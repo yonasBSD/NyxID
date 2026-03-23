@@ -80,12 +80,16 @@ function EmptyState() {
   );
 }
 
+interface DashboardLink {
+  readonly to: string;
+  readonly label: string;
+}
+
 interface QuickPrompt {
   readonly title: string;
   readonly description: string;
   readonly prompt: string;
-  readonly dashboardLink?: string;
-  readonly dashboardLabel?: string;
+  readonly links: readonly DashboardLink[];
 }
 
 function buildQuickPrompts(baseUrl: string): readonly QuickPrompt[] {
@@ -95,38 +99,39 @@ function buildQuickPrompts(baseUrl: string): readonly QuickPrompt[] {
       description:
         "Add an external API, internal service, or OIDC provider. Connect via direct credentials (API key, bearer token) or through a provider's OAuth flow (e.g., Codex, GitHub).",
       prompt: `Read ${baseUrl}/llms-full.txt then help me register a new service in NyxID and connect to it. I need help choosing the right auth method (header, bearer, basic, oidc, or none) and service category. Also show me how to connect credentials -- either by entering an API key directly, or by connecting through a provider's OAuth flow if one is available (e.g., OpenAI Codex device code flow, GitHub OAuth).`,
-      dashboardLink: "/services",
-      dashboardLabel: "Services",
+      links: [
+        { to: "/services", label: "Services" },
+        { to: "/connections", label: "Connections" },
+        { to: "/providers", label: "Providers" },
+      ],
     },
     {
       title: "Set up MCP proxy for AI clients",
       description:
         "Configure Cursor, Claude Code, or Codex to use NyxID as an MCP proxy with automatic credential injection.",
       prompt: `Read ${baseUrl}/llms-full.txt then help me set up the NyxID MCP proxy in my AI coding tool so I can call APIs through it.`,
+      links: [],
     },
     {
       title: "Install and configure a node agent",
       description:
         "Deploy an on-premise node agent that keeps credentials on your infrastructure. NyxID routes requests through it.",
       prompt: `Read ${baseUrl}/llms-full.txt then walk me through installing the nyxid-node agent, registering it, adding credentials, and binding services to it.`,
-      dashboardLink: "/nodes",
-      dashboardLabel: "Nodes",
+      links: [{ to: "/nodes", label: "Nodes" }],
     },
     {
       title: "Set up a provider (OAuth / API Key / Device Code)",
       description:
         "Register an external OAuth service (admin or user-provided credentials), API key provider, or device code flow.",
       prompt: `Read ${baseUrl}/llms-full.txt then help me set up a new provider in NyxID. I need to choose between credential modes (admin provides credentials, users bring their own developer app, or both) and provider types (oauth2, api_key, device_code).`,
-      dashboardLink: "/providers/manage",
-      dashboardLabel: "Providers",
+      links: [{ to: "/providers/manage", label: "Providers" }],
     },
     {
       title: "Add login to my app",
       description:
         "Register an OAuth client and integrate NyxID login into a React, Next.js, or any web app.",
       prompt: `Read ${baseUrl}/llms-full.txt then help me add "Sign in with NyxID" to my app. The NyxID server is at ${baseUrl}.`,
-      dashboardLink: "/developer/apps",
-      dashboardLabel: "Developer Apps",
+      links: [{ to: "/developer/apps", label: "Developer Apps" }],
     },
   ] as const;
 }
@@ -166,19 +171,20 @@ function QuickPromptsCard({ baseUrl }: { readonly baseUrl: string }) {
                 </p>
               </div>
               <div className="flex shrink-0 gap-1">
-                {p.dashboardLink && (
+                {p.links.map((link) => (
                   <Button
+                    key={link.to}
                     variant="ghost"
                     size="sm"
                     className="h-7 gap-1 text-xs"
                     asChild
                   >
-                    <Link to={p.dashboardLink}>
-                      {p.dashboardLabel}
+                    <Link to={link.to}>
+                      {link.label}
                       <ArrowRight className="h-3 w-3" />
                     </Link>
                   </Button>
-                )}
+                ))}
                 <Button
                   variant="outline"
                   size="sm"
