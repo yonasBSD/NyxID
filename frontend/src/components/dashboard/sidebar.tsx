@@ -18,6 +18,7 @@ import {
   ClipboardList,
   Lock,
   HardDrive,
+  Sparkles,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth-store";
@@ -44,6 +45,7 @@ const APPROVAL_NAV_ITEMS = [
 
 const DEVELOPER_NAV_ITEMS = [
   { to: "/developer/apps", icon: Code, label: "Developer Apps" },
+  { to: "/ai-setup", icon: Sparkles, label: "AI Setup" },
   { to: "/integration-guide", icon: BookMarked, label: "Integration Guide" },
 ] as const;
 

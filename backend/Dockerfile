@@ -16,8 +16,9 @@ RUN cargo build --release --manifest-path backend/Cargo.toml --features gcp-kms
 # Remove the dummy build artifacts (forces recompilation of our code only)
 RUN rm -rf backend/src target/release/deps/nyxid-* target/release/nyxid
 
-# Copy the real source code
+# Copy the real source code and docs (docs are embedded via include_str!)
 COPY backend/src backend/src
+COPY docs/AI_AGENT_PLAYBOOK.md docs/AI_AGENT_PLAYBOOK.md
 
 # Touch main.rs to ensure cargo sees it as newer than the cached dummy
 RUN touch backend/src/main.rs

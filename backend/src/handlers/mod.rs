@@ -18,6 +18,7 @@ pub mod docs;
 pub mod endpoints;
 pub mod health;
 pub mod llm_gateway;
+pub mod llms_txt;
 pub mod mcp;
 pub mod mcp_transport;
 pub mod mfa;

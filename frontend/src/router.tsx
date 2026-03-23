@@ -13,6 +13,7 @@ import { DashboardLayout } from "@/components/layout/dashboard-layout";
 import { useAuthStore } from "@/stores/auth-store";
 
 import {
+  AiSetupPage,
   LoginPage,
   RegisterPage,
   DashboardPage,
@@ -236,6 +237,12 @@ const integrationGuideRoute = createRoute({
   component: IntegrationGuidePage,
 });
 
+const aiSetupRoute = createRoute({
+  path: "/ai-setup",
+  getParentRoute: () => dashboardLayout,
+  component: AiSetupPage,
+});
+
 const providersLayout = createRoute({
   path: "/providers",
   getParentRoute: () => dashboardLayout,
@@ -400,6 +407,7 @@ const routeTree = rootRoute.addChildren([
     developerAppsRoute,
     developerAppDetailRoute,
     integrationGuideRoute,
+    aiSetupRoute,
     notificationSettingsRoute,
     approvalHistoryRoute,
     approvalGrantsRoute,
