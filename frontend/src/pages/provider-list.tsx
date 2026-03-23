@@ -226,36 +226,21 @@ export function ProviderListPage() {
 
                           field.onChange(nextType);
 
-                          if (resets.credential_mode !== undefined) {
+                          const resetKeys = Object.keys(resets) as Array<
+                            keyof typeof resets
+                          >;
+                          for (const key of resetKeys) {
                             form.setValue(
-                              "credential_mode",
-                              resets.credential_mode,
-                              {
-                                shouldDirty: false,
-                                shouldValidate: false,
-                              },
+                              key as keyof CreateProviderFormData,
+                              resets[key] as never,
+                              { shouldDirty: false, shouldValidate: false },
                             );
                           }
 
-                          if (resets.client_id_param_name !== undefined) {
-                            form.setValue(
-                              "client_id_param_name",
-                              resets.client_id_param_name,
-                              {
-                                shouldDirty: false,
-                                shouldValidate: false,
-                              },
+                          if (resetKeys.length > 0) {
+                            form.clearErrors(
+                              resetKeys as Array<keyof CreateProviderFormData>,
                             );
-                          }
-
-                          if (
-                            resets.credential_mode !== undefined ||
-                            resets.client_id_param_name !== undefined
-                          ) {
-                            form.clearErrors([
-                              "credential_mode",
-                              "client_id_param_name",
-                            ]);
                           }
                         }}
                       >

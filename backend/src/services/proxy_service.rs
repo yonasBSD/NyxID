@@ -965,6 +965,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn prepare_delegated_request_applies_telegram_bot_path_injection() {
+        // Regression test: the node routing path calls prepare_delegated_request
+        // (not forward_request) so path-injection prefixes must work via that
+        // entry point too.  Before the fix in 1209b96, node-routed requests
+        // skipped delegated credential resolution entirely.
+        let prepared = prepare_delegated_request(
+            "sendMessage",
+            Some("chat_id=123"),
+            &[DelegatedCredential {
+                provider_slug: "telegram-bot".to_string(),
+                injection_method: "path".to_string(),
+                injection_key: "bot".to_string(),
+                credential: "123456:ABC-DEF".to_string(),
+            }],
+        )
+        .expect("delegated request should prepare");
+
+        assert_eq!(prepared.path, "bot123456:ABC-DEF/sendMessage");
+        assert_eq!(prepared.query.as_deref(), Some("chat_id=123"));
+        assert!(
+            prepared.delegated_headers.is_empty(),
+            "path injection should not produce headers"
+        );
+    }
+
     #[tokio::test]
     async fn forward_request_rejects_percent_encoded_path_injection_prefix() {
         let err = forward_request(
