@@ -20,7 +20,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Separator } from "@/components/ui/separator";
 import { toast } from "sonner";
-import { Copy, ExternalLink, Plus } from "lucide-react";
+import { Copy, ExternalLink, Plus, ArrowRight } from "lucide-react";
 import { useDeveloperApps } from "@/hooks/use-developer-apps";
 import { usePublicConfig } from "@/hooks/use-public-config";
 import {
@@ -75,6 +75,123 @@ function EmptyState() {
             Create Developer App
           </Link>
         </Button>
+      </CardContent>
+    </Card>
+  );
+}
+
+interface QuickPrompt {
+  readonly title: string;
+  readonly description: string;
+  readonly prompt: string;
+  readonly dashboardLink?: string;
+  readonly dashboardLabel?: string;
+}
+
+function buildQuickPrompts(baseUrl: string): readonly QuickPrompt[] {
+  return [
+    {
+      title: "Register a service and connect credentials",
+      description:
+        "Add an external API (e.g., OpenAI, Stripe) so you can store your API key and proxy requests through NyxID.",
+      prompt: `Read ${baseUrl}/llms-full.txt then help me register a new service in NyxID and connect my API credentials to it.`,
+      dashboardLink: "/services",
+      dashboardLabel: "Services",
+    },
+    {
+      title: "Set up MCP proxy for AI clients",
+      description:
+        "Configure Cursor, Claude Code, or Codex to use NyxID as an MCP proxy with automatic credential injection.",
+      prompt: `Read ${baseUrl}/llms-full.txt then help me set up the NyxID MCP proxy in my AI coding tool so I can call APIs through it.`,
+    },
+    {
+      title: "Install and configure a node agent",
+      description:
+        "Deploy an on-premise node agent that keeps credentials on your infrastructure. NyxID routes requests through it.",
+      prompt: `Read ${baseUrl}/llms-full.txt then walk me through installing the nyxid-node agent, registering it, adding credentials, and binding services to it.`,
+      dashboardLink: "/nodes",
+      dashboardLabel: "Nodes",
+    },
+    {
+      title: "Set up a provider (OAuth / API Key / Device Code)",
+      description:
+        "Register an external provider that users can connect their accounts to.",
+      prompt: `Read ${baseUrl}/llms-full.txt then help me set up a new provider in NyxID so users can connect their accounts.`,
+      dashboardLink: "/providers/manage",
+      dashboardLabel: "Providers",
+    },
+    {
+      title: "Add login to my app",
+      description:
+        "Register an OAuth client and integrate NyxID login into a React, Next.js, or any web app.",
+      prompt: `Read ${baseUrl}/llms-full.txt then help me add "Sign in with NyxID" to my app. The NyxID server is at ${baseUrl}.`,
+      dashboardLink: "/developer/apps",
+      dashboardLabel: "Developer Apps",
+    },
+  ] as const;
+}
+
+function QuickPromptsCard({ baseUrl }: { readonly baseUrl: string }) {
+  const prompts = useMemo(() => buildQuickPrompts(baseUrl), [baseUrl]);
+
+  const handleCopy = useCallback(async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast.success("Copied prompt to clipboard");
+    } catch {
+      toast.error("Failed to copy");
+    }
+  }, []);
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Quick Start Prompts</CardTitle>
+        <CardDescription>
+          Copy a prompt and paste it into your AI assistant. Each one includes
+          the playbook URL so the AI gets full context.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {prompts.map((p) => (
+          <div
+            key={p.title}
+            className="rounded-lg border border-border p-3 space-y-2"
+          >
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <p className="text-sm font-medium">{p.title}</p>
+                <p className="text-xs text-muted-foreground">
+                  {p.description}
+                </p>
+              </div>
+              <div className="flex shrink-0 gap-1">
+                {p.dashboardLink && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 gap-1 text-xs"
+                    asChild
+                  >
+                    <Link to={p.dashboardLink}>
+                      {p.dashboardLabel}
+                      <ArrowRight className="h-3 w-3" />
+                    </Link>
+                  </Button>
+                )}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 gap-1 text-xs"
+                  onClick={() => void handleCopy(p.prompt)}
+                >
+                  <Copy className="h-3 w-3" />
+                  Copy prompt
+                </Button>
+              </div>
+            </div>
+          </div>
+        ))}
       </CardContent>
     </Card>
   );
@@ -220,6 +337,8 @@ export function AiSetupPage() {
       </div>
 
       <LlmsTxtCard baseUrl={baseUrl} />
+
+      <QuickPromptsCard baseUrl={baseUrl} />
 
       <Separator />
 
