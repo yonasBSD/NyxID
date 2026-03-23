@@ -384,6 +384,35 @@ async fn main() {
             Ok(()) => tracing::info!("Telegram webhook registered: {webhook_url}"),
             Err(e) => tracing::error!("Failed to register Telegram webhook: {e}"),
         }
+
+        // Periodically verify the webhook is healthy and re-register if needed.
+        // Telegram can silently drop webhooks after sustained delivery failures.
+        let wh_http = state.http_client.clone();
+        let wh_token = bot_token.clone();
+        let wh_url = webhook_url.clone();
+        let wh_secret = webhook_secret.clone();
+        tokio::spawn(async move {
+            // Check every 5 minutes
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+            // Skip the first tick (we just registered above)
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                if !services::telegram_service::is_webhook_healthy(&wh_http, &wh_token, &wh_url)
+                    .await
+                {
+                    tracing::warn!("Telegram webhook unhealthy, re-registering");
+                    match services::telegram_service::set_webhook(
+                        &wh_http, &wh_token, &wh_url, &wh_secret,
+                    )
+                    .await
+                    {
+                        Ok(()) => tracing::info!("Telegram webhook re-registered"),
+                        Err(e) => tracing::error!("Telegram webhook re-registration failed: {e}"),
+                    }
+                }
+            }
+        });
     } else if config.telegram_bot_token.is_some() {
         // Development fallback: poll getUpdates when no webhook URL is configured
         let polling_state = state.clone();
