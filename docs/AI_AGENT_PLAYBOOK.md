@@ -85,10 +85,53 @@ The dashboard is at http://localhost:3000. The API is at http://localhost:3001.
 
 - A NyxID account (register at http://localhost:3000/register or via API)
 - For admin operations: an admin account
+- An API key for AI agent access (see below)
 
-### Authenticate via API
+### Set up an API key for AI agent access (recommended)
 
-All API calls (except public endpoints) require a Bearer token. Get one by logging in:
+Create an API key so AI agents can make API calls on the user's behalf. The key should be stored as an environment variable -- **never paste it into AI chat**.
+
+**Step 1:** Create an API key via the dashboard at http://localhost:3000/api-keys, or via API:
+
+```bash
+# Login first to get an access token
+ACCESS_TOKEN=$(curl -s -X POST http://localhost:3001/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "USER_EMAIL", "password": "USER_PASSWORD"}' \
+  | jq -r '.access_token')
+
+# Create an API key with read + write scopes
+curl -X POST http://localhost:3001/api/v1/api-keys \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "AI Agent Key", "scopes": "read write"}'
+# Response includes full_key -- save it immediately (shown only once)
+```
+
+**Step 2:** Store the key as an environment variable:
+
+```bash
+export NYXID_API_KEY="nyxid_..."
+```
+
+Add it to your shell profile (`~/.zshrc`, `~/.bashrc`) to persist across sessions.
+
+**Step 3:** Use the key in API calls (via `X-API-Key` header or `Authorization: Bearer`):
+
+```bash
+curl http://localhost:3001/api/v1/users/me \
+  -H "X-API-Key: $NYXID_API_KEY"
+
+# Or as Bearer token:
+curl http://localhost:3001/api/v1/users/me \
+  -H "Authorization: Bearer $NYXID_API_KEY"
+```
+
+**IMPORTANT for AI agents:** The user's API key is in `$NYXID_API_KEY`. Always use the environment variable in commands. Never ask the user to paste the key into chat. Never output the key value.
+
+### Alternative: Login with email/password
+
+For short-lived sessions without an API key:
 
 ```bash
 ACCESS_TOKEN=$(curl -s -X POST http://localhost:3001/api/v1/auth/login \
@@ -97,19 +140,22 @@ ACCESS_TOKEN=$(curl -s -X POST http://localhost:3001/api/v1/auth/login \
   | jq -r '.access_token')
 ```
 
-Use it in subsequent requests:
-
-```bash
-curl http://localhost:3001/api/v1/users/me \
-  -H "Authorization: Bearer $ACCESS_TOKEN"
-```
-
 Access tokens expire in 15 minutes. Refresh:
 
 ```bash
 curl -X POST http://localhost:3001/api/v1/auth/refresh \
   -H "Content-Type: application/json" \
   -d '{"refresh_token": "REFRESH_TOKEN"}'
+```
+
+### A note on `$ACCESS_TOKEN` in examples
+
+The API examples throughout this document use `$ACCESS_TOKEN`. If the user has set up an API key (recommended), replace with:
+
+```bash
+-H "X-API-Key: $NYXID_API_KEY"
+# instead of:
+-H "Authorization: Bearer $ACCESS_TOKEN"
 ```
 
 ### Or use the dashboard

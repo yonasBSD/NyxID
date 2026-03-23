@@ -92,13 +92,15 @@ interface QuickPrompt {
   readonly links: readonly DashboardLink[];
 }
 
+const API_KEY_PREAMBLE = `My NyxID API key is stored in the environment variable NYXID_API_KEY. Use $NYXID_API_KEY in commands -- NEVER ask me to paste the key into chat. `;
+
 function buildQuickPrompts(baseUrl: string): readonly QuickPrompt[] {
   return [
     {
       title: "Register a service and connect credentials",
       description:
         "Add an external API, internal service, or OIDC provider. Connect via direct credentials (API key, bearer token) or through a provider's OAuth flow (e.g., Codex, GitHub).",
-      prompt: `Read ${baseUrl}/llms-full.txt then help me register a new service in NyxID and connect to it. I need help choosing the right auth method (header, bearer, basic, oidc, or none) and service category. Also show me how to connect credentials -- either by entering an API key directly, or by connecting through a provider's OAuth flow if one is available (e.g., OpenAI Codex device code flow, GitHub OAuth).`,
+      prompt: `${API_KEY_PREAMBLE}Read ${baseUrl}/llms-full.txt then help me register a new service in NyxID and connect to it. I need help choosing the right auth method (header, bearer, basic, oidc, or none) and service category. Also show me how to connect credentials -- either by entering an API key directly, or by connecting through a provider's OAuth flow if one is available (e.g., OpenAI Codex device code flow, GitHub OAuth).`,
       links: [
         { to: "/services", label: "Services" },
         { to: "/connections", label: "Connections" },
@@ -109,28 +111,28 @@ function buildQuickPrompts(baseUrl: string): readonly QuickPrompt[] {
       title: "Set up MCP proxy for AI clients",
       description:
         "Configure Cursor, Claude Code, or Codex to use NyxID as an MCP proxy with automatic credential injection.",
-      prompt: `Read ${baseUrl}/llms-full.txt then help me set up the NyxID MCP proxy in my AI coding tool so I can call APIs through it.`,
+      prompt: `${API_KEY_PREAMBLE}Read ${baseUrl}/llms-full.txt then help me set up the NyxID MCP proxy in my AI coding tool so I can call APIs through it.`,
       links: [],
     },
     {
       title: "Install and configure a node agent",
       description:
         "Deploy an on-premise node agent that keeps credentials on your infrastructure. NyxID routes requests through it.",
-      prompt: `Read ${baseUrl}/llms-full.txt then walk me through installing the nyxid-node agent, registering it, adding credentials, and binding services to it.`,
+      prompt: `${API_KEY_PREAMBLE}Read ${baseUrl}/llms-full.txt then walk me through installing the nyxid-node agent, registering it, adding credentials, and binding services to it.`,
       links: [{ to: "/nodes", label: "Nodes" }],
     },
     {
       title: "Set up a provider (OAuth / API Key / Device Code)",
       description:
         "Register an external OAuth service (admin or user-provided credentials), API key provider, or device code flow.",
-      prompt: `Read ${baseUrl}/llms-full.txt then help me set up a new provider in NyxID. I need to choose between credential modes (admin provides credentials, users bring their own developer app, or both) and provider types (oauth2, api_key, device_code).`,
+      prompt: `${API_KEY_PREAMBLE}Read ${baseUrl}/llms-full.txt then help me set up a new provider in NyxID. I need to choose between credential modes (admin provides credentials, users bring their own developer app, or both) and provider types (oauth2, api_key, device_code).`,
       links: [{ to: "/providers/manage", label: "Providers" }],
     },
     {
       title: "Add login to my app",
       description:
         "Register an OAuth client and integrate NyxID login into a React, Next.js, or any web app.",
-      prompt: `Read ${baseUrl}/llms-full.txt then help me add "Sign in with NyxID" to my app. The NyxID server is at ${baseUrl}.`,
+      prompt: `${API_KEY_PREAMBLE}Read ${baseUrl}/llms-full.txt then help me add "Sign in with NyxID" to my app. The NyxID server is at ${baseUrl}.`,
       links: [{ to: "/developer/apps", label: "Developer Apps" }],
     },
   ] as const;
@@ -153,11 +155,42 @@ function QuickPromptsCard({ baseUrl }: { readonly baseUrl: string }) {
       <CardHeader>
         <CardTitle className="text-base">Quick Start Prompts</CardTitle>
         <CardDescription>
-          Copy a prompt and paste it into your AI assistant. Each one includes
-          the playbook URL so the AI gets full context.
+          Copy a prompt and paste it into your AI assistant. Each prompt
+          references <code className="text-[10px]">$NYXID_API_KEY</code> so
+          your AI can make API calls without the key appearing in chat.
         </CardDescription>
       </CardHeader>
-      <CardContent className="space-y-3">
+      <CardContent className="space-y-4">
+        <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 space-y-3">
+          <p className="text-sm font-medium">Before you start</p>
+          <p className="text-xs text-muted-foreground">
+            Create an API key with{" "}
+            <code className="rounded bg-muted px-1 py-0.5 text-[10px]">read write</code>{" "}
+            scopes from the{" "}
+            <Link to="/api-keys" className="text-primary underline underline-offset-2">
+              API Keys
+            </Link>{" "}
+            page, then set it as an environment variable:
+          </p>
+          <div className="relative">
+            <pre className="overflow-x-auto rounded-md border border-border bg-muted px-3 py-2 font-mono text-xs">
+              export NYXID_API_KEY="nyxid_..."
+            </pre>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="absolute right-1 top-1 h-6 w-6"
+              onClick={() => void handleCopy('export NYXID_API_KEY="nyxid_..."')}
+            >
+              <Copy className="h-3 w-3" />
+            </Button>
+          </div>
+          <p className="text-[11px] text-muted-foreground">
+            Never paste your API key directly into AI chat. The prompts below
+            use <code className="rounded bg-muted px-1 py-0.5 text-[10px]">$NYXID_API_KEY</code>{" "}
+            so your AI agent reads it from the environment.
+          </p>
+        </div>
         {prompts.map((p) => (
           <div
             key={p.title}
