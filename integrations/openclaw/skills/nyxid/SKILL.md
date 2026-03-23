@@ -7,16 +7,10 @@ user-invocable: /nyxid
 metadata:
   openclaw:
     requires:
-      env:
-        - NYXID_BASE_URL
       bins:
         - curl
-        - jq
   clawdbot:
     emoji: "key"
-    requires:
-      env:
-        - NYXID_BASE_URL
     primaryEnv: NYXID_ACCESS_TOKEN
     files:
       - "tools/*"
