@@ -1,9 +1,25 @@
 ---
 name: NyxID
 description: Access user-connected services through NyxID's credential brokering proxy
+version: 0.1.0
 homepage: https://github.com/ChronoAIProject/NyxID
 user-invocable: /nyxid
-metadata: {"openclaw":{"requires":{"env":["NYXID_BASE_URL"]}}}
+metadata:
+  openclaw:
+    requires:
+      env:
+        - NYXID_BASE_URL
+      bins:
+        - curl
+        - jq
+  clawdbot:
+    emoji: "key"
+    requires:
+      env:
+        - NYXID_BASE_URL
+    primaryEnv: NYXID_ACCESS_TOKEN
+    files:
+      - "tools/*"
 ---
 
 # NyxID
@@ -87,3 +103,27 @@ NyxID injects the user's credentials automatically. Do not ask for or log raw do
 - Use exact downstream API paths. Do not guess undocumented endpoints.
 - Keep request bodies minimal and service-correct.
 - Never try to extract or display the user's stored provider credentials.
+
+## External Endpoints
+
+All requests go to a single NyxID instance configured via `NYXID_BASE_URL`:
+
+- `GET $NYXID_BASE_URL/api/v1/proxy/services` -- lists user-connected services and their proxy slugs
+- `$NYXID_BASE_URL/api/v1/proxy/s/{slug}/{path}` -- forwards requests to downstream services with credential injection
+
+No other external endpoints are contacted. The downstream service calls are made server-side by NyxID, not by this skill directly.
+
+## Security and Privacy
+
+- **Credentials never leave NyxID.** This skill sends requests to the NyxID proxy, which injects stored credentials server-side. Raw API keys and OAuth tokens for downstream services are never exposed to the agent or transmitted in skill traffic.
+- **Authentication tokens stay local.** `NYXID_ACCESS_TOKEN` and `NYXID_API_KEY` are read from environment variables and sent only to the configured `NYXID_BASE_URL` instance.
+- **No data is sent to third parties.** All traffic flows between the agent and the user's NyxID instance. NyxID then forwards to downstream services on behalf of the user.
+- **Audit logging.** All proxy requests are logged in NyxID with client identity, timestamp, and target service for user review.
+
+## Model Invocation Note
+
+This skill may be invoked autonomously by the agent when a user request involves an external service (e.g., "post a tweet", "list my GitHub issues"). The agent discovers available services through NyxID and routes requests through the proxy without prompting for raw credentials. Users can disable this skill in their OpenClaw configuration to opt out of autonomous invocation.
+
+## Trust Statement
+
+By using this skill, requests are sent to your configured NyxID instance (`NYXID_BASE_URL`). NyxID then forwards those requests to downstream services using your stored credentials. Only install this skill if you trust your NyxID instance operator and have reviewed which services are connected in your NyxID dashboard.

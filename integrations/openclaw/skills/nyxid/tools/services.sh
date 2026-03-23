@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# SECURITY MANIFEST:
+# Environment variables accessed: NYXID_BASE_URL, NYXID_API_KEY, NYXID_ACCESS_TOKEN
+# External endpoints called: $NYXID_BASE_URL/api/v1/proxy/services (only)
+# Local files read: none
+# Local files written: none
 set -euo pipefail
 
 BASE_URL="${NYXID_BASE_URL:-https://nyx-api.chrono-ai.fun}"
