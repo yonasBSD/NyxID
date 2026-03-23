@@ -342,6 +342,61 @@ pub async fn set_webhook(
     Ok(())
 }
 
+/// Check whether the webhook is healthy (registered, no pending errors).
+/// Returns `true` if the webhook URL matches and has no undelivered errors.
+pub async fn is_webhook_healthy(http_client: &Client, bot_token: &str, expected_url: &str) -> bool {
+    let url = format!("{TELEGRAM_API_BASE}{bot_token}/getWebhookInfo");
+    let resp = match http_client.get(&url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("Telegram getWebhookInfo request failed: {e}");
+            return false;
+        }
+    };
+
+    let body: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("Telegram getWebhookInfo parse failed: {e}");
+            return false;
+        }
+    };
+
+    let result = match body.get("result") {
+        Some(r) => r,
+        None => return false,
+    };
+
+    let registered_url = result.get("url").and_then(|v| v.as_str()).unwrap_or("");
+
+    if registered_url != expected_url {
+        tracing::warn!(
+            "Telegram webhook URL mismatch: expected {expected_url}, got {registered_url}"
+        );
+        return false;
+    }
+
+    // Check for accumulated errors that indicate delivery failures
+    let pending_count = result
+        .get("pending_update_count")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+
+    let last_error = result
+        .get("last_error_message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if pending_count > 50 {
+        tracing::warn!(
+            "Telegram webhook has {pending_count} pending updates, last error: {last_error}"
+        );
+        return false;
+    }
+
+    true
+}
+
 /// Remove any registered webhook (required before using getUpdates).
 pub async fn delete_webhook(http_client: &Client, bot_token: &str) -> AppResult<()> {
     let url = format!("{TELEGRAM_API_BASE}{bot_token}/deleteWebhook");

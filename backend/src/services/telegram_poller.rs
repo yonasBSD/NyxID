@@ -73,9 +73,6 @@ async fn handle_callback_query(
         }
     };
 
-    // Verify the chat_id matches the request's telegram_chat_id
-    let chat_id = callback.message.as_ref().map(|m| m.chat.id).unwrap_or(0);
-
     let request = match approval_service::get_request(&state.db, &request_id).await {
         Ok(r) => r,
         Err(_) => {
@@ -84,7 +81,16 @@ async fn handle_callback_query(
         }
     };
 
-    // Verify chat_id binding
+    // Verify the chat_id matches the request's telegram_chat_id.
+    // Telegram may omit `callback.message` for old messages, so fall back
+    // to `callback.from.id` which is always present and represents the
+    // user's private chat ID for bot conversations.
+    let chat_id = callback
+        .message
+        .as_ref()
+        .map(|m| m.chat.id)
+        .unwrap_or(callback.from.id);
+
     if request.telegram_chat_id != Some(chat_id) {
         tracing::warn!(
             "Chat ID mismatch: expected {:?}, got {}",
@@ -94,6 +100,10 @@ async fn handle_callback_query(
         answer_callback(state, &callback.id, "Unauthorized").await;
         return;
     }
+
+    // Build an idempotency key from the callback so Telegram retries are
+    // handled correctly instead of being rejected as "already_decided".
+    let decision_idempotency_key = format!("tg:{}:{}", callback.id, request_id);
 
     // Process the decision
     match approval_service::process_decision(
@@ -105,7 +115,7 @@ async fn handle_callback_query(
         &request_id,
         approved,
         None,
-        None,
+        Some(decision_idempotency_key.as_str()),
         "telegram",
     )
     .await
