@@ -79,7 +79,7 @@ Then reference it in your OpenClaw plugin config (see Configuration below).
 2. Go to **API Keys** > **Create API Key**
 3. Name: `openclaw-agent`, Scope: `proxy`
 4. Copy the key (starts with `nyx_`)
-5. Configure OpenClaw:
+5. Configure OpenClaw -- add to `~/.openclaw/openclaw.json`:
 
 ```json
 {
@@ -117,7 +117,7 @@ For interactive OAuth login with token refresh and delegation:
 
 1. Create a developer app in NyxID (Dashboard > Developer Apps > Create)
 2. Note the `client_id` and `client_secret`
-3. Configure:
+3. Add to `~/.openclaw/openclaw.json`:
 
 ```json
 {

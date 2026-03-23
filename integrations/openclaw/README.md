@@ -47,7 +47,7 @@ export NYXID_API_KEY="nyx_your_key_here"
 export NYXID_BASE_URL="https://nyx-api.chrono-ai.fun"  # optional, this is the default
 ```
 
-**Or in OpenClaw config (`~/.openclaw/openclaw.json`):**
+**Or in OpenClaw config -- add to `~/.openclaw/openclaw.json`:**
 
 ```json
 {
