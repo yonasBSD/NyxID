@@ -26,10 +26,14 @@ This document is a reference for AI agents (Claude, Codex, ChatGPT, Gemini, etc.
 12. [Add Login to a React App (OAuth Client)](#12-add-login-to-a-react-app-oauth-client)
 13. [Add Login to Any Web App (Raw OAuth / OIDC)](#13-add-login-to-any-web-app-raw-oauth--oidc)
 14. [Server-to-Server Authentication (Service Accounts)](#14-server-to-server-authentication-service-accounts)
-15. [API Quick Reference](#15-api-quick-reference)
-16. [Error Code Reference](#16-error-code-reference)
-17. [Troubleshooting](#17-troubleshooting)
-18. [Common Pitfalls](#18-common-pitfalls)
+15. [Approval Workflow](#15-approval-workflow)
+16. [SSH Services](#16-ssh-services)
+17. [API Keys (Programmatic Access)](#17-api-keys-programmatic-access)
+18. [LLM Gateway](#18-llm-gateway)
+19. [API Quick Reference](#19-api-quick-reference)
+20. [Error Code Reference](#20-error-code-reference)
+21. [Troubleshooting](#21-troubleshooting)
+22. [Common Pitfalls](#22-common-pitfalls)
 
 ---
 
@@ -1123,7 +1127,193 @@ Token TTL defaults to 1 hour.
 
 ---
 
-## 15. API Quick Reference
+## 15. Approval Workflow
+
+**Goal:** Require approval before users can access sensitive services. Approvals can be delivered via Telegram or mobile push notifications.
+
+### Configure a service to require approval
+
+```bash
+curl -X PUT http://localhost:3001/api/v1/approvals/service-configs/$SERVICE_ID \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": true}'
+```
+
+When a user tries to proxy a request to this service, they get a 403 with `error_code: 7000` and a `request_id`.
+
+### Poll for approval status
+
+```bash
+curl http://localhost:3001/api/v1/approvals/requests/$REQUEST_ID/status \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+# Returns: { "status": "pending" | "approved" | "denied", "expires_at": "..." }
+```
+
+### Approve or deny (admin / approver)
+
+```bash
+curl -X POST http://localhost:3001/api/v1/approvals/requests/$REQUEST_ID/decide \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"approved": true}'
+```
+
+### View approval history and grants
+
+```bash
+# List all approval requests
+GET /api/v1/approvals/requests
+
+# List active grants
+GET /api/v1/approvals/grants
+
+# Revoke a grant
+DELETE /api/v1/approvals/grants/{grant_id}
+```
+
+### Set up Telegram notifications
+
+```bash
+# Link Telegram account (returns a link code to send to the NyxID bot)
+POST /api/v1/notifications/telegram/link
+
+# Configure notification preferences
+PUT /api/v1/notifications/settings
+{"approval_requests": true, "approval_grants": true}
+
+# Disconnect Telegram
+DELETE /api/v1/notifications/telegram
+```
+
+### Via Dashboard
+
+- Approval history: http://localhost:3000/approvals/history
+- Active grants: http://localhost:3000/approvals/grants
+- Notification settings: http://localhost:3000/approvals/settings
+
+---
+
+## 16. SSH Services
+
+**Goal:** Register an SSH service for certificate-based authentication, remote command execution, or interactive terminal sessions.
+
+### Register an SSH service
+
+```bash
+curl -X POST http://localhost:3001/api/v1/services \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Production Server",
+    "slug": "prod-server",
+    "base_url": "ssh://10.0.0.5",
+    "service_type": "ssh",
+    "visibility": "private",
+    "ssh_config": {
+      "host": "10.0.0.5",
+      "port": 22,
+      "certificate_auth_enabled": true,
+      "certificate_ttl_minutes": 30,
+      "allowed_principals": ["ubuntu", "deploy"]
+    }
+  }'
+```
+
+SSH services allow private IPs and localhost (they're admin-configured infrastructure, not user-supplied URLs).
+
+### Issue an SSH certificate
+
+```bash
+curl -X POST http://localhost:3001/api/v1/ssh/$SERVICE_ID/certificate \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"public_key": "ssh-ed25519 AAAA..."}'
+# Returns: { "certificate": "ssh-ed25519-cert-v01@openssh.com ...", "validity_period": "30m" }
+```
+
+### Execute a remote command
+
+```bash
+curl -X POST http://localhost:3001/api/v1/ssh/$SERVICE_ID/exec \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"command": "uptime"}'
+# Returns: { "stdout": "...", "stderr": "...", "exit_code": 0 }
+```
+
+### Interactive terminal (WebSocket)
+
+```
+GET /api/v1/ssh/{service_id}/terminal  (WebSocket upgrade)
+```
+
+### SSH tunnel (WebSocket)
+
+```
+GET /api/v1/ssh/{service_id}  (WebSocket upgrade, bidirectional SSH protocol)
+```
+
+---
+
+## 17. API Keys (Programmatic Access)
+
+**Goal:** Create API keys for CLI or programmatic access without going through the OAuth flow.
+
+```bash
+# Create an API key
+curl -X POST http://localhost:3001/api/v1/api-keys \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "CI Pipeline Key"}'
+# Returns the key value (one-time display)
+
+# List API keys
+GET /api/v1/api-keys
+
+# Rotate a key
+POST /api/v1/api-keys/{key_id}/rotate
+
+# Delete a key
+DELETE /api/v1/api-keys/{key_id}
+```
+
+Use API keys as Bearer tokens: `Authorization: Bearer nyxid_key_...`
+
+---
+
+## 18. LLM Gateway
+
+**Goal:** Proxy LLM API calls through NyxID with automatic credential injection. Provides an OpenAI-compatible API interface.
+
+### Check available LLM providers
+
+```bash
+curl http://localhost:3001/api/v1/llm/status \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+```
+
+### Make LLM requests (OpenAI-compatible)
+
+```bash
+# Route through the unified gateway
+curl http://localhost:3001/api/v1/llm/gateway/v1/chat/completions \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}]}'
+
+# Or route to a specific provider by slug
+curl http://localhost:3001/api/v1/openai/v1/chat/completions \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}]}'
+```
+
+NyxID injects the user's stored provider token automatically.
+
+---
+
+## 19. API Quick Reference
 
 Base URL: `http://localhost:3001`
 
@@ -1251,6 +1441,49 @@ Base URL: `http://localhost:3001`
 | POST | `/api/v1/auth/mfa/verify` | Verify MFA code |
 | POST | `/api/v1/auth/mfa/disable` | Disable MFA |
 
+### Approvals
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/v1/approvals/requests` | List approval requests |
+| GET | `/api/v1/approvals/requests/{id}` | Get request details |
+| POST | `/api/v1/approvals/requests/{id}/decide` | Approve or deny |
+| GET | `/api/v1/approvals/requests/{id}/status` | Poll approval status |
+| GET | `/api/v1/approvals/grants` | List active grants |
+| DELETE | `/api/v1/approvals/grants/{id}` | Revoke grant |
+| GET | `/api/v1/approvals/service-configs` | List service approval configs |
+| PUT | `/api/v1/approvals/service-configs/{service_id}` | Configure approval requirement |
+| DELETE | `/api/v1/approvals/service-configs/{service_id}` | Remove approval requirement |
+
+### Notifications
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/v1/notifications/settings` | Get notification preferences |
+| PUT | `/api/v1/notifications/settings` | Update notification preferences |
+| POST | `/api/v1/notifications/telegram/link` | Link Telegram account |
+| DELETE | `/api/v1/notifications/telegram` | Disconnect Telegram |
+| POST | `/api/v1/notifications/devices` | Register push notification device |
+| GET | `/api/v1/notifications/devices` | List registered devices |
+| DELETE | `/api/v1/notifications/devices/{id}` | Remove device |
+
+### SSH
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/v1/ssh/{service_id}/certificate` | Issue SSH user certificate |
+| POST | `/api/v1/ssh/{service_id}/exec` | Execute remote command |
+| GET | `/api/v1/ssh/{service_id}/terminal` | Interactive terminal (WebSocket) |
+| GET | `/api/v1/ssh/{service_id}` | SSH tunnel (WebSocket) |
+
+### LLM Gateway
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/v1/llm/status` | List available LLM providers |
+| ANY | `/api/v1/llm/gateway/v1/{path}` | Unified LLM proxy (OpenAI-compatible) |
+| ANY | `/api/v1/{provider_slug}/v1/{path}` | Provider-specific LLM proxy |
+
 ### MCP
 
 | Method | Endpoint | Description |
@@ -1269,7 +1502,7 @@ Base URL: `http://localhost:3001`
 
 ---
 
-## 16. Error Code Reference
+## 20. Error Code Reference
 
 All errors return JSON: `{ "error": "...", "error_code": N, "message": "..." }`
 
@@ -1306,7 +1539,7 @@ All errors return JSON: `{ "error": "...", "error_code": N, "message": "..." }`
 
 ---
 
-## 17. Troubleshooting
+## 21. Troubleshooting
 
 ### "unauthorized" on all requests
 
@@ -1379,7 +1612,7 @@ curl -X POST http://localhost:3001/oauth/token \
 
 ---
 
-## 18. Common Pitfalls
+## 22. Common Pitfalls
 
 1. **`allowed_scopes` is an array, not a string.** When creating OAuth clients, pass `["openid", "profile", "email"]`, not `"openid profile email"`.
 
