@@ -299,17 +299,24 @@ Returns the new `client_secret` (one-time display).
 
 ---
 
-## 7. Connect User Credentials to a Service
+## 7. Connect to a Service
 
-**Goal:** Store a user's credential for a service so NyxID can inject it when proxying requests.
+There are two ways to connect to a service depending on how it's set up:
 
-### Via Dashboard
+1. **Direct credential** -- Enter an API key, bearer token, or basic auth credential directly.
+2. **Via a provider** -- Connect through an OAuth flow, device code flow, or API key provider that's been registered in NyxID (see section 10).
+
+### Option A: Direct credential
+
+For services where you have an API key or token.
+
+**Via Dashboard:**
 
 1. Go to http://localhost:3000/connections
 2. Find the service and click "Connect"
-3. Enter the credential (API key, bearer token, etc.)
+3. Enter your credential (API key, bearer token, etc.)
 
-### Via API
+**Via API:**
 
 ```bash
 curl -X POST http://localhost:3001/api/v1/connections/$SERVICE_ID \
@@ -321,22 +328,50 @@ curl -X POST http://localhost:3001/api/v1/connections/$SERVICE_ID \
   }'
 ```
 
-**Update an existing credential:**
+### Option B: Via a provider (OAuth / Device Code)
+
+For services that use a provider for authentication (e.g., OpenAI via Codex device code flow, GitHub via OAuth).
+
+**Via Dashboard:**
+
+1. Go to http://localhost:3000/providers
+2. Find the provider and click "Connect"
+3. Follow the OAuth flow, enter a device code, or paste an API key depending on the provider type
+
+**Via API:**
 
 ```bash
+# OAuth provider -- initiates browser redirect
+GET /api/v1/providers/{provider_id}/connect/oauth
+# Returns: { "authorization_url": "https://..." }
+
+# Device code provider (e.g., Codex) -- no browser needed
+POST /api/v1/providers/{provider_id}/connect/device-code/initiate
+# Returns: { "user_code": "ABCD-1234", "verification_uri": "https://...", "state": "..." }
+# Show user_code to the user, then poll:
+POST /api/v1/providers/{provider_id}/connect/device-code/poll
+{"state": "STATE_FROM_INITIATE"}
+
+# API key provider
+POST /api/v1/providers/{provider_id}/connect/api-key
+{"api_key": "sk-...", "label": "My Key"}
+```
+
+### Update or disconnect
+
+```bash
+# Update a direct credential
 curl -X PUT http://localhost:3001/api/v1/connections/$SERVICE_ID/credential \
   -H "Authorization: Bearer $ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{
-    "credential": "Bearer sk-proj-new-key",
-    "credential_label": "Rotated Key"
-  }'
-```
+  -d '{"credential": "Bearer sk-proj-new-key", "credential_label": "Rotated Key"}'
 
-**Disconnect:**
-
-```bash
+# Disconnect from a service
 curl -X DELETE http://localhost:3001/api/v1/connections/$SERVICE_ID \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+
+# Disconnect from a provider
+curl -X DELETE http://localhost:3001/api/v1/providers/$PROVIDER_ID/disconnect \
   -H "Authorization: Bearer $ACCESS_TOKEN"
 ```
 

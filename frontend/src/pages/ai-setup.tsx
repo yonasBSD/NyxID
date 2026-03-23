@@ -93,8 +93,8 @@ function buildQuickPrompts(baseUrl: string): readonly QuickPrompt[] {
     {
       title: "Register a service and connect credentials",
       description:
-        "Add an external API, internal service, or OIDC provider. Supports API key, bearer token, basic auth, and OAuth/OIDC services.",
-      prompt: `Read ${baseUrl}/llms-full.txt then help me register a new service in NyxID and connect my credentials to it. I need help choosing the right auth method (header, bearer, basic, oidc, or none) and service category.`,
+        "Add an external API, internal service, or OIDC provider. Connect via direct credentials (API key, bearer token) or through a provider's OAuth flow (e.g., Codex, GitHub).",
+      prompt: `Read ${baseUrl}/llms-full.txt then help me register a new service in NyxID and connect to it. I need help choosing the right auth method (header, bearer, basic, oidc, or none) and service category. Also show me how to connect credentials -- either by entering an API key directly, or by connecting through a provider's OAuth flow if one is available (e.g., OpenAI Codex device code flow, GitHub OAuth).`,
       dashboardLink: "/services",
       dashboardLabel: "Services",
     },
