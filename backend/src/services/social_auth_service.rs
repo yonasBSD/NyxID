@@ -576,6 +576,22 @@ fn resolve_social_login(
     Ok(SocialLoginOutcome::CreateNew(new_user))
 }
 
+fn is_duplicate_key_error(e: &mongodb::error::Error) -> bool {
+    if let mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(we)) =
+        e.kind.as_ref()
+    {
+        return we.code == 11000;
+    }
+    false
+}
+
+fn map_social_link_error(e: mongodb::error::Error) -> AppError {
+    if is_duplicate_key_error(&e) {
+        return AppError::SocialAuthConflict;
+    }
+    AppError::DatabaseError(e)
+}
+
 /// Find an existing user by social identity or email, or create a new one.
 ///
 /// NOTE: The returned `User` struct reflects the state *before* the update.
@@ -611,11 +627,12 @@ pub async fn find_or_create_user(
         SocialLoginOutcome::LinkToExisting { ref user, ref update } => {
             users
                 .update_one(doc! { "_id": &user.id }, doc! { "$set": update })
-                .await?;
+                .await
+                .map_err(map_social_link_error)?;
             Ok(user.clone())
         }
         SocialLoginOutcome::CreateNew(new_user) => {
-            users.insert_one(&new_user).await?;
+            users.insert_one(&new_user).await.map_err(map_social_link_error)?;
             tracing::info!(
                 user_id = %new_user.id,
                 provider = %profile.provider.as_str(),
@@ -936,7 +953,7 @@ mod tests {
         let result = resolve_social_login(None, Some(user), &profile).unwrap();
         match result {
             SocialLoginOutcome::LinkToExisting { update, .. } => {
-                assert_eq!(update.get_bool("email_verified").unwrap(), true);
+                assert!(update.get_bool("email_verified").unwrap());
             }
             other => panic!("expected LinkToExisting, got {other:?}"),
         }

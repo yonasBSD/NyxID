@@ -105,7 +105,7 @@ pub enum AppError {
     #[error("Social authentication failed: {0}")]
     SocialAuthFailed(String),
 
-    #[error("Social auth conflict: email already linked to another provider")]
+    #[error("Social auth conflict: social identity already linked to another account")]
     SocialAuthConflict,
 
     #[error("Social auth: no verified email from provider")]

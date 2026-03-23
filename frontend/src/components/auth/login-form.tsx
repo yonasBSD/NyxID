@@ -19,7 +19,7 @@ import { SocialLoginButtons } from "@/components/auth/social-login-buttons";
 /** Map backend social-auth error keys to user-friendly messages. */
 const SOCIAL_ERROR_MESSAGES: Record<string, string> = {
   social_auth_conflict:
-    "This email is already linked to another sign-in method. Please use your original sign-in method or reset your password.",
+    "This social account is already linked elsewhere. Please use your original sign-in method or contact support.",
   social_auth_no_email:
     "We couldn't retrieve an email address from your social account. Please ensure your email is public or use email/password sign-in.",
   social_auth_deactivated:

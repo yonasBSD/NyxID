@@ -35,7 +35,7 @@ describe("LoginForm social error", () => {
     const alert = screen.getByTestId("social-error");
     expect(alert).toBeInTheDocument();
     expect(alert).toHaveTextContent(
-      "This email is already linked to another sign-in method",
+      "This social account is already linked elsewhere",
     );
   });
 
