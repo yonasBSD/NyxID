@@ -129,11 +129,45 @@ function buildQuickPrompts(baseUrl: string): readonly QuickPrompt[] {
       links: [{ to: "/providers/manage", label: "Providers" }],
     },
     {
+      title: "Set up approvals and notifications",
+      description:
+        "Require approval before accessing sensitive services. Get notified via Telegram or push notifications when approval is needed.",
+      prompt: `${API_KEY_PREAMBLE}Read ${baseUrl}/llms-full.txt then help me set up approval workflows for my NyxID services. I want to configure which services require approval, set up Telegram notifications for approval requests, and understand how to approve or deny requests.`,
+      links: [
+        { to: "/approvals/settings", label: "Notifications" },
+        { to: "/approvals/history", label: "Approvals" },
+      ],
+    },
+    {
+      title: "Set up SSH services",
+      description:
+        "Register an SSH service with certificate-based auth, execute remote commands, or open interactive terminals.",
+      prompt: `${API_KEY_PREAMBLE}Read ${baseUrl}/llms-full.txt then help me register an SSH service in NyxID with certificate-based authentication, and show me how to issue certificates, execute remote commands, and open SSH tunnels.`,
+      links: [{ to: "/services", label: "Services" }],
+    },
+    {
+      title: "Use the LLM gateway",
+      description:
+        "Proxy LLM API calls (OpenAI-compatible) through NyxID with automatic credential injection.",
+      prompt: `${API_KEY_PREAMBLE}Read ${baseUrl}/llms-full.txt then help me set up and use the NyxID LLM gateway to proxy requests to LLM providers like OpenAI with automatic credential injection.`,
+      links: [
+        { to: "/providers", label: "Providers" },
+        { to: "/connections", label: "Connections" },
+      ],
+    },
+    {
       title: "Add login to my app",
       description:
         "Register an OAuth client and integrate NyxID login into a React, Next.js, or any web app.",
       prompt: `${API_KEY_PREAMBLE}Read ${baseUrl}/llms-full.txt then help me add "Sign in with NyxID" to my app. The NyxID server is at ${baseUrl}.`,
       links: [{ to: "/developer/apps", label: "Developer Apps" }],
+    },
+    {
+      title: "Create and manage API keys",
+      description:
+        "Create API keys for programmatic access without going through the OAuth flow.",
+      prompt: `${API_KEY_PREAMBLE}Read ${baseUrl}/llms-full.txt then help me create and manage NyxID API keys for programmatic access.`,
+      links: [{ to: "/api-keys", label: "API Keys" }],
     },
   ] as const;
 }
