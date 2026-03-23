@@ -20,6 +20,7 @@ Choose one of these methods:
 **Option A -- Copy to OpenClaw managed skills (recommended):**
 
 ```bash
+mkdir -p ~/.openclaw/skills
 cp -r integrations/openclaw/skills/nyxid ~/.openclaw/skills/nyxid
 ```
 
@@ -29,21 +30,7 @@ cp -r integrations/openclaw/skills/nyxid ~/.openclaw/skills/nyxid
 cp -r integrations/openclaw/skills/nyxid /path/to/your/workspace/skills/nyxid
 ```
 
-**Option C -- Point OpenClaw to this repo's skill directory:**
-
-Add to `~/.openclaw/openclaw.json`:
-
-```json
-{
-  "skills": {
-    "load": {
-      "extraDirs": ["/absolute/path/to/NyxID/integrations/openclaw/skills"]
-    }
-  }
-}
-```
-
-**Option D -- Install from ClawHub (when published):**
+**Option C -- Install from ClawHub (when published):**
 
 ```bash
 clawhub install nyxid
@@ -78,7 +65,18 @@ export NYXID_BASE_URL="https://nyx-api.chrono-ai.fun"  # optional, this is the d
 }
 ```
 
-### Step 4: Test it
+### Step 4: Reload OpenClaw
+
+OpenClaw snapshots available skills at session start. After installing the skill or changing config, reload so the new skill is picked up:
+
+- **Start a new chat session** -- the simplest option; just open a new conversation
+- **Restart the gateway** -- `openclaw gateway restart` (restarts the background service)
+- **Docker** -- `docker compose restart openclaw-gateway`
+- **Hot reload** -- set `"gateway": { "reload": { "mode": "hybrid" } }` in your gateway config to auto-restart when new skills are detected (this is the default mode)
+
+Verify the gateway is running after restart with `openclaw gateway status`.
+
+### Step 5: Test it
 
 Start a new OpenClaw session and ask: "What services do I have connected in NyxID?"
 

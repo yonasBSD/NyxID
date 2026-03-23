@@ -29,6 +29,7 @@ https://nyx.chrono-ai.fun
 **Option A -- Copy to OpenClaw managed skills (recommended):**
 
 ```bash
+mkdir -p ~/.openclaw/skills
 cp -r integrations/openclaw/skills/nyxid ~/.openclaw/skills/nyxid
 ```
 
@@ -42,23 +43,7 @@ cp -r integrations/openclaw/skills/nyxid /path/to/workspace/skills/nyxid
 
 Workspace skills take highest precedence in OpenClaw's skill loading order.
 
-**Option C -- Add as an extra skill directory:**
-
-In `~/.openclaw/openclaw.json`:
-
-```json
-{
-  "skills": {
-    "load": {
-      "extraDirs": ["/absolute/path/to/NyxID/integrations/openclaw/skills"]
-    }
-  }
-}
-```
-
-This avoids copying files and loads the skill directly from this repo.
-
-**Option D -- Install from Git URL:**
+**Option C -- Install from Git URL:**
 
 Paste the repository URL into OpenClaw chat:
 
@@ -118,7 +103,13 @@ export NYXID_API_KEY="nyx_your_key_here"
 export NYXID_BASE_URL="https://nyx-api.chrono-ai.fun"  # optional, this is the default
 ```
 
-6. Start a new OpenClaw session. Ask: "What services do I have connected in NyxID?"
+6. Reload OpenClaw so the new skill is picked up:
+   - **Start a new chat session** -- simplest option, just open a new conversation
+   - **Restart the gateway** -- `openclaw gateway restart`
+   - **Docker** -- `docker compose restart openclaw-gateway`
+   - **Hot reload** -- set `"gateway": { "reload": { "mode": "hybrid" } }` in gateway config (this is the default; auto-restarts when new skills are detected)
+   - Verify with `openclaw gateway status`
+7. Ask: "What services do I have connected in NyxID?"
 
 ### Full plugin config (OAuth mode)
 
