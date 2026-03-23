@@ -499,11 +499,15 @@ pub async fn find_or_create_user(
         return Ok(user);
     }
 
-    // Case 2: Existing email user (account linking)
+    // Case 2: Existing email user (account linking or re-linking)
     //
     // Trust the provider's email verification: this is an accepted industry
     // pattern used by Auth0, Supabase Auth, and Firebase Auth. The provider
     // has already verified the email address as part of its own OAuth flow.
+    //
+    // If the user already has a different social provider linked, we allow
+    // re-linking to the new provider. This supports users who have accounts
+    // with multiple social providers sharing the same verified email address.
     let email_lower = profile.email.to_lowercase();
     let existing_email = users.find_one(doc! { "email": &email_lower }).await?;
 
@@ -512,13 +516,10 @@ pub async fn find_or_create_user(
             return Err(AppError::SocialAuthDeactivated);
         }
 
-        if user.social_provider.is_some() {
-            return Err(AppError::SocialAuthConflict);
-        }
-
-        // Link social identity to existing email/password user.
-        // Use a conditional filter to prevent TOCTOU race: only update if
-        // social_provider is still null (no concurrent linking occurred).
+        // Link (or re-link) social identity to existing email user.
+        // The social provider has verified ownership of this email address,
+        // so updating the linked provider is safe regardless of whether
+        // a different provider was previously linked.
         let now = Utc::now();
         let mut update = doc! {
             "social_provider": profile.provider.as_str(),
@@ -534,15 +535,12 @@ pub async fn find_or_create_user(
         if !user.email_verified {
             update.insert("email_verified", true);
         }
-        let result = users
+        users
             .update_one(
-                doc! { "_id": &user.id, "social_provider": null },
+                doc! { "_id": &user.id },
                 doc! { "$set": update },
             )
             .await?;
-        if result.modified_count == 0 {
-            return Err(AppError::SocialAuthConflict);
-        }
         return Ok(user);
     }
 
