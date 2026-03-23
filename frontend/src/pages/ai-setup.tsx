@@ -92,7 +92,7 @@ interface QuickPrompt {
   readonly links: readonly DashboardLink[];
 }
 
-const API_KEY_PREAMBLE = `My NyxID API key is stored in the environment variable NYXID_API_KEY. Use $NYXID_API_KEY in commands -- NEVER ask me to paste it into chat. When I need to enter any secret (API keys, credentials, tokens), always use "read -s" to prompt me securely or direct me to the dashboard UI. Never put secret values directly in commands. `;
+const API_KEY_PREAMBLE = `My NyxID API key is stored in the environment variable NYXID_API_KEY. Use $NYXID_API_KEY in commands -- NEVER ask me to paste it into chat. When I need to enter any secret (API keys, credentials, tokens for services or providers), ask me to set it as an environment variable first (e.g., tell me to run: ! export SECRET_NAME="value" in Claude Code, or set it in a separate terminal for other tools), then use $SECRET_NAME in commands. Alternatively, direct me to the NyxID dashboard UI to enter it securely. Never put secret values directly in commands. `;
 
 function buildQuickPrompts(baseUrl: string): readonly QuickPrompt[] {
   return [
@@ -188,10 +188,11 @@ function QuickPromptsCard({ baseUrl }: { readonly baseUrl: string }) {
           <p className="text-[11px] text-muted-foreground">
             Never paste secrets into AI chat. The prompts below tell your AI to
             use <code className="rounded bg-muted px-1 py-0.5 text-[10px]">$NYXID_API_KEY</code>{" "}
-            from the environment and to use{" "}
-            <code className="rounded bg-muted px-1 py-0.5 text-[10px]">read -s</code>{" "}
-            for any other credentials (service API keys, provider tokens, etc.)
-            or direct you to the dashboard UI.
+            from the environment. For other secrets (service API keys, provider
+            tokens), the AI will ask you to set them as env vars using{" "}
+            <code className="rounded bg-muted px-1 py-0.5 text-[10px]">! export</code>{" "}
+            (Claude Code) or in a separate terminal, or direct you to the
+            dashboard UI.
           </p>
         </div>
         {prompts.map((p) => (

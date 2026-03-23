@@ -129,20 +129,15 @@ curl http://localhost:3001/api/v1/users/me \
 
 **IMPORTANT for AI agents -- credential safety rules:**
 
-1. The user's NyxID API key is in `$NYXID_API_KEY`. Always reference the environment variable -- never ask the user to paste it into chat.
-2. When helping users store credentials for services, providers, or nodes, **never include the secret value in a command directly**. Instead:
-   - **Preferred:** Direct the user to the dashboard UI where they can enter it in a form field securely.
-   - **CLI alternative:** Use `read -s` to prompt for the value so it stays out of shell history and chat:
-     ```bash
-     read -s -p "Enter your API key: " SECRET_VALUE
-     curl -X POST .../connections/$SERVICE_ID \
-       -H "X-API-Key: $NYXID_API_KEY" \
-       -H "Content-Type: application/json" \
-       -d "{\"credential\": \"$SECRET_VALUE\"}"
-     unset SECRET_VALUE
-     ```
-   - For node agent credentials, use `nyxid-node credentials add` which prompts securely (hidden input).
-3. Never echo, log, or output secret values. Use placeholder text like `<your-api-key>` in examples.
+AI coding tools (Claude Code, Codex, Cursor) run commands in non-interactive shells with no TTY. `read -s` will not work. Use these methods instead:
+
+1. **`$NYXID_API_KEY` env var** -- The user's NyxID API key. Always reference the variable name, never ask for the value.
+2. **Environment variables for other secrets** -- Ask the user to set secrets as env vars before or during the session:
+   - **Claude Code:** Tell the user to run `! export SECRET_NAME="value"` (the `!` prefix runs it in their real terminal -- the AI never sees the value).
+   - **Codex / Cursor / other tools:** Tell the user to set the env var in a separate terminal, then reference `$SECRET_NAME` in commands.
+3. **Dashboard UI** -- For entering credentials (service connections, provider keys, etc.), direct users to the relevant dashboard page where they can type secrets into form fields securely.
+4. **`nyxid-node credentials add`** -- For node agent credentials, this command prompts for the secret value interactively (the user runs it themselves, not through the AI).
+5. **Never** include secret values in commands, echo them, or ask the user to paste them into chat. Use placeholder text like `<your-api-key>` in examples.
 
 ### Alternative: Login with email/password
 
@@ -252,10 +247,16 @@ curl -X POST http://localhost:3001/api/v1/services/$SERVICE_ID/endpoints \
 
 **Via Dashboard (recommended):** Create the service at http://localhost:3000/services and enter the shared credential in the form.
 
-**Via CLI (secure prompt):**
+**Via CLI:** First set the credential as an env var (user runs this themselves -- in Claude Code use `!` prefix):
 
 ```bash
-read -s -p "Enter shared credential: " SHARED_CRED && echo
+# User runs this in their terminal (not through the AI):
+! export SHARED_CRED="<the-shared-api-key>"
+```
+
+Then the AI can run:
+
+```bash
 curl -X POST http://localhost:3001/api/v1/services \
   -H "X-API-Key: $NYXID_API_KEY" \
   -H "Content-Type: application/json" \
@@ -269,7 +270,6 @@ curl -X POST http://localhost:3001/api/v1/services \
     \"credential\": \"$SHARED_CRED\",
     \"visibility\": \"public\"
   }"
-unset SHARED_CRED
 ```
 
 Users connect with an empty body (no credential needed):
@@ -383,21 +383,23 @@ For services where you have an API key or token.
 2. Find the service and click "Connect"
 3. Enter your credential in the form field (input is masked)
 
-**Via CLI (secure prompt -- secret stays out of shell history and chat):**
+**Via CLI:** First have the user set the credential as an env var (in Claude Code use `!` prefix, in other tools use a separate terminal):
 
 ```bash
-# Prompt for the credential securely (hidden input)
-read -s -p "Enter credential (e.g., Bearer sk-proj-...): " CREDENTIAL && echo
+# User runs this themselves (AI never sees the value):
+! export SERVICE_CREDENTIAL="Bearer sk-proj-..."
+```
 
+Then the AI can run:
+
+```bash
 curl -X POST http://localhost:3001/api/v1/connections/$SERVICE_ID \
   -H "X-API-Key: $NYXID_API_KEY" \
   -H "Content-Type: application/json" \
-  -d "{\"credential\": \"$CREDENTIAL\", \"credential_label\": \"My Key\"}"
-
-unset CREDENTIAL
+  -d "{\"credential\": \"$SERVICE_CREDENTIAL\", \"credential_label\": \"My Key\"}"
 ```
 
-**Never** put the actual credential value in a curl command directly. Always use `read -s` or the dashboard.
+**Never** put the actual credential value in a command. Always use an env var or the dashboard.
 
 ### Option B: Via a provider (OAuth / Device Code)
 
@@ -428,25 +430,23 @@ curl -X POST http://localhost:3001/api/v1/providers/$PROVIDER_ID/connect/device-
   -H "Content-Type: application/json" \
   -d '{"state": "STATE_FROM_INITIATE"}'
 
-# API key provider -- use secure prompt
-read -s -p "Enter API key: " PROVIDER_KEY && echo
+# API key provider -- user sets env var first (! prefix in Claude Code):
+# ! export PROVIDER_KEY="sk-..."
 curl -X POST http://localhost:3001/api/v1/providers/$PROVIDER_ID/connect/api-key \
   -H "X-API-Key: $NYXID_API_KEY" \
   -H "Content-Type: application/json" \
   -d "{\"api_key\": \"$PROVIDER_KEY\", \"label\": \"My Key\"}"
-unset PROVIDER_KEY
 ```
 
 ### Update or disconnect
 
 ```bash
-# Update a direct credential (secure prompt)
-read -s -p "Enter new credential: " CREDENTIAL && echo
+# Update a direct credential -- user sets env var first:
+# ! export SERVICE_CREDENTIAL="Bearer sk-proj-new-key"
 curl -X PUT http://localhost:3001/api/v1/connections/$SERVICE_ID/credential \
   -H "X-API-Key: $NYXID_API_KEY" \
   -H "Content-Type: application/json" \
-  -d "{\"credential\": \"$CREDENTIAL\", \"credential_label\": \"Rotated Key\"}"
-unset CREDENTIAL
+  -d "{\"credential\": \"$SERVICE_CREDENTIAL\", \"credential_label\": \"Rotated Key\"}"
 
 # Disconnect from a service
 curl -X DELETE http://localhost:3001/api/v1/connections/$SERVICE_ID \
@@ -661,17 +661,17 @@ Users who want the default just call `GET /api/v1/providers/{id}/connect/oauth`.
 
 **Via Dashboard (recommended):** Go to http://localhost:3000/providers, select the provider, and enter credentials in the form.
 
-**Via CLI (secure prompt):**
+**Via CLI:** User sets their OAuth app credentials as env vars first (in Claude Code use `!` prefix):
 
 ```bash
-# Set user's own OAuth credentials
-read -p "Client ID: " CLIENT_ID
-read -s -p "Client Secret: " CLIENT_SECRET && echo
+# User runs these themselves:
+# ! export OAUTH_CLIENT_ID="my-client-id"
+# ! export OAUTH_CLIENT_SECRET="my-client-secret"
+
 curl -X PUT http://localhost:3001/api/v1/providers/$PROVIDER_ID/credentials \
   -H "X-API-Key: $NYXID_API_KEY" \
   -H "Content-Type: application/json" \
-  -d "{\"client_id\": \"$CLIENT_ID\", \"client_secret\": \"$CLIENT_SECRET\", \"label\": \"My App\"}"
-unset CLIENT_ID CLIENT_SECRET
+  -d "{\"client_id\": \"$OAUTH_CLIENT_ID\", \"client_secret\": \"$OAUTH_CLIENT_SECRET\", \"label\": \"My App\"}"
 
 # Get user's credentials for a provider
 curl http://localhost:3001/api/v1/providers/$PROVIDER_ID/credentials \
