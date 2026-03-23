@@ -580,7 +580,10 @@ fn is_duplicate_key_error(e: &mongodb::error::Error) -> bool {
     if let mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(we)) =
         e.kind.as_ref()
     {
-        return we.code == 11000;
+        return we.code == 11000
+            && we
+                .message
+                .contains("social_provider_1_social_provider_id_1");
     }
     false
 }
