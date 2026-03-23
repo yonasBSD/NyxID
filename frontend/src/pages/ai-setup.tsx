@@ -92,7 +92,7 @@ interface QuickPrompt {
   readonly links: readonly DashboardLink[];
 }
 
-const API_KEY_PREAMBLE = `My NyxID API key is stored in the environment variable NYXID_API_KEY. Use $NYXID_API_KEY in commands -- NEVER ask me to paste the key into chat. `;
+const API_KEY_PREAMBLE = `My NyxID API key is stored in the environment variable NYXID_API_KEY. Use $NYXID_API_KEY in commands -- NEVER ask me to paste it into chat. When I need to enter any secret (API keys, credentials, tokens), always use "read -s" to prompt me securely or direct me to the dashboard UI. Never put secret values directly in commands. `;
 
 function buildQuickPrompts(baseUrl: string): readonly QuickPrompt[] {
   return [
@@ -186,9 +186,12 @@ function QuickPromptsCard({ baseUrl }: { readonly baseUrl: string }) {
             </Button>
           </div>
           <p className="text-[11px] text-muted-foreground">
-            Never paste your API key directly into AI chat. The prompts below
+            Never paste secrets into AI chat. The prompts below tell your AI to
             use <code className="rounded bg-muted px-1 py-0.5 text-[10px]">$NYXID_API_KEY</code>{" "}
-            so your AI agent reads it from the environment.
+            from the environment and to use{" "}
+            <code className="rounded bg-muted px-1 py-0.5 text-[10px]">read -s</code>{" "}
+            for any other credentials (service API keys, provider tokens, etc.)
+            or direct you to the dashboard UI.
           </p>
         </div>
         {prompts.map((p) => (

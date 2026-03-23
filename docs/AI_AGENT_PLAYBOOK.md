@@ -127,7 +127,22 @@ curl http://localhost:3001/api/v1/users/me \
   -H "Authorization: Bearer $NYXID_API_KEY"
 ```
 
-**IMPORTANT for AI agents:** The user's API key is in `$NYXID_API_KEY`. Always use the environment variable in commands. Never ask the user to paste the key into chat. Never output the key value.
+**IMPORTANT for AI agents -- credential safety rules:**
+
+1. The user's NyxID API key is in `$NYXID_API_KEY`. Always reference the environment variable -- never ask the user to paste it into chat.
+2. When helping users store credentials for services, providers, or nodes, **never include the secret value in a command directly**. Instead:
+   - **Preferred:** Direct the user to the dashboard UI where they can enter it in a form field securely.
+   - **CLI alternative:** Use `read -s` to prompt for the value so it stays out of shell history and chat:
+     ```bash
+     read -s -p "Enter your API key: " SECRET_VALUE
+     curl -X POST .../connections/$SERVICE_ID \
+       -H "X-API-Key: $NYXID_API_KEY" \
+       -H "Content-Type: application/json" \
+       -d "{\"credential\": \"$SECRET_VALUE\"}"
+     unset SECRET_VALUE
+     ```
+   - For node agent credentials, use `nyxid-node credentials add` which prompts securely (hidden input).
+3. Never echo, log, or output secret values. Use placeholder text like `<your-api-key>` in examples.
 
 ### Alternative: Login with email/password
 
@@ -235,20 +250,26 @@ curl -X POST http://localhost:3001/api/v1/services/$SERVICE_ID/endpoints \
 
 ### Via API
 
+**Via Dashboard (recommended):** Create the service at http://localhost:3000/services and enter the shared credential in the form.
+
+**Via CLI (secure prompt):**
+
 ```bash
+read -s -p "Enter shared credential: " SHARED_CRED && echo
 curl -X POST http://localhost:3001/api/v1/services \
-  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "X-API-Key: $NYXID_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{
-    "name": "Internal Analytics API",
-    "slug": "analytics",
-    "base_url": "https://analytics.internal.example.com",
-    "auth_method": "header",
-    "auth_key_name": "X-API-Key",
-    "service_category": "internal",
-    "credential": "the-shared-api-key-here",
-    "visibility": "public"
-  }'
+  -d "{
+    \"name\": \"Internal Analytics API\",
+    \"slug\": \"analytics\",
+    \"base_url\": \"https://analytics.internal.example.com\",
+    \"auth_method\": \"header\",
+    \"auth_key_name\": \"X-API-Key\",
+    \"service_category\": \"internal\",
+    \"credential\": \"$SHARED_CRED\",
+    \"visibility\": \"public\"
+  }"
+unset SHARED_CRED
 ```
 
 Users connect with an empty body (no credential needed):
@@ -356,27 +377,31 @@ There are two ways to connect to a service depending on how it's set up:
 
 For services where you have an API key or token.
 
-**Via Dashboard:**
+**Via Dashboard (recommended for entering secrets):**
 
 1. Go to http://localhost:3000/connections
 2. Find the service and click "Connect"
-3. Enter your credential (API key, bearer token, etc.)
+3. Enter your credential in the form field (input is masked)
 
-**Via API:**
+**Via CLI (secure prompt -- secret stays out of shell history and chat):**
 
 ```bash
+# Prompt for the credential securely (hidden input)
+read -s -p "Enter credential (e.g., Bearer sk-proj-...): " CREDENTIAL && echo
+
 curl -X POST http://localhost:3001/api/v1/connections/$SERVICE_ID \
-  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "X-API-Key: $NYXID_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{
-    "credential": "Bearer sk-proj-your-api-key-here",
-    "credential_label": "My Production Key"
-  }'
+  -d "{\"credential\": \"$CREDENTIAL\", \"credential_label\": \"My Key\"}"
+
+unset CREDENTIAL
 ```
+
+**Never** put the actual credential value in a curl command directly. Always use `read -s` or the dashboard.
 
 ### Option B: Via a provider (OAuth / Device Code)
 
-For services that use a provider for authentication (e.g., OpenAI via Codex device code flow, GitHub via OAuth).
+For services that use a provider for authentication (e.g., OpenAI via Codex device code flow, GitHub via OAuth). These flows are safe because the secret exchange happens via OAuth redirect or device code -- no credential is typed into chat.
 
 **Via Dashboard:**
 
@@ -387,38 +412,49 @@ For services that use a provider for authentication (e.g., OpenAI via Codex devi
 **Via API:**
 
 ```bash
-# OAuth provider -- initiates browser redirect
-GET /api/v1/providers/{provider_id}/connect/oauth
+# OAuth provider -- initiates browser redirect (no secrets in chat)
+curl http://localhost:3001/api/v1/providers/$PROVIDER_ID/connect/oauth \
+  -H "X-API-Key: $NYXID_API_KEY"
 # Returns: { "authorization_url": "https://..." }
+# Open the URL in a browser to complete the OAuth flow.
 
-# Device code provider (e.g., Codex) -- no browser needed
-POST /api/v1/providers/{provider_id}/connect/device-code/initiate
-# Returns: { "user_code": "ABCD-1234", "verification_uri": "https://...", "state": "..." }
+# Device code provider (e.g., Codex) -- no secrets needed
+curl -X POST http://localhost:3001/api/v1/providers/$PROVIDER_ID/connect/device-code/initiate \
+  -H "X-API-Key: $NYXID_API_KEY"
+# Returns: { "user_code": "ABCD-1234", "verification_uri": "https://..." }
 # Show user_code to the user, then poll:
-POST /api/v1/providers/{provider_id}/connect/device-code/poll
-{"state": "STATE_FROM_INITIATE"}
+curl -X POST http://localhost:3001/api/v1/providers/$PROVIDER_ID/connect/device-code/poll \
+  -H "X-API-Key: $NYXID_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"state": "STATE_FROM_INITIATE"}'
 
-# API key provider
-POST /api/v1/providers/{provider_id}/connect/api-key
-{"api_key": "sk-...", "label": "My Key"}
+# API key provider -- use secure prompt
+read -s -p "Enter API key: " PROVIDER_KEY && echo
+curl -X POST http://localhost:3001/api/v1/providers/$PROVIDER_ID/connect/api-key \
+  -H "X-API-Key: $NYXID_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{\"api_key\": \"$PROVIDER_KEY\", \"label\": \"My Key\"}"
+unset PROVIDER_KEY
 ```
 
 ### Update or disconnect
 
 ```bash
-# Update a direct credential
+# Update a direct credential (secure prompt)
+read -s -p "Enter new credential: " CREDENTIAL && echo
 curl -X PUT http://localhost:3001/api/v1/connections/$SERVICE_ID/credential \
-  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "X-API-Key: $NYXID_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"credential": "Bearer sk-proj-new-key", "credential_label": "Rotated Key"}'
+  -d "{\"credential\": \"$CREDENTIAL\", \"credential_label\": \"Rotated Key\"}"
+unset CREDENTIAL
 
 # Disconnect from a service
 curl -X DELETE http://localhost:3001/api/v1/connections/$SERVICE_ID \
-  -H "Authorization: Bearer $ACCESS_TOKEN"
+  -H "X-API-Key: $NYXID_API_KEY"
 
 # Disconnect from a provider
 curl -X DELETE http://localhost:3001/api/v1/providers/$PROVIDER_ID/disconnect \
-  -H "Authorization: Bearer $ACCESS_TOKEN"
+  -H "X-API-Key: $NYXID_API_KEY"
 ```
 
 ---
@@ -623,16 +659,27 @@ Users who want the default just call `GET /api/v1/providers/{id}/connect/oauth`.
 
 ### User credential management
 
-```bash
-# Get user's credentials for a provider
-GET /api/v1/providers/{provider_id}/credentials
+**Via Dashboard (recommended):** Go to http://localhost:3000/providers, select the provider, and enter credentials in the form.
 
+**Via CLI (secure prompt):**
+
+```bash
 # Set user's own OAuth credentials
-PUT /api/v1/providers/{provider_id}/credentials
-{"client_id": "...", "client_secret": "...", "label": "My App"}
+read -p "Client ID: " CLIENT_ID
+read -s -p "Client Secret: " CLIENT_SECRET && echo
+curl -X PUT http://localhost:3001/api/v1/providers/$PROVIDER_ID/credentials \
+  -H "X-API-Key: $NYXID_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{\"client_id\": \"$CLIENT_ID\", \"client_secret\": \"$CLIENT_SECRET\", \"label\": \"My App\"}"
+unset CLIENT_ID CLIENT_SECRET
+
+# Get user's credentials for a provider
+curl http://localhost:3001/api/v1/providers/$PROVIDER_ID/credentials \
+  -H "X-API-Key: $NYXID_API_KEY"
 
 # Delete user's credentials (fall back to admin credentials if mode is "both")
-DELETE /api/v1/providers/{provider_id}/credentials
+curl -X DELETE http://localhost:3001/api/v1/providers/$PROVIDER_ID/credentials \
+  -H "X-API-Key: $NYXID_API_KEY"
 ```
 
 ### API Key Provider
