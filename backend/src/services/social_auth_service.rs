@@ -465,10 +465,7 @@ async fn fetch_google_profile(
 #[derive(Debug)]
 enum SocialLoginOutcome {
     /// Returning social user (same provider + provider_id). Update profile.
-    UpdateReturning {
-        user: User,
-        update: bson::Document,
-    },
+    UpdateReturning { user: User, update: bson::Document },
     /// Link (or re-link) social identity to an existing email-matched user.
     ///
     /// **Policy:** We allow re-linking even if a different social provider is
@@ -477,10 +474,7 @@ enum SocialLoginOutcome {
     /// to prove account ownership. This function is also called by the mobile
     /// token-exchange flow (`social_token_exchange_service`), so the policy
     /// applies uniformly across all social login entry points.
-    LinkToExisting {
-        user: User,
-        update: bson::Document,
-    },
+    LinkToExisting { user: User, update: bson::Document },
     /// No matching user found; create a brand-new account.
     CreateNew(User),
 }
@@ -621,13 +615,19 @@ pub async fn find_or_create_user(
     };
 
     match resolve_social_login(existing_social, existing_email, profile)? {
-        SocialLoginOutcome::UpdateReturning { ref user, ref update } => {
+        SocialLoginOutcome::UpdateReturning {
+            ref user,
+            ref update,
+        } => {
             users
                 .update_one(doc! { "_id": &user.id }, doc! { "$set": update })
                 .await?;
             Ok(user.clone())
         }
-        SocialLoginOutcome::LinkToExisting { ref user, ref update } => {
+        SocialLoginOutcome::LinkToExisting {
+            ref user,
+            ref update,
+        } => {
             users
                 .update_one(doc! { "_id": &user.id }, doc! { "$set": update })
                 .await
@@ -635,7 +635,10 @@ pub async fn find_or_create_user(
             Ok(user.clone())
         }
         SocialLoginOutcome::CreateNew(new_user) => {
-            users.insert_one(&new_user).await.map_err(map_social_link_error)?;
+            users
+                .insert_one(&new_user)
+                .await
+                .map_err(map_social_link_error)?;
             tracing::info!(
                 user_id = %new_user.id,
                 provider = %profile.provider.as_str(),
@@ -909,14 +912,8 @@ mod tests {
         match result {
             SocialLoginOutcome::LinkToExisting { user: u, update } => {
                 assert_eq!(u.id, user.id);
-                assert_eq!(
-                    update.get_str("social_provider").unwrap(),
-                    "github"
-                );
-                assert_eq!(
-                    update.get_str("social_provider_id").unwrap(),
-                    "gh_12345"
-                );
+                assert_eq!(update.get_str("social_provider").unwrap(), "github");
+                assert_eq!(update.get_str("social_provider_id").unwrap(), "gh_12345");
             }
             other => panic!("expected LinkToExisting, got {other:?}"),
         }
@@ -934,14 +931,8 @@ mod tests {
         match result {
             SocialLoginOutcome::LinkToExisting { user: u, update } => {
                 assert_eq!(u.id, user.id);
-                assert_eq!(
-                    update.get_str("social_provider").unwrap(),
-                    "github"
-                );
-                assert_eq!(
-                    update.get_str("social_provider_id").unwrap(),
-                    "gh_12345"
-                );
+                assert_eq!(update.get_str("social_provider").unwrap(), "github");
+                assert_eq!(update.get_str("social_provider_id").unwrap(), "gh_12345");
             }
             other => panic!("expected LinkToExisting, got {other:?}"),
         }
