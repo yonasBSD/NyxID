@@ -63,6 +63,6 @@ describe("SshServiceInstructions", () => {
     ).toBeGreaterThanOrEqual(2);
     expect(screen.getByText("Optional: Generate SSH config stanza")).toBeInTheDocument();
     expect(screen.getByText("Target Machine Setup (Passwordless Login)")).toBeInTheDocument();
-    expect(screen.getByText("Node Agent (Remote Targets)")).toBeInTheDocument();
+    expect(screen.getByText("Node Agent (Required)")).toBeInTheDocument();
   });
 });
