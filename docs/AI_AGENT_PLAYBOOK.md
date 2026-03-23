@@ -457,7 +457,41 @@ Go to http://localhost:3000/providers/manage to create and manage providers.
 
 **Goal:** Keep sensitive credentials on your own infrastructure. NyxID routes proxy requests through the node agent, which injects credentials locally -- they never leave your machine.
 
-### Step 1: Generate a registration token
+### How it works
+
+1. The node agent runs on your infrastructure and connects to NyxID via WebSocket
+2. You store API credentials locally on the node (encrypted at rest)
+3. When a user makes a proxy request for a node-bound service, NyxID routes it through the node
+4. The node injects the credential and forwards the request to the downstream API
+5. The credential never transits the NyxID server
+
+### Step 1: Install the node agent
+
+The node agent is a single Rust binary. Build from source:
+
+```bash
+# Requires Rust toolchain (https://rustup.rs)
+# Clone the NyxID repo, then:
+cargo build --release -p nyxid-node
+
+# Binary is at: target/release/nyxid-node
+# Copy it to the target machine or add to PATH:
+cp target/release/nyxid-node /usr/local/bin/
+```
+
+Or install directly:
+
+```bash
+cargo install --path node-agent
+```
+
+Verify:
+
+```bash
+nyxid-node version
+```
+
+### Step 2: Generate a registration token
 
 Via dashboard: http://localhost:3000/nodes, or via API:
 
@@ -470,55 +504,166 @@ curl -X POST http://localhost:3001/api/v1/nodes/register-token \
 
 Returns: `{ "token": "nyx_nreg_...", "token_id": "...", "expires_at": "..." }`
 
-### Step 2: Install and register the node agent
+Registration tokens expire after 1 hour by default.
 
-On the target machine:
+### Step 3: Register the node
+
+On the target machine where the agent will run:
 
 ```bash
-# Download or build nyxid-node binary
-# Then register:
 nyxid-node register \
   --token "nyx_nreg_..." \
-  --url "ws://localhost:3001/api/v1/nodes/ws"
+  --url "wss://localhost:3001/api/v1/nodes/ws"
 ```
 
-For production with TLS, use `wss://` instead of `ws://`.
+This creates a config file at `~/.nyxid-node/config.toml` and an encryption keyfile at `~/.nyxid-node/.keyfile`.
 
-### Step 3: Add credentials to the node
+**Options:**
+- `--config <PATH>` -- Custom config directory (default: `~/.nyxid-node`)
+- `--keychain` -- Use OS keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service) instead of file-based encryption
+
+### Step 4: Add credentials
+
+Add credentials for each service the node will handle. The secret value is prompted securely (not visible in shell history):
 
 ```bash
-nyxid-node credentials add \
-  --service "openai" \
-  --header "Authorization" \
-  --value "Bearer sk-proj-your-secret-key"
+# Header injection (most common -- e.g., Authorization header)
+nyxid-node credentials add --service "openai" --header "Authorization"
+# Prompts for: Enter secret value: (hidden input)
+
+# With automatic Bearer prefix
+nyxid-node credentials add --service "openai" --header "Authorization" --secret-format Bearer
+# Prompts for the API key, then stores as "Bearer <key>"
+
+# Query parameter injection
+nyxid-node credentials add --service "weather-api" --query-param "api_key"
+# Prompts for the key value
 ```
 
-### Step 4: Bind services to the node
+**Secret formats:**
+- `Raw` (default) -- Store the value exactly as entered
+- `Bearer` -- Automatically prepend `Bearer ` to the value
+- `Basic` -- Base64-encode as `username:password` and prepend `Basic `
 
-In the dashboard (http://localhost:3000/nodes/{nodeId}) or via API:
+**Manage credentials:**
 
 ```bash
+nyxid-node credentials list                      # List all configured credentials
+nyxid-node credentials remove --service "openai"  # Remove a credential
+```
+
+### Step 5: Bind services to the node
+
+In the dashboard (http://localhost:3000/nodes/{nodeId}), or via API:
+
+```bash
+# Get the node ID (shown during registration, or from the dashboard)
 curl -X POST http://localhost:3001/api/v1/nodes/$NODE_ID/bindings \
   -H "Authorization: Bearer $ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"service_id": "SERVICE_UUID"}'
 ```
 
-### Step 5: Start the node agent
+Only bound services will be routed through this node. Unbound services use NyxID's direct proxy.
+
+### Step 6: Start the agent
 
 ```bash
 nyxid-node start
 ```
 
-Now proxy requests to bound services will be routed through the node. Credentials are injected locally and never transit the NyxID server.
+The agent connects via WebSocket and automatically reconnects with exponential backoff (100ms to 60s) if the connection drops. Run it as a systemd service or supervisor process for production.
 
-### Node management commands
+**Example systemd unit:**
+
+```ini
+[Unit]
+Description=NyxID Node Agent
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/nyxid-node start
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### Configuration file reference
+
+The config is stored at `~/.nyxid-node/config.toml` (created during registration):
+
+```toml
+storage_backend = "file"  # "file" (AES-256-GCM) or "keychain" (OS keychain)
+
+[server]
+url = "wss://localhost:3001/api/v1/nodes/ws"
+
+[node]
+id = "node-uuid-here"
+auth_token_encrypted = "..."  # Encrypted auth token (file backend only)
+
+[signing]
+shared_secret_encrypted = "..."  # HMAC signing secret (file backend only)
+
+[ssh]
+max_tunnels = 10           # Max concurrent SSH tunnels (default: 10)
+io_timeout_secs = 3600     # Idle timeout per tunnel in seconds (default: 3600)
+# Restrict which SSH hosts the node can connect to:
+# allowed_targets = [
+#   { host = "internal.example.com", port = 22 },
+#   { host = "db.example.com", port = 22 },
+# ]
+
+# Credentials are stored per-service:
+[credentials.openai]
+injection_method = "header"
+header_name = "Authorization"
+header_value_encrypted = "..."  # AES-256-GCM encrypted (file backend)
+
+[credentials.weather-api]
+injection_method = "query_param"
+param_name = "api_key"
+param_value_encrypted = "..."
+```
+
+### Secret storage backends
+
+**File backend (default):**
+- Secrets encrypted with AES-256-GCM
+- Encryption key stored at `~/.nyxid-node/.keyfile` (mode `0600`)
+- Works on all platforms, no daemon required
+
+**Keychain backend:**
+- macOS: Keychain
+- Windows: Credential Manager
+- Linux: Secret Service D-Bus (GNOME Keyring / KDE Wallet)
+- Register with `--keychain` flag, or migrate later
+
+**Migrate between backends:**
 
 ```bash
-nyxid-node status              # Check connection status
-nyxid-node credentials list    # List configured credentials
-nyxid-node credentials remove --service "openai"  # Remove a credential
+nyxid-node migrate --to keychain   # File -> OS keychain
+nyxid-node migrate --to file       # OS keychain -> file
 ```
+
+### All CLI commands
+
+```bash
+nyxid-node register   --token <TOKEN> [--url <WS_URL>] [--config <PATH>] [--keychain]
+nyxid-node start      [--config <PATH>] [--log-level <LEVEL>]
+nyxid-node status     [--config <PATH>]
+nyxid-node rekey      --auth-token <TOKEN> --signing-secret <HEX> [--config <PATH>]
+nyxid-node credentials add    --service <SLUG> [--header <NAME> | --query-param <NAME>] [--secret-format Raw|Bearer|Basic]
+nyxid-node credentials list   [--config <PATH>]
+nyxid-node credentials remove --service <SLUG> [--config <PATH>]
+nyxid-node migrate    --to <file|keychain> [--config <PATH>]
+nyxid-node version
+```
+
+Global option: `--log-level <trace|debug|info|warn|error>` (default: `info`)
 
 ---
 
