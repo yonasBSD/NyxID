@@ -16,8 +16,23 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { SocialLoginButtons } from "@/components/auth/social-login-buttons";
 
+/** Map backend social-auth error keys to user-friendly messages. */
+const SOCIAL_ERROR_MESSAGES: Record<string, string> = {
+  social_auth_conflict:
+    "This social account is already linked elsewhere. Please use your original sign-in method or contact support.",
+  social_auth_no_email:
+    "We couldn't retrieve an email address from your social account. Please ensure your email is public or use email/password sign-in.",
+  social_auth_deactivated:
+    "Your account has been deactivated. Please contact support for assistance.",
+  social_auth_failed:
+    "Social sign-in failed. Please try again.",
+  social_auth_exchange:
+    "Social sign-in failed due to a temporary error. Please try again.",
+};
+
 interface LoginFormProps {
   readonly returnTo?: string;
+  readonly socialError?: string;
 }
 
 /** Trusted origins for return_to redirect validation (open-redirect prevention). */
@@ -29,7 +44,7 @@ const BACKEND_URL = (
 
 const FRONTEND_ORIGIN = window.location.origin;
 
-export function LoginForm({ returnTo }: LoginFormProps) {
+export function LoginForm({ returnTo, socialError }: LoginFormProps) {
   const navigate = useNavigate();
   const loginMutation = useLogin();
 
@@ -78,6 +93,17 @@ export function LoginForm({ returnTo }: LoginFormProps) {
           Sign in to your NyxID account
         </p>
       </div>
+
+      {socialError && (
+        <div
+          role="alert"
+          data-testid="social-error"
+          className="rounded-md bg-destructive/10 p-3 text-sm text-destructive"
+        >
+          {SOCIAL_ERROR_MESSAGES[socialError] ??
+            "Social sign-in failed. Please try again."}
+        </div>
+      )}
 
       <Form {...form}>
         <form onSubmit={form.handleSubmit(onSubmit)} className="flex flex-col gap-4">

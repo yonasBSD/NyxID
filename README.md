@@ -42,7 +42,7 @@ It provides a complete identity layer: user registration, session management, Op
 
 ### Social Login
 - Google and GitHub OAuth 2.0 integration
-- Automatic account linking by verified email
+- Automatic account linking by verified email, including provider re-linking for existing accounts
 - Session creation on successful social login (same cookies as email/password login)
 
 ### Social Token Exchange (Native Mobile)

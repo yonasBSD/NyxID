@@ -114,7 +114,7 @@ Internal errors never leak implementation details. The `message` for error codes
 | 5000 | `service_account_not_found`| 404         | Service account does not exist           |
 | 5001 | `service_account_inactive` | 403         | Service account is deactivated           |
 | 6000 | `social_auth_failed`       | 400         | Social authentication failed             |
-| 6001 | `social_auth_conflict`     | 409         | Email already linked to another provider |
+| 6001 | `social_auth_conflict`     | 409         | Social identity could not be linked because it is already reserved by another account |
 | 6002 | `social_auth_no_email`     | 400         | No verified email from provider          |
 | 6003 | `social_auth_deactivated`  | 403         | Social login account is deactivated      |
 | 6004 | `external_token_invalid`   | 400         | External provider token verification failed (signature, expiry, audience, or claims) |
@@ -696,17 +696,18 @@ Possible error keys in the redirect:
 | State/CSRF token mismatch         | `social_auth_csrf`            |
 | Code exchange failed              | `social_auth_exchange`        |
 | Profile fetch failed              | `social_auth_profile`         |
-| Email linked to another provider  | `social_auth_conflict`        |
+| Social identity could not be linked | `social_auth_conflict`      |
 | No verified email from provider   | `social_auth_no_email`        |
 | Provider not configured           | `social_auth_unavailable`     |
 | Unsupported provider name         | `social_auth_unsupported`     |
 | Account is deactivated            | `social_auth_deactivated`     |
 
 **Notes:**
-- If a user with the same email already exists and has no social provider set, the account is linked to this provider
-- If a user with the same email is already linked to a *different* social provider, the login fails with `social_auth_conflict`
+- If a user with the same verified email already exists, the social identity is linked to that account
+- If the matched account was previously linked to a different social provider, NyxID re-links it to the current provider
+- `social_auth_conflict` is reserved for write-time identity collisions (for example, if the provider identity is already bound to another account)
 - New users created via social login have `email_verified = true` (provider verified the email) and no password set
-- Social login users cannot use the password reset or password login flows
+- Existing email/password accounts keep their password login path after social linking
 
 ---
 
@@ -3747,7 +3748,7 @@ Exchange a Google ID token or GitHub access token for a full NyxID token set (ac
 - `1000 bad_request` -- Missing required parameters (`subject_token`, `subject_token_type`, `provider`)
 - `1001 unauthorized` -- Invalid client credentials
 - `6000 social_auth_failed` -- Provider API call failed (e.g., GitHub API unreachable)
-- `6001 social_auth_conflict` -- Email from provider is already linked to a different social provider
+- `6001 social_auth_conflict` -- Provider identity could not be linked because it is already reserved by another account
 - `6002 social_auth_no_email` -- No verified email returned by provider
 - `6003 social_auth_deactivated` -- Matched user account is deactivated
 - `6004 external_token_invalid` -- External token verification failed (expired, bad signature, wrong audience, unverified email)
@@ -3787,7 +3788,7 @@ curl -X POST http://localhost:3001/oauth/token \
 The same account linking logic as web-based social login applies:
 
 1. **Returning user** -- If a user with the same provider + provider ID exists, log them in
-2. **Email linking** -- If a user with the same email exists (no social provider linked), link the social identity
+2. **Email linking** -- If a user with the same verified email exists, link or re-link the social identity to that account
 3. **New user** -- If no match, create a new user with `email_verified = true`
 
 **Security Notes:**

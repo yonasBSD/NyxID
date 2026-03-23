@@ -458,25 +458,37 @@ async fn fetch_google_profile(
     })
 }
 
-/// Find an existing user by social identity or email, or create a new one.
+/// Outcome of resolving a social login against existing user records.
 ///
-/// NOTE: The returned `User` struct reflects the state *before* the update.
-/// Only `user.id` should be relied upon from the return value for downstream
-/// operations (e.g. session creation). Profile fields may be stale.
-pub async fn find_or_create_user(
-    db: &mongodb::Database,
+/// This enum captures the business-logic decision so it can be unit-tested
+/// independently of database I/O.
+#[derive(Debug)]
+enum SocialLoginOutcome {
+    /// Returning social user (same provider + provider_id). Update profile.
+    UpdateReturning { user: User, update: bson::Document },
+    /// Link (or re-link) social identity to an existing email-matched user.
+    ///
+    /// **Policy:** We allow re-linking even if a different social provider is
+    /// already set. This follows the same pattern as Auth0, Supabase Auth,
+    /// and Firebase Auth — a provider's verified-email assertion is sufficient
+    /// to prove account ownership. This function is also called by the mobile
+    /// token-exchange flow (`social_token_exchange_service`), so the policy
+    /// applies uniformly across all social login entry points.
+    LinkToExisting { user: User, update: bson::Document },
+    /// No matching user found; create a brand-new account.
+    CreateNew(User),
+}
+
+/// Pure business-logic resolver: given DB lookup results and the incoming
+/// social profile, determine what action `find_or_create_user` should take.
+///
+/// This function contains NO database calls so it can be tested directly.
+fn resolve_social_login(
+    existing_social: Option<User>,
+    existing_email: Option<User>,
     profile: &SocialProfile,
-) -> AppResult<User> {
-    let users = db.collection::<User>(USERS);
-
+) -> AppResult<SocialLoginOutcome> {
     // Case 1: Returning social user (same provider + provider_id)
-    let existing_social = users
-        .find_one(doc! {
-            "social_provider": profile.provider.as_str(),
-            "social_provider_id": &profile.provider_id,
-        })
-        .await?;
-
     if let Some(user) = existing_social {
         if !user.is_active {
             return Err(AppError::SocialAuthDeactivated);
@@ -493,32 +505,23 @@ pub async fn find_or_create_user(
         if let Some(ref avatar) = profile.avatar_url {
             update.insert("avatar_url", avatar);
         }
-        users
-            .update_one(doc! { "_id": &user.id }, doc! { "$set": update })
-            .await?;
-        return Ok(user);
+        return Ok(SocialLoginOutcome::UpdateReturning { user, update });
     }
 
-    // Case 2: Existing email user (account linking)
+    // Case 2: Existing email user — link or re-link social identity.
     //
     // Trust the provider's email verification: this is an accepted industry
     // pattern used by Auth0, Supabase Auth, and Firebase Auth. The provider
     // has already verified the email address as part of its own OAuth flow.
-    let email_lower = profile.email.to_lowercase();
-    let existing_email = users.find_one(doc! { "email": &email_lower }).await?;
-
+    //
+    // If the user already has a different social provider linked, we allow
+    // re-linking to the new provider. This supports users who have accounts
+    // with multiple social providers sharing the same verified email address.
     if let Some(user) = existing_email {
         if !user.is_active {
             return Err(AppError::SocialAuthDeactivated);
         }
 
-        if user.social_provider.is_some() {
-            return Err(AppError::SocialAuthConflict);
-        }
-
-        // Link social identity to existing email/password user.
-        // Use a conditional filter to prevent TOCTOU race: only update if
-        // social_provider is still null (no concurrent linking occurred).
         let now = Utc::now();
         let mut update = doc! {
             "social_provider": profile.provider.as_str(),
@@ -534,24 +537,16 @@ pub async fn find_or_create_user(
         if !user.email_verified {
             update.insert("email_verified", true);
         }
-        let result = users
-            .update_one(
-                doc! { "_id": &user.id, "social_provider": null },
-                doc! { "$set": update },
-            )
-            .await?;
-        if result.modified_count == 0 {
-            return Err(AppError::SocialAuthConflict);
-        }
-        return Ok(user);
+        return Ok(SocialLoginOutcome::LinkToExisting { user, update });
     }
 
     // Case 3: New social user
     let now = Utc::now();
     let user_id = Uuid::new_v4().to_string();
+    let email_lower = profile.email.to_lowercase();
 
     let new_user = User {
-        id: user_id.clone(),
+        id: user_id,
         email: email_lower,
         password_hash: None,
         display_name: profile.display_name.clone(),
@@ -572,11 +567,86 @@ pub async fn find_or_create_user(
         last_login_at: Some(now),
     };
 
-    users.insert_one(&new_user).await?;
+    Ok(SocialLoginOutcome::CreateNew(new_user))
+}
 
-    tracing::info!(user_id = %user_id, provider = %profile.provider.as_str(), "Social user created");
+fn is_duplicate_key_error(e: &mongodb::error::Error) -> bool {
+    if let mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(we)) =
+        e.kind.as_ref()
+    {
+        return we.code == 11000
+            && we
+                .message
+                .contains("social_provider_1_social_provider_id_1");
+    }
+    false
+}
 
-    Ok(new_user)
+fn map_social_link_error(e: mongodb::error::Error) -> AppError {
+    if is_duplicate_key_error(&e) {
+        return AppError::SocialAuthConflict;
+    }
+    AppError::DatabaseError(e)
+}
+
+/// Find an existing user by social identity or email, or create a new one.
+///
+/// NOTE: The returned `User` struct reflects the state *before* the update.
+/// Only `user.id` should be relied upon from the return value for downstream
+/// operations (e.g. session creation). Profile fields may be stale.
+pub async fn find_or_create_user(
+    db: &mongodb::Database,
+    profile: &SocialProfile,
+) -> AppResult<User> {
+    let users = db.collection::<User>(USERS);
+
+    let existing_social = users
+        .find_one(doc! {
+            "social_provider": profile.provider.as_str(),
+            "social_provider_id": &profile.provider_id,
+        })
+        .await?;
+
+    let existing_email = if existing_social.is_none() {
+        let email_lower = profile.email.to_lowercase();
+        users.find_one(doc! { "email": &email_lower }).await?
+    } else {
+        None
+    };
+
+    match resolve_social_login(existing_social, existing_email, profile)? {
+        SocialLoginOutcome::UpdateReturning {
+            ref user,
+            ref update,
+        } => {
+            users
+                .update_one(doc! { "_id": &user.id }, doc! { "$set": update })
+                .await?;
+            Ok(user.clone())
+        }
+        SocialLoginOutcome::LinkToExisting {
+            ref user,
+            ref update,
+        } => {
+            users
+                .update_one(doc! { "_id": &user.id }, doc! { "$set": update })
+                .await
+                .map_err(map_social_link_error)?;
+            Ok(user.clone())
+        }
+        SocialLoginOutcome::CreateNew(new_user) => {
+            users
+                .insert_one(&new_user)
+                .await
+                .map_err(map_social_link_error)?;
+            tracing::info!(
+                user_id = %new_user.id,
+                provider = %profile.provider.as_str(),
+                "Social user created"
+            );
+            Ok(new_user)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -761,5 +831,199 @@ mod tests {
         assert!(url.contains("nonce=test_nonce"));
         assert!(url.contains("state=test_state"));
         assert!(url.contains("scope=name%20email"));
+    }
+
+    // -- resolve_social_login tests ----------------------------------------
+
+    fn make_test_user(
+        email: &str,
+        social_provider: Option<&str>,
+        social_provider_id: Option<&str>,
+    ) -> User {
+        let now = Utc::now();
+        User {
+            id: Uuid::new_v4().to_string(),
+            email: email.to_string(),
+            password_hash: Some("hashed".to_string()),
+            display_name: None,
+            avatar_url: None,
+            email_verified: true,
+            email_verification_token: None,
+            password_reset_token: None,
+            password_reset_expires_at: None,
+            is_active: true,
+            is_admin: false,
+            role_ids: vec![],
+            group_ids: vec![],
+            mfa_enabled: false,
+            social_provider: social_provider.map(String::from),
+            social_provider_id: social_provider_id.map(String::from),
+            created_at: now,
+            updated_at: now,
+            last_login_at: None,
+        }
+    }
+
+    fn github_profile() -> SocialProfile {
+        SocialProfile {
+            provider: SocialProvider::GitHub,
+            provider_id: "gh_12345".to_string(),
+            email: "user@example.com".to_string(),
+            display_name: Some("Test User".to_string()),
+            avatar_url: Some("https://avatars.example.com/u/1".to_string()),
+        }
+    }
+
+    #[test]
+    fn resolve_returning_social_user() {
+        let user = make_test_user("user@example.com", Some("github"), Some("gh_12345"));
+        let profile = github_profile();
+
+        let result = resolve_social_login(Some(user.clone()), None, &profile).unwrap();
+        match result {
+            SocialLoginOutcome::UpdateReturning { user: u, update } => {
+                assert_eq!(u.id, user.id);
+                assert!(update.contains_key("last_login_at"));
+                assert!(update.contains_key("display_name"));
+                // Should NOT set social_provider (already matches)
+                assert!(!update.contains_key("social_provider"));
+            }
+            other => panic!("expected UpdateReturning, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_returning_social_user_deactivated() {
+        let mut user = make_test_user("user@example.com", Some("github"), Some("gh_12345"));
+        user.is_active = false;
+        let profile = github_profile();
+
+        let err = resolve_social_login(Some(user), None, &profile).unwrap_err();
+        assert!(matches!(err, AppError::SocialAuthDeactivated));
+    }
+
+    #[test]
+    fn resolve_link_to_email_password_user() {
+        // User registered with email/password, no social provider linked.
+        let user = make_test_user("user@example.com", None, None);
+        let profile = github_profile();
+
+        let result = resolve_social_login(None, Some(user.clone()), &profile).unwrap();
+        match result {
+            SocialLoginOutcome::LinkToExisting { user: u, update } => {
+                assert_eq!(u.id, user.id);
+                assert_eq!(update.get_str("social_provider").unwrap(), "github");
+                assert_eq!(update.get_str("social_provider_id").unwrap(), "gh_12345");
+            }
+            other => panic!("expected LinkToExisting, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_relink_different_provider() {
+        // User previously linked with Google; now logging in via GitHub.
+        // This is the fix for issue #89: re-linking must succeed, not
+        // return SocialAuthConflict.
+        let user = make_test_user("user@example.com", Some("google"), Some("goog_999"));
+        let profile = github_profile();
+
+        let result = resolve_social_login(None, Some(user.clone()), &profile).unwrap();
+        match result {
+            SocialLoginOutcome::LinkToExisting { user: u, update } => {
+                assert_eq!(u.id, user.id);
+                assert_eq!(update.get_str("social_provider").unwrap(), "github");
+                assert_eq!(update.get_str("social_provider_id").unwrap(), "gh_12345");
+            }
+            other => panic!("expected LinkToExisting, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_link_sets_email_verified_when_unverified() {
+        let mut user = make_test_user("user@example.com", None, None);
+        user.email_verified = false;
+        let profile = github_profile();
+
+        let result = resolve_social_login(None, Some(user), &profile).unwrap();
+        match result {
+            SocialLoginOutcome::LinkToExisting { update, .. } => {
+                assert!(update.get_bool("email_verified").unwrap());
+            }
+            other => panic!("expected LinkToExisting, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_link_skips_email_verified_when_already_verified() {
+        let user = make_test_user("user@example.com", None, None);
+        assert!(user.email_verified); // precondition
+        let profile = github_profile();
+
+        let result = resolve_social_login(None, Some(user), &profile).unwrap();
+        match result {
+            SocialLoginOutcome::LinkToExisting { update, .. } => {
+                assert!(!update.contains_key("email_verified"));
+            }
+            other => panic!("expected LinkToExisting, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_link_deactivated_email_user() {
+        let mut user = make_test_user("user@example.com", None, None);
+        user.is_active = false;
+        let profile = github_profile();
+
+        let err = resolve_social_login(None, Some(user), &profile).unwrap_err();
+        assert!(matches!(err, AppError::SocialAuthDeactivated));
+    }
+
+    #[test]
+    fn resolve_creates_new_user_when_no_match() {
+        let profile = github_profile();
+
+        let result = resolve_social_login(None, None, &profile).unwrap();
+        match result {
+            SocialLoginOutcome::CreateNew(user) => {
+                assert_eq!(user.email, "user@example.com");
+                assert_eq!(user.social_provider.as_deref(), Some("github"));
+                assert_eq!(user.social_provider_id.as_deref(), Some("gh_12345"));
+                assert!(user.email_verified);
+                assert!(user.is_active);
+                assert!(user.password_hash.is_none());
+            }
+            other => panic!("expected CreateNew, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_link_preserves_existing_avatar() {
+        let mut user = make_test_user("user@example.com", None, None);
+        user.avatar_url = Some("https://old-avatar.example.com".to_string());
+        let profile = github_profile();
+
+        let result = resolve_social_login(None, Some(user), &profile).unwrap();
+        match result {
+            SocialLoginOutcome::LinkToExisting { update, .. } => {
+                // Should NOT overwrite existing avatar
+                assert!(!update.contains_key("avatar_url"));
+            }
+            other => panic!("expected LinkToExisting, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_link_sets_avatar_when_missing() {
+        let user = make_test_user("user@example.com", None, None);
+        assert!(user.avatar_url.is_none()); // precondition
+        let profile = github_profile();
+
+        let result = resolve_social_login(None, Some(user), &profile).unwrap();
+        match result {
+            SocialLoginOutcome::LinkToExisting { update, .. } => {
+                assert!(update.contains_key("avatar_url"));
+            }
+            other => panic!("expected LinkToExisting, got {other:?}"),
+        }
     }
 }
