@@ -17,18 +17,19 @@ This document is a reference for AI agents (Claude, Codex, ChatGPT, Gemini, etc.
 3. [Getting Started](#3-getting-started)
 4. [Register a Service (External API)](#4-register-a-service-external-api)
 5. [Register a Service (Internal / Shared Credential)](#5-register-a-service-internal--shared-credential)
-6. [Connect User Credentials to a Service](#6-connect-user-credentials-to-a-service)
-7. [Set Up MCP Proxy for AI Clients](#7-set-up-mcp-proxy-for-ai-clients)
-8. [Use the Credential Proxy](#8-use-the-credential-proxy)
-9. [Set Up a Provider (OAuth / API Key / Device Code)](#9-set-up-a-provider-oauth--api-key--device-code)
-10. [Deploy a Node Agent (On-Premise Credentials)](#10-deploy-a-node-agent-on-premise-credentials)
-11. [Add Login to a React App (OAuth Client)](#11-add-login-to-a-react-app-oauth-client)
-12. [Add Login to Any Web App (Raw OAuth / OIDC)](#12-add-login-to-any-web-app-raw-oauth--oidc)
-13. [Server-to-Server Authentication (Service Accounts)](#13-server-to-server-authentication-service-accounts)
-14. [API Quick Reference](#14-api-quick-reference)
-15. [Error Code Reference](#15-error-code-reference)
-16. [Troubleshooting](#16-troubleshooting)
-17. [Common Pitfalls](#17-common-pitfalls)
+6. [Register a Service (OIDC / SSO Provider)](#6-register-a-service-oidc--sso-provider)
+7. [Connect User Credentials to a Service](#7-connect-user-credentials-to-a-service)
+8. [Set Up MCP Proxy for AI Clients](#8-set-up-mcp-proxy-for-ai-clients)
+9. [Use the Credential Proxy](#9-use-the-credential-proxy)
+10. [Set Up a Provider (OAuth / API Key / Device Code)](#10-set-up-a-provider-oauth--api-key--device-code)
+11. [Deploy a Node Agent (On-Premise Credentials)](#11-deploy-a-node-agent-on-premise-credentials)
+12. [Add Login to a React App (OAuth Client)](#12-add-login-to-a-react-app-oauth-client)
+13. [Add Login to Any Web App (Raw OAuth / OIDC)](#13-add-login-to-any-web-app-raw-oauth--oidc)
+14. [Server-to-Server Authentication (Service Accounts)](#14-server-to-server-authentication-service-accounts)
+15. [API Quick Reference](#15-api-quick-reference)
+16. [Error Code Reference](#16-error-code-reference)
+17. [Troubleshooting](#17-troubleshooting)
+18. [Common Pitfalls](#18-common-pitfalls)
 
 ---
 
@@ -211,7 +212,90 @@ curl -X POST http://localhost:3001/api/v1/connections/$SERVICE_ID \
 
 ---
 
-## 6. Connect User Credentials to a Service
+## 6. Register a Service (OIDC / SSO Provider)
+
+**Goal:** Register a service where NyxID acts as the OIDC identity provider. Users sign in via NyxID's OAuth flow and the downstream app gets a client_id/client_secret pair.
+
+### Via Dashboard
+
+1. Go to http://localhost:3000/services
+2. Click "New Service"
+3. Set auth type to **OIDC**
+4. NyxID auto-generates a client_id and client_secret for the service
+5. The service category is automatically set to "provider"
+
+### Via API
+
+```bash
+curl -X POST http://localhost:3001/api/v1/services \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Customer Portal",
+    "slug": "customer-portal",
+    "base_url": "https://portal.example.com",
+    "auth_method": "oidc",
+    "visibility": "public"
+  }'
+```
+
+When `auth_method` is `oidc`, NyxID automatically:
+- Creates an OAuth client with a generated `client_id` and `client_secret`
+- Sets the default redirect URI to `{base_url}/callback`
+- Sets `service_category` to `provider`
+
+### Retrieve OIDC credentials
+
+```bash
+curl http://localhost:3001/api/v1/services/$SERVICE_ID/oidc-credentials \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+```
+
+Response:
+
+```json
+{
+  "client_id": "generated-uuid",
+  "client_secret": "generated-secret",
+  "redirect_uris": ["https://portal.example.com/callback"],
+  "allowed_scopes": "openid profile email",
+  "delegation_scopes": "",
+  "issuer": "http://localhost:3001",
+  "authorization_endpoint": "http://localhost:3001/oauth/authorize",
+  "token_endpoint": "http://localhost:3001/oauth/token",
+  "userinfo_endpoint": "http://localhost:3001/oauth/userinfo",
+  "jwks_uri": "http://localhost:3001/.well-known/jwks.json"
+}
+```
+
+Give these values to the downstream app to configure its OIDC client.
+
+### Update redirect URIs
+
+```bash
+curl -X PUT http://localhost:3001/api/v1/services/$SERVICE_ID/redirect-uris \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "redirect_uris": [
+      "https://portal.example.com/callback",
+      "https://portal.example.com/auth/callback"
+    ]
+  }'
+```
+
+### Regenerate client secret
+
+```bash
+curl -X POST http://localhost:3001/api/v1/services/$SERVICE_ID/regenerate-secret \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+```
+
+Returns the new `client_secret` (one-time display).
+
+---
+
+## 7. Connect User Credentials to a Service
 
 **Goal:** Store a user's credential for a service so NyxID can inject it when proxying requests.
 
@@ -254,7 +338,7 @@ curl -X DELETE http://localhost:3001/api/v1/connections/$SERVICE_ID \
 
 ---
 
-## 7. Set Up MCP Proxy for AI Clients
+## 8. Set Up MCP Proxy for AI Clients
 
 **Goal:** Let Cursor, Claude Code, or Codex call APIs through NyxID's MCP proxy with automatic credential injection.
 
@@ -320,7 +404,7 @@ Built-in meta-tools let you search for tools and discover/connect to new service
 
 ---
 
-## 8. Use the Credential Proxy
+## 9. Use the Credential Proxy
 
 **Goal:** Proxy API requests through NyxID with automatic credential injection (without MCP).
 
@@ -362,11 +446,13 @@ Services can be configured to forward the NyxID user's identity to the downstrea
 
 ---
 
-## 9. Set Up a Provider (OAuth / API Key / Device Code)
+## 10. Set Up a Provider (OAuth / API Key / Device Code)
 
 **Goal:** Register an external provider that users can connect their accounts to.
 
-### OAuth 2.0 Provider
+### OAuth 2.0 Provider (admin credentials)
+
+Admin provides a shared OAuth app. Users just authorize via the OAuth flow.
 
 ```bash
 curl -X POST http://localhost:3001/api/v1/providers \
@@ -387,6 +473,82 @@ curl -X POST http://localhost:3001/api/v1/providers \
 ```
 
 Users connect via: `GET /api/v1/providers/{provider_id}/connect/oauth`
+
+### OAuth 2.0 Provider (user credentials)
+
+Each user provides their own developer OAuth app credentials (e.g., X/Twitter where each developer creates their own app, or Codex CLI auth).
+
+```bash
+curl -X POST http://localhost:3001/api/v1/providers \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "X (Twitter)",
+    "slug": "x-twitter",
+    "provider_type": "oauth2",
+    "credential_mode": "user",
+    "authorization_url": "https://twitter.com/i/oauth2/authorize",
+    "token_url": "https://api.twitter.com/2/oauth2/token",
+    "default_scopes": ["tweet.read", "users.read"],
+    "supports_pkce": true
+  }'
+```
+
+Users first set their own OAuth credentials, then authorize:
+
+```bash
+# Step 1: User provides their own developer app client_id/client_secret
+curl -X PUT http://localhost:3001/api/v1/providers/$PROVIDER_ID/credentials \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_id": "users-own-client-id",
+    "client_secret": "users-own-client-secret",
+    "label": "My X Developer App"
+  }'
+
+# Step 2: User initiates OAuth flow (uses their own credentials)
+# GET /api/v1/providers/{provider_id}/connect/oauth
+# Returns: { "authorization_url": "https://twitter.com/i/oauth2/authorize?..." }
+```
+
+### OAuth 2.0 Provider (both modes)
+
+Admin provides default credentials but users can override with their own:
+
+```bash
+curl -X POST http://localhost:3001/api/v1/providers \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Codex",
+    "slug": "codex",
+    "provider_type": "oauth2",
+    "credential_mode": "both",
+    "authorization_url": "https://auth.openai.com/authorize",
+    "token_url": "https://auth.openai.com/oauth/token",
+    "default_scopes": ["openid", "profile"],
+    "client_id": "default-client-id",
+    "client_secret": "default-client-secret",
+    "supports_pkce": true
+  }'
+```
+
+Users who want the default just call `GET /api/v1/providers/{id}/connect/oauth`. Users who want their own credentials set them first via `PUT /api/v1/providers/{id}/credentials`.
+
+### User credential management
+
+```bash
+# Get user's credentials for a provider
+GET /api/v1/providers/{provider_id}/credentials
+
+# Set user's own OAuth credentials
+PUT /api/v1/providers/{provider_id}/credentials
+{"client_id": "...", "client_secret": "...", "label": "My App"}
+
+# Delete user's credentials (fall back to admin credentials if mode is "both")
+DELETE /api/v1/providers/{provider_id}/credentials
+```
 
 ### API Key Provider
 
@@ -453,7 +615,7 @@ Go to http://localhost:3000/providers/manage to create and manage providers.
 
 ---
 
-## 10. Deploy a Node Agent (On-Premise Credentials)
+## 11. Deploy a Node Agent (On-Premise Credentials)
 
 **Goal:** Keep sensitive credentials on your own infrastructure. NyxID routes proxy requests through the node agent, which injects credentials locally -- they never leave your machine.
 
@@ -667,7 +829,7 @@ Global option: `--log-level <trace|debug|info|warn|error>` (default: `info`)
 
 ---
 
-## 11. Add Login to a React App (OAuth Client)
+## 12. Add Login to a React App (OAuth Client)
 
 **Goal:** Add "Sign in with NyxID" to a React app using the official SDK.
 
@@ -815,7 +977,7 @@ interface OAuthUserInfo {
 
 ---
 
-## 12. Add Login to Any Web App (Raw OAuth / OIDC)
+## 13. Add Login to Any Web App (Raw OAuth / OIDC)
 
 **Goal:** Integrate NyxID login without the SDK. Works with any language/framework.
 
@@ -925,7 +1087,7 @@ Use any JWT library to verify tokens with the RS256 algorithm and these keys.
 
 ---
 
-## 13. Server-to-Server Authentication (Service Accounts)
+## 14. Server-to-Server Authentication (Service Accounts)
 
 **Goal:** Authenticate a backend service (no browser) using client credentials.
 
@@ -961,7 +1123,7 @@ Token TTL defaults to 1 hour.
 
 ---
 
-## 14. API Quick Reference
+## 15. API Quick Reference
 
 Base URL: `http://localhost:3001`
 
@@ -997,6 +1159,9 @@ Base URL: `http://localhost:3001`
 | DELETE | `/api/v1/services/{id}` | Delete service |
 | POST | `/api/v1/services/{id}/endpoints` | Add API endpoint |
 | POST | `/api/v1/services/{id}/discover-endpoints` | Auto-discover from OpenAPI |
+| GET | `/api/v1/services/{id}/oidc-credentials` | Get OIDC client credentials |
+| PUT | `/api/v1/services/{id}/redirect-uris` | Update OIDC redirect URIs |
+| POST | `/api/v1/services/{id}/regenerate-secret` | Regenerate OIDC client secret |
 
 ### Connections
 
@@ -1030,6 +1195,9 @@ Base URL: `http://localhost:3001`
 | POST | `/api/v1/providers/{id}/connect/device-code/poll` | Poll device code status |
 | POST | `/api/v1/providers/{id}/refresh` | Refresh provider token |
 | DELETE | `/api/v1/providers/{id}/disconnect` | Disconnect provider |
+| GET | `/api/v1/providers/{id}/credentials` | Get user's own OAuth credentials |
+| PUT | `/api/v1/providers/{id}/credentials` | Set user's own OAuth credentials |
+| DELETE | `/api/v1/providers/{id}/credentials` | Delete user's own credentials |
 
 ### Nodes
 
@@ -1101,7 +1269,7 @@ Base URL: `http://localhost:3001`
 
 ---
 
-## 15. Error Code Reference
+## 16. Error Code Reference
 
 All errors return JSON: `{ "error": "...", "error_code": N, "message": "..." }`
 
@@ -1138,7 +1306,7 @@ All errors return JSON: `{ "error": "...", "error_code": N, "message": "..." }`
 
 ---
 
-## 16. Troubleshooting
+## 17. Troubleshooting
 
 ### "unauthorized" on all requests
 
@@ -1211,7 +1379,7 @@ curl -X POST http://localhost:3001/oauth/token \
 
 ---
 
-## 17. Common Pitfalls
+## 18. Common Pitfalls
 
 1. **`allowed_scopes` is an array, not a string.** When creating OAuth clients, pass `["openid", "profile", "email"]`, not `"openid profile email"`.
 

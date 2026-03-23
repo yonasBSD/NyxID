@@ -93,8 +93,8 @@ function buildQuickPrompts(baseUrl: string): readonly QuickPrompt[] {
     {
       title: "Register a service and connect credentials",
       description:
-        "Add an external API (e.g., OpenAI, Stripe) so you can store your API key and proxy requests through NyxID.",
-      prompt: `Read ${baseUrl}/llms-full.txt then help me register a new service in NyxID and connect my API credentials to it.`,
+        "Add an external API, internal service, or OIDC provider. Supports API key, bearer token, basic auth, and OAuth/OIDC services.",
+      prompt: `Read ${baseUrl}/llms-full.txt then help me register a new service in NyxID and connect my credentials to it. I need help choosing the right auth method (header, bearer, basic, oidc, or none) and service category.`,
       dashboardLink: "/services",
       dashboardLabel: "Services",
     },
@@ -115,8 +115,8 @@ function buildQuickPrompts(baseUrl: string): readonly QuickPrompt[] {
     {
       title: "Set up a provider (OAuth / API Key / Device Code)",
       description:
-        "Register an external provider that users can connect their accounts to.",
-      prompt: `Read ${baseUrl}/llms-full.txt then help me set up a new provider in NyxID so users can connect their accounts.`,
+        "Register an external OAuth service (admin or user-provided credentials), API key provider, or device code flow.",
+      prompt: `Read ${baseUrl}/llms-full.txt then help me set up a new provider in NyxID. I need to choose between credential modes (admin provides credentials, users bring their own developer app, or both) and provider types (oauth2, api_key, device_code).`,
       dashboardLink: "/providers/manage",
       dashboardLabel: "Providers",
     },
