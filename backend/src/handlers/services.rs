@@ -21,8 +21,8 @@ use crate::mw::auth::AuthUser;
 use crate::services::{api_docs_service, audit_service, oauth_client_service, ssh_service};
 
 use super::services_helpers::{
-    DeleteServiceResponse, fetch_service, require_admin, require_admin_or_creator,
-    service_to_response, validate_base_url, validate_optional_spec_url,
+    DeleteServiceResponse, fetch_service, require_admin_or_creator, service_to_response,
+    validate_base_url, validate_optional_spec_url,
 };
 
 // --- Request / Response types ---
@@ -374,8 +374,6 @@ pub async fn create_service(
     auth_user: AuthUser,
     Json(body): Json<CreateServiceRequest>,
 ) -> AppResult<Json<ServiceResponse>> {
-    require_admin(&state, &auth_user).await?;
-
     if body.name.is_empty() {
         return Err(AppError::ValidationError("name is required".to_string()));
     }
@@ -1089,9 +1087,8 @@ pub async fn get_oidc_credentials(
     auth_user: AuthUser,
     Path(service_id): Path<String>,
 ) -> AppResult<Json<OidcCredentialsResponse>> {
-    require_admin(&state, &auth_user).await?;
-
     let service = fetch_service(&state, &service_id).await?;
+    require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
 
     if service.auth_method != "oidc" {
         return Err(AppError::BadRequest(
@@ -1174,9 +1171,8 @@ pub async fn update_redirect_uris(
     Path(service_id): Path<String>,
     Json(body): Json<UpdateRedirectUrisRequest>,
 ) -> AppResult<Json<RedirectUrisResponse>> {
-    require_admin(&state, &auth_user).await?;
-
     let service = fetch_service(&state, &service_id).await?;
+    require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
 
     if service.auth_method != "oidc" {
         return Err(AppError::BadRequest(
@@ -1275,9 +1271,8 @@ pub async fn regenerate_oidc_secret(
     auth_user: AuthUser,
     Path(service_id): Path<String>,
 ) -> AppResult<Json<RegenerateSecretResponse>> {
-    require_admin(&state, &auth_user).await?;
-
     let service = fetch_service(&state, &service_id).await?;
+    require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
 
     if service.auth_method != "oidc" {
         return Err(AppError::BadRequest(
