@@ -322,6 +322,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
                 .delete(handlers::admin_roles::delete_role),
         )
         .route(
+            "/roles/{role_id}/assign-bulk",
+            post(handlers::admin_roles::bulk_assign_role),
+        )
+        .route(
             "/groups",
             get(handlers::admin_groups::list_groups).post(handlers::admin_groups::create_group),
         )

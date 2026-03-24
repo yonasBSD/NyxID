@@ -6,6 +6,7 @@ use uuid::Uuid;
 use crate::config::AppConfig;
 use crate::errors::{AppError, AppResult};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
+use crate::services::role_service;
 
 /// Supported social login providers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -634,7 +635,11 @@ pub async fn find_or_create_user(
                 .map_err(map_social_link_error)?;
             Ok(user.clone())
         }
-        SocialLoginOutcome::CreateNew(new_user) => {
+        SocialLoginOutcome::CreateNew(mut new_user) => {
+            // Auto-assign default roles to new social users
+            let default_role_ids = role_service::get_default_role_ids(db).await?;
+            new_user.role_ids = default_role_ids;
+
             users
                 .insert_one(&new_user)
                 .await
