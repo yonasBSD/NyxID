@@ -1,6 +1,5 @@
 use mongodb::bson::doc;
 use serde::Serialize;
-use std::net::Ipv4Addr;
 use utoipa::ToSchema;
 
 use crate::AppState;
@@ -107,11 +106,13 @@ pub fn service_to_response(s: DownstreamService) -> ServiceResponse {
     }
 }
 
-/// Validate that a base_url is safe to proxy to (not a private/internal address).
+/// Validate that a URL has a valid scheme and hostname.
 ///
-/// In development mode, private/internal addresses (localhost, 127.0.0.1, etc.)
-/// are allowed so that locally-running downstream services can be registered.
-pub fn validate_base_url(url: &str, allow_private: bool) -> AppResult<()> {
+/// Private IPs and localhost are allowed because NyxID is a self-hosted
+/// platform where services may run on private infrastructure (especially
+/// when accessed via node agents). Only cloud metadata endpoints are
+/// blocked to prevent credential leakage.
+pub fn validate_base_url(url: &str) -> AppResult<()> {
     // Must start with https:// or http://
     if !url.starts_with("https://") && !url.starts_with("http://") {
         return Err(AppError::ValidationError(
@@ -127,68 +128,33 @@ pub fn validate_base_url(url: &str, allow_private: bool) -> AppResult<()> {
         .host_str()
         .ok_or_else(|| AppError::ValidationError("base_url must contain a hostname".to_string()))?;
 
-    // Skip private-address checks in development mode
-    if allow_private {
-        return Ok(());
-    }
-
-    // Block private/reserved hostnames
-    let blocked_hosts = [
-        "localhost",
-        "127.0.0.1",
-        "0.0.0.0",
-        "[::1]",
-        "metadata.google.internal",
-    ];
-    let host_lower = host.to_lowercase();
-    for blocked in &blocked_hosts {
-        if host_lower == *blocked {
-            return Err(AppError::ValidationError(
-                "base_url must not point to a private or internal address".to_string(),
-            ));
-        }
-    }
-
-    // Block common private IP ranges (CR-2/SEC-3: includes IPv6 private ranges)
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        let is_private = match ip {
-            std::net::IpAddr::V4(ipv4) => {
-                ipv4.is_loopback()
-                    || ipv4.is_private()
-                    || ipv4.is_link_local()
-                    || is_rfc6598_cgnat(ipv4)
-            }
-            std::net::IpAddr::V6(ipv6) => {
-                ipv6.is_loopback()
-                    || (ipv6.segments()[0] & 0xfe00) == 0xfc00 // unique-local fc00::/7
-                    || (ipv6.segments()[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
-                    || ipv6.to_ipv4_mapped().is_some_and(|v4| v4.is_private() || v4.is_loopback())
-            }
-        };
-
-        if is_private {
-            return Err(AppError::ValidationError(
-                "base_url must not point to a private or internal IP address".to_string(),
-            ));
-        }
+    // Block cloud metadata endpoints -- these are dangerous in any environment
+    if is_cloud_metadata_host(host) {
+        return Err(AppError::ValidationError(
+            "URL must not point to a cloud metadata endpoint".to_string(),
+        ));
     }
 
     Ok(())
 }
 
-fn is_rfc6598_cgnat(ipv4: Ipv4Addr) -> bool {
-    ipv4.octets()[0] == 100 && (64..=127).contains(&ipv4.octets()[1])
+/// Returns true if the hostname is a known cloud metadata endpoint.
+fn is_cloud_metadata_host(host: &str) -> bool {
+    let normalized = host.trim_end_matches('.').to_ascii_lowercase();
+    normalized == "metadata.google.internal"
+        || normalized == "169.254.169.254"
+        || normalized == "[fd00:ec2::254]"
 }
 
-/// Validate an optional documentation spec URL using the same SSRF rules as base_url.
-pub fn validate_optional_spec_url(url: &str, allow_private: bool) -> AppResult<()> {
+/// Validate an optional documentation spec URL.
+pub fn validate_optional_spec_url(url: &str) -> AppResult<()> {
     if url.len() > 2048 {
         return Err(AppError::ValidationError(
             "Spec URL must not exceed 2048 characters".to_string(),
         ));
     }
 
-    validate_base_url(url, allow_private)
+    validate_base_url(url)
 }
 
 pub fn require_http_service(service: &DownstreamService) -> AppResult<()> {
@@ -212,18 +178,45 @@ mod tests {
     use super::{validate_base_url, validate_optional_spec_url};
 
     #[test]
+    fn validate_base_url_accepts_public_url() {
+        assert!(validate_base_url("https://api.example.com").is_ok());
+        assert!(validate_base_url("http://api.example.com").is_ok());
+    }
+
+    #[test]
+    fn validate_base_url_accepts_private_and_localhost() {
+        assert!(validate_base_url("http://localhost:3000").is_ok());
+        assert!(validate_base_url("http://127.0.0.1:8080").is_ok());
+        assert!(validate_base_url("http://192.168.1.50:3000").is_ok());
+        assert!(validate_base_url("http://10.0.0.5:8080").is_ok());
+        assert!(validate_base_url("http://100.64.0.10:3000").is_ok());
+    }
+
+    #[test]
+    fn validate_base_url_rejects_cloud_metadata() {
+        assert!(validate_base_url("http://metadata.google.internal").is_err());
+        assert!(validate_base_url("http://169.254.169.254").is_err());
+    }
+
+    #[test]
+    fn validate_base_url_rejects_invalid_scheme() {
+        assert!(validate_base_url("ftp://example.com").is_err());
+        assert!(validate_base_url("javascript:alert(1)").is_err());
+    }
+
+    #[test]
     fn validate_optional_spec_url_accepts_public_https_url() {
-        assert!(validate_optional_spec_url("https://example.com/openapi.json", false).is_ok());
+        assert!(validate_optional_spec_url("https://example.com/openapi.json").is_ok());
     }
 
     #[test]
-    fn validate_optional_spec_url_rejects_private_host() {
-        assert!(validate_optional_spec_url("http://127.0.0.1/openapi.json", false).is_err());
-        assert!(validate_optional_spec_url("http://100.64.0.10/openapi.json", false).is_err());
+    fn validate_optional_spec_url_accepts_private_host() {
+        assert!(validate_optional_spec_url("http://127.0.0.1/openapi.json").is_ok());
+        assert!(validate_optional_spec_url("http://192.168.1.50/openapi.json").is_ok());
     }
 
     #[test]
-    fn validate_base_url_accepts_private_hosts_in_development() {
-        assert!(validate_base_url("http://127.0.0.1:3000", true).is_ok());
+    fn validate_optional_spec_url_rejects_metadata() {
+        assert!(validate_optional_spec_url("http://169.254.169.254/latest").is_err());
     }
 }

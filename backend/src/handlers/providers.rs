@@ -310,10 +310,10 @@ pub async fn create_provider(
         })?;
 
         // SSRF validation on OAuth provider URLs
-        validate_base_url(authorization_url, state.config.is_development())?;
-        validate_base_url(token_url, state.config.is_development())?;
+        validate_base_url(authorization_url)?;
+        validate_base_url(token_url)?;
         if let Some(ref url) = body.revocation_url {
-            validate_base_url(url, state.config.is_development())?;
+            validate_base_url(url)?;
         }
 
         let client_id = body.client_id.clone();
@@ -373,15 +373,15 @@ pub async fn create_provider(
         })?;
 
         // SSRF validation on all URLs
-        validate_base_url(authorization_url, state.config.is_development())?;
-        validate_base_url(token_url, state.config.is_development())?;
-        validate_base_url(device_code_url, state.config.is_development())?;
-        validate_base_url(device_token_url, state.config.is_development())?;
+        validate_base_url(authorization_url)?;
+        validate_base_url(token_url)?;
+        validate_base_url(device_code_url)?;
+        validate_base_url(device_token_url)?;
         if let Some(ref url) = body.device_verification_url {
-            validate_base_url(url, state.config.is_development())?;
+            validate_base_url(url)?;
         }
         if let Some(ref url) = body.hosted_callback_url {
-            validate_base_url(url, state.config.is_development())?;
+            validate_base_url(url)?;
         }
 
         let client_id = body.client_id.clone();
@@ -478,25 +478,25 @@ pub async fn update_provider(
 
     // SSRF validation on URLs if provided
     if let Some(ref url) = body.authorization_url {
-        validate_base_url(url, state.config.is_development())?;
+        validate_base_url(url)?;
     }
     if let Some(ref url) = body.token_url {
-        validate_base_url(url, state.config.is_development())?;
+        validate_base_url(url)?;
     }
     if let Some(ref url) = body.revocation_url {
-        validate_base_url(url, state.config.is_development())?;
+        validate_base_url(url)?;
     }
     if let Some(ref url) = body.device_code_url {
-        validate_base_url(url, state.config.is_development())?;
+        validate_base_url(url)?;
     }
     if let Some(ref url) = body.device_token_url {
-        validate_base_url(url, state.config.is_development())?;
+        validate_base_url(url)?;
     }
     if let Some(ref url) = body.device_verification_url {
-        validate_base_url(url, state.config.is_development())?;
+        validate_base_url(url)?;
     }
     if let Some(ref url) = body.hosted_callback_url {
-        validate_base_url(url, state.config.is_development())?;
+        validate_base_url(url)?;
     }
 
     let updates = provider_service::ProviderUpdateInput {

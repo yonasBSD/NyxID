@@ -584,6 +584,8 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
 
     let private = Router::new()
         .route("/health", get(handlers::health::health_check))
+        .route("/llms.txt", get(handlers::llms_txt::llms_txt))
+        .route("/llms-full.txt", get(handlers::llms_txt::llms_full_txt))
         .nest("/api/v1/webhooks", webhook_routes)
         .nest("/api/v1", api_v1)
         // WebSocket endpoint for node agents. Auth happens in-message (not middleware).

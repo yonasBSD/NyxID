@@ -100,13 +100,13 @@ backend/src/
 |-- main.rs              # Server startup
 |-- models/              # MongoDB document structs (31 models, 29 collections, incl. node, node_service_binding, mcp_session)
 |-- services/            # Business logic (37 services, incl. node_service, node_routing_service, node_ws_manager, node_metrics_service)
-|-- handlers/            # HTTP handlers (38 handler modules, incl. node_admin, admin_nodes, node_ws, developer_apps, ssh_exec)
+|-- handlers/            # HTTP handlers (39 handler modules, incl. node_admin, admin_nodes, node_ws, developer_apps, ssh_exec, llms_txt)
 |-- crypto/              # JWT, AES, password hashing, token generation, KeyProvider trait, KMS providers, JWKS
 |-- errors/              # AppError enum, ErrorResponse, AppResult
 |-- mw/                  # Middleware: auth, rate_limit, security_headers
 
 frontend/src/
-|-- pages/               # Route pages (38 pages, incl. nodes, node-detail, admin-nodes, service-detail, providers)
+|-- pages/               # Route pages (39 pages, incl. nodes, node-detail, admin-nodes, service-detail, providers, ai-setup)
 |-- components/          # UI components (auth/, dashboard/, layout/, shared/, ui/)
 |-- hooks/               # TanStack Query hooks (15 hooks, incl. use-nodes, use-admin-nodes, use-providers, use-developer-apps)
 |-- schemas/             # Zod validation schemas (8 schema files + tests, incl. nodes.ts)
@@ -160,7 +160,7 @@ All API routes under `/api/v1`:
 
 - `/oauth/token` -- also supports `grant_type=client_credentials` (service accounts), `grant_type=urn:ietf:params:oauth:grant-type:token-exchange` (RFC 8693 delegated access and social token exchange via `subject_token_type=id_token` for native mobile Google/GitHub login)
 
-Top-level: `/health`, `/.well-known/openid-configuration`, `/oauth/*`, `/mcp`
+Top-level: `/health`, `/.well-known/openid-configuration`, `/oauth/*`, `/mcp`, `/llms.txt`, `/llms-full.txt`
 
 ## Environment Variables
 

@@ -21,8 +21,8 @@ use crate::mw::auth::AuthUser;
 use crate::services::{api_docs_service, audit_service, oauth_client_service, ssh_service};
 
 use super::services_helpers::{
-    DeleteServiceResponse, fetch_service, require_admin, require_admin_or_creator,
-    service_to_response, validate_base_url, validate_optional_spec_url,
+    DeleteServiceResponse, fetch_service, require_admin_or_creator, service_to_response,
+    validate_base_url, validate_optional_spec_url,
 };
 
 // --- Request / Response types ---
@@ -374,8 +374,6 @@ pub async fn create_service(
     auth_user: AuthUser,
     Json(body): Json<CreateServiceRequest>,
 ) -> AppResult<Json<ServiceResponse>> {
-    require_admin(&state, &auth_user).await?;
-
     if body.name.is_empty() {
         return Err(AppError::ValidationError("name is required".to_string()));
     }
@@ -502,7 +500,7 @@ pub async fn create_service(
             )));
         }
 
-        validate_base_url(base_url, state.config.is_development())?;
+        validate_base_url(base_url)?;
 
         let (encrypted_cred, oauth_client_id) = if auth_method == "oidc" {
             let callback_url = format!("{}/callback", base_url.trim_end_matches('/'));
@@ -840,7 +838,7 @@ pub async fn update_service(
                 .map(str::to_string);
 
             if let Some(ref base_url) = body.base_url {
-                validate_base_url(base_url, state.config.is_development())?;
+                validate_base_url(base_url)?;
                 if base_url.len() > 2048 {
                     return Err(AppError::ValidationError(
                         "base_url must not exceed 2048 characters".to_string(),
@@ -852,7 +850,7 @@ pub async fn update_service(
             if body.openapi_spec_url.is_some() {
                 explicit_openapi_spec_url = Some(openapi_spec_url.clone());
                 if let Some(ref openapi_spec_url) = openapi_spec_url {
-                    validate_optional_spec_url(openapi_spec_url, state.config.is_development())?;
+                    validate_optional_spec_url(openapi_spec_url)?;
                     set_doc.insert("openapi_spec_url", openapi_spec_url.as_str());
                 } else {
                     set_doc.insert("openapi_spec_url", bson::Bson::Null);
@@ -862,7 +860,7 @@ pub async fn update_service(
             if body.asyncapi_spec_url.is_some() {
                 explicit_asyncapi_spec_url = Some(asyncapi_spec_url.clone());
                 if let Some(ref asyncapi_spec_url) = asyncapi_spec_url {
-                    validate_optional_spec_url(asyncapi_spec_url, state.config.is_development())?;
+                    validate_optional_spec_url(asyncapi_spec_url)?;
                     set_doc.insert("asyncapi_spec_url", asyncapi_spec_url.as_str());
                 } else {
                     set_doc.insert("asyncapi_spec_url", bson::Bson::Null);
@@ -1089,9 +1087,8 @@ pub async fn get_oidc_credentials(
     auth_user: AuthUser,
     Path(service_id): Path<String>,
 ) -> AppResult<Json<OidcCredentialsResponse>> {
-    require_admin(&state, &auth_user).await?;
-
     let service = fetch_service(&state, &service_id).await?;
+    require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
 
     if service.auth_method != "oidc" {
         return Err(AppError::BadRequest(
@@ -1174,9 +1171,8 @@ pub async fn update_redirect_uris(
     Path(service_id): Path<String>,
     Json(body): Json<UpdateRedirectUrisRequest>,
 ) -> AppResult<Json<RedirectUrisResponse>> {
-    require_admin(&state, &auth_user).await?;
-
     let service = fetch_service(&state, &service_id).await?;
+    require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
 
     if service.auth_method != "oidc" {
         return Err(AppError::BadRequest(
@@ -1275,9 +1271,8 @@ pub async fn regenerate_oidc_secret(
     auth_user: AuthUser,
     Path(service_id): Path<String>,
 ) -> AppResult<Json<RegenerateSecretResponse>> {
-    require_admin(&state, &auth_user).await?;
-
     let service = fetch_service(&state, &service_id).await?;
+    require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
 
     if service.auth_method != "oidc" {
         return Err(AppError::BadRequest(

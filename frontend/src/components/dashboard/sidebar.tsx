@@ -18,6 +18,7 @@ import {
   ClipboardList,
   Lock,
   HardDrive,
+  Sparkles,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth-store";
@@ -44,6 +45,7 @@ const APPROVAL_NAV_ITEMS = [
 
 const DEVELOPER_NAV_ITEMS = [
   { to: "/developer/apps", icon: Code, label: "Developer Apps" },
+  { to: "/ai-setup", icon: Sparkles, label: "AI Setup" },
   { to: "/integration-guide", icon: BookMarked, label: "Integration Guide" },
 ] as const;
 
@@ -113,11 +115,11 @@ export function Sidebar({ onNavigate }: { readonly onNavigate?: () => void } = {
     : user?.email?.slice(0, 2).toUpperCase() ?? "U";
 
   return (
-    <aside className="flex h-full w-[280px] flex-col justify-between overflow-y-auto border-r border-border bg-sidebar px-7 py-10">
-      {/* ── Top: Logo + Navigation ── */}
-      <div className="flex flex-col gap-12">
+    <aside className="flex h-full w-[280px] flex-col overflow-y-auto border-r border-border bg-sidebar px-7 py-10">
+      {/* ── Navigation ── */}
+      <div className="flex flex-1 flex-col gap-6">
         {/* Logo */}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 mb-6">
           <PortalMarkLogo size={36} className="shrink-0" />
           <span className="logo-wordmark text-[22px]">NyxID</span>
         </div>
@@ -133,10 +135,7 @@ export function Sidebar({ onNavigate }: { readonly onNavigate?: () => void } = {
             />
           ))}
         </nav>
-      </div>
 
-      {/* ── Bottom: Developer + Admin + Account ── */}
-      <div className="flex flex-col gap-6">
         {/* Approvals section */}
         <div className="flex flex-col gap-1">
           <p className="mb-1 px-4 text-[11px] font-semibold uppercase tracking-[1px] text-text-tertiary">
@@ -183,20 +182,20 @@ export function Sidebar({ onNavigate }: { readonly onNavigate?: () => void } = {
             ))}
           </div>
         )}
+      </div>
 
-        {/* Account row */}
-        <div className="flex items-center gap-3 border-t border-border pt-4">
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-primary">
-            <span className="text-xs font-semibold text-void-400">{initials}</span>
-          </div>
-          <div className="flex min-w-0 flex-col gap-0.5">
-            <span className="truncate text-[13px] font-medium text-foreground">
-              {user?.name ?? "User"}
-            </span>
-            <span className="truncate text-[11px] text-text-tertiary">
-              {user?.email ?? ""}
-            </span>
-          </div>
+      {/* ── Account ── */}
+      <div className="flex items-center gap-3 border-t border-border mt-6 pt-4">
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-primary">
+          <span className="text-xs font-semibold text-void-400">{initials}</span>
+        </div>
+        <div className="flex min-w-0 flex-col gap-0.5">
+          <span className="truncate text-[13px] font-medium text-foreground">
+            {user?.name ?? "User"}
+          </span>
+          <span className="truncate text-[11px] text-text-tertiary">
+            {user?.email ?? ""}
+          </span>
         </div>
       </div>
     </aside>

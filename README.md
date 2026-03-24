@@ -76,7 +76,7 @@ It provides a complete identity layer: user registration, session management, Op
 - Service discovery endpoint (`GET /api/v1/proxy/services`) for listing available services with proxy URLs and connection status
 - Downstream docs catalog: discover per-service Scalar, OpenAPI, and AsyncAPI URLs from `GET /api/v1/proxy/services`
 - Connection enforcement: users must connect before proxying; per-user credentials for connection services, master credentials for internal services
-- SSRF protection (blocks private IPs, metadata endpoints, localhost)
+- SSRF protection (blocks cloud metadata endpoints; private IPs and localhost allowed for self-hosted node agents)
 - Path traversal prevention (rejects `..` and `//` in proxy paths)
 - Header allowlist to prevent leaking sensitive request headers
 
@@ -772,8 +772,9 @@ Every response includes:
 
 The service registration endpoint validates that `base_url` values:
 - Use `https://` or `http://` scheme only
-- Do not resolve to private IP ranges (10.x, 172.16-31.x, 192.168.x, 127.x, ::1)
-- Do not point to `localhost`, `metadata.google.internal`, or other reserved hosts
+- Do not point to cloud metadata endpoints (`metadata.google.internal`, `169.254.169.254`)
+
+Private IPs and `localhost` are allowed because NyxID is a self-hosted platform where services commonly run on private infrastructure, especially when accessed via node agents.
 
 ### Rate Limiting
 
