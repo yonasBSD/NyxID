@@ -88,13 +88,12 @@ pub async fn store_api_key(
         ));
     }
 
-    // Check if user already has a token for this provider
+    // Check if user already has a token for this provider (including revoked)
     let existing = db
         .collection::<UserProviderToken>(COLLECTION_NAME)
         .find_one(doc! {
             "user_id": user_id,
             "provider_config_id": provider_id,
-            "status": { "$ne": "revoked" },
         })
         .await?;
 
