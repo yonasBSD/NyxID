@@ -69,6 +69,23 @@ pub struct RoleAssignmentResponse {
     pub message: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct BulkAssignRequest {
+    /// If `true`, assign the role to all users. Mutually exclusive with `user_ids`.
+    #[serde(default)]
+    pub all: bool,
+    /// Specific user IDs to assign the role to. Mutually exclusive with `all`.
+    #[serde(default)]
+    pub user_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BulkAssignResponse {
+    pub assigned_count: u64,
+    pub already_assigned_count: u64,
+    pub message: String,
+}
+
 // --- Helpers ---
 
 fn role_to_response(r: Role) -> RoleResponse {
@@ -312,5 +329,59 @@ pub async fn revoke_role(
 
     Ok(Json(RoleAssignmentResponse {
         message: "Role revoked".to_string(),
+    }))
+}
+
+/// POST /api/v1/admin/roles/:role_id/assign-bulk
+pub async fn bulk_assign_role(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    headers: HeaderMap,
+    Path(role_id): Path<String>,
+    Json(body): Json<BulkAssignRequest>,
+) -> AppResult<Json<BulkAssignResponse>> {
+    require_admin(&state, &auth_user).await?;
+
+    if !body.all && body.user_ids.is_empty() {
+        return Err(crate::errors::AppError::ValidationError(
+            "Either set 'all' to true or provide 'user_ids'".to_string(),
+        ));
+    }
+    if body.all && !body.user_ids.is_empty() {
+        return Err(crate::errors::AppError::ValidationError(
+            "'all' and 'user_ids' are mutually exclusive".to_string(),
+        ));
+    }
+
+    let user_ids_opt = if body.all {
+        None
+    } else {
+        Some(&body.user_ids[..])
+    };
+
+    let result = role_service::bulk_assign_role(&state.db, &role_id, user_ids_opt).await?;
+
+    audit_service::log_async(
+        state.db.clone(),
+        Some(auth_user.user_id.to_string()),
+        "admin.role.bulk_assigned".to_string(),
+        Some(serde_json::json!({
+            "role_id": &role_id,
+            "all": body.all,
+            "user_ids_count": body.user_ids.len(),
+            "assigned_count": result.assigned_count,
+            "already_assigned_count": result.already_assigned_count,
+        })),
+        extract_ip(&headers),
+        extract_user_agent(&headers),
+    );
+
+    Ok(Json(BulkAssignResponse {
+        assigned_count: result.assigned_count,
+        already_assigned_count: result.already_assigned_count,
+        message: format!(
+            "Role assigned to {} users ({} already had it)",
+            result.assigned_count, result.already_assigned_count
+        ),
     }))
 }

@@ -6,6 +6,7 @@ use crate::crypto::password;
 use crate::crypto::token::{generate_random_token, hash_token};
 use crate::errors::{AppError, AppResult};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
+use crate::services::role_service;
 
 /// Maximum password length to prevent Argon2 DoS via extremely long passwords.
 const MAX_PASSWORD_LENGTH: usize = 128;
@@ -70,6 +71,9 @@ pub async fn register_user(
     let now = Utc::now();
     let user_id = Uuid::new_v4().to_string();
 
+    // Auto-assign default roles to new users
+    let default_role_ids = role_service::get_default_role_ids(db).await?;
+
     let new_user = User {
         id: user_id.clone(),
         email: email.to_lowercase(),
@@ -82,7 +86,7 @@ pub async fn register_user(
         password_reset_expires_at: None,
         is_active: true,
         is_admin: false,
-        role_ids: vec![],
+        role_ids: default_role_ids,
         group_ids: vec![],
         mfa_enabled: false,
         social_provider: None,
