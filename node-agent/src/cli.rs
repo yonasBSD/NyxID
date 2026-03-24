@@ -82,8 +82,49 @@ pub enum Commands {
         config: Option<String>,
     },
 
+    /// Manage OpenClaw integration (connect, status, disconnect)
+    Openclaw {
+        #[command(subcommand)]
+        command: OpenClawCommands,
+
+        /// Path to config directory
+        #[arg(long)]
+        config: Option<String>,
+    },
+
     /// Show version information
     Version,
+}
+
+#[derive(Subcommand)]
+pub enum OpenClawCommands {
+    /// Connect to a local or remote OpenClaw gateway.
+    /// Stores credentials locally, registers provider connection with NyxID,
+    /// and creates the node service binding automatically.
+    Connect {
+        /// OpenClaw gateway URL (e.g., http://localhost:18789)
+        #[arg(long)]
+        url: String,
+
+        /// OpenClaw gateway bearer token (OPENCLAW_GATEWAY_TOKEN).
+        /// If omitted, will prompt securely.
+        #[arg(long)]
+        token: Option<String>,
+
+        /// NyxID API base URL (e.g., http://localhost:3001). Defaults to server URL from config.
+        #[arg(long)]
+        api_url: Option<String>,
+
+        /// NyxID access token for API calls. If omitted, uses NYXID_ACCESS_TOKEN env var.
+        #[arg(long)]
+        access_token: Option<String>,
+    },
+
+    /// Show OpenClaw connection status
+    Status,
+
+    /// Disconnect from OpenClaw: removes local credentials and the node binding
+    Disconnect,
 }
 
 #[derive(Subcommand)]

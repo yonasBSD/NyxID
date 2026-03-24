@@ -18,7 +18,7 @@ use tracing_subscriber::EnvFilter;
 
 use std::time::Duration;
 
-use crate::cli::{Cli, Commands, CredentialCommands, CredentialSecretFormat};
+use crate::cli::{Cli, Commands, CredentialCommands, CredentialSecretFormat, OpenClawCommands};
 use crate::config::NodeConfig;
 use crate::credential_store::{CredentialStore, SharedCredentials, SharedCredentialsSender};
 use crate::error::Result;
@@ -68,6 +68,10 @@ async fn run(cli: Cli) -> Result<()> {
             to,
             config: config_path,
         } => cmd_migrate(&to, config_path.as_deref()),
+        Commands::Openclaw {
+            command,
+            config: config_path,
+        } => cmd_openclaw(command, config_path.as_deref()).await,
         Commands::Version => {
             println!("nyxid-node {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -533,6 +537,264 @@ fn parse_header(header: &str) -> Result<(String, String)> {
         )
     })?;
     Ok((name.trim().to_string(), value.trim().to_string()))
+}
+
+// --- OpenClaw integration ---
+
+const OPENCLAW_SERVICE_SLUG: &str = "llm-openclaw";
+const OPENCLAW_PROVIDER_SLUG: &str = "openclaw";
+
+async fn cmd_openclaw(command: OpenClawCommands, config_path: Option<&str>) -> Result<()> {
+    let config_dir = config::resolve_config_dir(config_path);
+    let config_file = config_dir.join("config.toml");
+
+    match command {
+        OpenClawCommands::Connect {
+            url,
+            token,
+            api_url,
+            access_token,
+        } => {
+            cmd_openclaw_connect(
+                &config_file,
+                &config_dir,
+                &url,
+                token,
+                api_url,
+                access_token,
+            )
+            .await
+        }
+        OpenClawCommands::Status => cmd_openclaw_status(&config_file, &config_dir),
+        OpenClawCommands::Disconnect => cmd_openclaw_disconnect(&config_file, &config_dir),
+    }
+}
+
+async fn cmd_openclaw_connect(
+    config_file: &Path,
+    config_dir: &Path,
+    gateway_url: &str,
+    token: Option<String>,
+    api_url: Option<String>,
+    access_token: Option<String>,
+) -> Result<()> {
+    // Validate gateway URL
+    if !gateway_url.starts_with("http://") && !gateway_url.starts_with("https://") {
+        return Err(crate::error::Error::Validation(
+            "Gateway URL must start with http:// or https://".to_string(),
+        ));
+    }
+
+    // Get bearer token (prompt if not provided)
+    let bearer_token = match token {
+        Some(t) => t,
+        None => {
+            println!("Enter your OpenClaw gateway bearer token (OPENCLAW_GATEWAY_TOKEN):");
+            prompt_secret("Bearer token")?
+        }
+    };
+
+    // 1. Store credential locally on the node
+    let mut config = NodeConfig::load(config_file)?;
+    let backend = SecretBackend::from_config(&config, config_dir)?;
+
+    let header_value = format!("Bearer {bearer_token}");
+    config.add_header_credential_via(
+        OPENCLAW_SERVICE_SLUG,
+        "Authorization",
+        &header_value,
+        &backend,
+    )?;
+    config.save(config_file)?;
+    println!("Local credential stored for '{OPENCLAW_SERVICE_SLUG}'.");
+
+    // 2. Register provider connection with NyxID backend (if access token available)
+    let nyxid_token = access_token
+        .or_else(|| std::env::var("NYXID_ACCESS_TOKEN").ok())
+        .filter(|s| !s.is_empty());
+
+    let base_api_url = api_url.unwrap_or_else(|| {
+        // Derive HTTP API URL from the WS URL in config
+        let ws_url = &config.server.url;
+        ws_url
+            .replace("ws://", "http://")
+            .replace("wss://", "https://")
+            .replace("/api/v1/nodes/ws", "")
+    });
+
+    if let Some(ref token) = nyxid_token {
+        let client = reqwest::Client::new();
+
+        // 2a. Find the OpenClaw provider ID
+        let providers_resp = client
+            .get(format!("{base_api_url}/api/v1/providers"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| crate::error::Error::Config(format!("Failed to fetch providers: {e}")))?;
+
+        if !providers_resp.status().is_success() {
+            println!(
+                "Warning: Could not fetch providers from NyxID ({}). Skipping remote registration.",
+                providers_resp.status()
+            );
+        } else {
+            let body: serde_json::Value = providers_resp.json().await.map_err(|e| {
+                crate::error::Error::Config(format!("Failed to parse providers response: {e}"))
+            })?;
+
+            let provider_id: Option<String> =
+                body["providers"]
+                    .as_array()
+                    .and_then(|arr: &Vec<serde_json::Value>| {
+                        arr.iter().find_map(|p| {
+                            if p["slug"].as_str() == Some(OPENCLAW_PROVIDER_SLUG) {
+                                p["id"].as_str().map(String::from)
+                            } else {
+                                None
+                            }
+                        })
+                    });
+
+            if let Some(ref pid) = provider_id {
+                // 2b. Connect API key with gateway URL
+                let connect_resp = client
+                    .post(format!(
+                        "{base_api_url}/api/v1/providers/{pid}/connect/api-key"
+                    ))
+                    .bearer_auth(token)
+                    .json(&serde_json::json!({
+                        "api_key": bearer_token,
+                        "gateway_url": gateway_url,
+                        "label": "Node agent",
+                    }))
+                    .send()
+                    .await;
+
+                match connect_resp {
+                    Ok(resp) if resp.status().is_success() => {
+                        println!("Provider connection registered with NyxID.");
+                    }
+                    Ok(resp) => {
+                        let status = resp.status();
+                        let body = resp.text().await.unwrap_or_default();
+                        println!("Warning: Provider connect returned {status}: {body}");
+                    }
+                    Err(e) => {
+                        println!("Warning: Could not register provider connection: {e}");
+                    }
+                }
+
+                // 2c. Find service ID for llm-openclaw and create node binding
+                let node_id = Some(config.node.id.clone());
+
+                if let Some(ref nid) = node_id {
+                    // Find the llm-openclaw service
+                    let services_resp = client
+                        .get(format!("{base_api_url}/api/v1/proxy/services"))
+                        .bearer_auth(token)
+                        .send()
+                        .await;
+
+                    let service_id: Option<String> = match services_resp {
+                        Ok(resp) if resp.status().is_success() => {
+                            let body: serde_json::Value = resp.json().await.unwrap_or_default();
+                            body["services"]
+                                .as_array()
+                                .and_then(|arr: &Vec<serde_json::Value>| {
+                                    arr.iter().find_map(|s| {
+                                        if s["slug"].as_str() == Some(OPENCLAW_SERVICE_SLUG) {
+                                            s["id"].as_str().map(String::from)
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                })
+                        }
+                        _ => None,
+                    };
+
+                    if let Some(ref sid) = service_id {
+                        let binding_resp = client
+                            .post(format!("{base_api_url}/api/v1/nodes/{nid}/bindings"))
+                            .bearer_auth(token)
+                            .json(&serde_json::json!({ "service_id": sid }))
+                            .send()
+                            .await;
+
+                        match binding_resp {
+                            Ok(resp) if resp.status().is_success() => {
+                                println!("Node binding created for '{OPENCLAW_SERVICE_SLUG}'.");
+                            }
+                            Ok(resp) if resp.status().as_u16() == 409 => {
+                                println!(
+                                    "Node binding already exists for '{OPENCLAW_SERVICE_SLUG}'."
+                                );
+                            }
+                            Ok(resp) => {
+                                let status = resp.status();
+                                let body = resp.text().await.unwrap_or_default();
+                                println!("Warning: Create binding returned {status}: {body}");
+                            }
+                            Err(e) => {
+                                println!("Warning: Could not create node binding: {e}");
+                            }
+                        }
+                    } else {
+                        println!(
+                            "Warning: '{OPENCLAW_SERVICE_SLUG}' service not found. Binding not created."
+                        );
+                    }
+                } else {
+                    println!("Warning: Node ID not found in config. Binding not created.");
+                }
+            } else {
+                println!(
+                    "Warning: OpenClaw provider not found on NyxID. Skipping remote registration."
+                );
+            }
+        }
+    } else {
+        println!("No NyxID access token provided (--access-token or NYXID_ACCESS_TOKEN env var).");
+        println!(
+            "Local credential stored. To complete setup, create a binding in the NyxID web UI."
+        );
+    }
+
+    println!();
+    println!("OpenClaw connected at {gateway_url}");
+    println!("Start the node agent with: nyxid-node start");
+    Ok(())
+}
+
+fn cmd_openclaw_status(config_file: &Path, config_dir: &Path) -> Result<()> {
+    let config = NodeConfig::load(config_file)?;
+    let backend = SecretBackend::from_config(&config, config_dir)?;
+    let creds = CredentialStore::from_config_with_backend(&config, &backend)?;
+
+    if let Some(cred) = creds.get(OPENCLAW_SERVICE_SLUG) {
+        println!("OpenClaw: connected");
+        println!(
+            "  Injection: {} ({})",
+            cred.injection_method(),
+            cred.target_name()
+        );
+    } else {
+        println!("OpenClaw: not connected");
+        println!("  Run 'nyxid-node openclaw connect --url <gateway-url>' to connect.");
+    }
+
+    Ok(())
+}
+
+fn cmd_openclaw_disconnect(config_file: &Path, config_dir: &Path) -> Result<()> {
+    let mut config = NodeConfig::load(config_file)?;
+    let backend = SecretBackend::from_config(&config, config_dir)?;
+    config.remove_credential_via(OPENCLAW_SERVICE_SLUG, &backend)?;
+    config.save(config_file)?;
+    println!("OpenClaw credentials removed from node.");
+    println!("Note: To fully disconnect, also remove the binding in the NyxID web UI.");
+    Ok(())
 }
 
 fn parse_query_param(param: &str) -> Result<(String, String)> {

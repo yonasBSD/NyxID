@@ -554,6 +554,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .nest("/notifications", notification_routes)
         .nest("/approvals", approval_routes)
         .nest("/nodes", node_routes)
+        .route(
+            "/integrations/openclaw/mappings",
+            post(handlers::openclaw_channel::create_mapping),
+        )
         .route("/public/config", get(handlers::health::public_config))
         .layer(middleware::from_fn(reject_delegated_tokens))
         .layer(middleware::from_fn(reject_service_account_tokens));
@@ -586,11 +590,18 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
     let webhook_routes =
         Router::new().route("/telegram", post(handlers::webhooks::telegram_webhook));
 
+    // Integration webhook routes -- unauthenticated (verified by HMAC signature)
+    let integration_routes = Router::new().route(
+        "/openclaw/channel",
+        post(handlers::openclaw_channel::handle_channel_message),
+    );
+
     let private = Router::new()
         .route("/health", get(handlers::health::health_check))
         .route("/llms.txt", get(handlers::llms_txt::llms_txt))
         .route("/llms-full.txt", get(handlers::llms_txt::llms_full_txt))
         .nest("/api/v1/webhooks", webhook_routes)
+        .nest("/api/v1/integrations", integration_routes)
         .nest("/api/v1", api_v1)
         // WebSocket endpoint for node agents. Auth happens in-message (not middleware).
         // Rate limiting: global per-IP rate limiter covers HTTP upgrade requests.

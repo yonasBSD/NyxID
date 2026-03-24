@@ -150,6 +150,7 @@ pub struct ProviderResponse {
     pub extra_auth_params: Option<std::collections::HashMap<String, String>>,
     pub device_code_format: String,
     pub client_id_param_name: Option<String>,
+    pub requires_gateway_url: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -190,6 +191,7 @@ fn provider_to_response(p: crate::models::provider_config::ProviderConfig) -> Pr
         extra_auth_params: p.extra_auth_params,
         device_code_format: p.device_code_format,
         client_id_param_name: p.client_id_param_name,
+        requires_gateway_url: p.requires_gateway_url,
         created_at: p.created_at.to_rfc3339(),
         updated_at: p.updated_at.to_rfc3339(),
     }
@@ -600,6 +602,7 @@ mod tests {
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            requires_gateway_url: false,
             created_by: "system".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),

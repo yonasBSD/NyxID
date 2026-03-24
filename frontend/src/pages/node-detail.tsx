@@ -22,6 +22,7 @@ import { CopyableField } from "@/components/shared/copyable-field";
 import { DetailRow } from "@/components/shared/detail-row";
 import { DetailSection } from "@/components/shared/detail-section";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -390,7 +391,14 @@ export function NodeDetailPage() {
                 {bindings.map((binding) => (
                   <TableRow key={binding.id}>
                     <TableCell className="font-medium">
-                      {binding.service_name}
+                      <div className="flex items-center gap-2">
+                        {binding.service_name}
+                        {binding.service_slug === "llm-openclaw" && (
+                          <Badge variant="outline" className="text-[10px]">
+                            Gateway
+                          </Badge>
+                        )}
+                      </div>
                     </TableCell>
                     <TableCell>
                       <code className="text-xs text-muted-foreground">

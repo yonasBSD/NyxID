@@ -30,6 +30,7 @@ pub struct UserProviderTokenSummary {
     pub token_type: String,
     pub status: String,
     pub label: Option<String>,
+    pub gateway_url: Option<String>,
     pub expires_at: Option<String>,
     pub last_used_at: Option<String>,
     pub connected_at: String,
@@ -68,6 +69,7 @@ pub async fn store_api_key(
     provider_id: &str,
     api_key: &str,
     label: Option<&str>,
+    gateway_url: Option<&str>,
 ) -> AppResult<UserProviderToken> {
     // Verify provider exists and is active
     let provider = db
@@ -102,20 +104,26 @@ pub async fn store_api_key(
 
     if let Some(existing_token) = existing {
         // Update existing token
+        let mut set_doc = doc! {
+            "api_key_encrypted": bson::Binary {
+                subtype: bson::spec::BinarySubtype::Generic,
+                bytes: encrypted,
+            },
+            "status": "active",
+            "label": label,
+            "error_message": bson::Bson::Null,
+            "updated_at": bson::DateTime::from_chrono(now),
+        };
+        match gateway_url {
+            Some(url) => {
+                set_doc.insert("gateway_url", url);
+            }
+            None => {
+                set_doc.insert("gateway_url", bson::Bson::Null);
+            }
+        }
         db.collection::<UserProviderToken>(COLLECTION_NAME)
-            .update_one(
-                doc! { "_id": &existing_token.id },
-                doc! { "$set": {
-                    "api_key_encrypted": bson::Binary {
-                        subtype: bson::spec::BinarySubtype::Generic,
-                        bytes: encrypted,
-                    },
-                    "status": "active",
-                    "label": label,
-                    "error_message": bson::Bson::Null,
-                    "updated_at": bson::DateTime::from_chrono(now),
-                }},
-            )
+            .update_one(doc! { "_id": &existing_token.id }, doc! { "$set": set_doc })
             .await?;
 
         let updated = db
@@ -143,6 +151,7 @@ pub async fn store_api_key(
         last_used_at: None,
         error_message: None,
         label: label.map(String::from),
+        gateway_url: gateway_url.map(String::from),
         created_at: now,
         updated_at: now,
     };
@@ -818,6 +827,7 @@ async fn store_device_code_tokens(
         last_used_at: None,
         error_message: None,
         label: None,
+        gateway_url: None,
         created_at: now,
         updated_at: now,
     };
@@ -1016,6 +1026,7 @@ pub async fn handle_oauth_callback(
         last_used_at: None,
         error_message: None,
         label: None,
+        gateway_url: None,
         created_at: now,
         updated_at: now,
     };
@@ -1335,6 +1346,7 @@ pub async fn list_user_tokens(
                 token_type: token.token_type.clone(),
                 status: token.status.clone(),
                 label: token.label.clone(),
+                gateway_url: token.gateway_url.clone(),
                 expires_at: token.expires_at.map(|dt| dt.to_rfc3339()),
                 last_used_at: token.last_used_at.map(|dt| dt.to_rfc3339()),
                 connected_at: token.created_at.to_rfc3339(),

@@ -155,6 +155,11 @@ export function ProviderCard({
                   {token.label}
                 </span>
               )}
+              {token.gateway_url && (
+                <span className="truncate text-xs text-muted-foreground/70">
+                  {token.gateway_url}
+                </span>
+              )}
               {token.expires_at && (
                 <span className="text-xs text-muted-foreground/70">
                   Expires {formatDate(token.expires_at)}

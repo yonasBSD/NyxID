@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::{AuthUser, OptionalAuthUser};
-use crate::services::{audit_service, user_token_service};
+use crate::services::{audit_service, provider_service, user_token_service};
+
+use super::services_helpers::validate_base_url;
 
 // TODO(SEC-9): Apply stricter per-endpoint rate limiting to OAuth callback and
 // initiate endpoints (e.g. 10 requests/minute per user) instead of relying
@@ -21,6 +23,8 @@ use crate::services::{audit_service, user_token_service};
 pub struct ConnectApiKeyRequest {
     pub api_key: String,
     pub label: Option<String>,
+    /// Per-user gateway URL for self-hosted providers (e.g., OpenClaw).
+    pub gateway_url: Option<String>,
 }
 
 impl std::fmt::Debug for ConnectApiKeyRequest {
@@ -28,6 +32,7 @@ impl std::fmt::Debug for ConnectApiKeyRequest {
         f.debug_struct("ConnectApiKeyRequest")
             .field("api_key", &"[REDACTED]")
             .field("label", &self.label)
+            .field("gateway_url", &self.gateway_url)
             .finish()
     }
 }
@@ -40,6 +45,7 @@ pub struct UserTokenResponse {
     pub provider_type: String,
     pub status: String,
     pub label: Option<String>,
+    pub gateway_url: Option<String>,
     pub expires_at: Option<String>,
     pub last_used_at: Option<String>,
     pub connected_at: String,
@@ -116,6 +122,7 @@ pub async fn list_my_tokens(
             provider_type: s.token_type,
             status: s.status,
             label: s.label,
+            gateway_url: s.gateway_url,
             expires_at: s.expires_at,
             last_used_at: s.last_used_at,
             connected_at: s.connected_at,
@@ -146,6 +153,29 @@ pub async fn connect_api_key(
         ));
     }
 
+    // Validate gateway_url if provided: must be a valid URL, SSRF-safe
+    if let Some(ref url) = body.gateway_url {
+        if url.is_empty() {
+            return Err(AppError::ValidationError(
+                "gateway_url must not be empty when provided".to_string(),
+            ));
+        }
+        if url.len() > 2048 {
+            return Err(AppError::ValidationError(
+                "gateway_url exceeds maximum length".to_string(),
+            ));
+        }
+        validate_base_url(url)?;
+    }
+
+    // If provider requires a gateway URL, enforce it
+    let provider = provider_service::get_provider(&state.db, &provider_id).await?;
+    if provider.requires_gateway_url && body.gateway_url.is_none() {
+        return Err(AppError::ValidationError(
+            "This provider requires a gateway URL (your self-hosted instance URL)".to_string(),
+        ));
+    }
+
     user_token_service::store_api_key(
         &state.db,
         &state.encryption_keys,
@@ -153,6 +183,7 @@ pub async fn connect_api_key(
         &provider_id,
         &body.api_key,
         body.label.as_deref(),
+        body.gateway_url.as_deref(),
     )
     .await?;
 
