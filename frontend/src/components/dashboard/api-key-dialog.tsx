@@ -15,7 +15,11 @@ import { ExternalLink } from "lucide-react";
 
 interface ApiKeyDialogProps {
   readonly provider: ProviderConfig;
-  readonly onSubmit: (apiKey: string, label?: string) => void;
+  readonly onSubmit: (
+    apiKey: string,
+    label?: string,
+    gatewayUrl?: string,
+  ) => void;
   readonly onCancel: () => void;
   readonly isPending: boolean;
 }
@@ -28,17 +32,28 @@ export function ApiKeyDialog({
 }: ApiKeyDialogProps) {
   const [apiKey, setApiKey] = useState("");
   const [label, setLabel] = useState("");
+  const [gatewayUrl, setGatewayUrl] = useState("");
+
+  const requiresGatewayUrl = provider.requires_gateway_url;
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     const trimmedKey = apiKey.trim();
-    if (trimmedKey.length > 0) {
-      onSubmit(
-        trimmedKey,
-        label.trim().length > 0 ? label.trim() : undefined,
-      );
-    }
+    const trimmedUrl = gatewayUrl.trim();
+    if (trimmedKey.length === 0) return;
+    if (requiresGatewayUrl && trimmedUrl.length === 0) return;
+
+    onSubmit(
+      trimmedKey,
+      label.trim().length > 0 ? label.trim() : undefined,
+      trimmedUrl.length > 0 ? trimmedUrl : undefined,
+    );
   }
+
+  const canSubmit =
+    apiKey.trim().length > 0 &&
+    (!requiresGatewayUrl || gatewayUrl.trim().length > 0) &&
+    !isPending;
 
   return (
     <Dialog open onOpenChange={onCancel}>
@@ -46,8 +61,9 @@ export function ApiKeyDialog({
         <DialogHeader>
           <DialogTitle>Connect to {provider.name}</DialogTitle>
           <DialogDescription>
-            Enter your API key to connect this provider. Your key will be
-            encrypted at rest.
+            {requiresGatewayUrl
+              ? `Enter your ${provider.name} instance URL and bearer token. Your credentials will be encrypted at rest.`
+              : "Enter your API key to connect this provider. Your key will be encrypted at rest."}
           </DialogDescription>
         </DialogHeader>
 
@@ -70,12 +86,34 @@ export function ApiKeyDialog({
             </a>
           )}
 
+          {requiresGatewayUrl && (
+            <div className="space-y-2">
+              <Label htmlFor="provider-gateway-url">
+                Gateway URL
+              </Label>
+              <Input
+                id="provider-gateway-url"
+                type="url"
+                placeholder="http://localhost:18789"
+                value={gatewayUrl}
+                onChange={(e) => setGatewayUrl(e.target.value)}
+                maxLength={2048}
+                autoComplete="url"
+              />
+              <p className="text-xs text-muted-foreground">
+                Your self-hosted {provider.name} instance URL
+              </p>
+            </div>
+          )}
+
           <div className="space-y-2">
-            <Label htmlFor="provider-api-key">API Key</Label>
+            <Label htmlFor="provider-api-key">
+              {requiresGatewayUrl ? "Bearer Token" : "API Key"}
+            </Label>
             <Input
               id="provider-api-key"
               type="password"
-              placeholder="sk-..."
+              placeholder={requiresGatewayUrl ? "Bearer token..." : "sk-..."}
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
               maxLength={4096}
@@ -99,7 +137,7 @@ export function ApiKeyDialog({
 
           {isPending && (
             <p className="text-xs text-muted-foreground">
-              Validating your API key with {provider.name}...
+              Validating your credentials with {provider.name}...
             </p>
           )}
 
@@ -114,7 +152,7 @@ export function ApiKeyDialog({
             </Button>
             <Button
               type="submit"
-              disabled={apiKey.trim().length === 0 || isPending}
+              disabled={!canSubmit}
               isLoading={isPending}
             >
               {isPending ? "Validating..." : "Connect"}

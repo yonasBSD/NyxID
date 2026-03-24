@@ -285,6 +285,7 @@ export interface ProviderConfig {
   readonly extra_auth_params: Readonly<Record<string, string>> | null;
   readonly device_code_format: string;
   readonly client_id_param_name: string | null;
+  readonly requires_gateway_url: boolean;
   readonly icon_url: string | null;
   readonly documentation_url: string | null;
   readonly is_active: boolean;
@@ -307,6 +308,7 @@ export interface UserProviderToken {
   readonly provider_type: string;
   readonly status: "active" | "expired" | "revoked" | "refresh_failed";
   readonly label: string | null;
+  readonly gateway_url: string | null;
   readonly expires_at: string | null;
   readonly last_used_at: string | null;
   readonly connected_at: string;

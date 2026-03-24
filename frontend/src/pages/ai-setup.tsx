@@ -156,6 +156,16 @@ function buildQuickPrompts(baseUrl: string): readonly QuickPrompt[] {
       ],
     },
     {
+      title: "Connect OpenClaw AI gateway",
+      description:
+        "Connect a self-hosted OpenClaw instance to NyxID. Route messages through OpenClaw channels, access skills and workspaces, and proxy requests through a node agent.",
+      prompt: `${API_KEY_PREAMBLE}Read ${baseUrl}/llms-full.txt then help me connect my self-hosted OpenClaw AI gateway to NyxID. I want to:\n1. Connect OpenClaw as a provider (gateway URL + bearer token)\n2. Set up a node agent to proxy requests through my local OpenClaw instance\n3. Optionally set up channel integration so NyxID can interact with OpenClaw messaging channels (WhatsApp, Telegram, Discord, etc.)\n\nMy OpenClaw gateway is running at http://localhost:18789. Walk me through the fastest setup path -- ideally using the node agent CLI.`,
+      links: [
+        { to: "/providers", label: "Providers" },
+        { to: "/nodes", label: "Nodes" },
+      ],
+    },
+    {
       title: "Add login to my app",
       description:
         "Register an OAuth client and integrate NyxID login into a React, Next.js, or any web app.",

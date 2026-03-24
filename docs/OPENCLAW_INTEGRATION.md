@@ -199,6 +199,63 @@ Same pattern -- set the env vars, then the agent calls `services.sh` to discover
 - Approval-gated proxy calls are blocking and end in success or `403 Forbidden`
 - The bundled skill helper scripts accept either `NYXID_ACCESS_TOKEN` or `NYXID_API_KEY`
 
+## NyxID Backend Integration (NyxID-to-OpenClaw)
+
+In addition to the OpenClaw skill/plugin (OpenClaw-to-NyxID), NyxID natively supports OpenClaw as a provider and proxy target.
+
+### Provider connection
+
+OpenClaw is pre-seeded as a provider with `requires_gateway_url: true`. Users connect with their self-hosted instance URL and bearer token:
+
+```bash
+# Via API
+POST /api/v1/providers/{openclaw_id}/connect/api-key
+{"api_key": "<bearer_token>", "gateway_url": "http://localhost:18789"}
+
+# Via node agent (recommended -- stores locally + registers remotely)
+nyxid-node openclaw connect --url http://localhost:18789
+```
+
+### Proxy passthrough
+
+Once connected, any OpenClaw API is accessible through NyxID's proxy:
+
+```
+/api/v1/proxy/s/llm-openclaw/v1/chat/completions  -- Chat completions
+/api/v1/proxy/s/llm-openclaw/v1/responses          -- OpenResponses API
+/api/v1/proxy/s/llm-openclaw/tools/invoke           -- Skills/tools
+```
+
+Each user's requests route to their own OpenClaw instance (per-user `gateway_url`).
+
+### Channel integration
+
+Map OpenClaw channel users (WhatsApp, Telegram, etc.) to NyxID identities:
+
+```bash
+# Create mapping (returns per-user webhook_secret -- configure in OpenClaw plugin)
+POST /api/v1/integrations/openclaw/mappings
+{"channel": "whatsapp", "channel_user_id": "+1234567890"}
+
+# OpenClaw sends webhooks to:
+POST /api/v1/integrations/openclaw/channel
+# Headers: X-OpenClaw-Signature (HMAC), X-OpenClaw-Webhook-Secret
+```
+
+Each mapping has its own webhook secret (generated at creation, only shown once). No server-level env var needed.
+
+### Node agent support
+
+The node agent provides a one-command OpenClaw setup:
+
+```bash
+nyxid-node openclaw connect --url http://localhost:18789 [--access-token <JWT>]
+nyxid-node openclaw status
+nyxid-node openclaw disconnect
+```
+
+`connect` stores the bearer token locally (encrypted), registers the provider connection with NyxID, and creates the node service binding automatically.
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |

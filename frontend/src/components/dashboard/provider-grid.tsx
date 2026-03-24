@@ -79,7 +79,11 @@ export function ProviderGrid() {
     }
   }
 
-  async function handleApiKeySubmit(apiKey: string, label?: string) {
+  async function handleApiKeySubmit(
+    apiKey: string,
+    label?: string,
+    gatewayUrl?: string,
+  ) {
     if (!apiKeyDialog) return;
     setActiveProviderId(apiKeyDialog.id);
     try {
@@ -87,6 +91,7 @@ export function ProviderGrid() {
         providerId: apiKeyDialog.id,
         apiKey,
         label,
+        gatewayUrl,
       });
       toast.success(`Connected to ${apiKeyDialog.name}`);
       setApiKeyDialog(null);
@@ -200,7 +205,9 @@ export function ProviderGrid() {
       {apiKeyDialog !== null && (
         <ApiKeyDialog
           provider={apiKeyDialog}
-          onSubmit={(key, label) => void handleApiKeySubmit(key, label)}
+          onSubmit={(key, label, gatewayUrl) =>
+            void handleApiKeySubmit(key, label, gatewayUrl)
+          }
           onCancel={() => setApiKeyDialog(null)}
           isPending={connectApiKeyMutation.isPending}
         />

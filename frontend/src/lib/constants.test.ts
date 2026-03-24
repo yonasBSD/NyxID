@@ -68,6 +68,7 @@ function makeProvider(
     extra_auth_params: null,
     device_code_format: "rfc8628",
     client_id_param_name: null,
+    requires_gateway_url: false,
     icon_url: null,
     documentation_url: null,
     is_active: true,

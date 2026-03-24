@@ -7,6 +7,10 @@ use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
+use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
+use crate::models::user_provider_token::{
+    COLLECTION_NAME as USER_PROVIDER_TOKENS, UserProviderToken,
+};
 use crate::models::user_service_connection::{
     COLLECTION_NAME as USER_SERVICE_CONNECTIONS, UserServiceConnection,
 };
@@ -142,8 +146,12 @@ pub async fn resolve_proxy_target(
         AppError::Internal("Failed to decode credential".to_string())
     })?;
 
+    let base_url = resolve_gateway_url_override(db, user_id, &service)
+        .await?
+        .unwrap_or_else(|| service.base_url.clone());
+
     Ok(ProxyTarget {
-        base_url: service.base_url.clone(),
+        base_url,
         auth_method: service.auth_method.clone(),
         auth_key_name: service.auth_key_name.clone(),
         credential,
@@ -235,9 +243,13 @@ pub async fn resolve_proxy_target_lenient(
         None => (String::new(), false),
     };
 
+    let base_url = resolve_gateway_url_override(db, user_id, &service)
+        .await?
+        .unwrap_or_else(|| service.base_url.clone());
+
     Ok((
         ProxyTarget {
-            base_url: service.base_url.clone(),
+            base_url,
             auth_method: service.auth_method.clone(),
             auth_key_name: service.auth_key_name.clone(),
             credential,
@@ -245,6 +257,50 @@ pub async fn resolve_proxy_target_lenient(
         },
         has_credential,
     ))
+}
+
+/// For services linked to a provider with `requires_gateway_url`, look up the
+/// user's provider token and return their per-user gateway URL.
+///
+/// Returns `Ok(None)` for providers that don't require a gateway URL.
+/// Returns `Err` if the provider requires a gateway URL but the user hasn't
+/// connected one -- this prevents fallback to the placeholder base_url.
+async fn resolve_gateway_url_override(
+    db: &mongodb::Database,
+    user_id: &str,
+    service: &DownstreamService,
+) -> AppResult<Option<String>> {
+    let provider_config_id = match &service.provider_config_id {
+        Some(id) => id,
+        None => return Ok(None),
+    };
+
+    let provider = db
+        .collection::<ProviderConfig>(PROVIDER_CONFIGS)
+        .find_one(doc! { "_id": provider_config_id })
+        .await?;
+
+    let provider = match provider {
+        Some(p) if p.requires_gateway_url => p,
+        _ => return Ok(None),
+    };
+
+    let user_token = db
+        .collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+        .find_one(doc! {
+            "user_id": user_id,
+            "provider_config_id": &provider.id,
+            "status": "active",
+        })
+        .await?;
+
+    match user_token.and_then(|t| t.gateway_url) {
+        Some(url) if !url.is_empty() => Ok(Some(url)),
+        _ => Err(AppError::BadRequest(format!(
+            "Connect your {} instance first (provide your gateway URL in Providers)",
+            provider.name
+        ))),
+    }
 }
 
 /// Forward a request to the downstream service with credential injection,

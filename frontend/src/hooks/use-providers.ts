@@ -51,14 +51,20 @@ export function useConnectApiKey() {
       providerId,
       apiKey,
       label,
+      gatewayUrl,
     }: {
       readonly providerId: string;
       readonly apiKey: string;
       readonly label?: string;
+      readonly gatewayUrl?: string;
     }): Promise<UserProviderToken> => {
       return api.post<UserProviderToken>(
         `/providers/${providerId}/connect/api-key`,
-        { api_key: apiKey, label },
+        {
+          api_key: apiKey,
+          label,
+          gateway_url: gatewayUrl || undefined,
+        },
       );
     },
     onSuccess: () => {

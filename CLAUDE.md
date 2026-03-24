@@ -76,11 +76,28 @@ Error variants map to HTTP status codes and numeric error codes (1000-3002, 7000
 - WS writer channels are bounded (capacity: 256); `try_send` treats full buffers as node offline (H4)
 - Admin node endpoints (`handlers/admin_nodes.rs`) require admin role and have no ownership check
 
+### 7. OpenClaw Integration
+
+OpenClaw is a self-hosted AI gateway that NyxID integrates with at three levels:
+
+**Provider (Option 1):** OpenClaw is seeded as an `api_key` provider with `requires_gateway_url: true`. Users connect by providing their gateway URL + bearer token. The `UserProviderToken.gateway_url` field stores the per-user instance URL. `proxy_service::resolve_gateway_url_override()` resolves this URL at proxy time, overriding the service's default `base_url`.
+
+**Node Proxy (Option 2):** The node agent has an `openclaw` subcommand that stores credentials locally, registers the provider connection with NyxID, and creates the node service binding in one step. Proxy requests flow: NyxID -> node agent (WS) -> local OpenClaw instance. The node agent injects the bearer token via the credential store.
+
+**Channel Integration (Option 3):** `openclaw_channel_service` handles inbound webhook messages from OpenClaw channels (WhatsApp, Telegram, Discord, etc.). `openclaw_channel_mappings` collection maps channel users to NyxID users. Each mapping has its own per-user webhook secret (SHA-256 hash stored, raw secret returned once at creation). No server-level env var needed.
+
+Key files:
+- `services/openclaw_channel_service.rs` -- HMAC verification, user mapping, provider slug resolution
+- `handlers/openclaw_channel.rs` -- Webhook endpoint + mapping CRUD
+- `models/user_provider_token.rs` -- `gateway_url` field for per-user instance URLs
+- `models/provider_config.rs` -- `requires_gateway_url` flag for self-hosted providers
+- `node-agent/src/main.rs` -- `cmd_openclaw_connect/status/disconnect` commands
+
 ## File Structure
 
 ```
 node-agent/src/
-|-- main.rs              # CLI entry point, command dispatch (register, start, status, credentials, version)
+|-- main.rs              # CLI entry point, command dispatch (register, start, status, credentials, openclaw, version)
 |-- cli.rs               # Clap subcommand definitions
 |-- config.rs            # TOML config (server url, node id, encrypted auth token, signing secret, credentials)
 |-- ws_client.rs         # WebSocket connection loop, exponential backoff reconnection, graceful shutdown
@@ -98,9 +115,9 @@ backend/src/
 |-- db.rs                # MongoDB connection + ensure_indexes()
 |-- routes.rs            # All route definitions
 |-- main.rs              # Server startup
-|-- models/              # MongoDB document structs (31 models, 29 collections, incl. node, node_service_binding, mcp_session)
-|-- services/            # Business logic (37 services, incl. node_service, node_routing_service, node_ws_manager, node_metrics_service)
-|-- handlers/            # HTTP handlers (39 handler modules, incl. node_admin, admin_nodes, node_ws, developer_apps, ssh_exec, llms_txt)
+|-- models/              # MongoDB document structs (32 models, 30 collections, incl. node, node_service_binding, mcp_session, openclaw_channel_mapping)
+|-- services/            # Business logic (38 services, incl. node_service, node_routing_service, node_ws_manager, node_metrics_service, openclaw_channel_service)
+|-- handlers/            # HTTP handlers (40 handler modules, incl. node_admin, admin_nodes, node_ws, developer_apps, ssh_exec, llms_txt, openclaw_channel)
 |-- crypto/              # JWT, AES, password hashing, token generation, KeyProvider trait, KMS providers, JWKS
 |-- errors/              # AppError enum, ErrorResponse, AppResult
 |-- mw/                  # Middleware: auth, rate_limit, security_headers
@@ -151,6 +168,8 @@ All API routes under `/api/v1`:
 - `/nodes` -- node management (register-token, list, get, delete, rotate-token, bindings CRUD + priority update)
 - `/nodes/ws` -- WebSocket upgrade for node agent connections (auth via WS protocol, not middleware)
 - `/admin/nodes` -- admin node management (list all, get, disconnect, delete -- no ownership check)
+- `/integrations/openclaw/channel` -- OpenClaw channel webhook (unauthenticated, HMAC-verified)
+- `/integrations/openclaw/mappings` -- OpenClaw channel-to-user mapping CRUD (authenticated)
 - `/ssh/{service_id}/certificate` -- issue short-lived SSH user certificate (POST)
 - `/ssh/{service_id}` -- SSH-over-WebSocket tunnel (GET, upgrade)
 - `/ssh/{service_id}/terminal` -- SSH web terminal (GET, upgrade)
@@ -244,6 +263,9 @@ cargo run -p nyxid-node -- register --token nyx_nreg_... --url ws://localhost:30
 cargo run -p nyxid-node -- start        # Start node agent
 cargo run -p nyxid-node -- status       # Show node status
 cargo run -p nyxid-node -- credentials list  # List configured credentials
+cargo run -p nyxid-node -- openclaw connect --url http://localhost:18789  # Connect OpenClaw (prompts for token)
+cargo run -p nyxid-node -- openclaw status   # Show OpenClaw connection status
+cargo run -p nyxid-node -- openclaw disconnect  # Remove OpenClaw credentials
 
 # Frontend (from frontend/)
 npm run dev                             # Dev server (port 3000)

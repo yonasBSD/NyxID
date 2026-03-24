@@ -27,6 +27,7 @@ pub mod node_ws;
 pub mod notifications;
 pub mod oauth;
 pub mod oidc_discovery;
+pub mod openclaw_channel;
 pub mod providers;
 pub mod proxy;
 pub mod service_requirements;

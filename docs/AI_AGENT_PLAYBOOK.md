@@ -705,6 +705,61 @@ POST /api/v1/providers/{provider_id}/connect/api-key
 {"api_key": "sk-ant-api03-...", "label": "My Anthropic Key"}
 ```
 
+### Self-Hosted Gateway Provider (e.g., OpenClaw)
+
+OpenClaw is pre-seeded as a provider with `requires_gateway_url: true`. Users must provide their instance URL alongside the bearer token when connecting.
+
+**Connect via API:**
+
+```bash
+# User sets their token as an env var first:
+# ! export OPENCLAW_TOKEN="my-gateway-bearer-token"
+
+curl -X POST http://localhost:3001/api/v1/providers/{openclaw_provider_id}/connect/api-key \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"api_key\": \"$OPENCLAW_TOKEN\",
+    \"gateway_url\": \"http://localhost:18789\",
+    \"label\": \"My OpenClaw\"
+  }"
+```
+
+**Connect via node agent (recommended -- one command):**
+
+```bash
+nyxid-node openclaw connect --url http://localhost:18789 --access-token $ACCESS_TOKEN
+# Prompts for bearer token, stores locally, registers with NyxID, creates binding
+```
+
+**Proxy through OpenClaw after connecting:**
+
+```bash
+# Chat completions
+curl http://localhost:3001/api/v1/proxy/s/llm-openclaw/v1/chat/completions \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "claude-3-5-sonnet", "messages": [{"role": "user", "content": "Hello"}]}'
+
+# Invoke tools/skills
+curl http://localhost:3001/api/v1/proxy/s/llm-openclaw/tools/invoke \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"tool": "sessions_list", "action": "json", "args": {}}'
+```
+
+**Channel integration (map OpenClaw channels to NyxID users):**
+
+```bash
+# Create a mapping (returns a one-time webhook_secret)
+curl -X POST http://localhost:3001/api/v1/integrations/openclaw/mappings \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"channel": "whatsapp", "channel_user_id": "+1234567890"}'
+# Returns: { "webhook_secret": "abc123...", ... }
+# Configure this secret in your OpenClaw channel plugin
+```
+
 ### Device Code Provider (for CLI tools)
 
 ```bash
@@ -953,6 +1008,9 @@ nyxid-node rekey      --auth-token <TOKEN> --signing-secret <HEX> [--config <PAT
 nyxid-node credentials add    --service <SLUG> [--header <NAME> | --query-param <NAME>] [--secret-format Raw|Bearer|Basic]
 nyxid-node credentials list   [--config <PATH>]
 nyxid-node credentials remove --service <SLUG> [--config <PATH>]
+nyxid-node openclaw connect    --url <GATEWAY_URL> [--token <TOKEN>] [--access-token <JWT>] [--api-url <URL>]
+nyxid-node openclaw status     [--config <PATH>]
+nyxid-node openclaw disconnect [--config <PATH>]
 nyxid-node migrate    --to <file|keychain> [--config <PATH>]
 nyxid-node version
 ```
@@ -1439,6 +1497,32 @@ curl http://localhost:3001/api/v1/openai/v1/chat/completions \
 
 NyxID injects the user's stored provider token automatically.
 
+### Route through OpenClaw
+
+If you've connected an OpenClaw gateway (see section 10), you can route LLM requests through it:
+
+```bash
+# OpenClaw chat completions (uses your gateway_url automatically)
+curl http://localhost:3001/api/v1/proxy/s/llm-openclaw/v1/chat/completions \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "openclaw:main", "messages": [{"role": "user", "content": "Hello"}]}'
+
+# OpenClaw tools/skills
+curl http://localhost:3001/api/v1/proxy/s/llm-openclaw/tools/invoke \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"tool": "sessions_list", "action": "json", "args": {}}'
+
+# OpenClaw OpenResponses API
+curl http://localhost:3001/api/v1/proxy/s/llm-openclaw/v1/responses \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"input": "Analyze this", "stream": true}'
+```
+
+Each user's requests route to their own OpenClaw instance (per-user gateway URL). If a node binding exists, requests are proxied through the node agent with local credential injection.
+
 ---
 
 ## 19. API Quick Reference
@@ -1617,6 +1701,13 @@ Base URL: `http://localhost:3001`
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | * | `/mcp` | MCP proxy endpoint (Streamable HTTP) |
+
+### OpenClaw Integration
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/v1/integrations/openclaw/channel` | Channel webhook (unauthenticated, per-user HMAC-verified) |
+| POST | `/api/v1/integrations/openclaw/mappings` | Create channel-to-user mapping (returns one-time webhook secret) |
 
 ### Public Endpoints (no auth)
 

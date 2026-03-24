@@ -23,6 +23,7 @@ pub mod oauth_client_service;
 pub mod oauth_flow;
 pub mod oauth_service;
 pub mod openapi_parser;
+pub mod openclaw_channel_service;
 pub mod provider_service;
 pub mod proxy_service;
 pub mod push_service;
