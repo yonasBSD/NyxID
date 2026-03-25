@@ -94,7 +94,7 @@ nyxid openclaw setup --url http://localhost:18789 --credential-env OPENCLAW_TOKE
 
 # Or via node agent (credential stays local):
 nyxid service add llm-openclaw --via-node my-node --credential-env OPENCLAW_TOKEN
-# Then on the node: nyxid-node openclaw connect --url http://localhost:18789
+# Then on the node: nyxid node openclaw connect --url http://localhost:18789
 
 # 5. Verify (no --base-url needed after login)
 nyxid service list --output json
@@ -258,20 +258,20 @@ nyxid openclaw setup --url http://localhost:18789 --credential-env OPENCLAW_TOKE
 nyxid service add llm-openclaw --via-node my-node
 
 # On the node machine:
-nyxid-node openclaw connect --url http://localhost:18789
+nyxid node openclaw connect --url http://localhost:18789
 ```
 
 **Option C -- Node agent auto-setup (generic, works for any service):**
 ```bash
-nyxid-node credentials setup --service llm-openclaw
+nyxid node credentials setup --service llm-openclaw
 # Auto-detects: requires gateway URL → prompts for URL, then bearer token
 ```
 
 **Option D -- Node agent OpenClaw-specific (legacy, still works):**
 ```bash
-nyxid-node openclaw connect --url http://localhost:18789
-nyxid-node openclaw status
-nyxid-node openclaw disconnect
+nyxid node openclaw connect --url http://localhost:18789
+nyxid node openclaw status
+nyxid node openclaw disconnect
 ```
 
 ### Proxy passthrough
@@ -312,26 +312,26 @@ Each mapping has its own webhook secret (generated at creation, only shown once)
 **Setting up a node for OpenClaw (or any service):**
 
 ```bash
-# Install and register the node agent (--keychain recommended)
-cargo install --git https://github.com/ChronoAIProject/NyxID --bin nyxid-node
-nyxid-node register \
+# Install the nyxid CLI (includes node agent subcommand, --keychain recommended)
+cargo install --git https://github.com/ChronoAIProject/NyxID --bin nyxid
+nyxid node register \
   --token "nyx_nreg_..." \
   --url "wss://<server>/api/v1/nodes/ws" \
   --keychain
 
 # Auto-setup credentials (detects requirements from catalog)
-nyxid-node credentials setup --service llm-openclaw
+nyxid node credentials setup --service llm-openclaw
 
 # Start the agent
-nyxid-node start
+nyxid node start
 ```
 
 **OpenClaw-specific one-command setup (legacy, still works):**
 
 ```bash
-nyxid-node openclaw connect --url http://localhost:18789 [--access-token <JWT>]
-nyxid-node openclaw status
-nyxid-node openclaw disconnect
+nyxid node openclaw connect --url http://localhost:18789 [--access-token <JWT>]
+nyxid node openclaw status
+nyxid node openclaw disconnect
 ```
 
 `connect` stores the bearer token locally (encrypted), registers the provider connection with NyxID, and creates the node service binding automatically.
@@ -345,7 +345,7 @@ nyxid-node openclaw disconnect
 | `1001 unauthorized` | Token/key invalid or expired | Run `nyxid login` or create a new API key with `nyxid api-key create` |
 | `1002 forbidden` | Missing scope or service not connected | Ensure key has `proxy` scope; add service with `nyxid service add` |
 | `7000 approval_required` | Approval gating enabled | Check `nyxid approval list`; approve via mobile app or Telegram |
-| `8003 node_proxy_error` | Node-backed proxy failed | Check node agent with `nyxid node list`; ensure `nyxid-node start` is running |
+| `8003 node_proxy_error` | Node-backed proxy failed | Check node agent with `nyxid node list`; ensure `nyxid node start` is running |
 | Empty services list | No services configured | Browse catalog: `nyxid catalog list`; add: `nyxid service add <slug>` |
 | Skill not loading in OpenClaw | Skill not in a recognized directory | Copy to `~/.openclaw/skills/nyxid` or add `extraDirs` |
-| Can't reach OpenClaw | Wrong gateway URL or node offline | Verify with `nyxid-node openclaw status`; check URL with `nyxid service show <id>` |
+| Can't reach OpenClaw | Wrong gateway URL or node offline | Verify with `nyxid node openclaw status`; check URL with `nyxid service show <id>` |

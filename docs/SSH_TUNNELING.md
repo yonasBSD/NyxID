@@ -375,7 +375,7 @@ curl -X POST https://auth.example.com/api/v1/nodes/register-token \
 **2. Register the node agent** on a machine in the target's network:
 
 ```bash
-nyxid-node register \
+nyxid node register \
   --token <registration_token> \
   --url wss://auth.example.com/api/v1/nodes/ws
 ```
@@ -383,7 +383,7 @@ nyxid-node register \
 **3. Start the agent:**
 
 ```bash
-nyxid-node start
+nyxid node start
 ```
 
 **4. Bind the SSH service to the node** via the Nodes page or API. This tells NyxID to route SSH traffic for this service through the node agent.

@@ -9,6 +9,7 @@ use crate::cli::{NodeCommands, OutputFormat};
 
 pub async fn run(command: NodeCommands) -> Result<()> {
     match command {
+        // --- User-side commands (API calls) ---
         NodeCommands::List { auth } => {
             let mut api = ApiClient::from_auth(&auth)?;
             let nodes: Value = api.get("/nodes").await?;
@@ -148,7 +149,7 @@ pub async fn run(command: NodeCommands) -> Result<()> {
                     eprintln!();
                     eprintln!("Register a node:");
                     eprintln!(
-                        "  nyxid-node register --token {token} --url ws://<server>/api/v1/nodes/ws"
+                        "  nyxid node register --token {token} --url ws://<server>/api/v1/nodes/ws"
                     );
                 }
             }
@@ -197,9 +198,58 @@ pub async fn run(command: NodeCommands) -> Result<()> {
                     eprintln!("Node token rotated.");
                     eprintln!("New Token: {token}  (save this -- shown only once)");
                     eprintln!();
-                    eprintln!("Update the node agent configuration with the new token.");
+                    eprintln!("Update the node agent configuration:");
+                    eprintln!("  nyxid node rekey --auth-token {token} --signing-secret <HEX>");
                 }
             }
+            Ok(())
+        }
+
+        // --- Agent-side commands (local node operations) ---
+        NodeCommands::Register {
+            token,
+            url,
+            config,
+            keychain,
+        } => crate::node::agent::cmd_register(&token, url.as_deref(), config.as_deref(), keychain)
+            .await
+            .map_err(anyhow::Error::from),
+
+        NodeCommands::Start { config, log_level } => {
+            crate::node::agent::cmd_start(config.as_deref(), log_level.as_deref())
+                .await
+                .map_err(anyhow::Error::from)
+        }
+
+        NodeCommands::AgentStatus { config } => {
+            crate::node::agent::cmd_status(config.as_deref()).map_err(anyhow::Error::from)
+        }
+
+        NodeCommands::Rekey {
+            auth_token,
+            signing_secret,
+            config,
+        } => crate::node::agent::cmd_rekey(&auth_token, &signing_secret, config.as_deref())
+            .map_err(anyhow::Error::from),
+
+        NodeCommands::Credentials { command, config } => {
+            crate::node::agent::cmd_credentials(command, config.as_deref())
+                .await
+                .map_err(anyhow::Error::from)
+        }
+
+        NodeCommands::Migrate { to, config } => {
+            crate::node::agent::cmd_migrate(&to, config.as_deref()).map_err(anyhow::Error::from)
+        }
+
+        NodeCommands::NodeOpenclaw { command, config } => {
+            crate::node::agent::cmd_openclaw(command, config.as_deref())
+                .await
+                .map_err(anyhow::Error::from)
+        }
+
+        NodeCommands::AgentVersion => {
+            crate::node::agent::cmd_version();
             Ok(())
         }
     }

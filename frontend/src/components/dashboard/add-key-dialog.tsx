@@ -754,7 +754,7 @@ function NodeSetupStep({
               service type and guides you through the right flow:
             </p>
             <CopyableCode>
-              {`nyxid-node credentials setup --service ${slug || "<slug>"}`}
+              {`nyxid node credentials setup --service ${slug || "<slug>"}`}
             </CopyableCode>
             {isCustom && (
               <p className="text-[11px] text-muted-foreground">

@@ -27,6 +27,11 @@ use crate::secret_backend::SecretBackend;
 
 #[tokio::main]
 async fn main() {
+    eprintln!("WARNING: `nyxid-node` is deprecated. Use `nyxid node` instead.");
+    eprintln!("  All node commands are now available as `nyxid node <command>`.");
+    eprintln!("  For example: `nyxid node start`, `nyxid node register --token ...`");
+    eprintln!();
+
     let cli = Cli::parse();
 
     let log_level = cli.log_level.as_deref().unwrap_or("info");
@@ -119,7 +124,7 @@ async fn cmd_register(
     println!("  Config:   {}", config_file.display());
     println!();
     println!("Start the agent with:");
-    println!("  nyxid-node start");
+    println!("  nyxid node start");
 
     Ok(())
 }
@@ -902,7 +907,7 @@ async fn cmd_openclaw_connect(
 
     println!();
     println!("OpenClaw connected at {gateway_url}");
-    println!("Start the node agent with: nyxid-node start");
+    println!("Start the node agent with: nyxid node start");
     Ok(())
 }
 
@@ -920,7 +925,7 @@ fn cmd_openclaw_status(config_file: &Path, config_dir: &Path) -> Result<()> {
         );
     } else {
         println!("OpenClaw: not connected");
-        println!("  Run 'nyxid-node openclaw connect --url <gateway-url>' to connect.");
+        println!("  Run 'nyxid node openclaw connect --url <gateway-url>' to connect.");
     }
 
     Ok(())

@@ -1,6 +1,8 @@
-# nyxid-node Agent
+# nyxid node Agent
 
-`nyxid-node` is a lightweight Rust binary that runs on your infrastructure as a credential node agent. It connects to a NyxID server via WebSocket, receives proxy requests, injects locally stored credentials, and forwards requests to downstream services. Credentials never leave your infrastructure.
+> **Deprecation notice:** The standalone `nyxid-node` binary is deprecated. The node agent functionality is now available as the `nyxid node` subcommand in the main `nyxid` CLI. All commands documented below should be run as `nyxid node <command>` instead of `nyxid-node <command>`. The `nyxid-node` binary still exists as a thin wrapper that prints a deprecation warning and delegates to `nyxid node`.
+
+The `nyxid node` subcommand is a lightweight credential node agent built into the `nyxid` CLI. It runs on your infrastructure, connects to a NyxID server via WebSocket, receives proxy requests, injects locally stored credentials, and forwards requests to downstream services. Credentials never leave your infrastructure.
 
 ---
 
@@ -27,19 +29,19 @@
 
 ## Installation
 
-Build from source (requires Rust 2024 edition):
+The node agent is included in the `nyxid` CLI. Build from source (requires Rust 2024 edition):
 
 ```bash
 # From the project root
-cargo build --release -p nyxid-node
+cargo build --release -p nyxid-cli
 
-# Binary is at target/release/nyxid-node
+# Binary is at target/release/nyxid
 ```
 
 Or install directly:
 
 ```bash
-cargo install --path node-agent
+cargo install --path cli
 ```
 
 ---
@@ -64,7 +66,7 @@ The response includes a `nyx_nreg_...` token that expires after 1 hour (configur
 ### Step 2: Register the Agent
 
 ```bash
-nyxid-node register --token nyx_nreg_<64_hex_chars>
+nyxid node register --token nyx_nreg_<64_hex_chars>
 ```
 
 The agent connects to the NyxID server via WebSocket, exchanges the registration token for a permanent auth token and HMAC signing secret, and saves the encrypted configuration to `~/.nyxid-node/config.toml`.
@@ -81,7 +83,7 @@ The agent connects to the NyxID server via WebSocket, exchanges the registration
 For production, use WSS:
 
 ```bash
-nyxid-node register \
+nyxid node register \
   --token nyx_nreg_... \
   --url wss://auth.example.com/api/v1/nodes/ws
 ```
@@ -89,7 +91,7 @@ nyxid-node register \
 To use the OS keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service) instead of file-based encryption:
 
 ```bash
-nyxid-node register \
+nyxid node register \
   --token nyx_nreg_... \
   --url wss://auth.example.com/api/v1/nodes/ws \
   --keychain
@@ -104,7 +106,7 @@ Node registered successfully.
   Config:   /home/user/.nyxid-node/config.toml
 
 Start the agent with:
-  nyxid-node start
+  nyxid node start
 ```
 
 ---
@@ -112,7 +114,7 @@ Start the agent with:
 ## Starting the Agent
 
 ```bash
-nyxid-node start
+nyxid node start
 ```
 
 The agent:
@@ -142,7 +144,7 @@ Credentials are stored locally using the configured storage backend -- either AE
 ### Add a Credential (Header Injection)
 
 ```bash
-nyxid-node credentials add \
+nyxid node credentials add \
   --service openai \
   --header "Authorization: Bearer sk-proj-..."
 ```
@@ -150,7 +152,7 @@ nyxid-node credentials add \
 ### Add a Credential (Query Parameter Injection)
 
 ```bash
-nyxid-node credentials add \
+nyxid node credentials add \
   --service stripe \
   --query-param "api_key=sk_live_..."
 ```
@@ -158,7 +160,7 @@ nyxid-node credentials add \
 ### List Credentials
 
 ```bash
-nyxid-node credentials list
+nyxid node credentials list
 ```
 
 Output:
@@ -172,7 +174,7 @@ Configured credentials:
 ### Remove a Credential
 
 ```bash
-nyxid-node credentials remove --service openai
+nyxid node credentials remove --service openai
 ```
 
 ### Service Slug Matching
@@ -184,7 +186,7 @@ The `--service` value must match the **slug** of the downstream service in NyxID
 ## Checking Status
 
 ```bash
-nyxid-node status
+nyxid node status
 ```
 
 Output:
@@ -212,7 +214,7 @@ The agent supports two backends for storing secrets (auth token, signing secret,
 Secrets are encrypted with AES-256-GCM and stored in `config.toml`. A 32-byte encryption key is generated at `~/.nyxid-node/.keyfile` (mode `0600`). This works on all platforms including headless servers and Docker containers.
 
 ```bash
-nyxid-node register --token nyx_nreg_...
+nyxid node register --token nyx_nreg_...
 ```
 
 ### Keychain Backend
@@ -226,7 +228,7 @@ Secrets are stored in the OS keychain:
 The TOML config file retains only non-secret metadata (server URL, node ID, injection method, header/param names). No encrypted values are written to disk.
 
 ```bash
-nyxid-node register --token nyx_nreg_... --keychain
+nyxid node register --token nyx_nreg_... --keychain
 ```
 
 Keychain entries use `nyxid-node` as the service name, with `{node_id}/auth_token`, `{node_id}/signing_secret`, and `{node_id}/cred/{service_slug}` as account identifiers. Multiple nodes on the same machine do not collide.
@@ -241,10 +243,10 @@ To migrate an existing node from file-based storage to OS keychain (or vice vers
 
 ```bash
 # Migrate from file to keychain
-nyxid-node migrate --to keychain
+nyxid node migrate --to keychain
 
 # Migrate from keychain back to file
-nyxid-node migrate --to file
+nyxid node migrate --to file
 ```
 
 The `migrate` command:
@@ -467,7 +469,7 @@ In-flight requests are tracked with an atomic counter that increments when a req
 ## CLI Reference
 
 ```
-nyxid-node <COMMAND> [OPTIONS]
+nyxid node <COMMAND> [OPTIONS]
 
 COMMANDS:
   register      Register this node with a NyxID server
@@ -524,7 +526,7 @@ MIGRATE OPTIONS:
 
 ### "Config error: Failed to read config"
 
-The config file does not exist. Run `nyxid-node register` first.
+The config file does not exist. Run `nyxid node register` first.
 
 ### "Authentication failed" on start
 
@@ -535,7 +537,7 @@ The auth token may have been rotated. Re-register the node with a new registrati
 The service slug in the proxy request does not match any entry in the local credential store. Add the credential with:
 
 ```bash
-nyxid-node credentials add --service <slug> --header "Authorization: Bearer ..."
+nyxid node credentials add --service <slug> --header "Authorization: Bearer ..."
 ```
 
 ### Agent keeps reconnecting

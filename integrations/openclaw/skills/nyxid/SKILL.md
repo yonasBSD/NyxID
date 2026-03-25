@@ -150,20 +150,20 @@ nyxid api-key update <ID> --allow-all-services true    # unrestrict
 # Step 1: Generate a registration token (on any machine with nyxid CLI)
 nyxid node register-token
 
-# Step 2: Install nyxid-node on the target machine
-cargo install --git https://github.com/ChronoAIProject/NyxID --bin nyxid-node
+# Step 2: Install nyxid CLI on the target machine
+cargo install --git https://github.com/ChronoAIProject/NyxID --bin nyxid
 
 # Step 3: Register the node (--keychain recommended for secure storage)
-nyxid-node register \
+nyxid node register \
   --token "nyx_nreg_..." \
   --url "wss://<server>/api/v1/nodes/ws" \
   --keychain
 
 # Step 4: Add credentials (auto-detects requirements from catalog)
-nyxid-node credentials setup --service llm-openai
+nyxid node credentials setup --service llm-openai
 
 # Step 5: Start the node agent
-nyxid-node start
+nyxid node start
 ```
 
 ### Managing nodes
@@ -176,12 +176,12 @@ nyxid node register-token                              # generate registration t
 nyxid node delete <ID_OR_NAME> --yes                   # delete node
 nyxid node rotate-token <ID_OR_NAME>                   # rotate node auth token
 
-# nyxid-node CLI (run on the node machine)
-nyxid-node credentials setup --service <SLUG>          # auto-detect and setup (recommended)
-nyxid-node credentials add --service <SLUG> --header Authorization --secret-format bearer
-nyxid-node credentials add-oauth --service <SLUG> --from-catalog  # OAuth from node
-nyxid-node credentials list                            # list configured credentials
-nyxid-node credentials remove --service <SLUG>         # remove credential
+# nyxid node CLI (run on the node machine)
+nyxid node credentials setup --service <SLUG>          # auto-detect and setup (recommended)
+nyxid node credentials add --service <SLUG> --header Authorization --secret-format bearer
+nyxid node credentials add-oauth --service <SLUG> --from-catalog  # OAuth from node
+nyxid node credentials list                            # list configured credentials
+nyxid node credentials remove --service <SLUG>         # remove credential
 ```
 
 > `credentials setup` auto-detects from the catalog whether a service needs an API key, OAuth, or gateway URL, and guides the user through the right flow.

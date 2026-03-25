@@ -30,7 +30,7 @@ graph TB
     end
 
     subgraph "Node Infrastructure"
-        NODE_CLI["nyxid-node CLI<br/>Register, credentials,<br/>OAuth, SSH"]
+        NODE_CLI["nyxid node subcommand<br/>Register, credentials,<br/>OAuth, SSH"]
         NODE["Node Agent<br/>WebSocket connection<br/>Local credential store"]
         TARGET["Target Service<br/>API endpoint or<br/>SSH server"]
     end
@@ -192,12 +192,12 @@ graph TB
         OPENCLAW["nyxid openclaw setup<br/>OpenClaw integration"]
     end
 
-    subgraph "nyxid-node CLI (node agent)"
-        REGISTER["nyxid-node register<br/>Register with NyxID"]
-        START["nyxid-node start<br/>Start WS connection"]
-        CREDS["nyxid-node credentials add<br/>Add API key credentials"]
-        OAUTH_NODE["nyxid-node credentials add-oauth<br/>Local OAuth flow"]
-        OC_NODE["nyxid-node openclaw connect<br/>OpenClaw via node"]
+    subgraph "nyxid node subcommand (node agent)"
+        REGISTER["nyxid node register<br/>Register with NyxID"]
+        START["nyxid node start<br/>Start WS connection"]
+        CREDS["nyxid node credentials add<br/>Add API key credentials"]
+        OAUTH_NODE["nyxid node credentials add-oauth<br/>Local OAuth flow"]
+        OC_NODE["nyxid node openclaw connect<br/>OpenClaw via node"]
     end
 
     LOGIN --> SERVICE
@@ -246,7 +246,7 @@ flowchart TD
     ROUTE -->|"Via Node"| NODE["Select node<br/>Configure on node agent"]
 
     DIRECT --> DONE["Service created<br/>Ready to proxy"]
-    NODE --> NODE_SETUP["Run on node:<br/>nyxid-node credentials add<br/>or nyxid-node credentials add-oauth"]
+    NODE --> NODE_SETUP["Run on node:<br/>nyxid node credentials add<br/>or nyxid node credentials add-oauth"]
     NODE_SETUP --> DONE
 
     style DONE fill:#4f8,stroke:#333

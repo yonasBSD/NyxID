@@ -44,7 +44,7 @@ describe("buildNodeCredentialCommand", () => {
     });
 
     expect(buildNodeCredentialCommand("openai", service)).toBe(
-      "nyxid-node credentials add --service openai --header Authorization --secret-format bearer",
+      "nyxid node credentials add --service openai --header Authorization --secret-format bearer",
     );
     expect(getNodeCredentialPromptHint(service)).toContain("raw token");
   });
@@ -57,7 +57,7 @@ describe("buildNodeCredentialCommand", () => {
     });
 
     expect(buildNodeCredentialCommand("github", service)).toBe(
-      "nyxid-node credentials add --service github --header Authorization --secret-format basic",
+      "nyxid node credentials add --service github --header Authorization --secret-format basic",
     );
     expect(getNodeCredentialPromptHint(service)).toContain("username:password");
   });
@@ -70,14 +70,14 @@ describe("buildNodeCredentialCommand", () => {
     });
 
     expect(buildNodeCredentialCommand("stripe", service)).toBe(
-      "nyxid-node credentials add --service stripe --query-param api_key",
+      "nyxid node credentials add --service stripe --query-param api_key",
     );
     expect(getNodeCredentialPromptHint(service)).toBeNull();
   });
 
   it("falls back to a raw header command when service metadata is unavailable", () => {
     expect(buildNodeCredentialCommand("fallback", undefined)).toBe(
-      "nyxid-node credentials add --service fallback --header Authorization",
+      "nyxid node credentials add --service fallback --header Authorization",
     );
   });
 

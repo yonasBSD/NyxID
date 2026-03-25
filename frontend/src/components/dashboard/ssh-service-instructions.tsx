@@ -54,8 +54,8 @@ export function SshServiceInstructions({
     publicConfig?.node_ws_url ??
     `${nyxidBaseUrl.replace("http://", "ws://").replace("https://", "wss://")}/api/v1/nodes/ws`;
   const nodeInstallCommand = "cargo install --path node-agent";
-  const nodeRegisterCommand = `nyxid-node register --token <token-from-nodes-page> --url ${nodeWsUrl}`;
-  const nodeStartCommand = "nyxid-node start";
+  const nodeRegisterCommand = `nyxid node register --token <token-from-nodes-page> --url ${nodeWsUrl}`;
+  const nodeStartCommand = "nyxid node start";
 
   return (
     <div className="space-y-6">

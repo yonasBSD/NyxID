@@ -212,7 +212,7 @@ It provides a complete identity layer: user registration, session management, Op
 - Background task auto-expires timed-out requests
 
 ### Credential Nodes (Node Proxy)
-- Run lightweight credential nodes on your own infrastructure via the `nyxid-node` agent binary
+- Run lightweight credential nodes on your own infrastructure via the `nyxid node` subcommand
 - Credentials never transit NyxID -- the node injects them locally before forwarding to the downstream service
 - Selective per-service routing: bind specific services to a node, keep others on NyxID
 - Automatic fallback to NyxID-stored credentials when a node is offline
@@ -438,18 +438,18 @@ nyxid mcp config --tool cursor
 
 Set `NYXID_URL` and `NYXID_ACCESS_TOKEN` environment variables to avoid passing `--base-url` and auth on every command. Run `nyxid --help` for the full command list.
 
-### nyxid-node (Node Agent)
+### nyxid node (Node Agent)
 
-On-premise credential storage and proxy routing. See [Credential Nodes](#credential-nodes-node-proxy) and `docs/AI_AGENT_PLAYBOOK.md` for full setup instructions.
+On-premise credential storage and proxy routing. The node agent is built into the `nyxid` CLI as the `nyxid node` subcommand. See [Credential Nodes](#credential-nodes-node-proxy) and `docs/AI_AGENT_PLAYBOOK.md` for full setup instructions.
 
 ```bash
-# Install
-cargo install --path node-agent
+# Install (part of the nyxid CLI)
+cargo install --path cli
 
 # Register and start
-nyxid-node register --token nyx_nreg_... --url wss://localhost:3001/api/v1/nodes/ws
-nyxid-node credentials add --service openai --header Authorization
-nyxid-node start
+nyxid node register --token nyx_nreg_... --url wss://localhost:3001/api/v1/nodes/ws
+nyxid node credentials add --service openai --header Authorization
+nyxid node start
 ```
 
 ---
@@ -854,14 +854,14 @@ NyxID supports user-operated **credential nodes** that keep API keys and tokens 
 - **Audit trail:** All node operations and node-routed proxy requests are logged
 
 **Quick start:**
-1. Build the agent: `cargo build --release -p nyxid-node`
+1. Build the CLI: `cargo build --release -p nyxid-cli`
 2. Navigate to **Credential Nodes** in the dashboard and click **Register Node**
-3. Register the agent: `nyxid-node register --token nyx_nreg_... --url wss://your-server/api/v1/nodes/ws`
+3. Register the agent: `nyxid node register --token nyx_nreg_... --url wss://your-server/api/v1/nodes/ws`
    - Add `--keychain` to store secrets in the OS keychain instead of encrypted file
-4. Add credentials: `nyxid-node credentials add --service openai --header "Authorization: Bearer sk-..."`
-5. Start the agent: `nyxid-node start`
+4. Add credentials: `nyxid node credentials add --service openai --header "Authorization: Bearer sk-..."`
+5. Start the agent: `nyxid node start`
 6. Bind services to the node from the node detail page
-7. (Optional) Migrate storage: `nyxid-node migrate --to keychain`
+7. (Optional) Migrate storage: `nyxid node migrate --to keychain`
 
 For the agent user guide, see **[docs/NYXID_NODE.md](docs/NYXID_NODE.md)**.
 For setup instructions, see **[docs/NODE_PROXY.md](docs/NODE_PROXY.md)**.
@@ -967,7 +967,7 @@ NyxID/
 |-- .gitignore                  Ignores target/, node_modules/, keys/, .env
 |
 |-- node-agent/
-|   |-- Cargo.toml              nyxid-node agent binary
+|   |-- Cargo.toml              nyxid-node deprecation wrapper (use nyxid node instead)
 |   `-- src/
 |       |-- main.rs             CLI entry point, command dispatch
 |       |-- cli.rs              Clap subcommand definitions

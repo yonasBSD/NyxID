@@ -55,8 +55,7 @@ The dashboard is at http://localhost:3000. The API is at http://localhost:3001.
 
 NyxID provides two CLI tools:
 
-- **`nyxid`** -- User CLI for managing services, keys, catalog, nodes, and more. Preferred over curl for AI agents.
-- **`nyxid-node`** -- Node agent CLI for on-premise credential management and proxy routing.
+- **`nyxid`** -- User CLI for managing services, keys, catalog, nodes, and more. Preferred over curl for AI agents. Includes the `nyxid node` subcommand for on-premise credential management and proxy routing.
 
 See [section 1b](#1b-install-cli-tools) for installation instructions.
 
@@ -121,20 +120,20 @@ export NYXID_BASE_URL="http://localhost:3001"
 curl -H "X-API-Key: $NYXID_API_KEY" "$NYXID_BASE_URL/api/v1/keys"
 ```
 
-### nyxid-node (Node Agent CLI)
+### nyxid node (Node Agent Subcommand)
 
-The `nyxid-node` CLI manages on-premise credential storage and proxying. See [section 11](#11-deploy-a-node-agent-on-premise-credentials) for full setup.
+The `nyxid node` subcommand manages on-premise credential storage and proxying. It is built into the `nyxid` CLI. See [section 11](#11-deploy-a-node-agent-on-premise-credentials) for full setup.
 
 ```bash
-# Install from git (requires Rust toolchain)
-cargo install --git https://github.com/ChronoAIProject/NyxID --bin nyxid-node
+# Install from git (requires Rust toolchain) -- nyxid node is included
+cargo install --git https://github.com/ChronoAIProject/NyxID --bin nyxid
 
 # Or clone and build locally
 git clone https://github.com/ChronoAIProject/NyxID && cd NyxID
-cargo install --path node-agent
+cargo install --path cli
 
 # Verify
-nyxid-node version
+nyxid node version
 ```
 
 ### CLI vs API
@@ -252,7 +251,7 @@ AI coding tools (Claude Code, Codex, Cursor) run commands in non-interactive she
    - **Claude Code:** Tell the user to run `! export SECRET_NAME="value"` (the `!` prefix runs it in their real terminal -- the AI never sees the value).
    - **Codex / Cursor / other tools:** Tell the user to set the env var in a separate terminal, then reference `$SECRET_NAME` in commands.
 3. **Dashboard UI** -- For entering credentials (service connections, provider keys, etc.), direct users to the relevant dashboard page where they can type secrets into form fields securely.
-4. **`nyxid-node credentials add`** -- For node agent credentials, this command prompts for the secret value interactively (the user runs it themselves, not through the AI).
+4. **`nyxid node credentials add`** -- For node agent credentials, this command prompts for the secret value interactively (the user runs it themselves, not through the AI).
 5. **Never** include secret values in commands, echo them, or ask the user to paste them into chat. Use placeholder text like `<your-api-key>` in examples.
 
 ### Alternative: Login with email/password
@@ -979,7 +978,7 @@ curl -X POST http://localhost:3001/api/v1/providers/{openclaw_provider_id}/conne
 **Connect via node agent (recommended -- one command):**
 
 ```bash
-nyxid-node openclaw connect --url http://localhost:18789 --access-token $ACCESS_TOKEN
+nyxid node openclaw connect --url http://localhost:18789 --access-token $ACCESS_TOKEN
 # Prompts for bearer token, stores locally, registers with NyxID, creates binding
 ```
 
@@ -1068,28 +1067,28 @@ Users add services and manage credentials from the AI Services page: http://loca
 
 ### Step 1: Install the node agent
 
-The node agent is a single Rust binary. Build from source:
+The node agent is built into the `nyxid` CLI. Build from source:
 
 ```bash
 # Requires Rust toolchain (https://rustup.rs)
 # Clone the NyxID repo, then:
-cargo build --release -p nyxid-node
+cargo build --release -p nyxid-cli
 
-# Binary is at: target/release/nyxid-node
+# Binary is at: target/release/nyxid
 # Copy it to the target machine or add to PATH:
-cp target/release/nyxid-node /usr/local/bin/
+cp target/release/nyxid /usr/local/bin/
 ```
 
 Or install directly:
 
 ```bash
-cargo install --path node-agent
+cargo install --path cli
 ```
 
 Verify:
 
 ```bash
-nyxid-node version
+nyxid node version
 ```
 
 ### Step 2: Generate a registration token
@@ -1117,13 +1116,13 @@ On the target machine where the agent will run:
 
 ```bash
 # Recommended: use OS keychain for secure credential storage
-nyxid-node register \
+nyxid node register \
   --token "nyx_nreg_..." \
   --url "wss://localhost:3001/api/v1/nodes/ws" \
   --keychain
 
 # Or file-based encryption (creates .keyfile)
-nyxid-node register \
+nyxid node register \
   --token "nyx_nreg_..." \
   --url "wss://localhost:3001/api/v1/nodes/ws"
 ```
@@ -1138,26 +1137,26 @@ Add credentials for each service the node will handle:
 
 ```bash
 # Recommended: auto-setup (fetches requirements from catalog, prompts accordingly)
-nyxid-node credentials setup --service llm-openai
+nyxid node credentials setup --service llm-openai
 # Auto-detects: API key service → prompts for key, shows where to get it
 # Auto-detects: OAuth service → runs device code flow from the node
 # Auto-detects: gateway URL required → prompts for instance URL first
 
 # Manual: header injection
-nyxid-node credentials add --service "llm-openai" --header "Authorization" --secret-format Bearer
+nyxid node credentials add --service "llm-openai" --header "Authorization" --secret-format Bearer
 
 # Manual: query parameter injection
-nyxid-node credentials add --service "llm-google-ai" --query-param "key"
+nyxid node credentials add --service "llm-google-ai" --query-param "key"
 
 # OAuth: run device code flow from the node
-nyxid-node credentials add-oauth --service "api-twitter" --from-catalog
+nyxid node credentials add-oauth --service "api-twitter" --from-catalog
 ```
 
 **Manage credentials:**
 
 ```bash
-nyxid-node credentials list                      # List all configured credentials
-nyxid-node credentials remove --service "openai"  # Remove a credential
+nyxid node credentials list                      # List all configured credentials
+nyxid node credentials remove --service "openai"  # Remove a credential
 ```
 
 ### Step 5: Route services through the node
@@ -1212,7 +1211,7 @@ Services without a `node_id` use NyxID's direct proxy. The old `POST /api/v1/nod
 The node agent can store a custom target URL alongside the credential, useful when the node should forward requests to a local endpoint:
 
 ```bash
-nyxid-node credentials add --service "my-api" --header "Authorization" --target-url "http://localhost:8080"
+nyxid node credentials add --service "my-api" --header "Authorization" --target-url "http://localhost:8080"
 # Prompts for the secret value
 ```
 
@@ -1221,14 +1220,14 @@ nyxid-node credentials add --service "my-api" --header "Authorization" --target-
 For OAuth-based services, the node agent can run a local OAuth flow and store the resulting tokens:
 
 ```bash
-nyxid-node credentials add-oauth --service "github" --provider-slug "github"
+nyxid node credentials add-oauth --service "github" --provider-slug "github"
 # Opens browser for OAuth authorization, stores tokens locally
 ```
 
 ### Step 6: Start the agent
 
 ```bash
-nyxid-node start
+nyxid node start
 ```
 
 The agent connects via WebSocket and automatically reconnects with exponential backoff (100ms to 60s) if the connection drops. Run it as a systemd service or supervisor process for production.
@@ -1242,7 +1241,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/nyxid-node start
+ExecStart=/usr/local/bin/nyxid node start
 Restart=always
 RestartSec=5
 
@@ -1304,27 +1303,27 @@ param_value_encrypted = "..."
 **Migrate between backends:**
 
 ```bash
-nyxid-node migrate --to keychain   # File -> OS keychain
-nyxid-node migrate --to file       # OS keychain -> file
+nyxid node migrate --to keychain   # File -> OS keychain
+nyxid node migrate --to file       # OS keychain -> file
 ```
 
 ### All CLI commands
 
 ```bash
-nyxid-node register       --token <TOKEN> [--url <WS_URL>] [--config <PATH>] [--keychain]
-nyxid-node start          [--config <PATH>] [--log-level <LEVEL>]
-nyxid-node status         [--config <PATH>]
-nyxid-node rekey          --auth-token <TOKEN> --signing-secret <HEX> [--config <PATH>]
-nyxid-node credentials setup     --service <SLUG> [--api-url <URL>]  # Auto-detect and setup (recommended)
-nyxid-node credentials add       --service <SLUG> [--header <NAME> | --query-param <NAME>] [--secret-format Raw|Bearer|Basic] [--target-url <URL>]
-nyxid-node credentials add-oauth --service <SLUG> --from-catalog [--api-url <URL>]  # OAuth flow from node
-nyxid-node credentials list      [--config <PATH>]
-nyxid-node credentials remove    --service <SLUG> [--config <PATH>]
-nyxid-node openclaw connect      --url <GATEWAY_URL> [--token <TOKEN>] [--access-token <JWT>] [--api-url <URL>]
-nyxid-node openclaw status       [--config <PATH>]
-nyxid-node openclaw disconnect   [--config <PATH>]
-nyxid-node migrate        --to <file|keychain> [--config <PATH>]
-nyxid-node version
+nyxid node register       --token <TOKEN> [--url <WS_URL>] [--config <PATH>] [--keychain]
+nyxid node start          [--config <PATH>] [--log-level <LEVEL>]
+nyxid node status         [--config <PATH>]
+nyxid node rekey          --auth-token <TOKEN> --signing-secret <HEX> [--config <PATH>]
+nyxid node credentials setup     --service <SLUG> [--api-url <URL>]  # Auto-detect and setup (recommended)
+nyxid node credentials add       --service <SLUG> [--header <NAME> | --query-param <NAME>] [--secret-format Raw|Bearer|Basic] [--target-url <URL>]
+nyxid node credentials add-oauth --service <SLUG> --from-catalog [--api-url <URL>]  # OAuth flow from node
+nyxid node credentials list      [--config <PATH>]
+nyxid node credentials remove    --service <SLUG> [--config <PATH>]
+nyxid node openclaw connect      --url <GATEWAY_URL> [--token <TOKEN>] [--access-token <JWT>] [--api-url <URL>]
+nyxid node openclaw status       [--config <PATH>]
+nyxid node openclaw disconnect   [--config <PATH>]
+nyxid node migrate        --to <file|keychain> [--config <PATH>]
+nyxid node version
 ```
 
 The node agent also supports live credential updates via WebSocket `credential_update` messages from the server, enabling remote credential rotation without restarting the agent.
@@ -2314,7 +2313,7 @@ curl -X POST http://localhost:3001/oauth/token \
 
 ### Node agent connection issues
 
-- Check the node is running: `nyxid-node status`
+- Check the node is running: `nyxid node status`
 - Verify the WebSocket URL is correct and reachable
 - For production, use `wss://` (not `ws://`)
 - Check node heartbeat timeout (default 90s) -- node marked offline if no heartbeat

@@ -498,8 +498,8 @@ function NodeSetupHelper({
       credentialFlags = ` \\\n  --header ${authKeyName}`;
   }
 
-  const setupCommand = `nyxid-node credentials setup --service ${slug}`;
-  const manualCommand = `nyxid-node credentials add \\\n  --service ${slug}${urlFlag}${credentialFlags}`;
+  const setupCommand = `nyxid node credentials setup --service ${slug}`;
+  const manualCommand = `nyxid node credentials add \\\n  --service ${slug}${urlFlag}${credentialFlags}`;
 
   function handleCopySetup() {
     void copyToClipboard(setupCommand).then(() => {

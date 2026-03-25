@@ -2,6 +2,7 @@ mod api;
 mod auth;
 mod cli;
 mod commands;
+pub mod node;
 
 use anyhow::Result;
 use clap::Parser;

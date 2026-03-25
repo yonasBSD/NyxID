@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
 #[command(
@@ -565,10 +565,11 @@ pub enum ApiKeyCommands {
     },
 }
 
-// ---- Node (I4-I5) ----
+// ---- Node (I4-I5 user side + agent side) ----
 
 #[derive(Subcommand)]
 pub enum NodeCommands {
+    // --- User-side commands (API calls) ---
     /// List user's nodes
     List {
         #[command(flatten)]
@@ -602,6 +603,200 @@ pub enum NodeCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
+
+    // --- Agent-side commands (local node operations) ---
+    /// Register this node with a NyxID server
+    Register {
+        /// One-time registration token (nyx_nreg_...)
+        #[arg(long)]
+        token: String,
+        /// WebSocket URL of the NyxID server
+        #[arg(long)]
+        url: Option<String>,
+        /// Path to config directory
+        #[arg(long)]
+        config: Option<String>,
+        /// Store secrets in the OS keychain instead of encrypted file
+        #[arg(long)]
+        keychain: bool,
+    },
+    /// Start the node agent (connect and serve)
+    Start {
+        /// Path to config directory
+        #[arg(long)]
+        config: Option<String>,
+        /// Log level (trace, debug, info, warn, error)
+        #[arg(long)]
+        log_level: Option<String>,
+    },
+    /// Show node connection status (local)
+    #[command(name = "agent-status")]
+    AgentStatus {
+        /// Path to config directory
+        #[arg(long)]
+        config: Option<String>,
+    },
+    /// Update the node's auth token and signing secret after a server-side rotation
+    Rekey {
+        /// Replacement auth token (nyx_nauth_...)
+        #[arg(long)]
+        auth_token: String,
+        /// Replacement HMAC signing secret (64 hex chars)
+        #[arg(long)]
+        signing_secret: String,
+        /// Path to config directory
+        #[arg(long)]
+        config: Option<String>,
+    },
+    /// Manage local credentials
+    Credentials {
+        #[command(subcommand)]
+        command: NodeCredentialCommands,
+        /// Path to config directory
+        #[arg(long)]
+        config: Option<String>,
+    },
+    /// Migrate secret storage from file to OS keychain (or vice versa)
+    Migrate {
+        /// Target backend: "keychain" or "file"
+        #[arg(long)]
+        to: String,
+        /// Path to config directory
+        #[arg(long)]
+        config: Option<String>,
+    },
+    /// Manage OpenClaw integration (connect, status, disconnect)
+    #[command(name = "openclaw")]
+    NodeOpenclaw {
+        #[command(subcommand)]
+        command: NodeOpenClawCommands,
+        /// Path to config directory
+        #[arg(long)]
+        config: Option<String>,
+    },
+    /// Show node agent version
+    #[command(name = "agent-version")]
+    AgentVersion,
+}
+
+// ---- Node Credential subcommands ----
+
+#[derive(Subcommand)]
+pub enum NodeCredentialCommands {
+    /// Add a credential for a service (prompts for the secret value securely)
+    Add {
+        /// Service slug (e.g., "openai", "github-api")
+        #[arg(long)]
+        service: String,
+        /// Target URL for this service (e.g., "https://api.openai.com/v1")
+        #[arg(long)]
+        url: Option<String>,
+        /// Header name to inject (e.g., "Authorization")
+        #[arg(long)]
+        header: Option<String>,
+        /// Query parameter name to inject (e.g., "api_key")
+        #[arg(long)]
+        query_param: Option<String>,
+        /// How to format the prompted secret before storing it
+        #[arg(long, value_enum, default_value_t = CredentialSecretFormat::Raw)]
+        secret_format: CredentialSecretFormat,
+        /// Inline secret value (skips interactive prompt; NOT recommended)
+        #[arg(long, hide = true)]
+        value: Option<String>,
+    },
+    /// Add an OAuth credential for a service (runs device code or authorization code flow)
+    AddOauth {
+        /// Service slug (e.g., "api-twitter", "llm-openai")
+        #[arg(long)]
+        service: String,
+        /// Fetch OAuth config from NyxID catalog
+        #[arg(long)]
+        from_catalog: bool,
+        /// OAuth client ID
+        #[arg(long)]
+        client_id: Option<String>,
+        /// OAuth client secret
+        #[arg(long)]
+        client_secret: Option<String>,
+        /// OAuth authorization URL
+        #[arg(long)]
+        authorization_url: Option<String>,
+        /// OAuth token URL
+        #[arg(long)]
+        token_url: Option<String>,
+        /// Device code URL
+        #[arg(long)]
+        device_code_url: Option<String>,
+        /// Scopes to request (space-separated)
+        #[arg(long)]
+        scopes: Option<String>,
+        /// Target URL for this service
+        #[arg(long)]
+        url: Option<String>,
+        /// NyxID API base URL
+        #[arg(long)]
+        api_url: Option<String>,
+        /// NyxID access token
+        #[arg(long)]
+        access_token: Option<String>,
+    },
+    /// Auto-setup credentials for a service (fetches requirements from catalog)
+    Setup {
+        /// Service slug (e.g., "llm-openai", "api-twitter")
+        #[arg(long)]
+        service: String,
+        /// NyxID API base URL
+        #[arg(long)]
+        api_url: Option<String>,
+        /// NyxID access token
+        #[arg(long)]
+        access_token: Option<String>,
+    },
+    /// List configured credentials
+    List,
+    /// Remove a credential for a service
+    Remove {
+        /// Service slug to remove
+        #[arg(long)]
+        service: String,
+    },
+}
+
+// ---- Node OpenClaw subcommands ----
+
+#[derive(Subcommand)]
+pub enum NodeOpenClawCommands {
+    /// Connect to an OpenClaw gateway
+    Connect {
+        /// OpenClaw gateway URL (e.g., http://localhost:18789)
+        #[arg(long)]
+        url: String,
+        /// OpenClaw gateway bearer token
+        #[arg(long)]
+        token: Option<String>,
+        /// NyxID API base URL
+        #[arg(long)]
+        api_url: Option<String>,
+        /// NyxID access token
+        #[arg(long)]
+        access_token: Option<String>,
+    },
+    /// Show OpenClaw connection status
+    Status,
+    /// Disconnect from OpenClaw
+    Disconnect,
+}
+
+// ---- Credential secret format ----
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum CredentialSecretFormat {
+    /// Store the secret exactly as entered.
+    Raw,
+    /// Prefix the secret with "Bearer ".
+    Bearer,
+    /// Base64-encode "username:password" and prefix it with "Basic ".
+    Basic,
 }
 
 // ---- Proxy (C8-C10) ----

@@ -550,7 +550,7 @@ export function NodeDetailPage() {
                     Run on your node
                   </p>
                   <code className="text-xs text-foreground break-all">
-                    nyxid-node rekey --auth-token{" "}
+                    nyxid node rekey --auth-token{" "}
                     {rotatedCredentials.auth_token} --signing-secret{" "}
                     {rotatedCredentials.signing_secret}
                   </code>

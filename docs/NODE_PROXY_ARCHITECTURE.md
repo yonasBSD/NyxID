@@ -785,7 +785,7 @@ if node.metrics.total_requests > 10 {
 
 ## Node Agent Crate (`node-agent/`)
 
-The `nyxid-node` agent is a separate workspace member alongside `backend/`.
+The node agent is now part of the `nyxid` CLI (`cli/` crate). The `node-agent/` crate remains as a deprecated wrapper.
 
 ### Crate Structure
 
@@ -848,7 +848,7 @@ shared_secret_encrypted = "base64-of-aes-gcm-ciphertext"
 
 **Keychain backend** (`--keychain` at registration): Secrets are stored in the OS keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service). The config file contains only non-secret metadata.
 
-Migration between backends: `nyxid-node migrate --to keychain` or `nyxid-node migrate --to file`.
+Migration between backends: `nyxid node migrate --to keychain` or `nyxid node migrate --to file`.
 
 ### WebSocket Client
 

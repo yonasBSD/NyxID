@@ -1,6 +1,6 @@
 ## Project Overview
 
-NyxID is an Auth/SSO platform (similar to Supabase Auth) with a Rust backend, React frontend, and CLI tools. It provides user authentication, OAuth/OIDC, MFA, credential brokering, admin management, and MCP proxy capabilities. The `nyxid` CLI covers all user-facing operations (services, keys, catalog, nodes, approvals, SSH, MCP, notifications); the `nyxid-node` CLI manages on-premise credential nodes.
+NyxID is an Auth/SSO platform (similar to Supabase Auth) with a Rust backend, React frontend, and CLI tools. It provides user authentication, OAuth/OIDC, MFA, credential brokering, admin management, and MCP proxy capabilities. The `nyxid` CLI covers all user-facing operations (services, keys, catalog, nodes, approvals, SSH, MCP, notifications) and also includes the `nyxid node` subcommand for managing on-premise credential nodes.
 
 **Tech Stack:**
 - **Backend:** Rust, Axum 0.8, MongoDB 8.0 (`mongodb` 3.5, `bson` 2.15)
@@ -132,8 +132,8 @@ cli/src/
 |-- output.rs            # Table/JSON output formatting
 
 node-agent/src/
-|-- main.rs              # CLI entry point, command dispatch (register, start, status, credentials, openclaw, version)
-|-- cli.rs               # Clap subcommand definitions
+|-- main.rs              # Deprecation wrapper (prints warning, delegates to nyxid node subcommand)
+|-- cli.rs               # Clap subcommand definitions (deprecated, use nyxid node instead)
 |-- config.rs            # TOML config (server url, node id, encrypted auth token, signing secret, credentials)
 |-- ws_client.rs         # WebSocket connection loop, exponential backoff reconnection, graceful shutdown
 |-- proxy_executor.rs    # HTTP request execution, credential injection, SSE streaming detection
@@ -301,16 +301,16 @@ cargo test                              # Run backend tests
 cargo test --all-features               # Run all tests including KMS provider tests
 cargo run                               # Start backend (port 3001)
 
-# Node Agent (from project root)
-cargo build -p nyxid-node               # Build node agent binary
-cargo test -p nyxid-node                # Run node agent tests
-cargo run -p nyxid-node -- register --token nyx_nreg_... --url ws://localhost:3001/api/v1/nodes/ws
-cargo run -p nyxid-node -- start        # Start node agent
-cargo run -p nyxid-node -- status       # Show node status
-cargo run -p nyxid-node -- credentials list  # List configured credentials
-cargo run -p nyxid-node -- openclaw connect --url http://localhost:18789  # Connect OpenClaw (use --credential-env for non-interactive)
-cargo run -p nyxid-node -- openclaw status   # Show OpenClaw connection status
-cargo run -p nyxid-node -- openclaw disconnect  # Remove OpenClaw credentials
+# Node Agent (from project root, via nyxid CLI)
+cargo build -p nyxid-cli                # Build CLI binary (includes node subcommand)
+cargo test -p nyxid-cli                 # Run CLI tests (includes node agent tests)
+nyxid node register --token nyx_nreg_... --url ws://localhost:3001/api/v1/nodes/ws
+nyxid node start                        # Start node agent
+nyxid node status                       # Show node status
+nyxid node credentials list             # List configured credentials
+nyxid node openclaw connect --url http://localhost:18789  # Connect OpenClaw (use --credential-env for non-interactive)
+nyxid node openclaw status              # Show OpenClaw connection status
+nyxid node openclaw disconnect          # Remove OpenClaw credentials
 
 # Frontend (from frontend/)
 npm run dev                             # Dev server (port 3000)
