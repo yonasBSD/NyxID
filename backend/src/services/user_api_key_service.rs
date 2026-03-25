@@ -43,6 +43,20 @@ pub struct CreateApiKeyParams<'a> {
     pub source_id: Option<&'a str>,
 }
 
+pub fn has_server_credential(api_key: &UserApiKey) -> bool {
+    match api_key.credential_type.as_str() {
+        "oauth2" => api_key
+            .access_token_encrypted
+            .as_ref()
+            .is_some_and(|value| !value.is_empty()),
+        "node_managed" | "ssh_certificate" => false,
+        _ => api_key
+            .credential_encrypted
+            .as_ref()
+            .is_some_and(|value| !value.is_empty()),
+    }
+}
+
 /// List all API keys for a user (summary only, no decrypted values).
 pub async fn list_api_keys(db: &mongodb::Database, user_id: &str) -> AppResult<Vec<UserApiKey>> {
     let keys: Vec<UserApiKey> = db
@@ -220,6 +234,10 @@ pub async fn sync_provider_token_to_api_keys(
     let now = bson::DateTime::from_chrono(Utc::now());
 
     for key in keys {
+        if key.credential_type == "node_managed" {
+            continue;
+        }
+
         let set_doc = if let Some(ref token) = provider_token {
             doc! {
                 "credential_type": provider_token_type_to_api_key_type(&token.token_type)?,
@@ -249,6 +267,57 @@ pub async fn sync_provider_token_to_api_keys(
         db.collection::<UserApiKey>(COLLECTION_NAME)
             .update_one(doc! { "_id": &key.id }, doc! { "$set": set_doc })
             .await?;
+    }
+
+    Ok(())
+}
+
+pub async fn activate_node_managed_api_key(
+    db: &mongodb::Database,
+    user_id: &str,
+    key_id: &str,
+) -> AppResult<()> {
+    reset_provider_api_key_state(db, user_id, key_id, "node_managed", "active").await
+}
+
+pub async fn mark_provider_connection_pending(
+    db: &mongodb::Database,
+    user_id: &str,
+    key_id: &str,
+    credential_type: &str,
+) -> AppResult<()> {
+    reset_provider_api_key_state(db, user_id, key_id, credential_type, "pending_auth").await
+}
+
+async fn reset_provider_api_key_state(
+    db: &mongodb::Database,
+    user_id: &str,
+    key_id: &str,
+    credential_type: &str,
+    status: &str,
+) -> AppResult<()> {
+    let result = db
+        .collection::<UserApiKey>(COLLECTION_NAME)
+        .update_one(
+            doc! { "_id": key_id, "user_id": user_id },
+            doc! {
+                "$set": {
+                    "credential_type": credential_type,
+                    "credential_encrypted": bson::Bson::Null,
+                    "access_token_encrypted": bson::Bson::Null,
+                    "refresh_token_encrypted": bson::Bson::Null,
+                    "token_scopes": bson::Bson::Null,
+                    "expires_at": bson::Bson::Null,
+                    "status": status,
+                    "error_message": bson::Bson::Null,
+                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                }
+            },
+        )
+        .await?;
+
+    if result.matched_count == 0 {
+        return Err(AppError::NotFound("API key not found".to_string()));
     }
 
     Ok(())
@@ -334,6 +403,13 @@ pub async fn update_api_key(
     }
 
     if let Some(cred) = credential {
+        if existing.credential_type == "node_managed" {
+            return Err(AppError::BadRequest(
+                "Credential is managed on the node agent. Update it on the node instead."
+                    .to_string(),
+            ));
+        }
+
         if cred.is_empty() {
             return Err(AppError::ValidationError(
                 "Credential must not be empty".to_string(),
@@ -438,4 +514,52 @@ pub async fn touch_last_used(db: &mongodb::Database, key_id: &str) {
             doc! { "$set": { "last_used_at": &now, "updated_at": &now } },
         )
         .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+
+    use super::has_server_credential;
+    use crate::models::user_api_key::UserApiKey;
+
+    fn sample_key(credential_type: &str) -> UserApiKey {
+        UserApiKey {
+            id: "key-1".to_string(),
+            user_id: "user-1".to_string(),
+            label: "Sample".to_string(),
+            credential_type: credential_type.to_string(),
+            credential_encrypted: None,
+            access_token_encrypted: None,
+            refresh_token_encrypted: None,
+            token_scopes: None,
+            expires_at: None,
+            provider_config_id: Some("provider-1".to_string()),
+            user_oauth_client_id_encrypted: None,
+            user_oauth_client_secret_encrypted: None,
+            status: "active".to_string(),
+            last_used_at: None,
+            error_message: None,
+            source: Some("user_created".to_string()),
+            source_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn detects_server_credential_for_oauth_keys() {
+        let mut key = sample_key("oauth2");
+        assert!(!has_server_credential(&key));
+        key.access_token_encrypted = Some(vec![1, 2, 3]);
+        assert!(has_server_credential(&key));
+    }
+
+    #[test]
+    fn node_managed_keys_never_report_server_credentials() {
+        let mut key = sample_key("node_managed");
+        key.credential_encrypted = Some(vec![1, 2, 3]);
+        key.access_token_encrypted = Some(vec![4, 5, 6]);
+        assert!(!has_server_credential(&key));
+    }
 }

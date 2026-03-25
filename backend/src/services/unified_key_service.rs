@@ -143,6 +143,37 @@ fn normalized_provider_credential_type(provider_type: &str) -> &'static str {
     }
 }
 
+fn direct_credential_type_from_auth_method(auth_method: &str) -> Option<&'static str> {
+    match auth_method {
+        "none" => None,
+        "bearer" => Some("bearer"),
+        "basic" => Some("basic"),
+        _ => Some("api_key"),
+    }
+}
+
+fn direct_credential_type_for_service(
+    api_key: &UserApiKey,
+    service: &UserService,
+    provider: Option<&ProviderConfig>,
+) -> Option<&'static str> {
+    if service.service_type == "ssh" || api_key.credential_type == "ssh_certificate" {
+        return None;
+    }
+
+    if let Some(provider) = provider {
+        return Some(normalized_provider_credential_type(&provider.provider_type));
+    }
+
+    match api_key.credential_type.as_str() {
+        "oauth2" => Some("oauth2"),
+        "bearer" => Some("bearer"),
+        "basic" => Some("basic"),
+        "node_managed" => direct_credential_type_from_auth_method(&service.auth_method),
+        _ => Some("api_key"),
+    }
+}
+
 async fn find_existing_provider_token(
     db: &mongodb::Database,
     user_id: &str,
@@ -226,8 +257,19 @@ pub async fn create_key(
         };
 
         // Determine credential type
+        let node_managed_credential = node_id.is_some() && credential.is_empty();
+
+        if node_id.is_some() && svc.provider_config_id.is_some() && !credential.is_empty() {
+            return Err(AppError::BadRequest(
+                "Node-routed provider services must be authorized on the node agent. Do not send the credential to NyxID."
+                    .to_string(),
+            ));
+        }
+
         let credential_type = if is_ssh {
             "ssh_certificate".to_string()
+        } else if node_managed_credential {
+            "node_managed".to_string()
         } else if let Some(ref token) = existing_provider_token {
             match token.token_type.as_str() {
                 "oauth2" => "oauth2".to_string(),
@@ -235,8 +277,6 @@ pub async fn create_key(
             }
         } else if matches!(provider_type, Some("oauth2" | "device_code")) {
             "oauth2".to_string()
-        } else if credential.is_empty() && node_id.is_some() {
-            "node_managed".to_string()
         } else if let Some(kind) = provider_type {
             normalized_provider_credential_type(kind).to_string()
         } else {
@@ -260,18 +300,46 @@ pub async fn create_key(
             user_endpoint_service::create_endpoint(db, user_id, &svc.name, &ep_url, Some(&svc.id))
                 .await?;
 
-        let api_key = if let Some(ref provider_token) = existing_provider_token {
-            user_api_key_service::create_api_key_from_provider_token(
-                db,
-                user_id,
-                label,
-                provider_config_id.expect("provider token implies provider config"),
-                provider_token,
-            )
-            .await?
+        let api_key = if !node_managed_credential {
+            if let Some(ref provider_token) = existing_provider_token {
+                user_api_key_service::create_api_key_from_provider_token(
+                    db,
+                    user_id,
+                    label,
+                    provider_config_id.expect("provider token implies provider config"),
+                    provider_token,
+                )
+                .await?
+            } else {
+                let pending_oauth = matches!(provider_type, Some("oauth2" | "device_code"))
+                    && credential.is_empty()
+                    && node_id.is_none();
+                user_api_key_service::create_api_key(
+                    db,
+                    encryption_keys,
+                    user_id,
+                    user_api_key_service::CreateApiKeyParams {
+                        label,
+                        credential_type: &credential_type,
+                        credential,
+                        access_token: (credential_type == "oauth2" && !credential.is_empty())
+                            .then_some(credential),
+                        refresh_token: None,
+                        token_scopes: None,
+                        expires_at: None,
+                        provider_config_id,
+                        status: if pending_oauth {
+                            "pending_auth"
+                        } else {
+                            "active"
+                        },
+                        source: Some("user_created"),
+                        source_id: None,
+                    },
+                )
+                .await?
+            }
         } else {
-            let pending_oauth =
-                matches!(provider_type, Some("oauth2" | "device_code")) && credential.is_empty();
             user_api_key_service::create_api_key(
                 db,
                 encryption_keys,
@@ -280,17 +348,12 @@ pub async fn create_key(
                     label,
                     credential_type: &credential_type,
                     credential,
-                    access_token: (credential_type == "oauth2" && !credential.is_empty())
-                        .then_some(credential),
+                    access_token: None,
                     refresh_token: None,
                     token_scopes: None,
                     expires_at: None,
                     provider_config_id,
-                    status: if pending_oauth {
-                        "pending_auth"
-                    } else {
-                        "active"
-                    },
+                    status: "active",
                     source: Some("user_created"),
                     source_id: None,
                 },
@@ -637,6 +700,62 @@ pub async fn get_key(
     Ok(build_key_view(&svc, &ep, &ak, &cat_map))
 }
 
+pub async fn reconcile_provider_key_for_service_routing(
+    db: &mongodb::Database,
+    user_id: &str,
+    service_id: &str,
+) -> AppResult<()> {
+    let service = user_service_service::get_user_service(db, user_id, service_id).await?;
+    let api_key = user_api_key_service::get_api_key(db, user_id, &service.api_key_id).await?;
+
+    if service.node_id.is_some() {
+        user_api_key_service::activate_node_managed_api_key(db, user_id, &api_key.id).await?;
+        return Ok(());
+    }
+
+    if user_api_key_service::has_server_credential(&api_key) || service.auth_method == "none" {
+        return Ok(());
+    }
+
+    let provider = if let Some(provider_config_id) = api_key.provider_config_id.as_deref() {
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .find_one(doc! { "_id": provider_config_id })
+            .await?
+    } else {
+        None
+    };
+    let Some(direct_credential_type) =
+        direct_credential_type_for_service(&api_key, &service, provider.as_ref())
+    else {
+        return Ok(());
+    };
+
+    if let Some(provider_config_id) = api_key.provider_config_id.as_deref()
+        && find_existing_provider_token(db, user_id, provider_config_id)
+            .await?
+            .is_some()
+    {
+        user_api_key_service::mark_provider_connection_pending(
+            db,
+            user_id,
+            &api_key.id,
+            direct_credential_type,
+        )
+        .await?;
+        user_api_key_service::sync_provider_token_to_api_keys(db, user_id, provider_config_id)
+            .await?;
+        return Ok(());
+    }
+
+    user_api_key_service::mark_provider_connection_pending(
+        db,
+        user_id,
+        &api_key.id,
+        direct_credential_type,
+    )
+    .await
+}
+
 /// DELETE /api/v1/keys/:id -- revoke key.
 pub async fn revoke_key(db: &mongodb::Database, user_id: &str, service_id: &str) -> AppResult<()> {
     let svc = user_service_service::get_user_service(db, user_id, service_id).await?;
@@ -709,5 +828,90 @@ fn build_key_view(
         ssh_ca_public_key,
         ssh_allowed_principals,
         ssh_certificate_ttl_minutes,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+
+    use super::{direct_credential_type_for_service, direct_credential_type_from_auth_method};
+    use crate::models::user_api_key::UserApiKey;
+    use crate::models::user_service::UserService;
+
+    fn sample_api_key(credential_type: &str) -> UserApiKey {
+        UserApiKey {
+            id: "key-1".to_string(),
+            user_id: "user-1".to_string(),
+            label: "Test".to_string(),
+            credential_type: credential_type.to_string(),
+            credential_encrypted: None,
+            access_token_encrypted: None,
+            refresh_token_encrypted: None,
+            token_scopes: None,
+            expires_at: None,
+            provider_config_id: None,
+            user_oauth_client_id_encrypted: None,
+            user_oauth_client_secret_encrypted: None,
+            status: "active".to_string(),
+            last_used_at: None,
+            error_message: None,
+            source: None,
+            source_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn sample_service(auth_method: &str) -> UserService {
+        UserService {
+            id: "svc-1".to_string(),
+            user_id: "user-1".to_string(),
+            slug: "test".to_string(),
+            endpoint_id: "ep-1".to_string(),
+            api_key_id: "key-1".to_string(),
+            auth_method: auth_method.to_string(),
+            auth_key_name: "Authorization".to_string(),
+            catalog_service_id: None,
+            node_id: None,
+            node_priority: 0,
+            service_type: "http".to_string(),
+            is_active: true,
+            source: None,
+            source_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn infers_direct_credential_type_from_auth_method() {
+        assert_eq!(
+            direct_credential_type_from_auth_method("bearer"),
+            Some("bearer")
+        );
+        assert_eq!(
+            direct_credential_type_from_auth_method("basic"),
+            Some("basic")
+        );
+        assert_eq!(
+            direct_credential_type_from_auth_method("header"),
+            Some("api_key")
+        );
+        assert_eq!(
+            direct_credential_type_from_auth_method("query"),
+            Some("api_key")
+        );
+        assert_eq!(direct_credential_type_from_auth_method("none"), None);
+    }
+
+    #[test]
+    fn restores_custom_node_managed_service_to_auth_specific_type() {
+        let key = sample_api_key("node_managed");
+        let service = sample_service("bearer");
+        assert_eq!(
+            direct_credential_type_for_service(&key, &service, None),
+            Some("bearer")
+        );
     }
 }

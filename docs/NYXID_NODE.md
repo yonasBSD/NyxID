@@ -141,6 +141,18 @@ The agent runs until terminated. Use `--log-level debug` for detailed connection
 
 Credentials are stored locally using the configured storage backend -- either AES-256-GCM encrypted in the config file (default) or in the OS keychain. The agent loads them at startup and holds decrypted values in memory.
 
+### Preferred: Setup from the NyxID Catalog
+
+For catalog-backed services, the easiest path is:
+
+```bash
+nyxid node credentials setup --service llm-openai
+```
+
+`credentials setup` fetches the service metadata from NyxID, detects whether the service needs an API key, bearer token, gateway URL, device-code OAuth, or authorization-code OAuth, and stores the resulting credential locally on the node.
+
+For node-routed provider-backed services, the OAuth token stays on the node. NyxID stores only the routed AI service metadata and does not keep the provider credential.
+
 ### Add a Credential (Header Injection)
 
 ```bash
@@ -477,6 +489,7 @@ COMMANDS:
   status        Show node connection status
   rekey         Update auth token and signing secret after server-side rotation
   credentials   Manage local credentials
+  openclaw      OpenClaw convenience commands
   migrate       Migrate secret storage between backends
   version       Show version information
 
@@ -501,15 +514,38 @@ REKEY OPTIONS:
   --config <PATH>           Path to config directory
 
 CREDENTIALS SUBCOMMANDS:
-  add     Add a credential for a service
-  list    List configured credentials
-  remove  Remove a credential for a service
+  setup      Set up a catalog-backed service locally (preferred)
+  add        Add a credential for a service
+  add-oauth  Run a local OAuth flow for a service
+  list       List configured credentials
+  remove     Remove a credential for a service
+
+CREDENTIALS SETUP OPTIONS:
+  --service <SLUG>          Catalog service slug (e.g., "llm-openai")
+  --api-url <URL>           NyxID base URL (auto-derived from node config when omitted)
+  --access-token <TOKEN>    NyxID access token (or use `nyxid login` / NYXID_ACCESS_TOKEN)
+  --config <PATH>           Path to config directory
 
 CREDENTIALS ADD OPTIONS:
   --service <SLUG>          Service slug (e.g., "openai")
   --header <HEADER>         Header to inject (e.g., "Authorization: Bearer sk-...")
   --query-param <PARAM>     Query parameter to inject (e.g., "api_key=sk-...")
   --config <PATH>           Path to config directory
+
+CREDENTIALS ADD-OAUTH OPTIONS:
+  --service <SLUG>          Service slug
+  --from-catalog            Fetch OAuth metadata from the NyxID catalog
+  --client-id <ID>          OAuth client ID (or use catalog-provided shared client ID)
+  --client-secret <SECRET>  OAuth client secret when required
+  --authorization-url <URL> OAuth authorization URL for manual setup
+  --token-url <URL>         OAuth token URL for manual setup
+  --device-code-url <URL>   OAuth device-code URL for manual setup
+  --config <PATH>           Path to config directory
+
+OPENCLAW SUBCOMMANDS:
+  connect     Store the OpenClaw credential locally and optionally create/check the routed AI service in NyxID
+  status      Show local OpenClaw credential status
+  disconnect  Remove the local OpenClaw credential
 
 CREDENTIALS REMOVE OPTIONS:
   --service <SLUG>          Service slug to remove

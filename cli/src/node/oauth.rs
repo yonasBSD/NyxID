@@ -1,11 +1,18 @@
-//! Node-native OAuth flow: device code and token refresh.
+//! Node-native OAuth flow: device code, authorization code, and token refresh.
 //!
 //! Fetches OAuth config from NyxID catalog or uses CLI-provided URLs.
 //! Runs the flow, stores tokens locally, never sends them to NyxID.
 
 use std::collections::HashMap;
+use std::net::TcpListener;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use rand::RngCore;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use url::Url;
 
 use super::error::{Error, Result};
 
@@ -22,6 +29,8 @@ pub struct OAuthConfig {
     pub device_code_format: String, // "rfc8628" | "openai"
     pub token_endpoint_auth_method: String,
     pub extra_auth_params: Option<HashMap<String, String>>,
+    pub oauth_client_id: Option<String>,
+    pub client_id_param_name: Option<String>,
 }
 
 /// Token response from OAuth token endpoint.
@@ -75,6 +84,53 @@ where
     }
 }
 
+impl OAuthConfig {
+    fn client_id_param_name(&self) -> &str {
+        self.client_id_param_name.as_deref().unwrap_or("client_id")
+    }
+}
+
+pub fn oauth_config_from_catalog_value(body: &serde_json::Value) -> Result<OAuthConfig> {
+    let token_url = body["token_url"]
+        .as_str()
+        .ok_or_else(|| Error::Config("Catalog entry has no token_url".to_string()))?
+        .to_string();
+
+    Ok(OAuthConfig {
+        authorization_url: body["authorization_url"].as_str().map(String::from),
+        token_url,
+        device_code_url: body["device_code_url"].as_str().map(String::from),
+        device_verification_url: body["device_verification_url"].as_str().map(String::from),
+        device_token_url: body["device_token_url"].as_str().map(String::from),
+        default_scopes: body["default_scopes"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        supports_pkce: body["supports_pkce"].as_bool().unwrap_or(false),
+        device_code_format: body["device_code_format"]
+            .as_str()
+            .unwrap_or("rfc8628")
+            .to_string(),
+        token_endpoint_auth_method: body["token_endpoint_auth_method"]
+            .as_str()
+            .unwrap_or("client_secret_post")
+            .to_string(),
+        extra_auth_params: body["extra_auth_params"].as_object().map(|map| {
+            map.iter()
+                .filter_map(|(key, value)| {
+                    value.as_str().map(|text| (key.clone(), text.to_string()))
+                })
+                .collect()
+        }),
+        oauth_client_id: body["oauth_client_id"].as_str().map(String::from),
+        client_id_param_name: body["client_id_param_name"].as_str().map(String::from),
+    })
+}
+
 /// Fetch OAuth config from NyxID catalog API.
 pub async fn fetch_catalog_oauth_config(
     api_base_url: &str,
@@ -107,36 +163,7 @@ pub async fn fetch_catalog_oauth_config(
         .await
         .map_err(|e| Error::Config(format!("Failed to parse catalog response: {e}")))?;
 
-    let token_url = body["token_url"]
-        .as_str()
-        .ok_or_else(|| Error::Config("Catalog entry has no token_url".to_string()))?
-        .to_string();
-
-    Ok(OAuthConfig {
-        authorization_url: body["authorization_url"].as_str().map(String::from),
-        token_url,
-        device_code_url: body["device_code_url"].as_str().map(String::from),
-        device_verification_url: body["device_verification_url"].as_str().map(String::from),
-        device_token_url: body["device_token_url"].as_str().map(String::from),
-        default_scopes: body["default_scopes"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default(),
-        supports_pkce: body["supports_pkce"].as_bool().unwrap_or(false),
-        device_code_format: body["device_code_format"]
-            .as_str()
-            .unwrap_or("rfc8628")
-            .to_string(),
-        token_endpoint_auth_method: body["token_endpoint_auth_method"]
-            .as_str()
-            .unwrap_or("client_secret_post")
-            .to_string(),
-        extra_auth_params: None,
-    })
+    oauth_config_from_catalog_value(&body)
 }
 
 /// Run RFC 8628 device code flow.
@@ -151,11 +178,20 @@ pub async fn run_device_code_flow(
         .device_code_url
         .as_deref()
         .ok_or_else(|| Error::Config("No device_code_url available".to_string()))?;
+    let client_id_param_name = config.client_id_param_name().to_string();
 
     // Step 1: Request device code
+    let mut request_form = vec![
+        (client_id_param_name.clone(), client_id.to_string()),
+        ("scope".to_string(), scopes.to_string()),
+    ];
+    if let Some(secret) = client_secret {
+        request_form.push(("client_secret".to_string(), secret.to_string()));
+    }
+
     let resp = client
         .post(device_code_url)
-        .form(&[("client_id", client_id), ("scope", scopes)])
+        .form(&request_form)
         .send()
         .await
         .map_err(|e| Error::Config(format!("Device code request failed: {e}")))?;
@@ -198,12 +234,15 @@ pub async fn run_device_code_flow(
         }
 
         let mut form = vec![
-            ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
-            ("device_code", &device_resp.device_code),
-            ("client_id", client_id),
+            (
+                "grant_type".to_string(),
+                "urn:ietf:params:oauth:grant-type:device_code".to_string(),
+            ),
+            ("device_code".to_string(), device_resp.device_code.clone()),
+            (client_id_param_name.clone(), client_id.to_string()),
         ];
         if let Some(secret) = client_secret {
-            form.push(("client_secret", secret));
+            form.push(("client_secret".to_string(), secret.to_string()));
         }
 
         let resp = client.post(token_poll_url).form(&form).send().await;
@@ -249,6 +288,77 @@ pub async fn run_device_code_flow(
     }
 }
 
+pub async fn run_authorization_code_flow(
+    config: &OAuthConfig,
+    client_id: &str,
+    client_secret: Option<&str>,
+    scopes: &str,
+) -> Result<TokenResponse> {
+    let authorization_url = config
+        .authorization_url
+        .as_deref()
+        .ok_or_else(|| Error::Config("No authorization_url available".to_string()))?;
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .map_err(|e| Error::Config(format!("Failed to bind local callback server: {e}")))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| Error::Config(format!("Failed to get callback address: {e}")))?
+        .port();
+    let redirect_uri = format!("http://127.0.0.1:{port}/callback");
+    let state = generate_state();
+    let code_verifier = config.supports_pkce.then(generate_pkce_verifier);
+    let code_challenge = code_verifier
+        .as_deref()
+        .map(pkce_code_challenge)
+        .transpose()?;
+
+    let mut url = Url::parse(authorization_url)
+        .map_err(|e| Error::Config(format!("Invalid authorization URL: {e}")))?;
+    {
+        let mut pairs = url.query_pairs_mut();
+        pairs.append_pair(config.client_id_param_name(), client_id);
+        pairs.append_pair("redirect_uri", &redirect_uri);
+        pairs.append_pair("response_type", "code");
+        pairs.append_pair("state", &state);
+        if !scopes.is_empty() {
+            pairs.append_pair("scope", scopes);
+        }
+        if let Some(ref challenge) = code_challenge {
+            pairs.append_pair("code_challenge", challenge);
+            pairs.append_pair("code_challenge_method", "S256");
+        }
+        if let Some(ref params) = config.extra_auth_params {
+            for (key, value) in params {
+                if !is_reserved_oauth_param(key) {
+                    pairs.append_pair(key, value);
+                }
+            }
+        }
+    }
+
+    let authorization_url: String = url.into();
+
+    println!("Opening browser for OAuth authorization...");
+    println!();
+    println!("If the browser does not open, visit:");
+    println!("  {authorization_url}");
+    println!();
+
+    let _ = open::that(&authorization_url);
+
+    let code = wait_for_authorization_code(listener, &state).await?;
+    exchange_authorization_code(
+        config,
+        client_id,
+        client_secret,
+        &code,
+        &redirect_uri,
+        code_verifier.as_deref(),
+    )
+    .await
+}
+
 /// Refresh an OAuth token using refresh_token grant.
 pub async fn refresh_token(
     token_url: &str,
@@ -256,8 +366,10 @@ pub async fn refresh_token(
     client_secret: Option<&str>,
     refresh_tok: &str,
     auth_method: &str,
+    client_id_param_name: Option<&str>,
 ) -> Result<TokenResponse> {
     let client = reqwest::Client::new();
+    let client_id_param_name = client_id_param_name.unwrap_or("client_id");
 
     let mut req = client.post(token_url);
 
@@ -272,12 +384,12 @@ pub async fn refresh_token(
         _ => {
             // client_secret_post (default)
             let mut form = vec![
-                ("grant_type", "refresh_token"),
-                ("refresh_token", refresh_tok),
-                ("client_id", client_id),
+                ("grant_type".to_string(), "refresh_token".to_string()),
+                ("refresh_token".to_string(), refresh_tok.to_string()),
+                (client_id_param_name.to_string(), client_id.to_string()),
             ];
             if let Some(secret) = client_secret {
-                form.push(("client_secret", secret));
+                form.push(("client_secret".to_string(), secret.to_string()));
             }
             req = req.form(&form);
         }
@@ -299,4 +411,320 @@ pub async fn refresh_token(
     resp.json()
         .await
         .map_err(|e| Error::Config(format!("Failed to parse refresh response: {e}")))
+}
+
+fn is_reserved_oauth_param(key: &str) -> bool {
+    matches!(
+        key,
+        "client_id"
+            | "client_secret"
+            | "redirect_uri"
+            | "response_type"
+            | "state"
+            | "code"
+            | "code_challenge"
+            | "code_challenge_method"
+            | "scope"
+    )
+}
+
+fn generate_state() -> String {
+    let mut bytes = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    hex::encode(bytes)
+}
+
+fn generate_pkce_verifier() -> String {
+    let mut bytes = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn pkce_code_challenge(verifier: &str) -> Result<String> {
+    let digest = Sha256::digest(verifier.as_bytes());
+    Ok(URL_SAFE_NO_PAD.encode(digest))
+}
+
+enum CallbackResult {
+    Success(String),
+    Error(String),
+    Ignore,
+}
+
+async fn wait_for_authorization_code(
+    listener: TcpListener,
+    expected_state: &str,
+) -> Result<String> {
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| Error::Config(format!("Failed to set callback listener non-blocking: {e}")))?;
+    let listener = tokio::net::TcpListener::from_std(listener)
+        .map_err(|e| Error::Config(format!("Failed to create async callback listener: {e}")))?;
+
+    let timeout = tokio::time::sleep(std::time::Duration::from_secs(180));
+    tokio::pin!(timeout);
+
+    loop {
+        tokio::select! {
+            accept = listener.accept() => {
+                let (mut stream, _) = accept
+                    .map_err(|e| Error::Config(format!("Failed to accept callback connection: {e}")))?;
+                let mut buf = vec![0u8; 8192];
+                let n = stream
+                    .read(&mut buf)
+                    .await
+                    .map_err(|e| Error::Config(format!("Failed to read callback request: {e}")))?;
+                let request = String::from_utf8_lossy(&buf[..n]);
+
+                match parse_callback_request(&request, expected_state) {
+                    CallbackResult::Success(code) => {
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n{}",
+                            callback_success_html()
+                        );
+                        let _ = stream.write_all(response.as_bytes()).await;
+                        return Ok(code);
+                    }
+                    CallbackResult::Error(message) => {
+                        let response = format!(
+                            "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n{}",
+                            callback_error_html()
+                        );
+                        let _ = stream.write_all(response.as_bytes()).await;
+                        return Err(Error::Config(message));
+                    }
+                    CallbackResult::Ignore => {
+                        let response = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n";
+                        let _ = stream.write_all(response.as_bytes()).await;
+                    }
+                }
+            }
+            () = &mut timeout => {
+                return Err(Error::Config("OAuth authorization timed out after 180s".to_string()));
+            }
+        }
+    }
+}
+
+fn parse_callback_request(request: &str, expected_state: &str) -> CallbackResult {
+    let Some(first_line) = request.lines().next() else {
+        return CallbackResult::Ignore;
+    };
+    let Some(path) = first_line.split_whitespace().nth(1) else {
+        return CallbackResult::Ignore;
+    };
+    if !path.starts_with("/callback") {
+        return CallbackResult::Ignore;
+    }
+
+    let Some(query) = path.split('?').nth(1) else {
+        return CallbackResult::Error(
+            "OAuth callback did not include query parameters".to_string(),
+        );
+    };
+    let params: HashMap<&str, &str> = query
+        .split('&')
+        .filter_map(|pair| {
+            let mut parts = pair.splitn(2, '=');
+            Some((parts.next()?, parts.next()?))
+        })
+        .collect();
+
+    let state = params
+        .get("state")
+        .and_then(|value| urlencoding::decode(value).ok())
+        .map(|value| value.into_owned());
+    if state.as_deref() != Some(expected_state) {
+        return CallbackResult::Error("OAuth callback state mismatch".to_string());
+    }
+
+    if let Some(error) = params
+        .get("error")
+        .and_then(|value| urlencoding::decode(value).ok())
+        .map(|value| value.into_owned())
+    {
+        let description = params
+            .get("error_description")
+            .and_then(|value| urlencoding::decode(value).ok())
+            .map(|value| value.into_owned())
+            .unwrap_or(error.clone());
+        return CallbackResult::Error(format!("OAuth authorization failed: {description}"));
+    }
+
+    let Some(code) = params
+        .get("code")
+        .and_then(|value| urlencoding::decode(value).ok())
+        .map(|value| value.into_owned())
+        .filter(|value| !value.is_empty())
+    else {
+        return CallbackResult::Error(
+            "OAuth callback did not include an authorization code".to_string(),
+        );
+    };
+
+    CallbackResult::Success(code)
+}
+
+async fn exchange_authorization_code(
+    config: &OAuthConfig,
+    client_id: &str,
+    client_secret: Option<&str>,
+    code: &str,
+    redirect_uri: &str,
+    code_verifier: Option<&str>,
+) -> Result<TokenResponse> {
+    let client = reqwest::Client::new();
+    let mut req = client.post(&config.token_url);
+    let client_id_param_name = config.client_id_param_name().to_string();
+
+    match config.token_endpoint_auth_method.as_str() {
+        "client_secret_basic" => {
+            req = req.basic_auth(client_id, client_secret);
+            let mut form = vec![
+                ("grant_type".to_string(), "authorization_code".to_string()),
+                ("code".to_string(), code.to_string()),
+                ("redirect_uri".to_string(), redirect_uri.to_string()),
+            ];
+            if client_secret.is_none() {
+                form.push((client_id_param_name, client_id.to_string()));
+            }
+            if let Some(verifier) = code_verifier {
+                form.push(("code_verifier".to_string(), verifier.to_string()));
+            }
+            req = req.form(&form);
+        }
+        _ => {
+            let mut form = vec![
+                ("grant_type".to_string(), "authorization_code".to_string()),
+                ("code".to_string(), code.to_string()),
+                ("redirect_uri".to_string(), redirect_uri.to_string()),
+                (client_id_param_name, client_id.to_string()),
+            ];
+            if let Some(secret) = client_secret {
+                form.push(("client_secret".to_string(), secret.to_string()));
+            }
+            if let Some(verifier) = code_verifier {
+                form.push(("code_verifier".to_string(), verifier.to_string()));
+            }
+            req = req.form(&form);
+        }
+    }
+
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| Error::Config(format!("Token exchange failed: {e}")))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(Error::Config(format!(
+            "Token exchange error {status}: {text}"
+        )));
+    }
+
+    resp.json()
+        .await
+        .map_err(|e| Error::Config(format!("Failed to parse token response: {e}")))
+}
+
+fn callback_success_html() -> &'static str {
+    r#"<!doctype html>
+<html>
+<head><title>NyxID Node OAuth</title></head>
+<body style="display:flex;align-items:center;justify-content:center;min-height:100vh;font-family:system-ui;background:#0f172a;color:#e2e8f0">
+<div style="text-align:center">
+<h2>Authorization complete</h2>
+<p style="color:#94a3b8">You can close this tab and return to your terminal.</p>
+</div>
+</body>
+</html>"#
+}
+
+fn callback_error_html() -> &'static str {
+    r#"<!doctype html>
+<html>
+<head><title>NyxID Node OAuth</title></head>
+<body style="display:flex;align-items:center;justify-content:center;min-height:100vh;font-family:system-ui;background:#0f172a;color:#e2e8f0">
+<div style="text-align:center">
+<h2>Authorization failed</h2>
+<p style="color:#94a3b8">Return to your terminal for the error details.</p>
+</div>
+</body>
+</html>"#
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CallbackResult, oauth_config_from_catalog_value, parse_callback_request};
+
+    #[test]
+    fn parses_catalog_oauth_config_with_provider_specific_fields() {
+        let body = serde_json::json!({
+            "authorization_url": "https://example.com/oauth/authorize",
+            "token_url": "https://example.com/oauth/token",
+            "default_scopes": ["profile", "email"],
+            "supports_pkce": true,
+            "token_endpoint_auth_method": "client_secret_basic",
+            "oauth_client_id": "shared-client-id",
+            "client_id_param_name": "client_key",
+            "extra_auth_params": {
+                "access_type": "offline"
+            }
+        });
+
+        let config = oauth_config_from_catalog_value(&body).expect("config");
+        assert_eq!(
+            config.authorization_url.as_deref(),
+            Some("https://example.com/oauth/authorize")
+        );
+        assert_eq!(config.token_url, "https://example.com/oauth/token");
+        assert_eq!(config.oauth_client_id.as_deref(), Some("shared-client-id"));
+        assert_eq!(config.client_id_param_name.as_deref(), Some("client_key"));
+        assert!(config.supports_pkce);
+        assert_eq!(
+            config
+                .extra_auth_params
+                .as_ref()
+                .and_then(|params| params.get("access_type"))
+                .map(String::as_str),
+            Some("offline")
+        );
+    }
+
+    #[test]
+    fn parses_valid_authorization_callback() {
+        let request =
+            "GET /callback?code=auth_code_123&state=deadbeef HTTP/1.1\r\nHost: 127.0.0.1\r\n";
+        match parse_callback_request(request, "deadbeef") {
+            CallbackResult::Success(code) => assert_eq!(code, "auth_code_123"),
+            other => panic!(
+                "unexpected callback result: {:?}",
+                callback_result_name(&other)
+            ),
+        }
+    }
+
+    #[test]
+    fn rejects_callback_with_wrong_state() {
+        let request =
+            "GET /callback?code=auth_code_123&state=wrong HTTP/1.1\r\nHost: 127.0.0.1\r\n";
+        match parse_callback_request(request, "deadbeef") {
+            CallbackResult::Error(message) => {
+                assert!(message.contains("state mismatch"));
+            }
+            other => panic!(
+                "unexpected callback result: {:?}",
+                callback_result_name(&other)
+            ),
+        }
+    }
+
+    fn callback_result_name(result: &CallbackResult) -> &'static str {
+        match result {
+            CallbackResult::Success(_) => "success",
+            CallbackResult::Error(_) => "error",
+            CallbackResult::Ignore => "ignore",
+        }
+    }
 }

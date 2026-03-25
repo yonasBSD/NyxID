@@ -93,7 +93,7 @@ nyxid api-key create --name "openclaw-agent" --scopes "proxy read"
 nyxid openclaw setup --url http://localhost:18789 --credential-env OPENCLAW_TOKEN
 
 # Or via node agent (credential stays local):
-nyxid service add llm-openclaw --via-node my-node --credential-env OPENCLAW_TOKEN
+nyxid service add llm-openclaw --via-node my-node
 # Then on the node: nyxid node openclaw connect --url http://localhost:18789
 
 # 5. Verify (no --base-url needed after login)
@@ -244,7 +244,7 @@ In addition to the OpenClaw skill/plugin (OpenClaw-to-NyxID), NyxID natively sup
 
 ### Connecting OpenClaw as an AI Service
 
-OpenClaw is pre-seeded in the NyxID catalog (`llm-openclaw`). Three ways to connect:
+OpenClaw is pre-seeded in the NyxID catalog (`llm-openclaw`). Four ways to connect:
 
 **Option A -- Direct via nyxid CLI (credential on NyxID):**
 ```bash
@@ -254,7 +254,7 @@ nyxid openclaw setup --url http://localhost:18789 --credential-env OPENCLAW_TOKE
 
 **Option B -- Via node agent (credential stays local, recommended for privacy):**
 ```bash
-# On NyxID:
+# In NyxID (creates the routed AI service only; no OpenClaw credential is uploaded):
 nyxid service add llm-openclaw --via-node my-node
 
 # On the node machine:
@@ -264,10 +264,10 @@ nyxid node openclaw connect --url http://localhost:18789
 **Option C -- Node agent auto-setup (generic, works for any service):**
 ```bash
 nyxid node credentials setup --service llm-openclaw
-# Auto-detects: requires gateway URL → prompts for URL, then bearer token
+# Auto-detects the catalog requirements and stores the gateway URL + bearer token locally
 ```
 
-**Option D -- Node agent OpenClaw-specific (legacy, still works):**
+**Option D -- Node agent OpenClaw-specific helper:**
 ```bash
 nyxid node openclaw connect --url http://localhost:18789
 nyxid node openclaw status
@@ -326,7 +326,7 @@ nyxid node credentials setup --service llm-openclaw
 nyxid node start
 ```
 
-**OpenClaw-specific one-command setup (legacy, still works):**
+**OpenClaw-specific convenience setup:**
 
 ```bash
 nyxid node openclaw connect --url http://localhost:18789 [--access-token <JWT>]
@@ -334,7 +334,7 @@ nyxid node openclaw status
 nyxid node openclaw disconnect
 ```
 
-`connect` stores the bearer token locally (encrypted), registers the provider connection with NyxID, and creates the node service binding automatically.
+`connect` stores the bearer token locally on the node. If the command also has a NyxID access token available, it will create or confirm the routed AI service on NyxID, but it does not upload the OpenClaw credential to NyxID.
 
 `credentials setup` is recommended for new setups -- it auto-detects the service type and guides through the right flow.
 

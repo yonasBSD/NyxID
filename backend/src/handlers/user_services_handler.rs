@@ -11,7 +11,7 @@ use crate::AppState;
 use crate::errors::AppResult;
 use crate::models::user_service::UserService;
 use crate::mw::auth::AuthUser;
-use crate::services::user_service_service;
+use crate::services::{unified_key_service, user_service_service};
 
 #[derive(Deserialize, ToSchema)]
 pub struct UpdateUserServiceRequest {
@@ -99,6 +99,15 @@ pub async fn update_user_service(
         body.is_active,
     )
     .await?;
+
+    if body.node_id.is_some() || body.auth_method.is_some() {
+        unified_key_service::reconcile_provider_key_for_service_routing(
+            &state.db,
+            &user_id_str,
+            &service_id,
+        )
+        .await?;
+    }
 
     let svc = user_service_service::get_user_service(&state.db, &user_id_str, &service_id).await?;
     Ok(Json(user_service_response(svc)))

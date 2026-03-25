@@ -455,7 +455,6 @@ pub async fn cmd_credentials(
 // ---------------------------------------------------------------------------
 
 const OPENCLAW_SERVICE_SLUG: &str = "llm-openclaw";
-const OPENCLAW_PROVIDER_SLUG: &str = "openclaw";
 
 pub async fn cmd_openclaw(
     command: crate::cli::NodeOpenClawCommands,
@@ -643,6 +642,7 @@ async fn oauth_refresh_loop(
                 client_secret.as_deref(),
                 &refresh_tok,
                 auth_method,
+                cred.oauth_client_id_param_name.as_deref(),
             )
             .await
             {
@@ -949,7 +949,7 @@ async fn cmd_openclaw_connect(
     node_config.save(config_file)?;
     println!("Local credential stored for '{OPENCLAW_SERVICE_SLUG}'.");
 
-    // 2. Register provider connection with NyxID backend (if access token available)
+    // 2. Create the NyxID-side node-routed AI Service (if an access token is available).
     let nyxid_token = access_token
         .or_else(crate::auth::read_saved_token)
         .or_else(|| std::env::var("NYXID_ACCESS_TOKEN").ok())
@@ -965,135 +965,47 @@ async fn cmd_openclaw_connect(
     });
 
     if let Some(ref token) = nyxid_token {
-        let client = reqwest::Client::new();
-
-        // 2a. Find the OpenClaw provider ID
-        let providers_resp = client
-            .get(format!("{base_api_url}/api/v1/providers"))
-            .bearer_auth(token)
-            .send()
-            .await
-            .map_err(|e| super::error::Error::Config(format!("Failed to fetch providers: {e}")))?;
-
-        if !providers_resp.status().is_success() {
-            println!(
-                "Warning: Could not fetch providers from NyxID ({}). Skipping remote registration.",
-                providers_resp.status()
-            );
-        } else {
-            let body: serde_json::Value = providers_resp.json().await.map_err(|e| {
-                super::error::Error::Config(format!("Failed to parse providers response: {e}"))
-            })?;
-
-            let provider_id: Option<String> =
-                body["providers"]
-                    .as_array()
-                    .and_then(|arr: &Vec<serde_json::Value>| {
-                        arr.iter().find_map(|p| {
-                            if p["slug"].as_str() == Some(OPENCLAW_PROVIDER_SLUG) {
-                                p["id"].as_str().map(String::from)
-                            } else {
-                                None
-                            }
+        match crate::api::ApiClient::new(&base_api_url, token.clone()) {
+            Ok(mut api) => {
+                let existing_keys = api.get_value("/keys").await;
+                let already_registered = existing_keys
+                    .ok()
+                    .and_then(|value| value["keys"].as_array().cloned())
+                    .is_some_and(|keys| {
+                        keys.iter().any(|key| {
+                            key["slug"].as_str() == Some(OPENCLAW_SERVICE_SLUG)
+                                && key["node_id"].as_str() == Some(node_config.node.id.as_str())
+                                && key["is_active"].as_bool().unwrap_or(true)
                         })
                     });
 
-            if let Some(ref pid) = provider_id {
-                // 2b. Connect API key with gateway URL
-                let connect_resp = client
-                    .post(format!(
-                        "{base_api_url}/api/v1/providers/{pid}/connect/api-key"
-                    ))
-                    .bearer_auth(token)
-                    .json(&serde_json::json!({
-                        "api_key": bearer_token,
-                        "gateway_url": gateway_url,
-                        "label": "Node agent",
-                    }))
-                    .send()
-                    .await;
-
-                match connect_resp {
-                    Ok(resp) if resp.status().is_success() => {
-                        println!("Provider connection registered with NyxID.");
-                    }
-                    Ok(resp) => {
-                        let status = resp.status();
-                        let body = resp.text().await.unwrap_or_default();
-                        println!("Warning: Provider connect returned {status}: {body}");
-                    }
-                    Err(e) => {
-                        println!("Warning: Could not register provider connection: {e}");
-                    }
-                }
-
-                // 2c. Find service ID for llm-openclaw and create node binding
-                let node_id = Some(node_config.node.id.clone());
-
-                if let Some(ref nid) = node_id {
-                    // Find the llm-openclaw service
-                    let services_resp = client
-                        .get(format!("{base_api_url}/api/v1/proxy/services"))
-                        .bearer_auth(token)
-                        .send()
+                if already_registered {
+                    println!("NyxID AI Service already exists for '{OPENCLAW_SERVICE_SLUG}'.");
+                } else {
+                    let create_result = api
+                        .post::<serde_json::Value, _>(
+                            "/keys",
+                            &serde_json::json!({
+                                "service_slug": OPENCLAW_SERVICE_SLUG,
+                                "label": "OpenClaw",
+                                "node_id": node_config.node.id,
+                            }),
+                        )
                         .await;
 
-                    let service_id: Option<String> = match services_resp {
-                        Ok(resp) if resp.status().is_success() => {
-                            let body: serde_json::Value = resp.json().await.unwrap_or_default();
-                            body["services"]
-                                .as_array()
-                                .and_then(|arr: &Vec<serde_json::Value>| {
-                                    arr.iter().find_map(|s| {
-                                        if s["slug"].as_str() == Some(OPENCLAW_SERVICE_SLUG) {
-                                            s["id"].as_str().map(String::from)
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                })
+                    match create_result {
+                        Ok(result) => {
+                            let slug = result["slug"].as_str().unwrap_or(OPENCLAW_SERVICE_SLUG);
+                            println!("NyxID AI Service created: {slug}");
                         }
-                        _ => None,
-                    };
-
-                    if let Some(ref sid) = service_id {
-                        let binding_resp = client
-                            .post(format!("{base_api_url}/api/v1/nodes/{nid}/bindings"))
-                            .bearer_auth(token)
-                            .json(&serde_json::json!({ "service_id": sid }))
-                            .send()
-                            .await;
-
-                        match binding_resp {
-                            Ok(resp) if resp.status().is_success() => {
-                                println!("Node binding created for '{OPENCLAW_SERVICE_SLUG}'.");
-                            }
-                            Ok(resp) if resp.status().as_u16() == 409 => {
-                                println!(
-                                    "Node binding already exists for '{OPENCLAW_SERVICE_SLUG}'."
-                                );
-                            }
-                            Ok(resp) => {
-                                let status = resp.status();
-                                let body = resp.text().await.unwrap_or_default();
-                                println!("Warning: Create binding returned {status}: {body}");
-                            }
-                            Err(e) => {
-                                println!("Warning: Could not create node binding: {e}");
-                            }
+                        Err(e) => {
+                            println!("Warning: Could not create NyxID AI Service: {e}");
                         }
-                    } else {
-                        println!(
-                            "Warning: '{OPENCLAW_SERVICE_SLUG}' service not found. Binding not created."
-                        );
                     }
-                } else {
-                    println!("Warning: Node ID not found in config. Binding not created.");
                 }
-            } else {
-                println!(
-                    "Warning: OpenClaw provider not found on NyxID. Skipping remote registration."
-                );
+            }
+            Err(e) => {
+                println!("Warning: Could not create API client for NyxID sync: {e}");
             }
         }
     } else {
@@ -1101,7 +1013,7 @@ async fn cmd_openclaw_connect(
             "No NyxID access token provided (--access-token, NYXID_ACCESS_TOKEN env var, or `nyxid login`)."
         );
         println!(
-            "Local credential stored. To complete setup, create a binding in the NyxID web UI."
+            "Local credential stored. To complete setup, create or route the OpenClaw AI Service to this node in NyxID."
         );
     }
 
@@ -1164,31 +1076,26 @@ async fn cmd_credentials_setup(
             .replace("/api/v1/nodes/ws", "")
     });
 
-    // Can now use saved token from `nyxid login`
-    let token = access_token
+    // Use ApiClient for auto token refresh
+    let token_str = access_token
         .map(|s| s.to_string())
         .or_else(crate::auth::read_saved_token)
-        .or_else(|| std::env::var("NYXID_ACCESS_TOKEN").ok());
+        .or_else(|| std::env::var("NYXID_ACCESS_TOKEN").ok())
+        .ok_or_else(|| {
+            super::error::Error::Validation(
+                "No access token. Run `nyxid login` first, set NYXID_ACCESS_TOKEN, or pass --access-token".to_string(),
+            )
+        })?;
 
-    let client = reqwest::Client::new();
+    let mut api = crate::api::ApiClient::new(&base_api_url, token_str.clone()).map_err(|e| {
+        super::error::Error::Validation(format!("Failed to create API client: {e}"))
+    })?;
 
-    // Fetch catalog entry
-    let catalog_url = format!("{base_api_url}/api/v1/catalog/{service}");
-    let mut req = client.get(&catalog_url);
-    if let Some(ref t) = token {
-        req = req.bearer_auth(t);
-    }
-
-    let resp = req.send().await?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(super::error::Error::Validation(format!(
-            "Failed to fetch catalog entry for '{service}' (HTTP {status}): {body}"
-        )));
-    }
-
-    let entry: serde_json::Value = resp.json().await?;
+    let entry: serde_json::Value = api.get(&format!("/catalog/{service}")).await.map_err(|e| {
+        super::error::Error::Validation(format!(
+            "Failed to fetch catalog entry for '{service}': {e}"
+        ))
+    })?;
     let provider_type = entry["provider_type"].as_str().unwrap_or("api_key");
     let credential_mode = entry["credential_mode"].as_str().unwrap_or("admin");
     let auth_method = entry["auth_method"].as_str().unwrap_or("bearer");
@@ -1229,7 +1136,7 @@ async fn cmd_credentials_setup(
                 None, // OAuth URLs (from catalog)
                 None, // target_url
                 Some(base_api_url),
-                token,
+                Some(token_str.clone()),
             )
             .await
         }
@@ -1341,9 +1248,23 @@ async fn cmd_credentials_add_oauth(
         let token = access_token
             .or_else(crate::auth::read_saved_token)
             .or_else(|| std::env::var("NYXID_ACCESS_TOKEN").ok())
-            .filter(|s| !s.is_empty());
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                super::error::Error::Validation(
+                    "No access token. Run `nyxid login` first, set NYXID_ACCESS_TOKEN, or pass --access-token".to_string(),
+                )
+            })?;
+        let mut api = crate::api::ApiClient::new(&base_api_url, token).map_err(|e| {
+            super::error::Error::Validation(format!("Failed to create API client: {e}"))
+        })?;
+        let entry: serde_json::Value =
+            api.get(&format!("/catalog/{service}")).await.map_err(|e| {
+                super::error::Error::Validation(format!(
+                    "Failed to fetch catalog entry for '{service}': {e}"
+                ))
+            })?;
 
-        oauth::fetch_catalog_oauth_config(&base_api_url, token.as_deref(), service).await?
+        oauth::oauth_config_from_catalog_value(&entry)?
     } else {
         let tok_url = token_url.ok_or_else(|| {
             super::error::Error::Validation(
@@ -1364,13 +1285,23 @@ async fn cmd_credentials_add_oauth(
             device_code_format: "rfc8628".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
             extra_auth_params: None,
+            oauth_client_id: None,
+            client_id_param_name: None,
         }
     };
 
     // 2. Get client credentials
-    let cid = match client_id {
+    let cid = match client_id.or_else(|| oauth_config.oauth_client_id.clone()) {
         Some(id) => id,
-        None => prompt_secret("OAuth Client ID")?,
+        None => {
+            let entered = prompt_string_optional("OAuth Client ID")?;
+            if entered.is_empty() {
+                return Err(super::error::Error::Validation(
+                    "OAuth client ID is required".to_string(),
+                ));
+            }
+            entered
+        }
     };
     let csecret = match client_secret {
         Some(s) => Some(s),
@@ -1391,10 +1322,8 @@ async fn cmd_credentials_add_oauth(
     let token_response = if oauth_config.device_code_url.is_some() {
         oauth::run_device_code_flow(&oauth_config, &cid, csecret.as_deref(), &final_scopes).await?
     } else {
-        return Err(super::error::Error::Validation(
-            "No device_code_url available. Only device code flow is currently supported."
-                .to_string(),
-        ));
+        oauth::run_authorization_code_flow(&oauth_config, &cid, csecret.as_deref(), &final_scopes)
+            .await?
     };
 
     // 5. Store tokens locally
@@ -1442,6 +1371,7 @@ async fn cmd_credentials_add_oauth(
             Some(final_scopes)
         };
         cred.oauth_token_endpoint_auth_method = Some(oauth_config.token_endpoint_auth_method);
+        cred.oauth_client_id_param_name = oauth_config.client_id_param_name;
     }
 
     node_config.save(config_file)?;

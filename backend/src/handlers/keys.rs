@@ -321,6 +321,15 @@ pub async fn update_key(
             body.is_active,
         )
         .await?;
+
+        if body.node_id.is_some() || body.auth_method.is_some() {
+            unified_key_service::reconcile_provider_key_for_service_routing(
+                &state.db,
+                &user_id_str,
+                &key_id,
+            )
+            .await?;
+        }
     }
 
     // Return refreshed view

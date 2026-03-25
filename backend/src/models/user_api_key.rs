@@ -12,7 +12,7 @@ pub struct UserApiKey {
     pub user_id: String,
     pub label: String,
 
-    /// "api_key" | "oauth2" | "bearer" | "basic"
+    /// "api_key" | "oauth2" | "bearer" | "basic" | "node_managed" | "ssh_certificate"
     pub credential_type: String,
 
     // --- Primary credential (encrypted) ---

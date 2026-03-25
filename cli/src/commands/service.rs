@@ -100,8 +100,8 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 }
             }
 
-            if let Some(node) = via_node {
-                body.insert("node_id".into(), Value::String(node));
+            if let Some(ref node) = via_node {
+                body.insert("node_id".into(), Value::String(node.clone()));
             }
 
             // Resolve credential: --credential flag > --credential-env > interactive prompt
@@ -125,6 +125,23 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
 
             let result: Value = api.post("/keys", &body).await?;
             print_add_result(&api, &result, auth.output)?;
+            if let Some(node_id) = via_node.as_deref() {
+                let result_slug = result["slug"]
+                    .as_str()
+                    .or(result["service_slug"].as_str())
+                    .unwrap_or("-");
+                eprintln!();
+                eprintln!("Next step: configure the credential on node {node_id}.");
+                if custom {
+                    eprintln!(
+                        "  Run `nyxid node credentials add ... --service {result_slug}` on that node."
+                    );
+                } else {
+                    eprintln!(
+                        "  Run `nyxid node credentials setup --service {result_slug}` on that node."
+                    );
+                }
+            }
             Ok(())
         }
 
@@ -384,6 +401,9 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 .as_str()
                 .or(svc["external_key_id"].as_str())
                 .ok_or_else(|| anyhow::anyhow!("No external credential found for this service"))?;
+            if svc["credential_type"].as_str() == Some("node_managed") {
+                bail!("This service is node-managed. Update the credential on the node instead.");
+            }
 
             let credential = if let Some(c) = credential {
                 c
@@ -521,9 +541,6 @@ async fn run_oauth_add(
 
     // Fetch catalog to get provider info and create a placeholder unified key first.
     let catalog: Value = api.get(&format!("/catalog/{slug}")).await?;
-    let provider_id = catalog["provider_config_id"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("No provider found for slug: {slug}"))?;
     let label = catalog["name"]
         .as_str()
         .map(str::to_string)
@@ -545,6 +562,18 @@ async fn run_oauth_add(
     let key_id = key_result["id"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Created key response did not include an id"))?;
+
+    if via_node.is_some() {
+        print_add_result(api, &key_result, auth.output)?;
+        eprintln!();
+        eprintln!("Next step: run this on the node that owns the credential:");
+        eprintln!("  nyxid node credentials setup --service {slug}");
+        return Ok(());
+    }
+
+    let provider_id = catalog["provider_config_id"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("No provider found for slug: {slug}"))?;
     let redirect_path = format!("/keys/{key_id}");
     let initiate: Value = api
         .get(&format!(
@@ -582,9 +611,6 @@ async fn run_device_code_add(
 
     // Fetch catalog to get provider info and create a placeholder unified key first.
     let catalog: Value = api.get(&format!("/catalog/{slug}")).await?;
-    let provider_id = catalog["provider_config_id"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("No provider found for slug: {slug}"))?;
     let label = catalog["name"]
         .as_str()
         .map(str::to_string)
@@ -605,6 +631,18 @@ async fn run_device_code_add(
     let key_id = key_result["id"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Created key response did not include an id"))?;
+
+    if via_node.is_some() {
+        print_add_result(api, &key_result, auth.output)?;
+        eprintln!();
+        eprintln!("Next step: run this on the node that owns the credential:");
+        eprintln!("  nyxid node credentials setup --service {slug}");
+        return Ok(());
+    }
+
+    let provider_id = catalog["provider_config_id"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("No provider found for slug: {slug}"))?;
 
     // Initiate device code flow
     let initiate: Value = api

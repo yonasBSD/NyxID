@@ -70,8 +70,8 @@ erDiagram
         string id PK
         string user_id
         string slug "auto-generated"
-        string endpoint_id FK "optional if node-routed"
-        string api_key_id FK "optional if node-managed"
+        string endpoint_id FK
+        string api_key_id FK
         string auth_method "bearer, header, query, etc"
         string auth_key_name "Authorization, X-API-Key, etc"
         string node_id FK "optional: route via node"
@@ -83,7 +83,7 @@ erDiagram
     UserEndpoint {
         string id PK
         string user_id
-        string url "target URL"
+        string url "target URL (may be empty on NyxID when the node stores it locally)"
         string label
         string catalog_service_id FK "optional"
     }
@@ -93,7 +93,7 @@ erDiagram
         string user_id
         string credential_type "api_key, oauth2, bearer, node_managed, ssh_certificate"
         bytes credential_encrypted "optional if node-managed"
-        string status "active, expired, revoked"
+        string status "active, expired, revoked, pending_auth"
     }
 
     ApiKey {
@@ -195,6 +195,7 @@ graph TB
     subgraph "nyxid node subcommand (node agent)"
         REGISTER["nyxid node register<br/>Register with NyxID"]
         START["nyxid node start<br/>Start WS connection"]
+        SETUP["nyxid node credentials setup<br/>Catalog-guided local setup"]
         CREDS["nyxid node credentials add<br/>Add API key credentials"]
         OAUTH_NODE["nyxid node credentials add-oauth<br/>Local OAuth flow"]
         OC_NODE["nyxid node openclaw connect<br/>OpenClaw via node"]
@@ -205,7 +206,7 @@ graph TB
     SERVICE --> PROXY
     NODE_CMD -.->|"register-token"| REGISTER
     REGISTER --> START
-    START --> CREDS & OAUTH_NODE & OC_NODE
+    START --> SETUP & CREDS & OAUTH_NODE & OC_NODE
 ```
 
 ## API Key Scoping
@@ -246,7 +247,7 @@ flowchart TD
     ROUTE -->|"Via Node"| NODE["Select node<br/>Configure on node agent"]
 
     DIRECT --> DONE["Service created<br/>Ready to proxy"]
-    NODE --> NODE_SETUP["Run on node:<br/>nyxid node credentials add<br/>or nyxid node credentials add-oauth"]
+    NODE --> NODE_SETUP["Run on node:<br/>nyxid node credentials setup --service <slug><br/>or use add/add-oauth for manual setup"]
     NODE_SETUP --> DONE
 
     style DONE fill:#4f8,stroke:#333

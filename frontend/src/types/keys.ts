@@ -56,6 +56,8 @@ export interface CatalogEntry {
   readonly device_code_url: string | null;
   readonly default_scopes: readonly string[] | null;
   readonly supports_pkce: boolean | null;
+  readonly oauth_client_id: string | null;
+  readonly client_id_param_name: string | null;
 }
 
 export interface CatalogListResponse {

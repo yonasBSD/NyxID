@@ -123,6 +123,7 @@ pub async fn push_oauth_credential_to_nodes(
             "user_id": user_id,
             "provider_config_id": provider_config_id,
             "status": "active",
+            "credential_type": { "$ne": "node_managed" },
         })
         .await
     {

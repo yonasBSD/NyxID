@@ -245,9 +245,14 @@ function ApiKeySection({
           </p>
         )}
 
-        {credentialType === "oauth2" && status === "pending_auth" ? (
+        {credentialType === "node_managed" ? (
           <p className="text-xs text-muted-foreground">
-            Complete the provider authentication flow to activate this service.
+            This credential is managed on the node agent. Update it on the node
+            instead of storing it in NyxID.
+          </p>
+        ) : status === "pending_auth" ? (
+          <p className="text-xs text-muted-foreground">
+            Complete the required credential setup to activate this service.
           </p>
         ) : credentialType === "oauth2" ? (
           <p className="text-xs text-muted-foreground">

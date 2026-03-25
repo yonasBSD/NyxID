@@ -134,6 +134,9 @@ pub struct CredentialConfig {
     /// Token endpoint auth method: "client_secret_post" | "client_secret_basic"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth_token_endpoint_auth_method: Option<String>,
+    /// Alternate OAuth client ID parameter name (e.g. "client_key" for TikTok)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_client_id_param_name: Option<String>,
 }
 
 impl CredentialConfig {
@@ -159,6 +162,7 @@ impl CredentialConfig {
             oauth_client_secret_encrypted: None,
             oauth_scopes: None,
             oauth_token_endpoint_auth_method: None,
+            oauth_client_id_param_name: None,
         }
     }
 
@@ -184,6 +188,7 @@ impl CredentialConfig {
             oauth_client_secret_encrypted: None,
             oauth_scopes: None,
             oauth_token_endpoint_auth_method: None,
+            oauth_client_id_param_name: None,
         }
     }
 }

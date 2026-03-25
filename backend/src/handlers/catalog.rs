@@ -69,6 +69,10 @@ pub struct CatalogEntryResponse {
     pub token_endpoint_auth_method: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extra_auth_params: Option<HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oauth_client_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id_param_name: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -90,7 +94,7 @@ pub async fn list_catalog(
     State(state): State<AppState>,
     _auth_user: AuthUser,
 ) -> AppResult<Json<CatalogListResponse>> {
-    let entries = catalog_service::list_catalog(&state.db).await?;
+    let entries = catalog_service::list_catalog(&state.db, &state.encryption_keys).await?;
     let items = entries.into_iter().map(catalog_entry_response).collect();
     Ok(Json(CatalogListResponse { entries: items }))
 }
@@ -114,7 +118,8 @@ pub async fn get_catalog_entry(
     _auth_user: AuthUser,
     Path(slug): Path<String>,
 ) -> AppResult<Json<CatalogEntryResponse>> {
-    let entry = catalog_service::get_catalog_entry(&state.db, &slug).await?;
+    let entry =
+        catalog_service::get_catalog_entry(&state.db, &state.encryption_keys, &slug).await?;
     Ok(Json(catalog_entry_response(entry)))
 }
 
@@ -156,5 +161,7 @@ fn catalog_entry_response(entry: catalog_service::CatalogEntry) -> CatalogEntryR
         device_code_format: entry.device_code_format,
         token_endpoint_auth_method: entry.token_endpoint_auth_method,
         extra_auth_params: entry.extra_auth_params,
+        oauth_client_id: entry.oauth_client_id,
+        client_id_param_name: entry.client_id_param_name,
     }
 }

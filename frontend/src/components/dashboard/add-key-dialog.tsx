@@ -1493,24 +1493,8 @@ export function AddKeyDialog({
   }
 
   function handleNodeSetupSubmit() {
-    if (
-      selectedEntry &&
-      (selectedEntry.provider_type === "oauth2" ||
-        selectedEntry.provider_type === "device_code")
-    ) {
-      const needsUserCreds =
-        selectedEntry.credential_mode === "user" ||
-        selectedEntry.credential_mode === "both";
-      setStep(
-        needsUserCreds
-          ? "oauth_credentials"
-          : selectedEntry.provider_type === "device_code"
-            ? "device_code"
-            : "oauth",
-      );
-      return;
-    }
-
+    // Node routing: create the service directly. No OAuth/credentials needed --
+    // the node agent handles auth locally via `nyxid node credentials setup`.
     const isSshCustom = !selectedEntry && form.serviceType === "ssh";
     const params = selectedEntry
       ? {

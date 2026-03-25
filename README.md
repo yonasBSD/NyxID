@@ -214,8 +214,8 @@ It provides a complete identity layer: user registration, session management, Op
 ### Credential Nodes (Node Proxy)
 - Run lightweight credential nodes on your own infrastructure via the `nyxid node` subcommand
 - Credentials never transit NyxID -- the node injects them locally before forwarding to the downstream service
-- Selective per-service routing: bind specific services to a node, keep others on NyxID
-- Automatic fallback to NyxID-stored credentials when a node is offline
+- Selective per-service routing: route specific services through a node, keep others on NyxID
+- Automatic fallback to NyxID-stored credentials when a node is offline, but only for services that still have a server-side credential
 - Streaming proxy support: SSE/chunked responses streamed through the WebSocket tunnel in real time
 - Node-routed SSH support: the same WebSocket control plane can bridge raw SSH TCP sessions for bound services
 - Multi-node failover: priority-based routing with health-aware automatic failback
@@ -843,7 +843,7 @@ NyxID supports user-operated **credential nodes** that keep API keys and tokens 
 
 **Key features:**
 - **Selective routing:** Bind specific services to a node; unbound services use NyxID-stored credentials
-- **Automatic fallback:** If the node is offline, requests transparently fall back to the standard proxy
+- **Automatic fallback:** If the node is offline, requests transparently fall back to the standard proxy only when a NyxID-side credential still exists
 - **Streaming proxy:** SSE/chunked responses streamed through the WebSocket tunnel in real time
 - **Multi-node failover:** Priority-based routing with health-aware node selection
 - **HMAC request signing:** HMAC-SHA256 integrity verification with replay protection

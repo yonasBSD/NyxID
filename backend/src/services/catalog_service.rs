@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use futures::TryStreamExt;
 use mongodb::bson::doc;
 
+use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
@@ -46,12 +47,15 @@ pub struct CatalogEntry {
     pub device_code_format: Option<String>,
     pub token_endpoint_auth_method: Option<String>,
     pub extra_auth_params: Option<HashMap<String, String>>,
+    pub oauth_client_id: Option<String>,
+    pub client_id_param_name: Option<String>,
 }
 
 fn build_catalog_entry(
     svc: DownstreamService,
     provider: Option<&ProviderConfig>,
     spr: Option<&ServiceProviderRequirement>,
+    oauth_client_id: Option<String>,
 ) -> CatalogEntry {
     CatalogEntry {
         service_type: svc.service_type.clone(),
@@ -103,12 +107,35 @@ fn build_catalog_entry(
         device_code_format: provider.map(|p| p.device_code_format.clone()),
         token_endpoint_auth_method: provider.map(|p| p.token_endpoint_auth_method.clone()),
         extra_auth_params: provider.and_then(|p| p.extra_auth_params.clone()),
+        oauth_client_id,
+        client_id_param_name: provider.and_then(|p| p.client_id_param_name.clone()),
+    }
+}
+
+async fn decrypt_provider_client_id(
+    provider: &ProviderConfig,
+    encryption_keys: &EncryptionKeys,
+) -> AppResult<Option<String>> {
+    let Some(encrypted) = provider.client_id_encrypted.as_ref() else {
+        return Ok(None);
+    };
+
+    let decrypted = encryption_keys.decrypt(encrypted).await?;
+    let client_id = String::from_utf8(decrypted)
+        .map_err(|_| AppError::Internal("Failed to decode provider client_id".to_string()))?;
+    if client_id.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(client_id))
     }
 }
 
 /// List catalog entries available for user key creation.
 /// Filters to connection-category + provider-linked services.
-pub async fn list_catalog(db: &mongodb::Database) -> AppResult<Vec<CatalogEntry>> {
+pub async fn list_catalog(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+) -> AppResult<Vec<CatalogEntry>> {
     let services: Vec<DownstreamService> = db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
         .find(doc! {
@@ -154,25 +181,34 @@ pub async fn list_catalog(db: &mongodb::Database) -> AppResult<Vec<CatalogEntry>
             .await?
     };
 
-    let entries = services
-        .into_iter()
-        .map(|svc| {
-            let provider = svc
-                .provider_config_id
-                .as_ref()
-                .and_then(|pid| providers.iter().find(|p| &p.id == pid));
+    let mut resolved_entries = Vec::with_capacity(services.len());
+    for svc in services {
+        let provider = svc
+            .provider_config_id
+            .as_ref()
+            .and_then(|pid| providers.iter().find(|p| &p.id == pid));
 
-            let spr = sprs.iter().find(|r| r.service_id == svc.id);
+        let spr = sprs.iter().find(|r| r.service_id == svc.id);
 
-            build_catalog_entry(svc, provider, spr)
-        })
-        .collect();
+        let oauth_client_id = match provider {
+            Some(provider) if provider.credential_mode != "user" => {
+                decrypt_provider_client_id(provider, encryption_keys).await?
+            }
+            _ => None,
+        };
 
-    Ok(entries)
+        resolved_entries.push(build_catalog_entry(svc, provider, spr, oauth_client_id));
+    }
+
+    Ok(resolved_entries)
 }
 
 /// Get single catalog entry by slug.
-pub async fn get_catalog_entry(db: &mongodb::Database, slug: &str) -> AppResult<CatalogEntry> {
+pub async fn get_catalog_entry(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    slug: &str,
+) -> AppResult<CatalogEntry> {
     let svc = db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
         .find_one(doc! { "slug": slug, "is_active": true })
@@ -192,5 +228,17 @@ pub async fn get_catalog_entry(db: &mongodb::Database, slug: &str) -> AppResult<
         .find_one(doc! { "service_id": &svc.id })
         .await?;
 
-    Ok(build_catalog_entry(svc, provider.as_ref(), spr.as_ref()))
+    let oauth_client_id = match provider.as_ref() {
+        Some(provider) if provider.credential_mode != "user" => {
+            decrypt_provider_client_id(provider, encryption_keys).await?
+        }
+        _ => None,
+    };
+
+    Ok(build_catalog_entry(
+        svc,
+        provider.as_ref(),
+        spr.as_ref(),
+        oauth_client_id,
+    ))
 }

@@ -152,8 +152,11 @@ export function useUpdateUserService() {
       const { serviceId, ...body } = params;
       return api.put<void>(`/user-services/${serviceId}`, body);
     },
-    onSuccess: () => {
+    onSuccess: (_data, variables) => {
       void queryClient.invalidateQueries({ queryKey: ["keys"] });
+      void queryClient.invalidateQueries({
+        queryKey: ["keys", variables.serviceId],
+      });
     },
   });
 }
