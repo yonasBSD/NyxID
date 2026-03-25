@@ -79,10 +79,10 @@ Configure the node agent with the registration token:
 
 ```bash
 # File-based storage (default, works on all platforms)
-nyxid-node register --token nyx_nreg_<64_hex_chars>
+nyxid node register --token nyx_nreg_<64_hex_chars>
 
 # OS keychain storage (macOS Keychain, Windows Credential Manager, Linux Secret Service)
-nyxid-node register --token nyx_nreg_<64_hex_chars> --keychain
+nyxid node register --token nyx_nreg_<64_hex_chars> --keychain
 ```
 
 The node agent will:
@@ -94,7 +94,7 @@ The node agent will:
 
 The auth token (`nyx_nauth_...`) is the node's long-lived credential for reconnecting. The signing secret is the HMAC shared secret for request integrity verification. Both are shown only once during registration. Store them securely.
 
-To migrate an existing node between storage backends later, use `nyxid-node migrate --to keychain` (or `--to file`).
+To migrate an existing node between storage backends later, use `nyxid node migrate --to keychain` (or `--to file`).
 
 ### Reconnecting
 

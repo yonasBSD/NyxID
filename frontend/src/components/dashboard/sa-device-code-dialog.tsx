@@ -121,9 +121,7 @@ export function SaDeviceCodeDialog({
                   setStep("success");
                   break;
                 case "expired":
-                  setErrorMessage(
-                    "Authentication expired. Please try again.",
-                  );
+                  setErrorMessage("Authentication expired. Please try again.");
                   setStep("error");
                   break;
                 case "denied":
@@ -268,12 +266,7 @@ export function SaDeviceCodeDialog({
             </div>
 
             <div className="flex justify-center">
-              <Button
-                type="button"
-                variant="default"
-                size="lg"
-                asChild
-              >
+              <Button type="button" variant="default" size="lg" asChild>
                 <a
                   href={verificationUri}
                   target="_blank"
@@ -289,7 +282,9 @@ export function SaDeviceCodeDialog({
               <ol className="list-decimal list-inside space-y-1">
                 <li>Click the link above to open the authentication page</li>
                 <li>Enter the code shown above</li>
-                <li>Sign in with the account to link to this service account</li>
+                <li>
+                  Sign in with the account to link to this service account
+                </li>
               </ol>
             </div>
 

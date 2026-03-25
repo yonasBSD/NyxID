@@ -83,6 +83,15 @@ enum NodeMessage {
     WebTerminalClosed(WsWebTerminalClosedMsg),
     #[serde(rename = "ssh_exec_result")]
     SshExecResult(WsSshExecResultMsg),
+    #[serde(rename = "credential_update_ack")]
+    CredentialUpdateAck {
+        #[serde(default)]
+        service_slug: Option<String>,
+        #[serde(default)]
+        status: Option<String>,
+        #[serde(default)]
+        error: Option<String>,
+    },
 }
 
 fn decode_base64_payload(
@@ -579,6 +588,29 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
                         error: result.error,
                     },
                 );
+            }
+            NodeMessage::CredentialUpdateAck {
+                service_slug,
+                status,
+                error,
+            } => {
+                let slug = service_slug.as_deref().unwrap_or("unknown");
+                let st = status.as_deref().unwrap_or("unknown");
+                if st == "ok" {
+                    tracing::info!(
+                        node_id = %node_id_reader,
+                        slug = %slug,
+                        "Node acknowledged credential update"
+                    );
+                } else {
+                    let err = error.as_deref().unwrap_or("unknown");
+                    tracing::warn!(
+                        node_id = %node_id_reader,
+                        slug = %slug,
+                        error = %err,
+                        "Node failed to apply credential update"
+                    );
+                }
             }
             NodeMessage::Register { .. } | NodeMessage::Auth { .. } => {
                 // Already authenticated, ignore duplicate auth messages

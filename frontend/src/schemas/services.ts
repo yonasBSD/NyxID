@@ -70,7 +70,8 @@ export const sshServiceConfigSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["allowed_principals"],
-        message: "At least one SSH principal is required when certificate auth is enabled",
+        message:
+          "At least one SSH principal is required when certificate auth is enabled",
       });
     }
   });
@@ -202,9 +203,7 @@ export const updateServiceSchema = z
       .url("Must be a valid URL")
       .optional()
       .or(z.literal("")),
-    identity_propagation_mode: z
-      .enum(IDENTITY_PROPAGATION_MODES)
-      .optional(),
+    identity_propagation_mode: z.enum(IDENTITY_PROPAGATION_MODES).optional(),
     identity_include_user_id: z.boolean().optional(),
     identity_include_email: z.boolean().optional(),
     identity_include_name: z.boolean().optional(),
@@ -260,5 +259,5 @@ export const redirectUriSchema = z
   .url("Must be a valid URL")
   .refine(
     (val) => val.startsWith("https://") || val.startsWith("http://"),
-    "URI must use https:// or http://"
+    "URI must use https:// or http://",
   );

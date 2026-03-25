@@ -104,10 +104,7 @@ function chatgptConfig(params: AiToolConfigParams): string {
   ].join("\n");
 }
 
-const GENERATORS: Record<
-  AiTool,
-  (params: AiToolConfigParams) => string
-> = {
+const GENERATORS: Record<AiTool, (params: AiToolConfigParams) => string> = {
   cursor: cursorConfig,
   "claude-code": claudeCodeConfig,
   codex: codexConfig,

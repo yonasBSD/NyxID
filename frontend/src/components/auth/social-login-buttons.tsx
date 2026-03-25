@@ -49,9 +49,7 @@ const SOCIAL_PROVIDERS = [
 
 type ProviderId = (typeof SOCIAL_PROVIDERS)[number]["id"];
 
-const ALLOWED_PROVIDER_IDS = new Set<string>(
-  SOCIAL_PROVIDERS.map((p) => p.id),
-);
+const ALLOWED_PROVIDER_IDS = new Set<string>(SOCIAL_PROVIDERS.map((p) => p.id));
 
 interface SocialLoginButtonsProps {
   readonly returnTo?: string;
@@ -84,7 +82,9 @@ export function SocialLoginButtons({ returnTo }: SocialLoginButtonsProps) {
   }
 
   return (
-    <div className={`grid gap-3 ${enabledProviders.length <= 2 ? "grid-cols-2" : "grid-cols-3"}`}>
+    <div
+      className={`grid gap-3 ${enabledProviders.length <= 2 ? "grid-cols-2" : "grid-cols-3"}`}
+    >
       {enabledProviders.map((provider) => (
         <Button
           key={provider.id}
@@ -95,7 +95,9 @@ export function SocialLoginButtons({ returnTo }: SocialLoginButtonsProps) {
           aria-label={`Sign in with ${provider.label}`}
         >
           {provider.icon}
-          <span className="text-xs font-medium text-muted-foreground">{provider.label}</span>
+          <span className="text-xs font-medium text-muted-foreground">
+            {provider.label}
+          </span>
         </Button>
       ))}
     </div>

@@ -20,7 +20,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Separator } from "@/components/ui/separator";
 import { toast } from "sonner";
-import { Copy, ExternalLink, Plus, ArrowRight } from "lucide-react";
+import { Copy, Plus } from "lucide-react";
 import { useDeveloperApps } from "@/hooks/use-developer-apps";
 import { usePublicConfig } from "@/hooks/use-public-config";
 import {
@@ -80,217 +80,17 @@ function EmptyState() {
   );
 }
 
-interface DashboardLink {
-  readonly to: string;
-  readonly label: string;
+
+function buildPrompt(baseUrl: string): string {
+  return `Read ${baseUrl}/llms.txt to understand what NyxID can do, then help me with whatever I need. The NyxID server is at ${baseUrl} and the dashboard is at ${baseUrl.replace('/api', '').replace(':3001', ':3000')}. Use the nyxid CLI for all operations -- if it's not installed, help me install it first (requires Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh). For secrets, always use --credential-env to read from environment variables. Use --output json for machine-readable output.`;
 }
 
-interface QuickPrompt {
-  readonly title: string;
-  readonly description: string;
-  readonly prompt: string;
-  readonly links: readonly DashboardLink[];
-}
-
-const API_KEY_PREAMBLE = `My NyxID API key is stored in the environment variable NYXID_API_KEY. Use $NYXID_API_KEY in commands -- NEVER ask me to paste it into chat. When I need to enter any secret (API keys, credentials, tokens for services or providers), ask me to set it as an environment variable first (e.g., tell me to run: ! export SECRET_NAME="value" in Claude Code, or set it in a separate terminal for other tools), then use $SECRET_NAME in commands. Alternatively, direct me to the NyxID dashboard UI to enter it securely. Never put secret values directly in commands. `;
-
-function buildQuickPrompts(baseUrl: string): readonly QuickPrompt[] {
-  return [
-    {
-      title: "Register a service and connect credentials",
-      description:
-        "Add an external API, internal service, or OIDC provider. Connect via direct credentials (API key, bearer token) or through a provider's OAuth flow (e.g., Codex, GitHub).",
-      prompt: `${API_KEY_PREAMBLE}Read ${baseUrl}/llms-full.txt then help me register a new service in NyxID and connect to it. I need help choosing the right auth method (header, bearer, basic, oidc, or none) and service category. Also show me how to connect credentials -- either by entering an API key directly, or by connecting through a provider's OAuth flow if one is available (e.g., OpenAI Codex device code flow, GitHub OAuth).`,
-      links: [
-        { to: "/services", label: "Services" },
-        { to: "/connections", label: "Connections" },
-        { to: "/providers", label: "Providers" },
-      ],
-    },
-    {
-      title: "Set up MCP proxy for AI clients",
-      description:
-        "Configure Cursor, Claude Code, or Codex to use NyxID as an MCP proxy with automatic credential injection.",
-      prompt: `${API_KEY_PREAMBLE}Read ${baseUrl}/llms-full.txt then help me set up the NyxID MCP proxy in my AI coding tool so I can call APIs through it.`,
-      links: [],
-    },
-    {
-      title: "Install and configure a node agent",
-      description:
-        "Deploy an on-premise node agent that keeps credentials on your infrastructure. NyxID routes requests through it.",
-      prompt: `${API_KEY_PREAMBLE}Read ${baseUrl}/llms-full.txt then walk me through installing the nyxid-node agent, registering it, adding credentials, and binding services to it.`,
-      links: [{ to: "/nodes", label: "Nodes" }],
-    },
-    {
-      title: "Set up a provider (OAuth / API Key / Device Code)",
-      description:
-        "Register an external OAuth service (admin or user-provided credentials), API key provider, or device code flow.",
-      prompt: `${API_KEY_PREAMBLE}Read ${baseUrl}/llms-full.txt then help me set up a new provider in NyxID. I need to choose between credential modes (admin provides credentials, users bring their own developer app, or both) and provider types (oauth2, api_key, device_code).`,
-      links: [{ to: "/providers/manage", label: "Providers" }],
-    },
-    {
-      title: "Set up approvals and notifications",
-      description:
-        "Require approval before accessing sensitive services. Get notified via Telegram or push notifications when approval is needed.",
-      prompt: `${API_KEY_PREAMBLE}Read ${baseUrl}/llms-full.txt then help me set up approval workflows for my NyxID services. I want to configure which services require approval, set up Telegram notifications for approval requests, and understand how to approve or deny requests.`,
-      links: [
-        { to: "/approvals/settings", label: "Notifications" },
-        { to: "/approvals/history", label: "Approvals" },
-      ],
-    },
-    {
-      title: "Set up SSH services",
-      description:
-        "Register an SSH service with certificate-based auth, execute remote commands, or open interactive terminals.",
-      prompt: `${API_KEY_PREAMBLE}Read ${baseUrl}/llms-full.txt then help me register an SSH service in NyxID with certificate-based authentication, and show me how to issue certificates, execute remote commands, and open SSH tunnels.`,
-      links: [{ to: "/services", label: "Services" }],
-    },
-    {
-      title: "Use the LLM gateway",
-      description:
-        "Proxy LLM API calls (OpenAI-compatible) through NyxID with automatic credential injection.",
-      prompt: `${API_KEY_PREAMBLE}Read ${baseUrl}/llms-full.txt then help me set up and use the NyxID LLM gateway to proxy requests to LLM providers like OpenAI with automatic credential injection.`,
-      links: [
-        { to: "/providers", label: "Providers" },
-        { to: "/connections", label: "Connections" },
-      ],
-    },
-    {
-      title: "Connect OpenClaw AI gateway",
-      description:
-        "Connect a self-hosted OpenClaw instance to NyxID. Route messages through OpenClaw channels, access skills and workspaces, and proxy requests through a node agent.",
-      prompt: `${API_KEY_PREAMBLE}Read ${baseUrl}/llms-full.txt then help me connect my self-hosted OpenClaw AI gateway to NyxID. I want to:\n1. Connect OpenClaw as a provider (gateway URL + bearer token)\n2. Set up a node agent to proxy requests through my local OpenClaw instance\n3. Optionally set up channel integration so NyxID can interact with OpenClaw messaging channels (WhatsApp, Telegram, Discord, etc.)\n\nMy OpenClaw gateway is running at http://localhost:18789. Walk me through the fastest setup path -- ideally using the node agent CLI.`,
-      links: [
-        { to: "/providers", label: "Providers" },
-        { to: "/nodes", label: "Nodes" },
-      ],
-    },
-    {
-      title: "Add login to my app",
-      description:
-        "Register an OAuth client and integrate NyxID login into a React, Next.js, or any web app.",
-      prompt: `${API_KEY_PREAMBLE}Read ${baseUrl}/llms-full.txt then help me add "Sign in with NyxID" to my app. The NyxID server is at ${baseUrl}.`,
-      links: [{ to: "/developer/apps", label: "Developer Apps" }],
-    },
-    {
-      title: "Create and manage API keys",
-      description:
-        "Create API keys for programmatic access without going through the OAuth flow.",
-      prompt: `${API_KEY_PREAMBLE}Read ${baseUrl}/llms-full.txt then help me create and manage NyxID API keys for programmatic access.`,
-      links: [{ to: "/api-keys", label: "API Keys" }],
-    },
-  ] as const;
-}
-
-function QuickPromptsCard({ baseUrl }: { readonly baseUrl: string }) {
-  const prompts = useMemo(() => buildQuickPrompts(baseUrl), [baseUrl]);
+function AiPromptCard({ baseUrl }: { readonly baseUrl: string }) {
+  const prompt = useMemo(() => buildPrompt(baseUrl), [baseUrl]);
 
   const handleCopy = useCallback(async (text: string) => {
     try {
       await navigator.clipboard.writeText(text);
-      toast.success("Copied prompt to clipboard");
-    } catch {
-      toast.error("Failed to copy");
-    }
-  }, []);
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-base">Quick Start Prompts</CardTitle>
-        <CardDescription>
-          Copy a prompt and paste it into your AI assistant. Each prompt
-          references <code className="text-[10px]">$NYXID_API_KEY</code> so
-          your AI can make API calls without the key appearing in chat.
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 space-y-3">
-          <p className="text-sm font-medium">Before you start</p>
-          <p className="text-xs text-muted-foreground">
-            Create an API key with{" "}
-            <code className="rounded bg-muted px-1 py-0.5 text-[10px]">read write</code>{" "}
-            scopes from the{" "}
-            <Link to="/api-keys" className="text-primary underline underline-offset-2">
-              API Keys
-            </Link>{" "}
-            page, then set it as an environment variable:
-          </p>
-          <div className="relative">
-            <pre className="overflow-x-auto rounded-md border border-border bg-muted px-3 py-2 font-mono text-xs">
-              export NYXID_API_KEY="nyxid_..."
-            </pre>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="absolute right-1 top-1 h-6 w-6"
-              onClick={() => void handleCopy('export NYXID_API_KEY="nyxid_..."')}
-            >
-              <Copy className="h-3 w-3" />
-            </Button>
-          </div>
-          <p className="text-[11px] text-muted-foreground">
-            Never paste secrets into AI chat. The prompts below tell your AI to
-            use <code className="rounded bg-muted px-1 py-0.5 text-[10px]">$NYXID_API_KEY</code>{" "}
-            from the environment. For other secrets (service API keys, provider
-            tokens), the AI will ask you to set them as env vars using{" "}
-            <code className="rounded bg-muted px-1 py-0.5 text-[10px]">! export</code>{" "}
-            (Claude Code) or in a separate terminal, or direct you to the
-            dashboard UI.
-          </p>
-        </div>
-        {prompts.map((p) => (
-          <div
-            key={p.title}
-            className="rounded-lg border border-border p-3 space-y-2"
-          >
-            <div className="flex items-start justify-between gap-2">
-              <div className="min-w-0">
-                <p className="text-sm font-medium">{p.title}</p>
-                <p className="text-xs text-muted-foreground">
-                  {p.description}
-                </p>
-              </div>
-              <div className="flex shrink-0 gap-1">
-                {p.links.map((link) => (
-                  <Button
-                    key={link.to}
-                    variant="ghost"
-                    size="sm"
-                    className="h-7 gap-1 text-xs"
-                    asChild
-                  >
-                    <Link to={link.to}>
-                      {link.label}
-                      <ArrowRight className="h-3 w-3" />
-                    </Link>
-                  </Button>
-                ))}
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-7 gap-1 text-xs"
-                  onClick={() => void handleCopy(p.prompt)}
-                >
-                  <Copy className="h-3 w-3" />
-                  Copy prompt
-                </Button>
-              </div>
-            </div>
-          </div>
-        ))}
-      </CardContent>
-    </Card>
-  );
-}
-
-function LlmsTxtCard({ baseUrl }: { readonly baseUrl: string }) {
-  const shortUrl = `${baseUrl}/llms.txt`;
-  const fullUrl = `${baseUrl}/llms-full.txt`;
-
-  const handleCopy = useCallback(async (url: string) => {
-    try {
-      await navigator.clipboard.writeText(url);
       toast.success("Copied to clipboard");
     } catch {
       toast.error("Failed to copy");
@@ -300,63 +100,42 @@ function LlmsTxtCard({ baseUrl }: { readonly baseUrl: string }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Direct URL for Any AI</CardTitle>
+        <CardTitle className="text-base">AI Agent Prompt</CardTitle>
         <CardDescription>
-          Tell your AI agent to read one of these URLs for full NyxID context
-          with your deployment's actual endpoints.
+          Copy this prompt and paste it into any AI assistant (Claude, Cursor,
+          Codex, ChatGPT, etc.). The AI will read the NyxID playbook and help
+          you with anything -- adding services, managing keys, setting up nodes,
+          SSH, MCP, approvals, and more.
         </CardDescription>
       </CardHeader>
-      <CardContent className="space-y-3">
-        <div className="flex items-center gap-2 rounded-lg border border-border bg-muted px-3 py-2">
-          <code className="flex-1 truncate font-mono text-xs">{shortUrl}</code>
+      <CardContent className="space-y-4">
+        <div className="relative">
+          <pre className="overflow-x-auto whitespace-pre-wrap rounded-lg border border-border bg-muted p-4 font-mono text-xs leading-relaxed">
+            {prompt}
+          </pre>
           <Button
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7 shrink-0"
-            onClick={() => void handleCopy(shortUrl)}
+            variant="outline"
+            size="sm"
+            className="absolute right-2 top-2 h-7 gap-1 text-xs"
+            onClick={() => void handleCopy(prompt)}
           >
-            <Copy className="h-3.5 w-3.5" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7 shrink-0"
-            asChild
-          >
-            <a href={shortUrl} target="_blank" rel="noopener noreferrer">
-              <ExternalLink className="h-3.5 w-3.5" />
-            </a>
+            <Copy className="h-3 w-3" />
+            Copy
           </Button>
         </div>
-        <div className="flex items-center gap-2 rounded-lg border border-border bg-muted px-3 py-2">
-          <code className="flex-1 truncate font-mono text-xs">{fullUrl}</code>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7 shrink-0"
-            onClick={() => void handleCopy(fullUrl)}
-          >
-            <Copy className="h-3.5 w-3.5" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7 shrink-0"
-            asChild
-          >
-            <a href={fullUrl} target="_blank" rel="noopener noreferrer">
-              <ExternalLink className="h-3.5 w-3.5" />
-            </a>
-          </Button>
-        </div>
-        <p className="text-xs text-muted-foreground">
-          Works with ChatGPT, Claude, Gemini, or any AI that can read URLs.
-          Just say: <em>"Read {shortUrl} and help me integrate NyxID."</em>
+        <p className="text-[11px] text-muted-foreground">
+          The AI reads the full playbook at{" "}
+          <code className="rounded bg-muted px-1 py-0.5 text-[10px]">
+            {baseUrl}/llms.txt
+          </code>{" "}
+          which contains all CLI commands, API endpoints, setup guides, and
+          troubleshooting. One prompt covers everything.
         </p>
       </CardContent>
     </Card>
   );
 }
+
 
 export function AiSetupPage() {
   const { data: appsData, isLoading: appsLoading } = useDeveloperApps();
@@ -423,9 +202,7 @@ export function AiSetupPage() {
         </p>
       </div>
 
-      <LlmsTxtCard baseUrl={baseUrl} />
-
-      <QuickPromptsCard baseUrl={baseUrl} />
+      <AiPromptCard baseUrl={baseUrl} />
 
       <Separator />
 
@@ -437,8 +214,8 @@ export function AiSetupPage() {
             <CardHeader>
               <CardTitle className="text-base">MCP Config Generator</CardTitle>
               <CardDescription>
-                Select your OAuth client and AI tool to generate a ready-to-paste
-                configuration file.
+                Select your OAuth client and AI tool to generate a
+                ready-to-paste configuration file.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">

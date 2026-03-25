@@ -56,37 +56,137 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
     "x-correlation-id",
 ];
 
+/// Pre-resolved proxy target from the new UserService path.
+struct PreResolved {
+    target: proxy_service::ProxyTarget,
+    node_id: Option<String>,
+    /// The UserService ID for API key scope checks.
+    user_service_id: Option<String>,
+    has_server_credential: bool,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/proxy/{service_id}/{path}",
+    params(
+        ("service_id" = String, Path, description = "Downstream service ID (UUID)"),
+        ("path" = String, Path, description = "Downstream API path")
+    ),
+    responses(
+        (status = 200, description = "Proxied response from downstream service"),
+        (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse),
+        (status = 403, description = "Forbidden / approval required", body = crate::errors::ErrorResponse),
+        (status = 404, description = "Service not found", body = crate::errors::ErrorResponse)
+    ),
+    tag = "Proxy"
+)]
 /// ANY /api/v1/proxy/:service_id/*path
 ///
 /// Forward the request to the downstream service with credential injection,
 /// identity propagation, and delegated provider credentials.
+/// Tries the new UserService path first (by catalog_service_id), falls back to old.
 pub async fn proxy_request(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Path((service_id, path)): Path<(String, String)>,
     request: Request<Body>,
 ) -> AppResult<Response> {
+    let user_id_str = auth_user.user_id.to_string();
+
+    // Try new UserService path first (lookup by catalog_service_id)
+    if let Some(resolved) = proxy_service::resolve_proxy_target_from_user_service(
+        &state.db,
+        &state.encryption_keys,
+        &state.node_ws_manager,
+        &user_id_str,
+        None,
+        Some(&service_id),
+    )
+    .await?
+    {
+        let effective_service_id = resolved.target.service.id.clone();
+        return execute_proxy_inner(
+            &state,
+            &auth_user,
+            &effective_service_id,
+            &path,
+            request,
+            Some(PreResolved {
+                target: resolved.target,
+                node_id: resolved.node_id,
+                user_service_id: Some(resolved.user_service_id),
+                has_server_credential: resolved.has_server_credential,
+            }),
+        )
+        .await;
+    }
+
+    // Fall back to old path
     execute_proxy(&state, &auth_user, &service_id, &path, request).await
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/proxy/s/{slug}/{path}",
+    params(
+        ("slug" = String, Path, description = "Service slug (e.g., llm-openai, api-github)"),
+        ("path" = String, Path, description = "Downstream API path")
+    ),
+    responses(
+        (status = 200, description = "Proxied response from downstream service"),
+        (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse),
+        (status = 403, description = "Forbidden / approval required", body = crate::errors::ErrorResponse),
+        (status = 404, description = "Service not found", body = crate::errors::ErrorResponse)
+    ),
+    tag = "Proxy"
+)]
 /// ANY /api/v1/proxy/s/:slug/*path
 ///
 /// Resolve the service by slug, then forward via the shared proxy pipeline.
+/// Tries the new UserService path first (by slug), then falls back to old
+/// DownstreamService resolution.
 pub async fn proxy_request_by_slug(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Path((slug, path)): Path<(String, String)>,
     request: Request<Body>,
 ) -> AppResult<Response> {
+    let user_id_str = auth_user.user_id.to_string();
+
+    // Try new UserService path first (by slug)
+    if let Some(resolved) = proxy_service::resolve_proxy_target_from_user_service(
+        &state.db,
+        &state.encryption_keys,
+        &state.node_ws_manager,
+        &user_id_str,
+        Some(&slug),
+        None,
+    )
+    .await?
+    {
+        let effective_service_id = resolved.target.service.id.clone();
+        return execute_proxy_inner(
+            &state,
+            &auth_user,
+            &effective_service_id,
+            &path,
+            request,
+            Some(PreResolved {
+                target: resolved.target,
+                node_id: resolved.node_id,
+                user_service_id: Some(resolved.user_service_id),
+                has_server_credential: resolved.has_server_credential,
+            }),
+        )
+        .await;
+    }
+
+    // Fall back to old path
     let service = proxy_service::resolve_service_by_slug(&state.db, &slug).await?;
     execute_proxy(&state, &auth_user, &service.id, &path, request).await
 }
 
-/// Core proxy execution logic shared by UUID and slug handlers.
-///
-/// Takes the resolved service_id (UUID string) and executes the full proxy
-/// pipeline: resolve target, build identity headers, inject delegation token,
-/// resolve delegated credentials, forward request, and return response.
+/// Core proxy execution logic shared by UUID and slug handlers (old path).
 async fn execute_proxy(
     state: &AppState,
     auth_user: &AuthUser,
@@ -94,24 +194,33 @@ async fn execute_proxy(
     path: &str,
     request: Request<Body>,
 ) -> AppResult<Response> {
-    let user_id_str = auth_user.user_id.to_string();
-    let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
+    execute_proxy_inner(state, auth_user, service_id, path, request, None).await
+}
 
-    // Resolve node routing FIRST so node-backed users bypass credential checks
-    let node_route = node_routing_service::resolve_node_route(
+/// Resolve proxy target and node routing via the old DownstreamService path.
+async fn resolve_via_downstream_service(
+    state: &AppState,
+    user_id_str: &str,
+    service_id: &str,
+) -> AppResult<(
+    Option<node_routing_service::NodeRoute>,
+    proxy_service::ProxyTarget,
+    bool,
+    Option<String>,
+)> {
+    let nr = node_routing_service::resolve_node_route(
         &state.db,
-        &user_id_str,
+        user_id_str,
         service_id,
         &state.node_ws_manager,
     )
     .await?;
 
-    let (target, has_server_credential) = if node_route.is_some() {
-        // Node route available: use lenient resolution (no credential required)
+    let (t, has_cred) = if nr.is_some() {
         match proxy_service::resolve_proxy_target_lenient(
             &state.db,
             &state.encryption_keys,
-            &user_id_str,
+            user_id_str,
             service_id,
         )
         .await
@@ -120,7 +229,7 @@ async fn execute_proxy(
             Err(e) => {
                 audit_service::log_async(
                     state.db.clone(),
-                    Some(user_id_str.clone()),
+                    Some(user_id_str.to_string()),
                     "proxy_request_denied".to_string(),
                     Some(serde_json::json!({
                         "service_id": service_id,
@@ -133,11 +242,10 @@ async fn execute_proxy(
             }
         }
     } else {
-        // No node route: strict credential resolution (unchanged behavior)
         match proxy_service::resolve_proxy_target(
             &state.db,
             &state.encryption_keys,
-            &user_id_str,
+            user_id_str,
             service_id,
         )
         .await
@@ -146,7 +254,7 @@ async fn execute_proxy(
             Err(e) => {
                 audit_service::log_async(
                     state.db.clone(),
-                    Some(user_id_str.clone()),
+                    Some(user_id_str.to_string()),
                     "proxy_request_denied".to_string(),
                     Some(serde_json::json!({
                         "service_id": service_id,
@@ -159,6 +267,72 @@ async fn execute_proxy(
             }
         }
     };
+
+    Ok((nr, t, has_cred, None))
+}
+
+/// Inner proxy execution with optional pre-resolved target from UserService path.
+///
+/// When `pre_resolved` is `Some`, the target and node routing are already known
+/// (from `resolve_proxy_target_from_user_service`). When `None`, falls back to
+/// the original DownstreamService resolution.
+async fn execute_proxy_inner(
+    state: &AppState,
+    auth_user: &AuthUser,
+    service_id: &str,
+    path: &str,
+    request: Request<Body>,
+    pre_resolved: Option<PreResolved>,
+) -> AppResult<Response> {
+    let user_id_str = auth_user.user_id.to_string();
+    let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
+
+    // Resolve target and node routing
+    let (node_route, target, has_server_credential, _resolved_user_service_id) =
+        if let Some(pre) = pre_resolved {
+            // New UserService path: target already resolved
+            let node_route = pre
+                .node_id
+                .as_ref()
+                .map(|nid| node_routing_service::NodeRoute {
+                    node_id: nid.clone(),
+                    fallback_node_ids: vec![],
+                });
+
+            // API key scope enforcement
+            if let Some(ref us_id) = pre.user_service_id
+                && !auth_user.allow_all_services
+                && !auth_user.allowed_service_ids.contains(us_id)
+            {
+                return Err(AppError::ApiKeyScopeForbidden(
+                    "API key does not have access to this service".to_string(),
+                ));
+            }
+            if let Some(ref nid) = pre.node_id
+                && !auth_user.allow_all_nodes
+                && !auth_user.allowed_node_ids.contains(nid)
+            {
+                return Err(AppError::ApiKeyScopeForbidden(
+                    "API key does not have access to this node".to_string(),
+                ));
+            }
+
+            (
+                node_route,
+                pre.target,
+                pre.has_server_credential,
+                pre.user_service_id,
+            )
+        } else {
+            // Old DownstreamService path -- scoped keys must use configured services
+            if !auth_user.allow_all_services {
+                return Err(AppError::ApiKeyScopeForbidden(
+                    "Scoped API keys must use configured services".to_string(),
+                ));
+            }
+
+            resolve_via_downstream_service(state, &user_id_str, service_id).await?
+        };
 
     // Check approval if user has it enabled for this service.
     // Only direct browser sessions bypass approval; API keys, delegated tokens,

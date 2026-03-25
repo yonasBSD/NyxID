@@ -9,7 +9,10 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::{AuthUser, OptionalAuthUser};
-use crate::services::{audit_service, provider_service, user_token_service};
+use crate::services::{
+    audit_service, credential_push_service, provider_service, user_api_key_service,
+    user_token_service,
+};
 
 use super::services_helpers::validate_base_url;
 
@@ -59,6 +62,11 @@ pub struct UserTokenListResponse {
 #[derive(Debug, Serialize)]
 pub struct OAuthInitiateResponse {
     pub authorization_url: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct OAuthInitiateQuery {
+    pub redirect_path: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -186,6 +194,7 @@ pub async fn connect_api_key(
         body.gateway_url.as_deref(),
     )
     .await?;
+    sync_provider_credentials_to_unified_keys(&state, &user_id_str, &provider_id, true).await?;
 
     audit_service::log_async(
         state.db.clone(),
@@ -210,8 +219,12 @@ pub async fn initiate_oauth_connect(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Path(provider_id): Path<String>,
+    Query(query): Query<OAuthInitiateQuery>,
 ) -> AppResult<Json<OAuthInitiateResponse>> {
     let user_id_str = auth_user.user_id.to_string();
+    if let Some(ref redirect_path) = query.redirect_path {
+        validate_redirect_path(redirect_path)?;
+    }
 
     let auth_url = user_token_service::initiate_oauth_connect(
         &state.db,
@@ -220,7 +233,7 @@ pub async fn initiate_oauth_connect(
         &user_id_str,
         &provider_id,
         None,
-        None,
+        query.redirect_path.as_deref(),
     )
     .await?;
 
@@ -380,6 +393,30 @@ async fn generic_oauth_callback_impl(
                 None,
                 None,
             );
+
+            if let Err(error) =
+                sync_provider_credentials_to_unified_keys(&state, &token.user_id, provider_id, true)
+                    .await
+            {
+                audit_service::log_async(
+                    state.db.clone(),
+                    Some(token.user_id.clone()),
+                    "provider_oauth_callback_failed".to_string(),
+                    Some(serde_json::json!({
+                        "provider_id": provider_id,
+                        "error": error.to_string(),
+                        "reason": "failed_to_sync_unified_keys",
+                    })),
+                    None,
+                    None,
+                );
+                let user_msg = safe_error_message(&error);
+                if let Some(ref path) = redirect_path {
+                    return redirect_to_path(frontend_url, path, "error", Some(&user_msg));
+                }
+                return redirect_callback(frontend_url, "error", Some(&user_msg));
+            }
+
             if let Some(ref path) = redirect_path {
                 redirect_to_path(frontend_url, path, "success", None)
             } else {
@@ -476,6 +513,7 @@ pub async fn disconnect_provider(
         &provider_id,
     )
     .await?;
+    sync_provider_credentials_to_unified_keys(&state, &user_id_str, &provider_id, false).await?;
 
     audit_service::log_async(
         state.db.clone(),
@@ -508,6 +546,7 @@ pub async fn manual_refresh(
         &provider_id,
     )
     .await?;
+    sync_provider_credentials_to_unified_keys(&state, &user_id_str, &provider_id, true).await?;
 
     audit_service::log_async(
         state.db.clone(),
@@ -584,6 +623,7 @@ pub async fn poll_device_code(
     .await?;
 
     if result.status == "complete" {
+        sync_provider_credentials_to_unified_keys(&state, &user_id_str, &provider_id, true).await?;
         audit_service::log_async(
             state.db.clone(),
             Some(user_id_str),
@@ -616,6 +656,44 @@ fn safe_error_message(e: &AppError) -> String {
     }
 }
 
+async fn sync_provider_credentials_to_unified_keys(
+    state: &AppState,
+    user_id: &str,
+    provider_id: &str,
+    push_to_nodes: bool,
+) -> AppResult<()> {
+    user_api_key_service::sync_provider_token_to_api_keys(&state.db, user_id, provider_id).await?;
+
+    if push_to_nodes {
+        let db = state.db.clone();
+        let enc = state.encryption_keys.clone();
+        let ws = state.node_ws_manager.clone();
+        let uid = user_id.to_string();
+        let pid = provider_id.to_string();
+        tokio::spawn(async move {
+            credential_push_service::push_oauth_credential_to_nodes(&db, &enc, &ws, &uid, &pid)
+                .await;
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_redirect_path(path: &str) -> AppResult<()> {
+    if path.is_empty() || !path.starts_with('/') || path.starts_with("//") {
+        return Err(AppError::ValidationError(
+            "redirect_path must be a frontend path beginning with '/'".to_string(),
+        ));
+    }
+    if path.contains('\r') || path.contains('\n') {
+        return Err(AppError::ValidationError(
+            "redirect_path must not contain control characters".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 fn ensure_callback_user_matches_state(
     auth_user: Option<&AuthUser>,
     oauth_state_user_id: &str,
@@ -643,6 +721,10 @@ mod tests {
             acting_client_id: None,
             approval_owner_user_id: None,
             auth_method: AuthMethod::Session,
+            allow_all_services: true,
+            allow_all_nodes: true,
+            allowed_service_ids: vec![],
+            allowed_node_ids: vec![],
         }
     }
 

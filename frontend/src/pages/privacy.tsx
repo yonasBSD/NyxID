@@ -5,7 +5,13 @@ import { ArrowLeft } from "lucide-react";
 // ── Last updated date (update on each revision) ──
 const EFFECTIVE_DATE = "2026-02-25";
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+function Section({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
   return (
     <section className="space-y-3">
       <h2 className="text-base font-semibold text-foreground">{title}</h2>
@@ -45,14 +51,15 @@ export function PrivacyPage() {
         <div className="space-y-6 rounded-xl border border-border bg-card p-6 sm:p-8">
           <Section title="1. Introduction">
             <p>
-              NyxID (&quot;we&quot;, &quot;our&quot;, or &quot;the Service&quot;) is an identity and
-              access management platform. This Privacy Policy explains how we collect,
-              use, store, and protect your personal information when you use our
-              application and services.
+              NyxID (&quot;we&quot;, &quot;our&quot;, or &quot;the
+              Service&quot;) is an identity and access management platform. This
+              Privacy Policy explains how we collect, use, store, and protect
+              your personal information when you use our application and
+              services.
             </p>
             <p>
-              By using NyxID, you agree to the collection and use of information in
-              accordance with this policy.
+              By using NyxID, you agree to the collection and use of information
+              in accordance with this policy.
             </p>
           </Section>
 
@@ -61,24 +68,37 @@ export function PrivacyPage() {
             <ul className="list-inside list-disc space-y-1 pl-2">
               <li>Email address (for registration and communication)</li>
               <li>Display name (optional, user-provided)</li>
-              <li>Password (stored as a salted Argon2 hash, never in plaintext)</li>
+              <li>
+                Password (stored as a salted Argon2 hash, never in plaintext)
+              </li>
             </ul>
 
-            <p className="mt-3 font-medium text-foreground">Authentication Data</p>
+            <p className="mt-3 font-medium text-foreground">
+              Authentication Data
+            </p>
             <ul className="list-inside list-disc space-y-1 pl-2">
               <li>Session tokens and refresh tokens</li>
-              <li>Multi-factor authentication (MFA) secrets (encrypted at rest)</li>
-              <li>OAuth provider tokens when you connect third-party accounts</li>
+              <li>
+                Multi-factor authentication (MFA) secrets (encrypted at rest)
+              </li>
+              <li>
+                OAuth provider tokens when you connect third-party accounts
+              </li>
             </ul>
 
             <p className="mt-3 font-medium text-foreground">Technical Data</p>
             <ul className="list-inside list-disc space-y-1 pl-2">
-              <li>IP address and approximate geolocation (for security and audit)</li>
+              <li>
+                IP address and approximate geolocation (for security and audit)
+              </li>
               <li>User-agent string and device type</li>
               <li>Timestamps of login events and API requests</li>
             </ul>
             <p className="mt-2 text-muted-foreground text-sm">
-              These are received by our servers as part of normal HTTPS requests. The web application does not collect, store, or share this technical metadata beyond what the server needs for security and audit.
+              These are received by our servers as part of normal HTTPS
+              requests. The web application does not collect, store, or share
+              this technical metadata beyond what the server needs for security
+              and audit.
             </p>
           </Section>
 
@@ -86,7 +106,9 @@ export function PrivacyPage() {
             <ul className="list-inside list-disc space-y-1 pl-2">
               <li>Authenticate your identity and manage your sessions</li>
               <li>Provide single sign-on (SSO) to connected services</li>
-              <li>Enforce security policies (rate limiting, anomaly detection)</li>
+              <li>
+                Enforce security policies (rate limiting, anomaly detection)
+              </li>
               <li>Send transactional emails (verification, password reset)</li>
               <li>Generate audit logs for administrative compliance</li>
               <li>Improve and maintain the Service</li>
@@ -95,9 +117,9 @@ export function PrivacyPage() {
 
           <Section title="4. Data Storage & Security">
             <p>
-              All data is stored in encrypted MongoDB databases. Sensitive fields
-              (OAuth tokens, MFA secrets, API credentials) are encrypted with
-              AES-256 at the application layer. Passwords use Argon2id with
+              All data is stored in encrypted MongoDB databases. Sensitive
+              fields (OAuth tokens, MFA secrets, API credentials) are encrypted
+              with AES-256 at the application layer. Passwords use Argon2id with
               per-user salts.
             </p>
             <p>
@@ -108,9 +130,9 @@ export function PrivacyPage() {
 
           <Section title="5. Data Sharing">
             <p>
-              We do <strong className="text-foreground">not</strong> sell, rent, or
-              trade your personal information. We share data only in the following
-              cases:
+              We do <strong className="text-foreground">not</strong> sell, rent,
+              or trade your personal information. We share data only in the
+              following cases:
             </p>
             <ul className="list-inside list-disc space-y-1 pl-2">
               <li>
@@ -122,18 +144,18 @@ export function PrivacyPage() {
                 when required by law, regulation, or valid legal process
               </li>
               <li>
-                <strong className="text-foreground">Security:</strong>{" "}
-                to prevent fraud or protect the rights and safety of our users
+                <strong className="text-foreground">Security:</strong> to
+                prevent fraud or protect the rights and safety of our users
               </li>
             </ul>
           </Section>
 
           <Section title="6. Data Retention">
             <p>
-              Account data is retained for the lifetime of your account. When you
-              delete your account, all personal data is permanently removed within
-              30 days. Audit logs may be retained for up to 90 days for security
-              compliance before automatic purging.
+              Account data is retained for the lifetime of your account. When
+              you delete your account, all personal data is permanently removed
+              within 30 days. Audit logs may be retained for up to 90 days for
+              security compliance before automatic purging.
             </p>
           </Section>
 
@@ -147,8 +169,8 @@ export function PrivacyPage() {
               <li>Opt out of non-essential communications</li>
             </ul>
             <p>
-              These actions are available through the Settings page in your NyxID
-              dashboard, or by contacting us directly.
+              These actions are available through the Settings page in your
+              NyxID dashboard, or by contacting us directly.
             </p>
           </Section>
 
@@ -160,12 +182,12 @@ export function PrivacyPage() {
             </p>
           </Section>
 
-          <Section title="9. Children&apos;s Privacy">
+          <Section title="9. Children's Privacy">
             <p>
               NyxID is not intended for users under the age of 13. We do not
-              knowingly collect personal information from children. If you believe
-              a child has provided us with personal data, please contact us for
-              immediate removal.
+              knowingly collect personal information from children. If you
+              believe a child has provided us with personal data, please contact
+              us for immediate removal.
             </p>
           </Section>
 

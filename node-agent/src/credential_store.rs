@@ -26,6 +26,8 @@ pub enum CredentialInjection {
 #[derive(Clone)]
 pub struct ServiceCredential {
     pub injection: CredentialInjection,
+    /// Local target URL for this service (used when NyxID sends empty base_url).
+    pub target_url: Option<String>,
 }
 
 impl ServiceCredential {
@@ -59,6 +61,11 @@ impl ServiceCredential {
             CredentialInjection::QueryParam { name, value } => Some((name, value)),
             _ => None,
         }
+    }
+
+    /// Local target URL for this service.
+    pub fn target_url(&self) -> Option<&str> {
+        self.target_url.as_deref()
     }
 }
 
@@ -96,6 +103,7 @@ impl CredentialStore {
                                 name: header_name.to_string(),
                                 value: Zeroizing::new(header_value),
                             },
+                            target_url: cred_config.target_url.clone(),
                         },
                     );
                 }
@@ -119,6 +127,7 @@ impl CredentialStore {
                                 name: param_name.to_string(),
                                 value: Zeroizing::new(param_value),
                             },
+                            target_url: cred_config.target_url.clone(),
                         },
                     );
                 }
@@ -157,6 +166,7 @@ impl CredentialStore {
                                 name: header_name.to_string(),
                                 value: Zeroizing::new(value),
                             },
+                            target_url: cred_config.target_url.clone(),
                         },
                     );
                 }
@@ -177,6 +187,7 @@ impl CredentialStore {
                                 name: param_name.to_string(),
                                 value: Zeroizing::new(value),
                             },
+                            target_url: cred_config.target_url.clone(),
                         },
                     );
                 }

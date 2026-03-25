@@ -39,17 +39,23 @@ export function SshServiceInstructions({
   const principalsCommand = [
     "sudo mkdir -p /etc/ssh/auth_principals",
     ...(sshConfig.allowed_principals.length > 0
-      ? sshConfig.allowed_principals.map((p) => `echo '${p}' | sudo tee /etc/ssh/auth_principals/${p}`)
-      : [`echo '${primaryPrincipal}' | sudo tee /etc/ssh/auth_principals/${primaryPrincipal}`]),
+      ? sshConfig.allowed_principals.map(
+          (p) => `echo '${p}' | sudo tee /etc/ssh/auth_principals/${p}`,
+        )
+      : [
+          `echo '${primaryPrincipal}' | sudo tee /etc/ssh/auth_principals/${primaryPrincipal}`,
+        ]),
   ].join(" && ");
   const restartSshdLinux = "sudo systemctl restart sshd";
   const restartSshdMac = "sudo launchctl kickstart -k system/com.openssh.sshd";
 
   // Node-agent setup (for targets not directly reachable from NyxID server)
-  const nodeWsUrl = publicConfig?.node_ws_url ?? `${nyxidBaseUrl.replace("http://", "ws://").replace("https://", "wss://")}/api/v1/nodes/ws`;
+  const nodeWsUrl =
+    publicConfig?.node_ws_url ??
+    `${nyxidBaseUrl.replace("http://", "ws://").replace("https://", "wss://")}/api/v1/nodes/ws`;
   const nodeInstallCommand = "cargo install --path node-agent";
-  const nodeRegisterCommand = `nyxid-node register --token <token-from-nodes-page> --url ${nodeWsUrl}`;
-  const nodeStartCommand = "nyxid-node start";
+  const nodeRegisterCommand = `nyxid node register --token <token-from-nodes-page> --url ${nodeWsUrl}`;
+  const nodeStartCommand = "nyxid node start";
 
   return (
     <div className="space-y-6">
@@ -61,26 +67,49 @@ export function SshServiceInstructions({
             Install the NyxID CLI on your local machine and authenticate.
           </p>
         </div>
-        <CopyableField label="1. Install CLI" value={installCommand} size="sm" />
+        <CopyableField
+          label="1. Install CLI"
+          value={installCommand}
+          size="sm"
+        />
         <div className="space-y-1">
           <p className="text-xs font-medium text-muted-foreground">
             2. Authenticate (choose one)
           </p>
         </div>
-        <CopyableField label="Option A: Browser login (recommended)" value={loginCommand} size="sm" />
-        <CopyableField label="Option B: API key" value={apiKeyCommand} size="sm" />
+        <CopyableField
+          label="Option A: Browser login (recommended)"
+          value={loginCommand}
+          size="sm"
+        />
+        <CopyableField
+          label="Option B: API key"
+          value={apiKeyCommand}
+          size="sm"
+        />
         <CopyableField
           label="3. Connect"
-          value={sshConfig.certificate_auth_enabled ? certificateCommand : transportCommand}
+          value={
+            sshConfig.certificate_auth_enabled
+              ? certificateCommand
+              : transportCommand
+          }
           size="sm"
         />
         {sshConfig.certificate_auth_enabled && (
           <>
             <p className="text-xs text-muted-foreground">
-              Replace <code className="rounded bg-muted px-1 text-[10px]">{keyPlaceholder}</code> with
-              your SSH private key path ({keyHint}).
+              Replace{" "}
+              <code className="rounded bg-muted px-1 text-[10px]">
+                {keyPlaceholder}
+              </code>{" "}
+              with your SSH private key path ({keyHint}).
             </p>
-            <CopyableField label="Optional: Generate SSH config stanza" value={configCommand} size="sm" />
+            <CopyableField
+              label="Optional: Generate SSH config stanza"
+              value={configCommand}
+              size="sm"
+            />
           </>
         )}
       </div>
@@ -89,11 +118,14 @@ export function SshServiceInstructions({
       {sshConfig.certificate_auth_enabled && (
         <div className="space-y-3 rounded-[10px] border border-border bg-muted/20 p-3">
           <div className="space-y-1">
-            <h4 className="text-sm font-semibold">Target Machine Setup (Passwordless Login)</h4>
+            <h4 className="text-sm font-semibold">
+              Target Machine Setup (Passwordless Login)
+            </h4>
             <p className="text-xs text-muted-foreground">
-              Run these commands on the SSH target machine to trust NyxID certificates.
-              Each principal maps to a Unix user -- only users listed in the
-              authorized principals file can log in via that principal.
+              Run these commands on the SSH target machine to trust NyxID
+              certificates. Each principal maps to a Unix user -- only users
+              listed in the authorized principals file can log in via that
+              principal.
             </p>
           </div>
           <CopyableField
@@ -122,27 +154,36 @@ export function SshServiceInstructions({
             size="sm"
           />
           <p className="text-xs text-muted-foreground">
-            macOS: ensure Remote Login is enabled in System Settings &gt; General &gt;
-            Sharing (&nbsp;or{" "}
-            <code className="rounded bg-muted px-1 text-[10px]">sudo systemsetup -setremotelogin on</code>
+            macOS: ensure Remote Login is enabled in System Settings &gt;
+            General &gt; Sharing (&nbsp;or{" "}
+            <code className="rounded bg-muted px-1 text-[10px]">
+              sudo systemsetup -setremotelogin on
+            </code>
             ). The sshd_config path is{" "}
-            <code className="rounded bg-muted px-1 text-[10px]">/etc/ssh/sshd_config</code>{" "}
-            (same as Linux). On recent macOS, SIP may restrict direct edits to /etc/ssh/ --
-            use <code className="rounded bg-muted px-1 text-[10px]">sudo</code> to write
-            config files. Ensure CA key file permissions are{" "}
+            <code className="rounded bg-muted px-1 text-[10px]">
+              /etc/ssh/sshd_config
+            </code>{" "}
+            (same as Linux). On recent macOS, SIP may restrict direct edits to
+            /etc/ssh/ -- use{" "}
+            <code className="rounded bg-muted px-1 text-[10px]">sudo</code> to
+            write config files. Ensure CA key file permissions are{" "}
             <code className="rounded bg-muted px-1 text-[10px]">644</code> and
             auth_principals directories are{" "}
             <code className="rounded bg-muted px-1 text-[10px]">755</code>.
           </p>
           <p className="text-xs text-muted-foreground">
-            How it works: NyxID signs short-lived certificates with a specific principal
-            (e.g., &quot;{primaryPrincipal}&quot;). The target machine checks that the
-            certificate is signed by the trusted CA AND that the principal is listed in{" "}
-            <code className="rounded bg-muted px-1 text-[10px]">/etc/ssh/auth_principals/{primaryPrincipal}</code>.
-            This means even if someone has a valid NyxID certificate, they can only access
-            accounts whose principals file includes their certificate&apos;s principal.
-            NyxID verifies the user&apos;s identity (via JWT or API key) before signing
-            any certificate, and only signs principals from the service&apos;s allowed list.
+            How it works: NyxID signs short-lived certificates with a specific
+            principal (e.g., &quot;{primaryPrincipal}&quot;). The target machine
+            checks that the certificate is signed by the trusted CA AND that the
+            principal is listed in{" "}
+            <code className="rounded bg-muted px-1 text-[10px]">
+              /etc/ssh/auth_principals/{primaryPrincipal}
+            </code>
+            . This means even if someone has a valid NyxID certificate, they can
+            only access accounts whose principals file includes their
+            certificate&apos;s principal. NyxID verifies the user&apos;s
+            identity (via JWT or API key) before signing any certificate, and
+            only signs principals from the service&apos;s allowed list.
           </p>
         </div>
       )}
@@ -152,11 +193,12 @@ export function SshServiceInstructions({
         <div className="space-y-1">
           <h4 className="text-sm font-semibold">Node Agent (Required)</h4>
           <p className="text-xs text-muted-foreground">
-            A node agent is required for web terminal, command execution (API/MCP),
-            and SSH tunneling. Deploy a node agent on a machine that can reach the
-            SSH target. The node agent connects outbound to NyxID via WebSocket and
-            handles all SSH operations locally -- no inbound ports required on the
-            target network. The NyxID server never makes direct SSH connections.
+            A node agent is required for web terminal, command execution
+            (API/MCP), and SSH tunneling. Deploy a node agent on a machine that
+            can reach the SSH target. The node agent connects outbound to NyxID
+            via WebSocket and handles all SSH operations locally -- no inbound
+            ports required on the target network. The NyxID server never makes
+            direct SSH connections.
           </p>
         </div>
         <CopyableField
@@ -166,8 +208,10 @@ export function SshServiceInstructions({
         />
         <p className="text-xs text-muted-foreground">
           2. Generate a registration token from the{" "}
-          <a href="/nodes" className="underline">Nodes page</a> using
-          &quot;Register Node&quot;.
+          <a href="/nodes" className="underline">
+            Nodes page
+          </a>{" "}
+          using &quot;Register Node&quot;.
         </p>
         <CopyableField
           label="3. On the node machine: register"
@@ -181,10 +225,12 @@ export function SshServiceInstructions({
         />
         <p className="text-xs text-muted-foreground">
           5. Bind this SSH service to the node from the{" "}
-          <a href="/nodes" className="underline">Nodes page</a> &gt;
-          select your node &gt; add a service binding for &quot;{serviceSlug}&quot;.
-          When a user connects, NyxID routes the SSH tunnel through the node agent
-          instead of connecting directly.
+          <a href="/nodes" className="underline">
+            Nodes page
+          </a>{" "}
+          &gt; select your node &gt; add a service binding for &quot;
+          {serviceSlug}&quot;. When a user connects, NyxID routes the SSH tunnel
+          through the node agent instead of connecting directly.
         </p>
       </div>
     </div>

@@ -158,10 +158,7 @@ export function ApprovalHistoryPage() {
       {isLoading ? (
         <div className="space-y-2">
           {Array.from({ length: 5 }).map((_, i) => (
-            <Skeleton
-              key={`req-skel-${String(i)}`}
-              className="h-12 w-full"
-            />
+            <Skeleton key={`req-skel-${String(i)}`} className="h-12 w-full" />
           ))}
         </div>
       ) : error ? (

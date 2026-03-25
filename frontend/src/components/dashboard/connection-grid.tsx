@@ -223,7 +223,7 @@ export function ConnectionGrid() {
                               <span className="text-[10px] text-muted-foreground/60">
                                 Manage credentials via{" "}
                                 <code className="rounded bg-muted px-1 py-0.5 font-mono">
-                                  nyxid-node credentials
+                                  nyxid node credentials
                                 </code>
                               </span>
                             </div>

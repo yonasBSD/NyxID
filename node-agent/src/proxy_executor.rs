@@ -106,27 +106,42 @@ pub async fn execute_proxy_request(
     let query = request["query"].as_str();
     let base_url = request["base_url"].as_str().unwrap_or("");
 
-    if base_url.is_empty() {
-        metrics.record_error();
-        let _ = send_ws_message(
-            tx,
-            proxy_error_response(
-                request_id,
-                "Missing downstream base URL in proxy request",
-                502,
-                false,
-            ),
-        )
-        .await;
-        return;
-    }
+    // If NyxID sent an empty base_url, resolve from local credential config
+    let effective_base_url = if base_url.is_empty() {
+        match cred.target_url() {
+            Some(url) => url,
+            None => {
+                metrics.record_error();
+                let _ = send_ws_message(
+                    tx,
+                    proxy_error_response(
+                        request_id,
+                        &format!(
+                            "No target URL configured for service '{service_slug}'. \
+                             Run: nyxid-node credentials add --service {service_slug} --url <URL> ..."
+                        ),
+                        502,
+                        false,
+                    ),
+                )
+                .await;
+                return;
+            }
+        }
+    } else {
+        base_url
+    };
 
     let normalized_path = if path.starts_with('/') {
         path.to_string()
     } else {
         format!("/{path}")
     };
-    let mut url = format!("{}{}", base_url.trim_end_matches('/'), normalized_path);
+    let mut url = format!(
+        "{}{}",
+        effective_base_url.trim_end_matches('/'),
+        normalized_path
+    );
     if let Some(q) = query
         && !q.is_empty()
     {

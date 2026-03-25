@@ -45,9 +45,7 @@ function makeService(
   };
 }
 
-function makeProvider(
-  overrides: Partial<ProviderConfig> = {},
-): ProviderConfig {
+function makeProvider(overrides: Partial<ProviderConfig> = {}): ProviderConfig {
   return {
     id: "provider-1",
     slug: "provider-1",
@@ -138,9 +136,9 @@ describe("isOidcService", () => {
   });
 
   it("returns true when oauth_client_id is set", () => {
-    expect(
-      isOidcService(makeService({ oauth_client_id: "client-123" })),
-    ).toBe(true);
+    expect(isOidcService(makeService({ oauth_client_id: "client-123" }))).toBe(
+      true,
+    );
   });
 
   it("returns false when none of the conditions match", () => {
@@ -196,15 +194,21 @@ describe("isProvider", () => {
 
 describe("needsUserCredentials", () => {
   it("returns false for admin mode", () => {
-    expect(needsUserCredentials(makeProvider({ credential_mode: "admin" }))).toBe(false);
+    expect(
+      needsUserCredentials(makeProvider({ credential_mode: "admin" })),
+    ).toBe(false);
   });
 
   it("returns true for user mode", () => {
-    expect(needsUserCredentials(makeProvider({ credential_mode: "user" }))).toBe(true);
+    expect(
+      needsUserCredentials(makeProvider({ credential_mode: "user" })),
+    ).toBe(true);
   });
 
   it("returns true for both mode", () => {
-    expect(needsUserCredentials(makeProvider({ credential_mode: "both" }))).toBe(true);
+    expect(
+      needsUserCredentials(makeProvider({ credential_mode: "both" })),
+    ).toBe(true);
   });
 });
 

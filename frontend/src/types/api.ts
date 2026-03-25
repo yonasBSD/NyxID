@@ -13,12 +13,32 @@ export interface User {
 export interface ApiKey {
   readonly id: string;
   readonly name: string;
+  readonly description: string | null;
   readonly key_prefix: string;
   readonly scopes: string;
   readonly created_at: string;
   readonly last_used_at: string | null;
   readonly expires_at: string | null;
   readonly is_active: boolean;
+  readonly allowed_service_ids: readonly string[];
+  readonly allowed_node_ids: readonly string[];
+  readonly allow_all_services: boolean;
+  readonly allow_all_nodes: boolean;
+  readonly allowed_services: readonly AllowedServiceInfo[];
+  readonly allowed_nodes: readonly AllowedNodeInfo[];
+}
+
+export interface AllowedServiceInfo {
+  readonly id: string;
+  readonly slug: string;
+  readonly label: string;
+  readonly catalog_service_name: string | null;
+}
+
+export interface AllowedNodeInfo {
+  readonly id: string;
+  readonly name: string;
+  readonly status: string;
 }
 
 export interface ApiKeyCreateResponse {
@@ -379,7 +399,9 @@ export type SocialTokenExchangeProvider = "google" | "github" | "apple";
 export interface SocialTokenExchangeRequest {
   readonly grant_type: "urn:ietf:params:oauth:grant-type:token-exchange";
   readonly subject_token: string;
-  readonly subject_token_type: "urn:ietf:params:oauth:token-type:id_token" | "urn:ietf:params:oauth:token-type:access_token";
+  readonly subject_token_type:
+    | "urn:ietf:params:oauth:token-type:id_token"
+    | "urn:ietf:params:oauth:token-type:access_token";
   readonly client_id: string;
   readonly client_secret?: string;
   readonly provider: SocialTokenExchangeProvider;

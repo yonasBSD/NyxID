@@ -62,7 +62,9 @@ export function ProviderDetailPage() {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 font-display text-lg font-semibold">Provider not found</h3>
+        <h3 className="mb-2 font-display text-lg font-semibold">
+          Provider not found
+        </h3>
         <p className="mb-4 text-sm text-muted-foreground">
           The provider you are looking for does not exist or has been deleted.
         </p>
@@ -164,19 +166,18 @@ export function ProviderDetailPage() {
               badge
               badgeVariant={provider.supports_pkce ? "success" : "secondary"}
             />
-            {provider.default_scopes &&
-              provider.default_scopes.length > 0 && (
-                <div className="flex items-start justify-between text-sm">
-                  <span className="text-muted-foreground">Default Scopes</span>
-                  <div className="flex flex-wrap gap-1 justify-end max-w-[60%]">
-                    {provider.default_scopes.map((scope) => (
-                      <Badge key={scope} variant="outline">
-                        {scope}
-                      </Badge>
-                    ))}
-                  </div>
+            {provider.default_scopes && provider.default_scopes.length > 0 && (
+              <div className="flex items-start justify-between text-sm">
+                <span className="text-muted-foreground">Default Scopes</span>
+                <div className="flex flex-wrap gap-1 justify-end max-w-[60%]">
+                  {provider.default_scopes.map((scope) => (
+                    <Badge key={scope} variant="outline">
+                      {scope}
+                    </Badge>
+                  ))}
                 </div>
-              )}
+              </div>
+            )}
           </DetailSection>
         </>
       )}
@@ -212,19 +213,18 @@ export function ProviderDetailPage() {
                 copyable
               />
             )}
-            {provider.default_scopes &&
-              provider.default_scopes.length > 0 && (
-                <div className="flex items-start justify-between text-sm">
-                  <span className="text-muted-foreground">Default Scopes</span>
-                  <div className="flex flex-wrap gap-1 justify-end max-w-[60%]">
-                    {provider.default_scopes.map((scope) => (
-                      <Badge key={scope} variant="outline">
-                        {scope}
-                      </Badge>
-                    ))}
-                  </div>
+            {provider.default_scopes && provider.default_scopes.length > 0 && (
+              <div className="flex items-start justify-between text-sm">
+                <span className="text-muted-foreground">Default Scopes</span>
+                <div className="flex flex-wrap gap-1 justify-end max-w-[60%]">
+                  {provider.default_scopes.map((scope) => (
+                    <Badge key={scope} variant="outline">
+                      {scope}
+                    </Badge>
+                  ))}
                 </div>
-              )}
+              </div>
+            )}
           </DetailSection>
         </>
       )}
@@ -259,11 +259,7 @@ export function ProviderDetailPage() {
           <Separator />
           <DetailSection title="Display">
             {provider.icon_url && (
-              <DetailRow
-                label="Icon URL"
-                value={provider.icon_url}
-                copyable
-              />
+              <DetailRow label="Icon URL" value={provider.icon_url} copyable />
             )}
             {provider.documentation_url && (
               <DetailRow

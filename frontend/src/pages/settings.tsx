@@ -77,7 +77,9 @@ export function SettingsPage() {
   return (
     <div className="space-y-8">
       <div>
-        <h2 className="font-display text-3xl md:text-5xl font-normal tracking-tight">Settings</h2>
+        <h2 className="font-display text-3xl md:text-5xl font-normal tracking-tight">
+          Settings
+        </h2>
         <p className="text-muted-foreground">
           Manage your account settings and preferences.
         </p>
@@ -511,7 +513,10 @@ function SecurityTab() {
           </DialogHeader>
 
           <div className="space-y-2">
-            <label className="text-sm font-medium" htmlFor="delete-account-email">
+            <label
+              className="text-sm font-medium"
+              htmlFor="delete-account-email"
+            >
               Email
             </label>
             <Input
@@ -580,11 +585,7 @@ function buildClaudeCodeCommand(mcpUrl: string): string {
 }
 
 function buildCursorConfig(mcpUrl: string): string {
-  return JSON.stringify(
-    { mcpServers: { nyxid: { url: mcpUrl } } },
-    null,
-    2,
-  );
+  return JSON.stringify({ mcpServers: { nyxid: { url: mcpUrl } } }, null, 2);
 }
 
 function buildClaudeCodeConfig(mcpUrl: string): string {
@@ -610,7 +611,13 @@ function buildCodexConfig(mcpUrl: string): string {
   return `[mcp_servers.nyxid]\nurl = "${mcpUrl}"`;
 }
 
-function CopyInlineButton({ text, label }: { readonly text: string; readonly label: string }) {
+function CopyInlineButton({
+  text,
+  label,
+}: {
+  readonly text: string;
+  readonly label: string;
+}) {
   const [copied, setCopied] = useState(false);
 
   async function handleCopy() {
@@ -729,7 +736,10 @@ function McpTab() {
               <pre className="rounded-[10px] bg-muted px-3 py-2 pr-10 font-mono text-xs overflow-x-auto">
                 {claudeConfig}
               </pre>
-              <CopyInlineButton text={claudeConfig} label="Claude Code config" />
+              <CopyInlineButton
+                text={claudeConfig}
+                label="Claude Code config"
+              />
             </div>
           </div>
         </CardContent>

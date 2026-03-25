@@ -89,6 +89,10 @@ fn default_ssh_io_timeout_secs() -> u64 {
 pub struct CredentialConfig {
     /// "header" or "query_param"
     pub injection_method: String,
+    /// Target URL for this service (e.g., "https://api.openai.com/v1").
+    /// Used when NyxID sends an empty base_url (node-resolved routing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_url: Option<String>,
     /// For header injection: the header name (e.g. "Authorization")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header_name: Option<String>,
@@ -101,6 +105,87 @@ pub struct CredentialConfig {
     /// For query_param injection: AES-GCM encrypted parameter value (base64)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub param_value_encrypted: Option<String>,
+
+    // --- OAuth fields ---
+    /// OAuth-managed credential: token refresh handled automatically
+    #[serde(default)]
+    pub oauth_managed: bool,
+    /// OAuth token URL (for refresh)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_token_url: Option<String>,
+    /// AES-GCM encrypted OAuth access token (base64)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_access_token_encrypted: Option<String>,
+    /// AES-GCM encrypted OAuth refresh token (base64)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_refresh_token_encrypted: Option<String>,
+    /// Token expiry time (ISO 8601)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_token_expires_at: Option<String>,
+    /// AES-GCM encrypted OAuth client ID (base64)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_client_id_encrypted: Option<String>,
+    /// AES-GCM encrypted OAuth client secret (base64)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_client_secret_encrypted: Option<String>,
+    /// OAuth scopes (space-separated)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_scopes: Option<String>,
+    /// Token endpoint auth method: "client_secret_post" | "client_secret_basic"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_token_endpoint_auth_method: Option<String>,
+}
+
+impl CredentialConfig {
+    /// Create a header credential config with default OAuth fields.
+    pub fn new_header(
+        header_name: String,
+        header_value_encrypted: Option<String>,
+        target_url: Option<String>,
+    ) -> Self {
+        Self {
+            injection_method: "header".to_string(),
+            target_url,
+            header_name: Some(header_name),
+            header_value_encrypted,
+            param_name: None,
+            param_value_encrypted: None,
+            oauth_managed: false,
+            oauth_token_url: None,
+            oauth_access_token_encrypted: None,
+            oauth_refresh_token_encrypted: None,
+            oauth_token_expires_at: None,
+            oauth_client_id_encrypted: None,
+            oauth_client_secret_encrypted: None,
+            oauth_scopes: None,
+            oauth_token_endpoint_auth_method: None,
+        }
+    }
+
+    /// Create a query_param credential config with default OAuth fields.
+    pub fn new_query_param(
+        param_name: String,
+        param_value_encrypted: Option<String>,
+        target_url: Option<String>,
+    ) -> Self {
+        Self {
+            injection_method: "query_param".to_string(),
+            target_url,
+            header_name: None,
+            header_value_encrypted: None,
+            param_name: Some(param_name),
+            param_value_encrypted,
+            oauth_managed: false,
+            oauth_token_url: None,
+            oauth_access_token_encrypted: None,
+            oauth_refresh_token_encrypted: None,
+            oauth_token_expires_at: None,
+            oauth_client_id_encrypted: None,
+            oauth_client_secret_encrypted: None,
+            oauth_scopes: None,
+            oauth_token_endpoint_auth_method: None,
+        }
+    }
 }
 
 impl NodeConfig {
@@ -193,13 +278,7 @@ impl NodeConfig {
         let encrypted_value = enc.encrypt(header_value)?;
         self.credentials.insert(
             service_slug.to_string(),
-            CredentialConfig {
-                injection_method: "header".to_string(),
-                header_name: Some(header_name.to_string()),
-                header_value_encrypted: Some(encrypted_value),
-                param_name: None,
-                param_value_encrypted: None,
-            },
+            CredentialConfig::new_header(header_name.to_string(), Some(encrypted_value), None),
         );
         Ok(())
     }
@@ -216,13 +295,7 @@ impl NodeConfig {
         let encrypted_value = enc.encrypt(param_value)?;
         self.credentials.insert(
             service_slug.to_string(),
-            CredentialConfig {
-                injection_method: "query_param".to_string(),
-                header_name: None,
-                header_value_encrypted: None,
-                param_name: Some(param_name.to_string()),
-                param_value_encrypted: Some(encrypted_value),
-            },
+            CredentialConfig::new_query_param(param_name.to_string(), Some(encrypted_value), None),
         );
         Ok(())
     }
@@ -244,18 +317,17 @@ impl NodeConfig {
         service_slug: &str,
         header_name: &str,
         header_value: &str,
+        target_url: Option<&str>,
         backend: &SecretBackend,
     ) -> Result<()> {
         let encrypted = backend.store_credential_value(service_slug, header_value)?;
         self.credentials.insert(
             service_slug.to_string(),
-            CredentialConfig {
-                injection_method: "header".to_string(),
-                header_name: Some(header_name.to_string()),
-                header_value_encrypted: encrypted,
-                param_name: None,
-                param_value_encrypted: None,
-            },
+            CredentialConfig::new_header(
+                header_name.to_string(),
+                encrypted,
+                target_url.map(String::from),
+            ),
         );
         Ok(())
     }
@@ -266,18 +338,17 @@ impl NodeConfig {
         service_slug: &str,
         param_name: &str,
         param_value: &str,
+        target_url: Option<&str>,
         backend: &SecretBackend,
     ) -> Result<()> {
         let encrypted = backend.store_credential_value(service_slug, param_value)?;
         self.credentials.insert(
             service_slug.to_string(),
-            CredentialConfig {
-                injection_method: "query_param".to_string(),
-                header_name: None,
-                header_value_encrypted: None,
-                param_name: Some(param_name.to_string()),
-                param_value_encrypted: encrypted,
-            },
+            CredentialConfig::new_query_param(
+                param_name.to_string(),
+                encrypted,
+                target_url.map(String::from),
+            ),
         );
         Ok(())
     }

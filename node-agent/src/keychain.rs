@@ -1,8 +1,8 @@
-use std::cell::RefCell;
 #[cfg(test)]
 use std::collections::HashMap;
 #[cfg(test)]
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -203,7 +203,7 @@ pub struct VaultData {
 /// Reads trigger one keychain prompt; subsequent access is from memory.
 pub struct KeychainVault {
     backend: KeychainBackend,
-    vault: RefCell<VaultData>,
+    vault: Mutex<VaultData>,
 }
 
 impl KeychainVault {
@@ -211,7 +211,7 @@ impl KeychainVault {
     pub fn new(node_id: &str) -> Self {
         Self {
             backend: KeychainBackend::new(node_id),
-            vault: RefCell::new(VaultData::default()),
+            vault: Mutex::new(VaultData::default()),
         }
     }
 
@@ -219,7 +219,7 @@ impl KeychainVault {
     pub fn new_mock(node_id: &str) -> Self {
         Self {
             backend: KeychainBackend::new_mock(node_id),
-            vault: RefCell::new(VaultData::default()),
+            vault: Mutex::new(VaultData::default()),
         }
     }
 
@@ -236,7 +236,7 @@ impl KeychainVault {
                     .map_err(|e| Error::Keychain(format!("Corrupt vault data: {e}")))?;
                 Ok(Self {
                     backend,
-                    vault: RefCell::new(vault),
+                    vault: Mutex::new(vault),
                 })
             }
             None => {
@@ -245,7 +245,7 @@ impl KeychainVault {
                 let vault = Self::migrate_from_individual(&backend, config)?;
                 let kv = Self {
                     backend,
-                    vault: RefCell::new(vault),
+                    vault: Mutex::new(vault),
                 };
                 kv.flush()?;
                 kv.cleanup_individual(config);
@@ -307,7 +307,7 @@ impl KeychainVault {
     }
 
     fn flush(&self) -> Result<()> {
-        let vault = self.vault.borrow();
+        let vault = self.vault.lock().unwrap();
         let json = serde_json::to_string(&*vault)
             .map_err(|e| Error::Keychain(format!("Failed to serialize vault: {e}")))?;
         self.backend.set(VAULT_KEY, &json)
@@ -322,13 +322,14 @@ impl KeychainVault {
     // -- Auth token --
 
     pub fn set_auth_token(&self, token: &str) -> Result<()> {
-        self.vault.borrow_mut().auth_token = Some(token.to_string());
+        self.vault.lock().unwrap().auth_token = Some(token.to_string());
         self.flush()
     }
 
     pub fn get_auth_token(&self) -> Result<String> {
         self.vault
-            .borrow()
+            .lock()
+            .unwrap()
             .auth_token
             .clone()
             .ok_or_else(|| Error::Keychain("No auth token in vault".to_string()))
@@ -337,19 +338,20 @@ impl KeychainVault {
     // -- Signing secret --
 
     pub fn set_signing_secret(&self, secret: &str) -> Result<()> {
-        self.vault.borrow_mut().signing_secret = Some(secret.to_string());
+        self.vault.lock().unwrap().signing_secret = Some(secret.to_string());
         self.flush()
     }
 
     pub fn get_signing_secret(&self) -> Result<Option<String>> {
-        Ok(self.vault.borrow().signing_secret.clone())
+        Ok(self.vault.lock().unwrap().signing_secret.clone())
     }
 
     // -- Service credentials --
 
     pub fn set_credential(&self, slug: &str, value: &str) -> Result<()> {
         self.vault
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .credentials
             .insert(slug.to_string(), value.to_string());
         self.flush()
@@ -357,7 +359,8 @@ impl KeychainVault {
 
     pub fn get_credential(&self, slug: &str) -> Result<String> {
         self.vault
-            .borrow()
+            .lock()
+            .unwrap()
             .credentials
             .get(slug)
             .cloned()
@@ -365,17 +368,17 @@ impl KeychainVault {
     }
 
     pub fn delete_credential(&self, slug: &str) -> Result<()> {
-        self.vault.borrow_mut().credentials.remove(slug);
+        self.vault.lock().unwrap().credentials.remove(slug);
         self.flush()
     }
 
     pub fn delete_auth_token(&self) -> Result<()> {
-        self.vault.borrow_mut().auth_token = None;
+        self.vault.lock().unwrap().auth_token = None;
         self.flush()
     }
 
     pub fn delete_signing_secret(&self) -> Result<()> {
-        self.vault.borrow_mut().signing_secret = None;
+        self.vault.lock().unwrap().signing_secret = None;
         self.flush()
     }
 
@@ -400,13 +403,7 @@ mod tests {
     }
 
     fn header_credential() -> CredentialConfig {
-        CredentialConfig {
-            injection_method: "header".to_string(),
-            header_name: Some("Authorization".to_string()),
-            header_value_encrypted: None,
-            param_name: None,
-            param_value_encrypted: None,
-        }
+        CredentialConfig::new_header("Authorization".to_string(), None, None)
     }
 
     #[test]

@@ -17,6 +17,16 @@ PATH_PART="$3"
 BODY="${4:-}"
 BASE_URL="${NYXID_BASE_URL:-https://nyx-api.chrono-ai.fun}"
 
+# Prefer the nyxid CLI when available
+if command -v nyxid >/dev/null 2>&1; then
+  proxy_args=(proxy request --service "${SERVICE}" --method "${METHOD}" --path "${PATH_PART}" --base-url "${BASE_URL}")
+  if [[ -n "${BODY}" ]]; then
+    proxy_args+=(--body "${BODY}")
+  fi
+  exec nyxid "${proxy_args[@]}"
+fi
+
+# Fallback to curl
 auth_args=()
 if [[ -n "${NYXID_API_KEY:-}" ]]; then
   auth_args=(-H "X-API-Key: ${NYXID_API_KEY}")

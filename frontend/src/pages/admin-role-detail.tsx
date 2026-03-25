@@ -128,9 +128,7 @@ export function AdminRoleDetailPage() {
       setBulkAssignOpen(false);
     } catch (err) {
       toast.error(
-        err instanceof ApiError
-          ? err.message
-          : "Failed to bulk assign role",
+        err instanceof ApiError ? err.message : "Failed to bulk assign role",
       );
     }
   }
@@ -148,7 +146,9 @@ export function AdminRoleDetailPage() {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 font-display text-lg font-semibold">Role not found</h3>
+        <h3 className="mb-2 font-display text-lg font-semibold">
+          Role not found
+        </h3>
         <p className="mb-4 text-sm text-muted-foreground">
           The role you are looking for does not exist or has been deleted.
         </p>
@@ -363,8 +363,9 @@ export function AdminRoleDetailPage() {
           <DialogHeader>
             <DialogTitle>Delete Role</DialogTitle>
             <DialogDescription>
-              Are you sure you want to delete &quot;{role.name}&quot;? It will be
-              removed from all users and groups. This action cannot be undone.
+              Are you sure you want to delete &quot;{role.name}&quot;? It will
+              be removed from all users and groups. This action cannot be
+              undone.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -388,16 +389,13 @@ export function AdminRoleDetailPage() {
           <DialogHeader>
             <DialogTitle>Assign Role to All Users</DialogTitle>
             <DialogDescription>
-              This will assign the &quot;{role.name}&quot; role to every existing
-              user who does not already have it. Users who already have this role
-              will not be affected.
+              This will assign the &quot;{role.name}&quot; role to every
+              existing user who does not already have it. Users who already have
+              this role will not be affected.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setBulkAssignOpen(false)}
-            >
+            <Button variant="outline" onClick={() => setBulkAssignOpen(false)}>
               Cancel
             </Button>
             <Button

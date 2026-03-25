@@ -25,11 +25,16 @@ export function DashboardLayout() {
 
       {/* ── Mobile drawer overlay ── */}
       {sidebarOpen && (
-        <div className="fixed inset-0 z-40 flex md:hidden" style={{ paddingTop: "var(--sat)" }}>
+        <div
+          className="fixed inset-0 z-40 flex md:hidden"
+          style={{ paddingTop: "var(--sat)" }}
+        >
           <div
             className="fixed inset-0 bg-black/60 backdrop-blur-sm"
             onClick={closeSidebar}
-            onKeyDown={(e) => { if (e.key === "Escape") closeSidebar(); }}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") closeSidebar();
+            }}
             role="button"
             tabIndex={-1}
             aria-label="Close navigation"

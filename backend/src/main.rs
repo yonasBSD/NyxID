@@ -211,6 +211,11 @@ async fn main() {
         .await
         .expect("Failed to seed system roles");
 
+    // Run unified collection migration (idempotent, non-fatal)
+    if let Err(e) = db::migrate_to_unified_collections(&db).await {
+        tracing::warn!("Unified collection migration encountered errors: {e}");
+    }
+
     // --- Server startup ---
     tracing::info!("Starting NyxID authentication server");
     tracing::info!(port = config.port, issuer = %config.jwt_issuer, "Configuration loaded");

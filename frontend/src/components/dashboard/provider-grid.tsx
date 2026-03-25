@@ -34,9 +34,7 @@ export function ProviderGrid() {
   const disconnectMutation = useDisconnectProvider();
   const refreshMutation = useRefreshProviderToken();
 
-  const [apiKeyDialog, setApiKeyDialog] = useState<ProviderConfig | null>(
-    null,
-  );
+  const [apiKeyDialog, setApiKeyDialog] = useState<ProviderConfig | null>(null);
   const [deviceCodeDialog, setDeviceCodeDialog] =
     useState<ProviderConfig | null>(null);
   const [credentialsDialog, setCredentialsDialog] =
@@ -49,7 +47,8 @@ export function ProviderGrid() {
   function handleConnect(provider: ProviderConfig, hasUserCredentials = false) {
     if (!canConnectProvider(provider, hasUserCredentials)) {
       toast.error(
-        getProviderConnectHint(provider, hasUserCredentials) ?? "Provider is not ready to connect.",
+        getProviderConnectHint(provider, hasUserCredentials) ??
+          "Provider is not ready to connect.",
       );
       return;
     }
@@ -111,9 +110,7 @@ export function ProviderGrid() {
     setActiveProviderId(providerId);
     try {
       await disconnectMutation.mutateAsync(providerId);
-      toast.success(
-        `Disconnected from ${provider?.name ?? "provider"}`,
-      );
+      toast.success(`Disconnected from ${provider?.name ?? "provider"}`);
     } catch (error) {
       if (error instanceof ApiError) {
         toast.error(error.message);
@@ -235,10 +232,7 @@ export function ProviderGrid() {
  * then renders the presentational ProviderCard with credential data.
  */
 function ProviderCardWithCredentials(
-  props: Omit<
-    React.ComponentProps<typeof ProviderCard>,
-    "hasUserCredentials"
-  >,
+  props: Omit<React.ComponentProps<typeof ProviderCard>, "hasUserCredentials">,
 ) {
   const showCreds = needsUserCredentials(props.provider);
   const { data: credentials } = useMyProviderCredentials(
@@ -246,10 +240,5 @@ function ProviderCardWithCredentials(
   );
   const hasUserCredentials = credentials?.has_credentials === true;
 
-  return (
-    <ProviderCard
-      {...props}
-      hasUserCredentials={hasUserCredentials}
-    />
-  );
+  return <ProviderCard {...props} hasUserCredentials={hasUserCredentials} />;
 }

@@ -266,7 +266,9 @@ export function AdminUserDetailPage() {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 font-display text-lg font-semibold">User not found</h3>
+        <h3 className="mb-2 font-display text-lg font-semibold">
+          User not found
+        </h3>
         <p className="mb-4 text-sm text-muted-foreground">
           The user you are looking for does not exist or has been deleted.
         </p>
@@ -341,10 +343,7 @@ export function AdminUserDetailPage() {
           badgeVariant={user.mfa_enabled ? "success" : "secondary"}
         />
         <DetailRow label="Created" value={formatDate(user.created_at)} />
-        <DetailRow
-          label="Last Login"
-          value={formatDate(user.last_login_at)}
-        />
+        <DetailRow label="Last Login" value={formatDate(user.last_login_at)} />
       </DetailSection>
 
       <Separator />
@@ -687,11 +686,7 @@ function UserRolesSection({ userId }: { readonly userId: string }) {
   return (
     <DetailSection title="Roles">
       <div className="mb-3">
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => setAssignOpen(true)}
-        >
+        <Button size="sm" variant="outline" onClick={() => setAssignOpen(true)}>
           Assign Role
         </Button>
       </div>
@@ -703,11 +698,7 @@ function UserRolesSection({ userId }: { readonly userId: string }) {
           </p>
           <div className="flex flex-wrap gap-2">
             {directRoles.map((role) => (
-              <Badge
-                key={role.id}
-                variant="default"
-                className="gap-1"
-              >
+              <Badge key={role.id} variant="default" className="gap-1">
                 {role.name}
                 {!role.is_system && (
                   <button
@@ -748,11 +739,7 @@ function UserRolesSection({ userId }: { readonly userId: string }) {
           </p>
           <div className="flex flex-wrap gap-1">
             {effectivePermissions.map((perm) => (
-              <Badge
-                key={perm}
-                variant="outline"
-                className="font-mono text-xs"
-              >
+              <Badge key={perm} variant="outline" className="font-mono text-xs">
                 {perm}
               </Badge>
             ))}
@@ -870,11 +857,7 @@ function ConfirmDialog({
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
-          <Button
-            variant={variant}
-            onClick={onConfirm}
-            isLoading={isPending}
-          >
+          <Button variant={variant} onClick={onConfirm} isLoading={isPending}>
             {confirmLabel}
           </Button>
         </DialogFooter>

@@ -27,6 +27,11 @@ export const createApiKeySchema = z.object({
     .array(z.enum(API_KEY_SCOPES))
     .min(1, "At least one scope is required"),
   expires_at: z.string().nullable().optional(),
+  description: z.string().nullable().optional(),
+  allow_all_services: z.boolean().optional(),
+  allow_all_nodes: z.boolean().optional(),
+  allowed_service_ids: z.array(z.string()).optional(),
+  allowed_node_ids: z.array(z.string()).optional(),
 });
 
 export type CreateApiKeyFormData = z.infer<typeof createApiKeySchema>;

@@ -12,12 +12,7 @@ import { EndpointFormDialog } from "./endpoint-form-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-  Pencil,
-  Plus,
-  Trash2,
-  Wand2,
-} from "lucide-react";
+import { Pencil, Plus, Trash2, Wand2 } from "lucide-react";
 import { toast } from "sonner";
 
 interface EndpointListProps {
@@ -34,7 +29,9 @@ const METHOD_COLORS: Readonly<Record<string, string>> = {
 };
 
 function getMethodColor(method: string): string {
-  return METHOD_COLORS[method.toUpperCase()] ?? "bg-muted text-muted-foreground";
+  return (
+    METHOD_COLORS[method.toUpperCase()] ?? "bg-muted text-muted-foreground"
+  );
 }
 
 export function EndpointList({ serviceId, hasApiSpecUrl }: EndpointListProps) {
@@ -211,9 +208,7 @@ export function EndpointList({ serviceId, hasApiSpecUrl }: EndpointListProps) {
         endpoint={editingEndpoint}
         onSubmit={handleFormSubmit}
         isPending={
-          editingEndpoint
-            ? updateMutation.isPending
-            : createMutation.isPending
+          editingEndpoint ? updateMutation.isPending : createMutation.isPending
         }
       />
     </div>

@@ -199,9 +199,7 @@ export function AdminServiceAccountDetailPage() {
   async function handleRevokeTokens() {
     try {
       const result = await revokeMutation.mutateAsync(saId);
-      toast.success(
-        `${String(result.revoked_count)} token(s) revoked`,
-      );
+      toast.success(`${String(result.revoked_count)} token(s) revoked`);
     } catch (err) {
       toast.error(
         err instanceof ApiError ? err.message : "Failed to revoke tokens",
@@ -218,7 +216,9 @@ export function AdminServiceAccountDetailPage() {
       void navigate({ to: "/admin/service-accounts" });
     } catch (err) {
       toast.error(
-        err instanceof ApiError ? err.message : "Failed to delete service account",
+        err instanceof ApiError
+          ? err.message
+          : "Failed to delete service account",
       );
     } finally {
       setConfirmAction(null);
@@ -239,7 +239,9 @@ export function AdminServiceAccountDetailPage() {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 text-lg font-semibold">Service account not found</h3>
+        <h3 className="mb-2 text-lg font-semibold">
+          Service account not found
+        </h3>
         <p className="mb-4 text-sm text-muted-foreground">
           The service account you are looking for does not exist or has been
           deleted.
@@ -298,9 +300,7 @@ export function AdminServiceAccountDetailPage() {
         <DetailRow label="Allowed Scopes" value={sa.allowed_scopes} />
         <DetailRow
           label="Role IDs"
-          value={
-            sa.role_ids.length > 0 ? sa.role_ids.join(", ") : "None"
-          }
+          value={sa.role_ids.length > 0 ? sa.role_ids.join(", ") : "None"}
         />
         <DetailRow
           label="Rate Limit"
@@ -540,10 +540,7 @@ export function AdminServiceAccountDetailPage() {
             </div>
           ) : (
             <DialogFooter>
-              <Button
-                variant="outline"
-                onClick={() => setRotateOpen(false)}
-              >
+              <Button variant="outline" onClick={() => setRotateOpen(false)}>
                 Cancel
               </Button>
               <Button

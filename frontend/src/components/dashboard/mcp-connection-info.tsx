@@ -42,7 +42,13 @@ function buildCodexConfig(mcpUrl: string): string {
   return `[mcp_servers.nyxid]\nurl = "${mcpUrl}"`;
 }
 
-function CopyButton({ text, label }: { readonly text: string; readonly label: string }) {
+function CopyButton({
+  text,
+  label,
+}: {
+  readonly text: string;
+  readonly label: string;
+}) {
   const [copied, setCopied] = useState(false);
 
   async function handleCopy() {

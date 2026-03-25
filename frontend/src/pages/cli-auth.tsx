@@ -13,6 +13,7 @@ interface CliAuthSearch {
 
 interface TokenResponse {
   readonly access_token: string;
+  readonly refresh_token: string;
 }
 
 export function CliAuthPage() {
@@ -34,7 +35,9 @@ export function CliAuthPage() {
         ...(state ? { state } : {}),
       }).toString()}`;
       const returnTo = `${window.location.origin}${returnPath}`;
-      window.location.assign(`/login?return_to=${encodeURIComponent(returnTo)}`);
+      window.location.assign(
+        `/login?return_to=${encodeURIComponent(returnTo)}`,
+      );
       return;
     }
 
@@ -58,10 +61,14 @@ export function CliAuthPage() {
       <div className="flex min-h-screen items-center justify-center">
         <div className="flex max-w-sm flex-col items-center gap-4 text-center">
           <AlertCircle className="h-12 w-12 text-muted-foreground/50" />
-          <h2 className="font-display text-lg font-semibold">Invalid CLI Auth Request</h2>
+          <h2 className="font-display text-lg font-semibold">
+            Invalid CLI Auth Request
+          </h2>
           <p className="text-sm text-muted-foreground">
             This page is used by the NyxID CLI. Run{" "}
-            <code className="rounded bg-muted px-1.5 py-0.5 text-xs">nyxid login</code>{" "}
+            <code className="rounded bg-muted px-1.5 py-0.5 text-xs">
+              nyxid login
+            </code>{" "}
             from your terminal.
           </p>
           <Button variant="outline" onClick={() => void navigate({ to: "/" })}>
@@ -76,12 +83,15 @@ export function CliAuthPage() {
     <div className="flex min-h-screen items-center justify-center">
       <div className="flex max-w-sm flex-col items-center gap-4 text-center">
         <Terminal className="h-12 w-12 text-primary/60" />
-        <h2 className="font-display text-lg font-semibold">CLI Authentication</h2>
+        <h2 className="font-display text-lg font-semibold">
+          CLI Authentication
+        </h2>
         <p className="text-sm text-muted-foreground">
           Sending credentials to the NyxID CLI...
         </p>
         <p className="text-xs text-muted-foreground">
-          You can close this tab after you see a success message in your terminal.
+          You can close this tab after you see a success message in your
+          terminal.
         </p>
       </div>
     </div>
@@ -94,6 +104,7 @@ async function sendTokenToCliCallback(port: string, state?: string) {
     const response = await api.post<TokenResponse>("/auth/cli-token");
     const callbackUrl = new URL(`http://127.0.0.1:${port}/callback`);
     callbackUrl.searchParams.set("access_token", response.access_token);
+    callbackUrl.searchParams.set("refresh_token", response.refresh_token);
     if (state) {
       callbackUrl.searchParams.set("state", state);
     }

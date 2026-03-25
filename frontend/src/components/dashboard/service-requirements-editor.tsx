@@ -39,7 +39,8 @@ export function ServiceRequirementsView({
     <div className="space-y-2">
       {requirements.map((req) => {
         const provider = providerMap.get(req.provider_config_id);
-        const hasToken = userTokenProviderIds?.has(req.provider_config_id) ?? false;
+        const hasToken =
+          userTokenProviderIds?.has(req.provider_config_id) ?? false;
 
         return (
           <div

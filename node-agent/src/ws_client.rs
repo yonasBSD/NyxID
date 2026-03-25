@@ -12,10 +12,11 @@ use tokio_tungstenite::tungstenite::Message;
 use zeroize::Zeroizing;
 
 use crate::config::{NodeConfig, SshConfig};
-use crate::credential_store::SharedCredentials;
+use crate::credential_store::{CredentialStore, SharedCredentials, SharedCredentialsSender};
 use crate::error::{Error, Result};
 use crate::metrics::NodeMetrics;
 use crate::proxy_executor;
+use crate::secret_backend::SecretBackend;
 use crate::signing::{self, ReplayGuard};
 
 // ---------------------------------------------------------------------------
@@ -167,22 +168,35 @@ pub async fn register_node(
 /// Run the agent with graceful shutdown on SIGINT/SIGTERM.
 pub async fn run_with_shutdown(
     config: NodeConfig,
+    config_path: std::path::PathBuf,
     auth_token: String,
     signing_secret: Option<String>,
     credentials: SharedCredentials,
+    credential_sender: Arc<SharedCredentialsSender>,
+    backend: Arc<SecretBackend>,
 ) {
     let in_flight = Arc::new(AtomicUsize::new(0));
     let in_flight_shutdown = in_flight.clone();
     let signing_secret = signing_secret.map(|secret| Arc::new(Zeroizing::new(secret)));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let config_dir = config_path
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .to_path_buf();
+    let storage_backend = config.storage_backend.clone();
+    drop(backend);
     let mut connection_task = tokio::spawn({
         let in_flight = in_flight.clone();
         async move {
             run_connection_loop(
                 &config,
+                &config_path,
+                &config_dir,
+                &storage_backend,
                 &auth_token,
                 signing_secret,
                 &credentials,
+                &credential_sender,
                 in_flight,
                 shutdown_rx,
             )
@@ -226,11 +240,16 @@ pub async fn run_with_shutdown(
 }
 
 /// Main connection loop with exponential backoff reconnection.
+#[allow(clippy::too_many_arguments)]
 async fn run_connection_loop(
     config: &NodeConfig,
+    config_path: &std::path::Path,
+    config_dir: &std::path::Path,
+    storage_backend: &str,
     auth_token: &str,
     signing_secret: Option<SharedSigningSecret>,
     credentials: &SharedCredentials,
+    credential_sender: &Arc<SharedCredentialsSender>,
     in_flight: Arc<AtomicUsize>,
     shutdown: watch::Receiver<bool>,
 ) {
@@ -244,9 +263,13 @@ async fn run_connection_loop(
 
         match connect_and_serve(
             config,
+            config_path,
+            config_dir,
+            storage_backend,
             auth_token,
             signing_secret.clone(),
             credentials,
+            credential_sender,
             in_flight.clone(),
             shutdown.clone(),
         )
@@ -279,12 +302,17 @@ async fn run_connection_loop(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 /// Single connection lifecycle: connect, authenticate, serve requests.
 async fn connect_and_serve(
     config: &NodeConfig,
+    config_path: &std::path::Path,
+    config_dir: &std::path::Path,
+    storage_backend: &str,
     auth_token: &str,
     signing_secret: Option<SharedSigningSecret>,
     credentials: &SharedCredentials,
+    credential_sender: &Arc<SharedCredentialsSender>,
     in_flight: Arc<AtomicUsize>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
@@ -488,6 +516,26 @@ async fn connect_and_serve(
                 tokio::spawn(async move {
                     handle_ssh_exec(&parsed, &ssh_config, tx_clone, secret, replay).await;
                 });
+            }
+            Some("credential_update") => {
+                // Process credential update synchronously (SecretBackend is
+                // not Send/Sync, so we reconstruct it within this block and
+                // ensure it's dropped before any .await).
+                let ack_msg = {
+                    match SecretBackend::from_storage_backend_str(storage_backend, config_dir) {
+                        Ok(be) => {
+                            process_credential_update(&parsed, credential_sender, config_path, &be)
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "Failed to init secret backend for credential update");
+                            None
+                        }
+                    }
+                };
+                // Send ack after backend is dropped (so we can .await)
+                if let Some(ack) = ack_msg {
+                    let _ = send_ws_message(&tx, ack).await;
+                }
             }
             Some("error") => {
                 let msg = parsed["message"].as_str().unwrap_or("unknown");
@@ -1847,6 +1895,182 @@ fn write_temp_key_file(path: &std::path::Path, content: &str) -> std::io::Result
         std::fs::write(path, content)?;
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Credential update handlers (server push)
+// ---------------------------------------------------------------------------
+
+/// Process a credential update synchronously. Returns an optional JSON ack
+/// message to send over the WebSocket (avoids holding `&SecretBackend` across
+/// an .await, since `SecretBackend` is not `Send`/`Sync`).
+fn process_credential_update(
+    parsed: &serde_json::Value,
+    credential_sender: &Arc<SharedCredentialsSender>,
+    config_path: &std::path::Path,
+    backend: &SecretBackend,
+) -> Option<String> {
+    let service_slug = match parsed["service_slug"].as_str() {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            tracing::warn!("credential_update missing service_slug");
+            return None;
+        }
+    };
+
+    let injection_method = parsed["injection_method"].as_str().unwrap_or("header");
+
+    let result = match injection_method {
+        "header" => {
+            let header_name = parsed["header_name"].as_str().unwrap_or("Authorization");
+            let header_value = match parsed["header_value"].as_str() {
+                Some(v) => v,
+                None => {
+                    tracing::warn!(slug = %service_slug, "credential_update missing header_value");
+                    return Some(build_credential_ack(
+                        service_slug,
+                        "error",
+                        Some("missing header_value"),
+                    ));
+                }
+            };
+            let target_url = parsed["target_url"].as_str();
+
+            update_header_credential(
+                service_slug,
+                header_name,
+                header_value,
+                target_url,
+                credential_sender,
+                config_path,
+                backend,
+            )
+        }
+        "query_param" => {
+            let param_name = match parsed["param_name"].as_str() {
+                Some(n) => n,
+                None => {
+                    tracing::warn!(slug = %service_slug, "credential_update missing param_name");
+                    return Some(build_credential_ack(
+                        service_slug,
+                        "error",
+                        Some("missing param_name"),
+                    ));
+                }
+            };
+            let param_value = match parsed["param_value"].as_str() {
+                Some(v) => v,
+                None => {
+                    tracing::warn!(slug = %service_slug, "credential_update missing param_value");
+                    return Some(build_credential_ack(
+                        service_slug,
+                        "error",
+                        Some("missing param_value"),
+                    ));
+                }
+            };
+            let target_url = parsed["target_url"].as_str();
+
+            update_query_param_credential(
+                service_slug,
+                param_name,
+                param_value,
+                target_url,
+                credential_sender,
+                config_path,
+                backend,
+            )
+        }
+        other => {
+            tracing::warn!(method = %other, "Unknown injection_method in credential_update");
+            return Some(build_credential_ack(
+                service_slug,
+                "error",
+                Some("unknown injection_method"),
+            ));
+        }
+    };
+
+    match result {
+        Ok(()) => {
+            tracing::info!(slug = %service_slug, "Credential updated via server push");
+            Some(build_credential_ack(service_slug, "ok", None))
+        }
+        Err(e) => {
+            tracing::error!(slug = %service_slug, error = %e, "Failed to update credential");
+            Some(build_credential_ack(
+                service_slug,
+                "error",
+                Some(&e.to_string()),
+            ))
+        }
+    }
+}
+
+fn update_header_credential(
+    service_slug: &str,
+    header_name: &str,
+    header_value: &str,
+    target_url: Option<&str>,
+    credential_sender: &Arc<SharedCredentialsSender>,
+    config_path: &std::path::Path,
+    backend: &SecretBackend,
+) -> Result<()> {
+    // 1. Update config on disk
+    let mut config = NodeConfig::load(config_path)?;
+    config.add_header_credential_via(
+        service_slug,
+        header_name,
+        header_value,
+        target_url,
+        backend,
+    )?;
+    config.save(config_path)?;
+
+    // 2. Rebuild credential store from updated config and push to watch channel
+    let new_store = CredentialStore::from_config_with_backend(&config, backend)?;
+    credential_sender.update(new_store);
+
+    Ok(())
+}
+
+fn update_query_param_credential(
+    service_slug: &str,
+    param_name: &str,
+    param_value: &str,
+    target_url: Option<&str>,
+    credential_sender: &Arc<SharedCredentialsSender>,
+    config_path: &std::path::Path,
+    backend: &SecretBackend,
+) -> Result<()> {
+    // 1. Update config on disk
+    let mut config = NodeConfig::load(config_path)?;
+    config.add_query_param_credential_via(
+        service_slug,
+        param_name,
+        param_value,
+        target_url,
+        backend,
+    )?;
+    config.save(config_path)?;
+
+    // 2. Rebuild credential store from updated config and push to watch channel
+    let new_store = CredentialStore::from_config_with_backend(&config, backend)?;
+    credential_sender.update(new_store);
+
+    Ok(())
+}
+
+fn build_credential_ack(service_slug: &str, status: &str, error: Option<&str>) -> String {
+    let mut ack = serde_json::json!({
+        "type": "credential_update_ack",
+        "service_slug": service_slug,
+        "status": status,
+    });
+    if let Some(e) = error {
+        ack["error"] = serde_json::Value::String(e.to_string());
+    }
+    ack.to_string()
 }
 
 async fn send_ws_message(tx: &mpsc::Sender<String>, message: String) -> bool {

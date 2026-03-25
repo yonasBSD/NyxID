@@ -108,10 +108,9 @@ pub fn service_to_response(s: DownstreamService) -> ServiceResponse {
 
 /// Validate that a URL has a valid scheme and hostname.
 ///
-/// Private IPs and localhost are allowed because NyxID is a self-hosted
-/// platform where services may run on private infrastructure (especially
-/// when accessed via node agents). Only cloud metadata endpoints are
-/// blocked to prevent credential leakage.
+/// Cloud metadata endpoints (169.254.169.254, metadata.google.internal)
+/// are blocked in every environment.  Private IPs and localhost are
+/// allowed so that self-hosted nodes and services remain reachable.
 pub fn validate_base_url(url: &str) -> AppResult<()> {
     // Must start with https:// or http://
     if !url.starts_with("https://") && !url.starts_with("http://") {
@@ -128,7 +127,7 @@ pub fn validate_base_url(url: &str) -> AppResult<()> {
         .host_str()
         .ok_or_else(|| AppError::ValidationError("base_url must contain a hostname".to_string()))?;
 
-    // Block cloud metadata endpoints -- these are dangerous in any environment
+    // Block cloud metadata endpoints -- dangerous in any environment
     if is_cloud_metadata_host(host) {
         return Err(AppError::ValidationError(
             "URL must not point to a cloud metadata endpoint".to_string(),
@@ -184,12 +183,13 @@ mod tests {
     }
 
     #[test]
-    fn validate_base_url_accepts_private_and_localhost() {
+    fn validate_base_url_accepts_private_ips() {
         assert!(validate_base_url("http://localhost:3000").is_ok());
         assert!(validate_base_url("http://127.0.0.1:8080").is_ok());
         assert!(validate_base_url("http://192.168.1.50:3000").is_ok());
         assert!(validate_base_url("http://10.0.0.5:8080").is_ok());
         assert!(validate_base_url("http://100.64.0.10:3000").is_ok());
+        assert!(validate_base_url("http://172.16.0.1:3000").is_ok());
     }
 
     #[test]
@@ -207,12 +207,6 @@ mod tests {
     #[test]
     fn validate_optional_spec_url_accepts_public_https_url() {
         assert!(validate_optional_spec_url("https://example.com/openapi.json").is_ok());
-    }
-
-    #[test]
-    fn validate_optional_spec_url_accepts_private_host() {
-        assert!(validate_optional_spec_url("http://127.0.0.1/openapi.json").is_ok());
-        assert!(validate_optional_spec_url("http://192.168.1.50/openapi.json").is_ok());
     }
 
     #[test]

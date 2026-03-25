@@ -13,7 +13,9 @@ export function ProvidersPage() {
     <div className="space-y-8">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h2 className="font-display text-3xl font-normal tracking-tight md:text-5xl">Providers</h2>
+          <h2 className="font-display text-3xl font-normal tracking-tight md:text-5xl">
+            Providers
+          </h2>
           <p className="text-sm text-muted-foreground">
             Connect your API keys and OAuth accounts for external providers.
           </p>

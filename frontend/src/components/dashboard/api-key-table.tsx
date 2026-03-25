@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { Link } from "@tanstack/react-router";
 import {
   useApiKeys,
   useDeleteApiKey,
@@ -42,6 +43,13 @@ import { toast } from "sonner";
 function parseScopesString(scopes: string): readonly string[] {
   if (!scopes || scopes.trim().length === 0) return [];
   return scopes.trim().split(/\s+/);
+}
+
+function servicesSummary(key: ApiKey): string {
+  if (key.allow_all_services) return "All services";
+  const count = key.allowed_service_ids?.length ?? 0;
+  if (count === 0) return "None";
+  return `${String(count)} service${count === 1 ? "" : "s"}`;
 }
 
 export function ApiKeyTable() {
@@ -117,6 +125,7 @@ export function ApiKeyTable() {
             <TableHead>Name</TableHead>
             <TableHead>Key</TableHead>
             <TableHead>Scopes</TableHead>
+            <TableHead>Services</TableHead>
             <TableHead>Created</TableHead>
             <TableHead>Last Used</TableHead>
             <TableHead className="w-12">
@@ -129,7 +138,15 @@ export function ApiKeyTable() {
             const scopesList = parseScopesString(key.scopes);
             return (
               <TableRow key={key.id}>
-                <TableCell className="font-medium">{key.name}</TableCell>
+                <TableCell className="font-medium">
+                  <Link
+                    to="/keys/api-key/$keyId"
+                    params={{ keyId: key.id }}
+                    className="hover:underline"
+                  >
+                    {key.name}
+                  </Link>
+                </TableCell>
                 <TableCell>
                   <code className="rounded bg-muted px-2 py-1 font-mono text-xs">
                     {maskApiKey(key.key_prefix)}
@@ -147,6 +164,9 @@ export function ApiKeyTable() {
                       </Badge>
                     ))}
                   </div>
+                </TableCell>
+                <TableCell className="text-muted-foreground text-xs">
+                  {servicesSummary(key)}
                 </TableCell>
                 <TableCell className="text-muted-foreground">
                   {formatDate(key.created_at)}
@@ -252,10 +272,7 @@ export function ApiKeyTable() {
               aria-label="Copy API key to clipboard"
             >
               {copied ? (
-                <Check
-                  className="h-4 w-4 text-success"
-                  aria-hidden="true"
-                />
+                <Check className="h-4 w-4 text-success" aria-hidden="true" />
               ) : (
                 <Copy className="h-4 w-4" aria-hidden="true" />
               )}

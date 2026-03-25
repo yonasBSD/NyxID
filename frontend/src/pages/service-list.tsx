@@ -457,7 +457,10 @@ export function ServiceListPage() {
                     <FormItem>
                       <FormLabel>Visibility</FormLabel>
                       <Select
-                        value={field.value ?? (serviceType === "ssh" ? "private" : "public")}
+                        value={
+                          field.value ??
+                          (serviceType === "ssh" ? "private" : "public")
+                        }
                         onValueChange={field.onChange}
                       >
                         <FormControl>

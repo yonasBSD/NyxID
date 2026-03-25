@@ -35,8 +35,18 @@ const OIDC_SCOPES = [
   { id: "openid", label: "openid", required: true },
   { id: "profile", label: "profile", required: false },
   { id: "email", label: "email", required: false },
-  { id: "roles", label: "roles", required: false, hint: "Includes user roles and permissions in tokens" },
-  { id: "groups", label: "groups", required: false, hint: "Includes user group memberships in tokens" },
+  {
+    id: "roles",
+    label: "roles",
+    required: false,
+    hint: "Includes user roles and permissions in tokens",
+  },
+  {
+    id: "groups",
+    label: "groups",
+    required: false,
+    hint: "Includes user group memberships in tokens",
+  },
 ] as const;
 
 export function DeveloperAppDetailPage() {
@@ -137,7 +147,10 @@ export function DeveloperAppDetailPage() {
         <p className="text-muted-foreground">
           App not found or you do not have access.
         </p>
-        <Button variant="outline" onClick={() => void navigate({ to: "/developer/apps" })}>
+        <Button
+          variant="outline"
+          onClick={() => void navigate({ to: "/developer/apps" })}
+        >
           Back to Apps
         </Button>
       </div>
@@ -156,7 +169,10 @@ export function DeveloperAppDetailPage() {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <Button variant="outline" onClick={() => void navigate({ to: "/developer/apps" })}>
+          <Button
+            variant="outline"
+            onClick={() => void navigate({ to: "/developer/apps" })}
+          >
             Back
           </Button>
           <Button variant="outline" onClick={openEditDialog}>
@@ -188,11 +204,17 @@ export function DeveloperAppDetailPage() {
             </Badge>
           </div>
           <div className="space-y-1">
-            <p className="text-xs uppercase tracking-wide text-text-tertiary">Client ID</p>
-            <p className="break-all font-mono text-sm text-foreground">{app.id}</p>
+            <p className="text-xs uppercase tracking-wide text-text-tertiary">
+              Client ID
+            </p>
+            <p className="break-all font-mono text-sm text-foreground">
+              {app.id}
+            </p>
           </div>
           <div className="space-y-1">
-            <p className="text-xs uppercase tracking-wide text-text-tertiary">Created At</p>
+            <p className="text-xs uppercase tracking-wide text-text-tertiary">
+              Created At
+            </p>
             <p className="text-sm text-foreground">
               {new Date(app.created_at).toLocaleString()}
             </p>
@@ -217,7 +239,9 @@ export function DeveloperAppDetailPage() {
             </div>
           ))}
           {app.redirect_uris.length === 0 && (
-            <p className="text-sm text-muted-foreground">No redirect URIs configured.</p>
+            <p className="text-sm text-muted-foreground">
+              No redirect URIs configured.
+            </p>
           )}
         </CardContent>
       </Card>
@@ -226,7 +250,8 @@ export function DeveloperAppDetailPage() {
         <CardHeader>
           <CardTitle>Allowed Scopes</CardTitle>
           <CardDescription>
-            OIDC scopes this client can request. Determines what user data is included in tokens.
+            OIDC scopes this client can request. Determines what user data is
+            included in tokens.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -263,7 +288,10 @@ export function DeveloperAppDetailPage() {
               />
             </div>
             <div className="space-y-2">
-              <label className="text-sm font-medium" htmlFor="edit-redirect-uris">
+              <label
+                className="text-sm font-medium"
+                htmlFor="edit-redirect-uris"
+              >
                 Redirect URIs (one per line)
               </label>
               <textarea
@@ -297,11 +325,15 @@ export function DeveloperAppDetailPage() {
                       >
                         {scope.label}
                         {scope.required && (
-                          <span className="ml-1 text-xs text-muted-foreground">(required)</span>
+                          <span className="ml-1 text-xs text-muted-foreground">
+                            (required)
+                          </span>
                         )}
                       </label>
                       {"hint" in scope && scope.hint && (
-                        <p className="text-xs text-muted-foreground">{scope.hint}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {scope.hint}
+                        </p>
                       )}
                     </div>
                   </div>
@@ -313,7 +345,10 @@ export function DeveloperAppDetailPage() {
             <Button variant="outline" onClick={() => setEditOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={() => void handleSave()} isLoading={updateMutation.isPending}>
+            <Button
+              onClick={() => void handleSave()}
+              isLoading={updateMutation.isPending}
+            >
               Save
             </Button>
           </DialogFooter>

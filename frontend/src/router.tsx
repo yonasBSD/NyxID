@@ -17,12 +17,11 @@ import {
   LoginPage,
   RegisterPage,
   DashboardPage,
-  ApiKeysPage,
+  ApiKeyDetailPage,
   ServicesPage,
   ServiceListPage,
   ServiceDetailPage,
   ServiceEditPage,
-  ConnectionsPage,
   SettingsPage,
   GuidePage,
   ProvidersLayout,
@@ -54,6 +53,8 @@ import {
   AdminNodesPage,
   CliAuthPage,
   SshTerminalPage,
+  KeysPage,
+  KeyDetailPage,
 } from "@/pages/lazy";
 
 // ── Route tree ──
@@ -91,6 +92,13 @@ const authLayout = createRoute({
 const loginRoute = createRoute({
   path: "/login",
   getParentRoute: () => authLayout,
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { return_to?: string } => ({
+    ...(typeof search.return_to === "string"
+      ? { return_to: search.return_to }
+      : {}),
+  }),
   component: LoginPage,
 });
 
@@ -165,40 +173,100 @@ const dashboardIndexRoute = createRoute({
   component: DashboardPage,
 });
 
-const apiKeysRoute = createRoute({
+const apiKeysRedirectRoute = createRoute({
   path: "/api-keys",
   getParentRoute: () => dashboardLayout,
-  component: ApiKeysPage,
+  beforeLoad: () => {
+    throw redirect({ to: "/keys", search: { tab: "nyxid" } });
+  },
+  component: () => null,
 });
 
-const servicesLayout = createRoute({
+// -- Redirect old paths --
+
+const servicesRedirectRoute = createRoute({
   path: "/services",
   getParentRoute: () => dashboardLayout,
+  beforeLoad: () => {
+    const { user } = useAuthStore.getState();
+    if (user?.is_admin) {
+      // Admin users can still access the services management pages
+      return;
+    }
+    throw redirect({ to: "/keys", search: {} });
+  },
   component: ServicesPage,
 });
 
 const servicesIndexRoute = createRoute({
   path: "/",
-  getParentRoute: () => servicesLayout,
+  getParentRoute: () => servicesRedirectRoute,
   component: ServiceListPage,
 });
 
 const serviceDetailRoute = createRoute({
   path: "$serviceId",
-  getParentRoute: () => servicesLayout,
+  getParentRoute: () => servicesRedirectRoute,
   component: ServiceDetailPage,
 });
 
 const serviceEditRoute = createRoute({
   path: "$serviceId/edit",
-  getParentRoute: () => servicesLayout,
+  getParentRoute: () => servicesRedirectRoute,
   component: ServiceEditPage,
 });
 
-const connectionsRoute = createRoute({
+const connectionsRedirectRoute = createRoute({
   path: "/connections",
   getParentRoute: () => dashboardLayout,
-  component: ConnectionsPage,
+  beforeLoad: () => {
+    throw redirect({ to: "/keys", search: {} });
+  },
+  component: () => null,
+});
+
+const providersRedirectRoute = createRoute({
+  path: "/providers",
+  getParentRoute: () => dashboardLayout,
+  beforeLoad: () => {
+    const { user } = useAuthStore.getState();
+    if (user?.is_admin) {
+      // Admin users can still access the providers management pages
+      return;
+    }
+    throw redirect({ to: "/keys", search: {} });
+  },
+  component: ProvidersLayout,
+});
+
+const providersIndexRoute = createRoute({
+  path: "/",
+  getParentRoute: () => providersRedirectRoute,
+  component: ProvidersPage,
+});
+
+const providersCallbackRoute = createRoute({
+  path: "callback",
+  getParentRoute: () => providersRedirectRoute,
+  component: ProvidersCallbackPage,
+});
+
+const providerManageRoute = createRoute({
+  path: "manage",
+  getParentRoute: () => providersRedirectRoute,
+  component: ProviderListPage,
+});
+
+const providerDetailRoute = createRoute({
+  path: "$providerId",
+  getParentRoute: () => providersRedirectRoute,
+  component: ProviderDetailPage,
+});
+
+const providerEditRoute = createRoute({
+  path: "$providerId/edit",
+  getParentRoute: () => providersRedirectRoute,
+  component: ProviderEditPage,
 });
 
 const settingsRoute = createRoute({
@@ -243,42 +311,6 @@ const aiSetupRoute = createRoute({
   component: AiSetupPage,
 });
 
-const providersLayout = createRoute({
-  path: "/providers",
-  getParentRoute: () => dashboardLayout,
-  component: ProvidersLayout,
-});
-
-const providersIndexRoute = createRoute({
-  path: "/",
-  getParentRoute: () => providersLayout,
-  component: ProvidersPage,
-});
-
-const providersCallbackRoute = createRoute({
-  path: "callback",
-  getParentRoute: () => providersLayout,
-  component: ProvidersCallbackPage,
-});
-
-const providerManageRoute = createRoute({
-  path: "manage",
-  getParentRoute: () => providersLayout,
-  component: ProviderListPage,
-});
-
-const providerDetailRoute = createRoute({
-  path: "$providerId",
-  getParentRoute: () => providersLayout,
-  component: ProviderDetailPage,
-});
-
-const providerEditRoute = createRoute({
-  path: "$providerId/edit",
-  getParentRoute: () => providersLayout,
-  component: ProviderEditPage,
-});
-
 const notificationSettingsRoute = createRoute({
   path: "/approvals/settings",
   getParentRoute: () => dashboardLayout,
@@ -307,6 +339,27 @@ const nodeDetailRoute = createRoute({
   path: "/nodes/$nodeId",
   getParentRoute: () => dashboardLayout,
   component: NodeDetailPage,
+});
+
+const keysRoute = createRoute({
+  path: "/keys",
+  getParentRoute: () => dashboardLayout,
+  validateSearch: (search: Record<string, unknown>): { tab?: string } => ({
+    ...(typeof search.tab === "string" ? { tab: search.tab } : {}),
+  }),
+  component: KeysPage,
+});
+
+const keyDetailRoute = createRoute({
+  path: "/keys/$keyId",
+  getParentRoute: () => dashboardLayout,
+  component: KeyDetailPage,
+});
+
+const apiKeyDetailRoute = createRoute({
+  path: "/keys/api-key/$keyId",
+  getParentRoute: () => dashboardLayout,
+  component: ApiKeyDetailPage,
 });
 
 const adminLayout = createRoute({
@@ -387,14 +440,14 @@ const routeTree = rootRoute.addChildren([
   sshTerminalRoute,
   dashboardLayout.addChildren([
     dashboardIndexRoute,
-    apiKeysRoute,
-    servicesLayout.addChildren([
+    apiKeysRedirectRoute,
+    servicesRedirectRoute.addChildren([
       servicesIndexRoute,
       serviceDetailRoute,
       serviceEditRoute,
     ]),
-    connectionsRoute,
-    providersLayout.addChildren([
+    connectionsRedirectRoute,
+    providersRedirectRoute.addChildren([
       providersIndexRoute,
       providersCallbackRoute,
       providerManageRoute,
@@ -411,6 +464,9 @@ const routeTree = rootRoute.addChildren([
     notificationSettingsRoute,
     approvalHistoryRoute,
     approvalGrantsRoute,
+    keysRoute,
+    keyDetailRoute,
+    apiKeyDetailRoute,
     nodesRoute,
     nodeDetailRoute,
     adminLayout.addChildren([

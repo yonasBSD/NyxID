@@ -23,6 +23,11 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [Providers](#providers)
   - [User Provider Credentials](#user-provider-credentials)
   - [User Provider Tokens](#user-provider-tokens)
+  - [Unified Keys (Streamlined Services)](#unified-keys-streamlined-services)
+  - [User Endpoints](#user-endpoints)
+  - [External API Keys](#external-api-keys)
+  - [User Services](#user-services)
+  - [Service Catalog](#service-catalog)
   - [Sessions](#sessions)
   - [Service Endpoints](#service-endpoints)
   - [MCP Config](#mcp-config)
@@ -838,6 +843,11 @@ Create a new API key. The full key is returned only in this response and cannot 
 | `name`       | string | Yes      | Human-readable name for the key              |
 | `scopes`     | string | No       | Space-separated scopes (default: `"read"`)   |
 | `expires_at` | string | No       | ISO 8601 expiration datetime                 |
+| `description` | string | No      | Optional description of key purpose          |
+| `allowed_service_ids` | string[] | No | UserService IDs this key can proxy (empty = use `allow_all_services`) |
+| `allowed_node_ids` | string[] | No | Node IDs this key can route through (empty = use `allow_all_nodes`) |
+| `allow_all_services` | boolean | No | If true, key can access all user's external services (default: true) |
+| `allow_all_nodes` | boolean | No | If true, key can route through all user's nodes (default: true) |
 
 ```json
 {
@@ -2772,6 +2782,143 @@ Manually trigger a token refresh for an OAuth2 provider. For OAuth tokens, this 
 curl -X POST http://localhost:3001/api/v1/providers/p1a2b3c4-d5e6-7890-abcd-ef1234567890/refresh \
   -H "Authorization: Bearer <access_token>"
 ```
+
+---
+
+### Unified Keys (Streamlined Services)
+
+The unified keys API auto-provisions UserEndpoint + UserApiKey + UserService records from a single request. This is the primary entry point for users connecting external services.
+
+#### POST /api/v1/keys
+
+Create a new key from catalog or custom endpoint. Auto-provisions all 3 records (endpoint, credential, service).
+
+**Auth:** Required
+
+**Request Body:**
+
+| Field          | Type   | Required | Description                                        |
+|----------------|--------|----------|----------------------------------------------------|
+| `service_slug` | string | No       | Catalog service slug (e.g., `"llm-openai"`)        |
+| `credential`   | string | Yes      | API key or bearer token                            |
+| `label`        | string | No       | Human-readable label                               |
+| `endpoint_url` | string | No       | Custom endpoint URL (required for self-hosted services, optional override for catalog) |
+| `auth_method`  | string | No       | Auth method: `"bearer"`, `"header"`, `"query"`, `"basic"` (default from catalog or `"bearer"`) |
+| `auth_key_name`| string | No       | Auth header/param name (default from catalog or `"Authorization"`) |
+
+**Response (200):** Combined view of endpoint + key + service.
+
+**Errors:**
+- `1003 not_found` -- Catalog service not found for given slug
+- `1004 conflict` -- User already has a service with this slug
+
+#### GET /api/v1/keys
+
+List all user's keys (combined endpoint + key + service view).
+
+**Auth:** Required
+
+#### GET /api/v1/keys/{id}
+
+Get a single key's combined view.
+
+**Auth:** Required
+
+#### DELETE /api/v1/keys/{id}
+
+Revoke a key (deactivates the service and credential).
+
+**Auth:** Required
+
+---
+
+### User Endpoints
+
+User-managed target URLs for external services.
+
+#### GET /api/v1/endpoints
+
+List user's endpoints.
+
+**Auth:** Required
+
+#### PUT /api/v1/endpoints/{id}
+
+Update an endpoint's URL or label.
+
+**Auth:** Required
+
+#### DELETE /api/v1/endpoints/{id}
+
+Delete an endpoint.
+
+**Auth:** Required
+
+---
+
+### External API Keys
+
+User's external credentials (distinct from NyxID API keys).
+
+#### GET /api/v1/api-keys/external
+
+List user's external API keys / credentials.
+
+**Auth:** Required
+
+#### PUT /api/v1/api-keys/external/{id}
+
+Update label or rotate credential.
+
+**Auth:** Required
+
+#### DELETE /api/v1/api-keys/external/{id}
+
+Revoke an external credential.
+
+**Auth:** Required
+
+---
+
+### User Services
+
+User's proxy routing configuration (binds endpoint + key + auth config + optional node).
+
+#### GET /api/v1/user-services
+
+List user's service bindings.
+
+**Auth:** Required
+
+#### PUT /api/v1/user-services/{id}
+
+Update auth config or node routing.
+
+**Auth:** Required
+
+#### DELETE /api/v1/user-services/{id}
+
+Deactivate a service binding.
+
+**Auth:** Required
+
+---
+
+### Service Catalog
+
+Read-only catalog of available service templates for users.
+
+#### GET /api/v1/catalog
+
+List all available service templates from the admin-managed catalog.
+
+**Auth:** Required
+
+#### GET /api/v1/catalog/{slug}
+
+Get a specific catalog template by slug.
+
+**Auth:** Required
 
 ---
 

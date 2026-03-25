@@ -251,9 +251,7 @@ export function useGroupMembers(groupId: string) {
   return useQuery({
     queryKey: ["admin", "groups", groupId, "members"],
     queryFn: async (): Promise<GroupMembersResponse> => {
-      return api.get<GroupMembersResponse>(
-        `/admin/groups/${groupId}/members`,
-      );
+      return api.get<GroupMembersResponse>(`/admin/groups/${groupId}/members`);
     },
     enabled: groupId.length > 0,
   });

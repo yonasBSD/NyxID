@@ -209,7 +209,7 @@ cargo test
 cargo test --all-features
 
 # Node agent tests
-cargo test -p nyxid-node
+cargo test -p nyxid-cli
 
 # Frontend tests
 cd frontend && npm run test

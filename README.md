@@ -67,15 +67,18 @@ It provides a complete identity layer: user registration, session management, Op
 - SHA-256 hashed storage (plaintext never persisted)
 - Optional expiration dates
 - Last-used tracking
+- Service scope fields: restrict which external services and nodes an API key can access (`allowed_service_ids`, `allowed_node_ids`, `allow_all_services`, `allow_all_nodes`)
 
 ### Downstream Service Proxy
 - Reverse proxy to internal or external services
-- Three service categories: **provider** (OIDC/SSO), **connection** (per-user credentials), **internal** (master credential)
+- **Unified AI Services page**: single entry point for managing external service credentials, endpoints, and routing config
+- Unified key API (`POST /api/v1/keys`): auto-provisions endpoint + credential + service from catalog or custom input
+- Three user-managed concepts: **endpoint** (target URL), **API key** (credential), **service** (proxy routing + auth config)
 - Automatic credential injection: header, bearer token, query parameter, or basic auth
 - Developer-friendly slug-based proxy URLs (`/api/v1/proxy/s/{slug}/{path}`) alongside UUID-based URLs
 - Service discovery endpoint (`GET /api/v1/proxy/services`) for listing available services with proxy URLs and connection status
+- Service catalog (`GET /api/v1/catalog`) for browsing available service templates
 - Downstream docs catalog: discover per-service Scalar, OpenAPI, and AsyncAPI URLs from `GET /api/v1/proxy/services`
-- Connection enforcement: users must connect before proxying; per-user credentials for connection services, master credentials for internal services
 - SSRF protection (blocks cloud metadata endpoints; private IPs and localhost allowed for self-hosted node agents)
 - Path traversal prevention (rejects `..` and `//` in proxy paths)
 - Header allowlist to prevent leaking sensitive request headers
@@ -209,10 +212,10 @@ It provides a complete identity layer: user registration, session management, Op
 - Background task auto-expires timed-out requests
 
 ### Credential Nodes (Node Proxy)
-- Run lightweight credential nodes on your own infrastructure via the `nyxid-node` agent binary
+- Run lightweight credential nodes on your own infrastructure via the `nyxid node` subcommand
 - Credentials never transit NyxID -- the node injects them locally before forwarding to the downstream service
-- Selective per-service routing: bind specific services to a node, keep others on NyxID
-- Automatic fallback to NyxID-stored credentials when a node is offline
+- Selective per-service routing: route specific services through a node, keep others on NyxID
+- Automatic fallback to NyxID-stored credentials when a node is offline, but only for services that still have a server-side credential
 - Streaming proxy support: SSE/chunked responses streamed through the WebSocket tunnel in real time
 - Node-routed SSH support: the same WebSocket control plane can bridge raw SSH TCP sessions for bound services
 - Multi-node failover: priority-based routing with health-aware automatic failback
@@ -312,7 +315,7 @@ See [docs/NYXID_NODE.md](docs/NYXID_NODE.md) for the agent user guide, [docs/NOD
                                   |
                          +--------v---------+
                          |  MongoDB 8.0     |
-                         |  (30 collections)|
+                         |  (33 collections)|
                          +------------------+
 ```
 
@@ -402,6 +405,51 @@ Expected response:
   "status": "ok",
   "version": "0.1.0"
 }
+```
+
+---
+
+## CLI Tools
+
+NyxID provides two CLI tools for managing the platform from the terminal.
+
+### nyxid (User CLI)
+
+Manages services, API keys, catalog, nodes, approvals, SSH, MCP config, and notifications. 24 top-level commands covering all user operations.
+
+```bash
+# Install
+cargo install --path cli
+
+# Login and explore
+nyxid login --base-url http://localhost:3001
+nyxid status
+nyxid catalog list
+nyxid service add llm-openai
+
+# Proxy requests
+nyxid proxy discover
+nyxid proxy request llm-openai v1/chat/completions \
+  -m POST -d '{"model":"gpt-4","messages":[{"role":"user","content":"Hello"}]}'
+
+# Generate MCP config for AI tools
+nyxid mcp config --tool cursor
+```
+
+Set `NYXID_URL` and `NYXID_ACCESS_TOKEN` environment variables to avoid passing `--base-url` and auth on every command. Run `nyxid --help` for the full command list.
+
+### nyxid node (Node Agent)
+
+On-premise credential storage and proxy routing. The node agent is built into the `nyxid` CLI as the `nyxid node` subcommand. See [Credential Nodes](#credential-nodes-node-proxy) and `docs/AI_AGENT_PLAYBOOK.md` for full setup instructions.
+
+```bash
+# Install (part of the nyxid CLI)
+cargo install --path cli
+
+# Register and start
+nyxid node register --token nyx_nreg_... --url wss://localhost:3001/api/v1/nodes/ws
+nyxid node credentials add --service openai --header Authorization
+nyxid node start
 ```
 
 ---
@@ -699,7 +747,7 @@ For development, Mailpit is provided via Docker Compose (SMTP on `localhost:1025
 
 ## Database Schema
 
-NyxID uses 30 MongoDB collections:
+NyxID uses 33 MongoDB collections:
 
 | Collection                 | Description                                          |
 |----------------------------|------------------------------------------------------|
@@ -708,14 +756,14 @@ NyxID uses 30 MongoDB collections:
 | `oauth_clients`            | Registered OIDC/OAuth clients (includes `delegation_scopes` for token exchange) |
 | `authorization_codes`      | Short-lived OIDC authorization codes                 |
 | `refresh_tokens`           | Issued refresh tokens with rotation chain tracking   |
-| `api_keys`                 | User-scoped API keys (hashed, with prefix)           |
-| `downstream_services`      | Registered HTTP and SSH services (includes auto-seeded LLM services via `provider_config_id`, `inject_delegation_token` and `delegation_token_scope`, plus embedded SSH target configuration and encrypted SSH CA material) |
-| `user_service_connections` | Per-user connections and encrypted credentials for downstream services |
+| `api_keys`                 | User-scoped API keys (hashed, with prefix, service scope fields) |
+| `downstream_services`      | Registered HTTP and SSH services (also serves as read-only catalog for streamlined services) |
+| `user_service_connections` | Per-user connections and encrypted credentials (legacy, kept for migration) |
 | `mfa_factors`              | TOTP factors and encrypted recovery codes            |
 | `service_endpoints`        | Registered API endpoints per service (MCP tools)     |
 | `provider_configs`         | External provider registry (encrypted OAuth creds)   |
-| `user_provider_tokens`     | Per-user encrypted provider tokens (API keys/OAuth)  |
-| `user_provider_credentials`| Per-user encrypted provider credentials              |
+| `user_provider_tokens`     | Per-user encrypted provider tokens (legacy, kept for migration) |
+| `user_provider_credentials`| Per-user encrypted provider credentials (legacy, kept for migration) |
 | `service_provider_requirements` | Provider token requirements per service          |
 | `oauth_states`             | Temporary OAuth state for provider flows             |
 | `roles`                    | Role definitions with permissions and scoping        |
@@ -728,10 +776,13 @@ NyxID uses 30 MongoDB collections:
 | `service_approval_configs` | Per-service approval overrides (per user)            |
 | `notification_channels`    | Per-user notification preferences, Telegram links, and push device tokens |
 | `nodes`                    | Registered credential nodes (per user, with auth token hash and status) |
-| `node_service_bindings`    | Service-to-node routing bindings (which services a node handles) |
+| `node_service_bindings`    | Service-to-node routing bindings (legacy, node routing absorbed into user_services) |
 | `node_registration_tokens` | One-time tokens for node registration (TTL-indexed, auto-expire) |
 | `mcp_sessions`             | MCP protocol session state                           |
 | `audit_log`                | Immutable audit trail of security events             |
+| `user_endpoints`           | User-managed target URLs (streamlined services)      |
+| `user_api_keys`            | User's external credentials -- API keys, OAuth tokens, bearer tokens (streamlined services) |
+| `user_services`            | User's proxy routing config -- binds endpoint + key + auth + optional node (streamlined services) |
 
 All documents use UUID identifiers, ISO 8601 timestamps, and appropriate indexes for query patterns.
 
@@ -792,7 +843,7 @@ NyxID supports user-operated **credential nodes** that keep API keys and tokens 
 
 **Key features:**
 - **Selective routing:** Bind specific services to a node; unbound services use NyxID-stored credentials
-- **Automatic fallback:** If the node is offline, requests transparently fall back to the standard proxy
+- **Automatic fallback:** If the node is offline, requests transparently fall back to the standard proxy only when a NyxID-side credential still exists
 - **Streaming proxy:** SSE/chunked responses streamed through the WebSocket tunnel in real time
 - **Multi-node failover:** Priority-based routing with health-aware node selection
 - **HMAC request signing:** HMAC-SHA256 integrity verification with replay protection
@@ -803,14 +854,14 @@ NyxID supports user-operated **credential nodes** that keep API keys and tokens 
 - **Audit trail:** All node operations and node-routed proxy requests are logged
 
 **Quick start:**
-1. Build the agent: `cargo build --release -p nyxid-node`
+1. Build the CLI: `cargo build --release -p nyxid-cli`
 2. Navigate to **Credential Nodes** in the dashboard and click **Register Node**
-3. Register the agent: `nyxid-node register --token nyx_nreg_... --url wss://your-server/api/v1/nodes/ws`
+3. Register the agent: `nyxid node register --token nyx_nreg_... --url wss://your-server/api/v1/nodes/ws`
    - Add `--keychain` to store secrets in the OS keychain instead of encrypted file
-4. Add credentials: `nyxid-node credentials add --service openai --header "Authorization: Bearer sk-..."`
-5. Start the agent: `nyxid-node start`
+4. Add credentials: `nyxid node credentials add --service openai --header "Authorization: Bearer sk-..."`
+5. Start the agent: `nyxid node start`
 6. Bind services to the node from the node detail page
-7. (Optional) Migrate storage: `nyxid-node migrate --to keychain`
+7. (Optional) Migrate storage: `nyxid node migrate --to keychain`
 
 For the agent user guide, see **[docs/NYXID_NODE.md](docs/NYXID_NODE.md)**.
 For setup instructions, see **[docs/NODE_PROXY.md](docs/NODE_PROXY.md)**.
@@ -916,7 +967,7 @@ NyxID/
 |-- .gitignore                  Ignores target/, node_modules/, keys/, .env
 |
 |-- node-agent/
-|   |-- Cargo.toml              nyxid-node agent binary
+|   |-- Cargo.toml              nyxid-node deprecation wrapper (use nyxid node instead)
 |   `-- src/
 |       |-- main.rs             CLI entry point, command dispatch
 |       |-- cli.rs              Clap subcommand definitions
@@ -950,7 +1001,7 @@ NyxID/
 |       |   |-- gcp_kms_provider.rs  GCP Cloud KMS encryption provider (feature: gcp-kms)
 |       |   |-- jwks.rs         JWKS key fetching and caching (social token verification)
 |       |   `-- apple_client_secret.rs Apple Sign-In client secret generation
-|       |-- models/             MongoDB document definitions (30 collections, incl. SSH service, role, group, consent, service_account, approval, mcp_session, node)
+|       |-- models/             MongoDB document definitions (33 collections, incl. SSH service, role, group, consent, service_account, approval, mcp_session, node, user_endpoint, user_api_key, user_service)
 |       |-- handlers/           HTTP handler functions by domain
 |       |   |-- auth.rs         Register, login, logout, refresh, verify-email, forgot/reset-password
 |       |   |-- social_auth.rs  Social login: authorize redirect + OAuth callback
@@ -991,7 +1042,12 @@ NyxID/
 |       |   |-- user_credentials.rs User provider credential management
 |       |   |-- service_helpers.rs Shared service handler helpers
 |       |   |-- mfa.rs          MFA setup and verification
-|       |   `-- health.rs       Health check
+|       |   |-- health.rs       Health check
+|       |   |-- keys.rs         Unified key CRUD (auto-provisions endpoint + key + service)
+|       |   |-- catalog.rs      Service catalog (read-only for users)
+|       |   |-- user_endpoints.rs User-managed target URLs
+|       |   |-- user_api_keys_external.rs User's external API keys / credentials
+|       |   `-- user_services_handler.rs User's proxy routing config
 |       |-- services/           Business logic layer
 |       |   |-- api_docs_service.rs Documentation discovery, spec rewriting, AsyncAPI builder
 |       |   |-- auth_service.rs     User registration, password verification
@@ -1031,7 +1087,12 @@ NyxID/
 |       |   |-- service_endpoint_service.rs Service endpoint CRUD
 |       |   |-- chatgpt_translator.rs  OpenAI-to-Anthropic format translation
 |       |   |-- openapi_parser.rs  OpenAPI spec parsing for service endpoints
-|       |   `-- audit_service.rs    Async audit log insertion
+|       |   |-- audit_service.rs    Async audit log insertion
+|       |   |-- unified_key_service.rs Orchestration: auto-provision endpoint + key + service
+|       |   |-- catalog_service.rs Read-only catalog from DownstreamService
+|       |   |-- user_endpoint_service.rs User endpoint CRUD
+|       |   |-- user_api_key_service.rs User external API key CRUD
+|       |   `-- user_service_service.rs User service config CRUD
 |       `-- mw/                 Middleware
 |           |-- auth.rs         AuthUser extractor (Bearer / cookie / API key)
 |           |-- rate_limit.rs   Per-IP + global rate limiting

@@ -72,10 +72,8 @@ export function NotificationSettingsPage() {
   const telegramLinkMutation = useTelegramLink();
   const telegramDisconnectMutation = useTelegramDisconnect();
 
-  const {
-    data: pushDevices,
-    isLoading: isPushDevicesLoading,
-  } = usePushDevices();
+  const { data: pushDevices, isLoading: isPushDevicesLoading } =
+    usePushDevices();
   const removeDeviceMutation = useRemoveDevice();
 
   const { data: services } = useServices();
@@ -153,9 +151,7 @@ export function NotificationSettingsPage() {
       toast.success("Telegram disconnected");
     } catch (err) {
       toast.error(
-        err instanceof ApiError
-          ? err.message
-          : "Failed to disconnect Telegram",
+        err instanceof ApiError ? err.message : "Failed to disconnect Telegram",
       );
     } finally {
       setDisconnectDialogOpen(false);
@@ -191,9 +187,7 @@ export function NotificationSettingsPage() {
       setSelectedApprovalRequired(true);
     } catch (err) {
       toast.error(
-        err instanceof ApiError
-          ? err.message
-          : "Failed to add service config",
+        err instanceof ApiError ? err.message : "Failed to add service config",
       );
     }
   }
@@ -388,9 +382,7 @@ export function NotificationSettingsPage() {
             <CardContent>
               <Form {...form}>
                 <form
-                  onSubmit={form.handleSubmit((data) =>
-                    void handleSave(data),
-                  )}
+                  onSubmit={form.handleSubmit((data) => void handleSave(data))}
                   className="space-y-6"
                 >
                   {form.formState.errors.root && (
@@ -470,9 +462,7 @@ export function NotificationSettingsPage() {
                           <Switch
                             checked={field.value}
                             onCheckedChange={field.onChange}
-                            disabled={
-                              !pushDevices?.devices.length
-                            }
+                            disabled={!pushDevices?.devices.length}
                           />
                         </FormControl>
                       </FormItem>
@@ -537,10 +527,7 @@ export function NotificationSettingsPage() {
                     )}
                   />
 
-                  <Button
-                    type="submit"
-                    isLoading={updateMutation.isPending}
-                  >
+                  <Button type="submit" isLoading={updateMutation.isPending}>
                     Save Preferences
                   </Button>
                 </form>
@@ -720,10 +707,7 @@ export function NotificationSettingsPage() {
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setRemoveDeviceId(null)}
-            >
+            <Button variant="outline" onClick={() => setRemoveDeviceId(null)}>
               Cancel
             </Button>
             <Button

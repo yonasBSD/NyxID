@@ -96,7 +96,7 @@ export default function register(api: OpenClawPluginApi): void {
 
   api.registerTool?.({
     name: "nyxid_list_services",
-    description: "List services available through the current user's NyxID account.",
+    description: "List AI services configured in the current user's NyxID account. Returns service slugs for use with nyxid_proxy.",
     execute: async (_params, context) => {
       const config = normalizeConfig(context.config);
       const profile = await loadProfile(context, config);
@@ -121,7 +121,7 @@ export default function register(api: OpenClawPluginApi): void {
 
   api.registerTool?.({
     name: "nyxid_proxy",
-    description: "Call a user-connected external service through the NyxID proxy.",
+    description: "Call an external service through the NyxID proxy. NyxID injects the user's stored credentials automatically.",
     parameters: {
       type: "object",
       properties: {

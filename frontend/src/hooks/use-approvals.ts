@@ -66,9 +66,7 @@ export function useTelegramDisconnect() {
 
   return useMutation({
     mutationFn: async (): Promise<TelegramDisconnectResponse> => {
-      return api.delete<TelegramDisconnectResponse>(
-        "/notifications/telegram",
-      );
+      return api.delete<TelegramDisconnectResponse>("/notifications/telegram");
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({
@@ -180,9 +178,7 @@ export function useRevokeGrant() {
 
   return useMutation({
     mutationFn: async (grantId: string): Promise<RevokeGrantResponse> => {
-      return api.delete<RevokeGrantResponse>(
-        `/approvals/grants/${grantId}`,
-      );
+      return api.delete<RevokeGrantResponse>(`/approvals/grants/${grantId}`);
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({

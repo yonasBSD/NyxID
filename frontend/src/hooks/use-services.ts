@@ -169,13 +169,10 @@ export function useConnectService() {
     mutationFn: async (
       params: ConnectServiceParams,
     ): Promise<ConnectResponse> => {
-      return api.post<ConnectResponse>(
-        `/connections/${params.serviceId}`,
-        {
-          credential: params.credential,
-          credential_label: params.credentialLabel,
-        },
-      );
+      return api.post<ConnectResponse>(`/connections/${params.serviceId}`, {
+        credential: params.credential,
+        credential_label: params.credentialLabel,
+      });
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["connections"] });
