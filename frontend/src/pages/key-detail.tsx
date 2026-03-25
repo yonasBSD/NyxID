@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { useParams, useNavigate } from "@tanstack/react-router";
+import { useEffect, useState } from "react";
+import { useParams, useNavigate, useSearch } from "@tanstack/react-router";
 import {
   useKey,
   useDeleteKey,
@@ -245,7 +245,15 @@ function ApiKeySection({
           </p>
         )}
 
-        {rotating ? (
+        {credentialType === "oauth2" && status === "pending_auth" ? (
+          <p className="text-xs text-muted-foreground">
+            Complete the provider authentication flow to activate this service.
+          </p>
+        ) : credentialType === "oauth2" ? (
+          <p className="text-xs text-muted-foreground">
+            This credential is managed through the provider connection flow.
+          </p>
+        ) : rotating ? (
           <div className="space-y-2">
             <Input
               type="password"
@@ -813,8 +821,23 @@ function LabelEditor({
 export function KeyDetailPage() {
   const { keyId } = useParams({ strict: false }) as { keyId: string };
   const navigate = useNavigate();
+  const search = useSearch({ strict: false }) as {
+    readonly provider_status?: string;
+    readonly message?: string;
+  };
   const { data: keyInfo, isLoading, error } = useKey(keyId);
   const [deleteOpen, setDeleteOpen] = useState(false);
+
+  useEffect(() => {
+    if (search.provider_status === "success") {
+      toast.success("Service connected successfully");
+      void navigate({ to: ".", search: {}, replace: true });
+    } else if (search.provider_status === "error") {
+      toast.error(search.message ?? "Failed to connect service");
+      void navigate({ to: ".", search: {}, replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search.provider_status]);
 
   if (isLoading) {
     return (

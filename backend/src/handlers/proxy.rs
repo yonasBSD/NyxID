@@ -62,6 +62,7 @@ struct PreResolved {
     node_id: Option<String>,
     /// The UserService ID for API key scope checks.
     user_service_id: Option<String>,
+    has_server_credential: bool,
 }
 
 #[utoipa::path(
@@ -114,6 +115,7 @@ pub async fn proxy_request(
                 target: resolved.target,
                 node_id: resolved.node_id,
                 user_service_id: Some(resolved.user_service_id),
+                has_server_credential: resolved.has_server_credential,
             }),
         )
         .await;
@@ -173,6 +175,7 @@ pub async fn proxy_request_by_slug(
                 target: resolved.target,
                 node_id: resolved.node_id,
                 user_service_id: Some(resolved.user_service_id),
+                has_server_credential: resolved.has_server_credential,
             }),
         )
         .await;
@@ -314,7 +317,12 @@ async fn execute_proxy_inner(
                 ));
             }
 
-            (node_route, pre.target, true, pre.user_service_id)
+            (
+                node_route,
+                pre.target,
+                pre.has_server_credential,
+                pre.user_service_id,
+            )
         } else {
             // Old DownstreamService path -- scoped keys must use configured services
             if !auth_user.allow_all_services {

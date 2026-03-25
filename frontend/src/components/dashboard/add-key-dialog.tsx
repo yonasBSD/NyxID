@@ -43,7 +43,7 @@ import {
   Terminal,
 } from "lucide-react";
 import { toast } from "sonner";
-import type { CatalogEntry } from "@/types/keys";
+import type { CatalogEntry, KeyInfo } from "@/types/keys";
 import type { DeviceCodePollResponse } from "@/types/api";
 
 type WizardStep =
@@ -798,9 +798,11 @@ function NodeSetupStep({
 
 function OAuthStep({
   catalogEntry,
+  ensureKey,
   onBack,
 }: {
   readonly catalogEntry: CatalogEntry;
+  readonly ensureKey: () => Promise<KeyInfo>;
   readonly onBack: () => void;
 }) {
   const initiateOAuth = useInitiateOAuth();
@@ -810,9 +812,11 @@ function OAuthStep({
     if (!catalogEntry.provider_config_id) return;
     setError(null);
     try {
-      const response = await initiateOAuth.mutateAsync(
-        catalogEntry.provider_config_id,
-      );
+      const key = await ensureKey();
+      const response = await initiateOAuth.mutateAsync({
+        providerId: catalogEntry.provider_config_id,
+        redirectPath: `/keys/${key.id}`,
+      });
       hardRedirect(response.authorization_url);
     } catch (err) {
       const message =
@@ -877,18 +881,21 @@ type DeviceFlowStep = "requesting" | "show_code" | "success" | "error";
 
 function DeviceCodeStep({
   catalogEntry,
+  ensureKey,
   onBack,
-  onClose,
+  onComplete,
 }: {
   readonly catalogEntry: CatalogEntry;
+  readonly ensureKey: () => Promise<KeyInfo>;
   readonly onBack: () => void;
-  readonly onClose: () => void;
+  readonly onComplete: (keyId: string) => void;
 }) {
   const [flowStep, setFlowStep] = useState<DeviceFlowStep>("requesting");
   const [userCode, setUserCode] = useState("");
   const [verificationUri, setVerificationUri] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
   const [secondsRemaining, setSecondsRemaining] = useState(0);
+  const [createdKeyId, setCreatedKeyId] = useState<string | null>(null);
 
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const countdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -999,6 +1006,9 @@ function DeviceCodeStep({
     setErrorMessage("");
     setFlowStep("requesting");
     try {
+      const key = await ensureKey();
+      if (!isMountedRef.current) return;
+      setCreatedKeyId(key.id);
       const response = await initiateMutation.mutateAsync(
         catalogEntry.provider_config_id,
       );
@@ -1083,7 +1093,15 @@ function DeviceCodeStep({
             Your {catalogEntry.name} account has been connected successfully.
           </p>
         </div>
-        <Button className="w-full" onClick={onClose}>
+        <Button
+          className="w-full"
+          onClick={() => {
+            if (createdKeyId) {
+              onComplete(createdKeyId);
+            }
+          }}
+          disabled={!createdKeyId}
+        >
           Done
         </Button>
       </div>
@@ -1300,11 +1318,13 @@ export function AddKeyDialog({
   const [step, setStep] = useState<WizardStep>("catalog");
   const [selectedEntry, setSelectedEntry] = useState<CatalogEntry | null>(null);
   const [form, setForm] = useState<FormState>(INITIAL_FORM);
+  const [authKey, setAuthKey] = useState<KeyInfo | null>(null);
 
   function resetWizard() {
     setStep("catalog");
     setSelectedEntry(null);
     setForm(INITIAL_FORM);
+    setAuthKey(null);
   }
 
   function handleOpenChange(next: boolean) {
@@ -1316,6 +1336,7 @@ export function AddKeyDialog({
 
   function handleSelectCatalog(entry: CatalogEntry) {
     setSelectedEntry(entry);
+    setAuthKey(null);
     setForm({
       ...INITIAL_FORM,
       label: entry.name,
@@ -1328,12 +1349,14 @@ export function AddKeyDialog({
 
   function handleSelectCustom() {
     setSelectedEntry(null);
+    setAuthKey(null);
     setForm(INITIAL_FORM);
     setStep("routing");
   }
 
   function handleSelectCustomSsh() {
     setSelectedEntry(null);
+    setAuthKey(null);
     setForm({
       ...INITIAL_FORM,
       serviceType: "ssh",
@@ -1389,7 +1412,45 @@ export function AddKeyDialog({
   }
 
   function handleFormChange(updates: Partial<FormState>) {
+    setAuthKey(null);
     setForm((prev) => ({ ...prev, ...updates }));
+  }
+
+  function buildCatalogKeyParams() {
+    if (!selectedEntry) {
+      throw new Error("Catalog entry is required for this flow");
+    }
+
+    return {
+      label: form.label,
+      service_slug: selectedEntry.slug,
+      ...(form.endpointUrl.trim()
+        ? { endpoint_url: form.endpointUrl.trim() }
+        : {}),
+      ...(form.authMethod !== (selectedEntry.auth_method ?? "bearer")
+        ? { auth_method: form.authMethod }
+        : {}),
+      ...(form.authKeyName !== (selectedEntry.auth_key_name ?? "Authorization")
+        ? { auth_key_name: form.authKeyName }
+        : {}),
+      ...(form.nodeId.trim() ? { node_id: form.nodeId.trim() } : {}),
+    };
+  }
+
+  async function ensureAuthKey(): Promise<KeyInfo> {
+    if (authKey) {
+      return authKey;
+    }
+
+    const key = await createKey.mutateAsync(buildCatalogKeyParams());
+    setAuthKey(key);
+    return key;
+  }
+
+  function handleAuthComplete(keyId: string) {
+    toast.success("Service connected");
+    handleOpenChange(false);
+    void navigate({ to: "/keys/$keyId", params: { keyId } });
   }
 
   function handleFormSubmit() {
@@ -1432,6 +1493,24 @@ export function AddKeyDialog({
   }
 
   function handleNodeSetupSubmit() {
+    if (
+      selectedEntry &&
+      (selectedEntry.provider_type === "oauth2" ||
+        selectedEntry.provider_type === "device_code")
+    ) {
+      const needsUserCreds =
+        selectedEntry.credential_mode === "user" ||
+        selectedEntry.credential_mode === "both";
+      setStep(
+        needsUserCreds
+          ? "oauth_credentials"
+          : selectedEntry.provider_type === "device_code"
+            ? "device_code"
+            : "oauth",
+      );
+      return;
+    }
+
     const isSshCustom = !selectedEntry && form.serviceType === "ssh";
     const params = selectedEntry
       ? {
@@ -1579,15 +1658,35 @@ export function AddKeyDialog({
         {step === "oauth" && selectedEntry && (
           <OAuthStep
             catalogEntry={selectedEntry}
-            onBack={() => setStep("routing")}
+            ensureKey={ensureAuthKey}
+            onBack={() =>
+              setStep(
+                selectedEntry.credential_mode === "user" ||
+                  selectedEntry.credential_mode === "both"
+                  ? "oauth_credentials"
+                  : form.nodeId.trim()
+                    ? "node_setup"
+                    : "routing",
+              )
+            }
           />
         )}
 
         {step === "device_code" && selectedEntry && (
           <DeviceCodeStep
             catalogEntry={selectedEntry}
-            onBack={() => setStep("routing")}
-            onClose={() => handleOpenChange(false)}
+            ensureKey={ensureAuthKey}
+            onBack={() =>
+              setStep(
+                selectedEntry.credential_mode === "user" ||
+                  selectedEntry.credential_mode === "both"
+                  ? "oauth_credentials"
+                  : form.nodeId.trim()
+                    ? "node_setup"
+                    : "routing",
+              )
+            }
+            onComplete={handleAuthComplete}
           />
         )}
       </DialogContent>

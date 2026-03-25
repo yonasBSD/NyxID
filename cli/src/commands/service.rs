@@ -27,12 +27,12 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
 
             // OAuth flow
             if oauth {
-                return run_oauth_add(&mut api, slug, &auth).await;
+                return run_oauth_add(&mut api, slug, via_node.as_deref(), &auth).await;
             }
 
             // Device code flow
             if device_code {
-                return run_device_code_add(&mut api, slug, &auth).await;
+                return run_device_code_add(&mut api, slug, via_node.as_deref(), &auth).await;
             }
 
             let mut body = serde_json::Map::new();
@@ -514,34 +514,58 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
 async fn run_oauth_add(
     api: &mut ApiClient,
     slug: Option<String>,
-    _auth: &crate::cli::AuthArgs,
+    via_node: Option<&str>,
+    auth: &crate::cli::AuthArgs,
 ) -> Result<()> {
     let slug = slug.ok_or_else(|| anyhow::anyhow!("Catalog slug is required for --oauth"))?;
 
-    // Fetch catalog to get provider info
+    // Fetch catalog to get provider info and create a placeholder unified key first.
     let catalog: Value = api.get(&format!("/catalog/{slug}")).await?;
-    let provider_id = catalog["provider_id"]
+    let provider_id = catalog["provider_config_id"]
         .as_str()
-        .or(catalog["_id"].as_str())
-        .or(catalog["id"].as_str())
         .ok_or_else(|| anyhow::anyhow!("No provider found for slug: {slug}"))?;
+    let label = catalog["name"]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| slug.clone());
 
-    // Initiate OAuth -- open browser to connect URL
-    let oauth_url = format!(
-        "{}/api/v1/providers/{provider_id}/connect/oauth",
-        api.base_url_root()
-    );
+    let key_body = if let Some(node_id) = via_node {
+        serde_json::json!({
+            "service_slug": slug,
+            "label": label,
+            "node_id": node_id,
+        })
+    } else {
+        serde_json::json!({
+            "service_slug": slug,
+            "label": label,
+        })
+    };
+    let key_result: Value = api.post("/keys", &key_body).await?;
+    let key_id = key_result["id"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Created key response did not include an id"))?;
+    let redirect_path = format!("/keys/{key_id}");
+    let initiate: Value = api
+        .get(&format!(
+            "/providers/{provider_id}/connect/oauth?redirect_path={}",
+            urlencoding::encode(&redirect_path)
+        ))
+        .await?;
+    let authorization_url = initiate["authorization_url"].as_str().ok_or_else(|| {
+        anyhow::anyhow!("OAuth initiate response did not include authorization_url")
+    })?;
 
     eprintln!("Opening browser for OAuth authorization...");
     eprintln!();
     eprintln!("If the browser does not open, visit:");
-    eprintln!("  {oauth_url}");
+    eprintln!("  {authorization_url}");
     eprintln!();
 
-    let _ = open::that(&oauth_url);
+    let _ = open::that(authorization_url);
 
-    eprintln!("After completing authorization in the browser, create the service:");
-    eprintln!("  nyxid service add {slug}");
+    let final_key = wait_for_authorized_key(api, key_id).await?;
+    print_add_result(api, &final_key, auth.output)?;
 
     Ok(())
 }
@@ -551,17 +575,36 @@ async fn run_oauth_add(
 async fn run_device_code_add(
     api: &mut ApiClient,
     slug: Option<String>,
+    via_node: Option<&str>,
     auth: &crate::cli::AuthArgs,
 ) -> Result<()> {
     let slug = slug.ok_or_else(|| anyhow::anyhow!("Catalog slug is required for --device-code"))?;
 
-    // Fetch catalog to get provider info
+    // Fetch catalog to get provider info and create a placeholder unified key first.
     let catalog: Value = api.get(&format!("/catalog/{slug}")).await?;
-    let provider_id = catalog["provider_id"]
+    let provider_id = catalog["provider_config_id"]
         .as_str()
-        .or(catalog["_id"].as_str())
-        .or(catalog["id"].as_str())
         .ok_or_else(|| anyhow::anyhow!("No provider found for slug: {slug}"))?;
+    let label = catalog["name"]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| slug.clone());
+    let key_body = if let Some(node_id) = via_node {
+        serde_json::json!({
+            "service_slug": slug,
+            "label": label,
+            "node_id": node_id,
+        })
+    } else {
+        serde_json::json!({
+            "service_slug": slug,
+            "label": label,
+        })
+    };
+    let key_result: Value = api.post("/keys", &key_body).await?;
+    let key_id = key_result["id"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Created key response did not include an id"))?;
 
     // Initiate device code flow
     let initiate: Value = api
@@ -576,11 +619,10 @@ async fn run_device_code_add(
         .as_str()
         .or(initiate["verification_url"].as_str())
         .unwrap_or("-");
-    let device_code = initiate["device_code"]
+    let state = initiate["state"]
         .as_str()
-        .or(initiate["device_auth_id"].as_str())
-        .unwrap_or("");
-    let interval = initiate["interval"]
+        .ok_or_else(|| anyhow::anyhow!("Device code initiate response did not include state"))?;
+    let mut interval = initiate["interval"]
         .as_u64()
         .or_else(|| initiate["interval"].as_str().and_then(|s| s.parse().ok()))
         .unwrap_or(5);
@@ -595,10 +637,7 @@ async fn run_device_code_add(
     let _ = open::that(verification_uri);
 
     // Poll for completion
-    let poll_body = serde_json::json!({
-        "device_code": device_code,
-        "user_code": user_code,
-    });
+    let poll_body = serde_json::json!({ "state": state });
 
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
@@ -613,10 +652,7 @@ async fn run_device_code_add(
                 {
                     eprintln!("Authorization successful!");
                     eprintln!();
-
-                    // Now create the service
-                    let key_body = serde_json::json!({ "service_slug": slug });
-                    let key_result: Value = api.post("/keys", &key_body).await?;
+                    let key_result: Value = api.get(&format!("/keys/{key_id}")).await?;
 
                     match auth.output {
                         crate::cli::OutputFormat::Json => {
@@ -627,6 +663,18 @@ async fn run_device_code_add(
                         }
                     }
                     return Ok(());
+                }
+                if status == "expired" {
+                    bail!("Device code authentication expired before completion");
+                }
+                if status == "denied" {
+                    bail!("Device code authentication was denied");
+                }
+                if status == "slow_down" {
+                    interval = result["interval"]
+                        .as_u64()
+                        .or_else(|| result["interval"].as_str().and_then(|s| s.parse().ok()))
+                        .unwrap_or(interval + 5);
                 }
                 // Still pending, continue polling
                 eprint!(".");
@@ -639,6 +687,36 @@ async fn run_device_code_add(
             }
         }
     }
+}
+
+async fn wait_for_authorized_key(api: &mut ApiClient, key_id: &str) -> Result<Value> {
+    const MAX_ATTEMPTS: usize = 150;
+    const POLL_INTERVAL_SECS: u64 = 2;
+
+    eprintln!("Waiting for authorization to complete...");
+
+    for _ in 0..MAX_ATTEMPTS {
+        tokio::time::sleep(std::time::Duration::from_secs(POLL_INTERVAL_SECS)).await;
+        let key: Value = api.get(&format!("/keys/{key_id}")).await?;
+        let status = key["status"].as_str().unwrap_or("");
+        match status {
+            "pending_auth" => {
+                eprint!(".");
+                std::io::stderr().flush()?;
+            }
+            "active" => {
+                eprintln!();
+                return Ok(key);
+            }
+            other => {
+                eprintln!();
+                bail!("OAuth flow finished with unexpected key status: {other}");
+            }
+        }
+    }
+
+    eprintln!();
+    bail!("Timed out waiting for OAuth authorization to complete")
 }
 
 fn print_add_result(api: &ApiClient, result: &Value, output: OutputFormat) -> Result<()> {

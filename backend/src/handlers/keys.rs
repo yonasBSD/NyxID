@@ -189,7 +189,9 @@ pub async fn create_key(
     .await?;
 
     // Fire-and-forget: push credential to node if routed AND we have a credential to push
-    if result.service.node_id.is_some() && result.api_key.credential_encrypted.is_some() {
+    let has_pushable_credential = result.api_key.credential_encrypted.is_some()
+        || result.api_key.access_token_encrypted.is_some();
+    if result.service.node_id.is_some() && has_pushable_credential {
         let db = state.db.clone();
         let enc = state.encryption_keys.clone();
         let ws = state.node_ws_manager.clone();

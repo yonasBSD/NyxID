@@ -14,6 +14,9 @@ use crate::models::downstream_service::{
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
 use crate::models::user_api_key::UserApiKey;
 use crate::models::user_endpoint::UserEndpoint;
+use crate::models::user_provider_token::{
+    COLLECTION_NAME as USER_PROVIDER_TOKENS, UserProviderToken,
+};
 use crate::models::user_service::UserService;
 use crate::services::{
     ssh_service, user_api_key_service, user_endpoint_service, user_service_service,
@@ -133,6 +136,28 @@ pub struct KeyView {
     pub ssh_certificate_ttl_minutes: Option<u32>,
 }
 
+fn normalized_provider_credential_type(provider_type: &str) -> &'static str {
+    match provider_type {
+        "oauth2" | "device_code" => "oauth2",
+        _ => "api_key",
+    }
+}
+
+async fn find_existing_provider_token(
+    db: &mongodb::Database,
+    user_id: &str,
+    provider_config_id: &str,
+) -> AppResult<Option<UserProviderToken>> {
+    db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+        .find_one(doc! {
+            "user_id": user_id,
+            "provider_config_id": provider_config_id,
+            "status": { "$in": ["active", "expired", "refresh_failed"] },
+        })
+        .await
+        .map_err(Into::into)
+}
+
 /// POST /api/v1/keys -- auto-provision endpoint + api_key + service from catalog or custom.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_key(
@@ -158,6 +183,20 @@ pub async fn create_key(
             .ok_or_else(|| AppError::NotFound(format!("Catalog service '{slug}' not found")))?;
 
         let is_ssh = svc.service_type == "ssh";
+        let provider = if let Some(ref pid) = svc.provider_config_id {
+            db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+                .find_one(doc! { "_id": pid })
+                .await?
+        } else {
+            None
+        };
+        let provider_type = provider.as_ref().map(|p| p.provider_type.as_str());
+        let existing_provider_token =
+            if let Some(provider_config_id) = svc.provider_config_id.as_deref() {
+                find_existing_provider_token(db, user_id, provider_config_id).await?
+            } else {
+                None
+            };
 
         // SSH services must be node-routed
         if is_ssh && node_id.is_none() {
@@ -178,17 +217,10 @@ pub async fn create_key(
         } else if node_id.is_some() {
             // Node-routed: endpoint URL stored on node, not on NyxID
             String::new()
-        } else if let Some(ref pid) = svc.provider_config_id {
-            let provider = db
-                .collection::<ProviderConfig>(PROVIDER_CONFIGS)
-                .find_one(doc! { "_id": pid })
-                .await?;
-            if provider.as_ref().is_some_and(|p| p.requires_gateway_url) {
-                return Err(AppError::BadRequest(
-                    "This service requires an endpoint URL".to_string(),
-                ));
-            }
-            svc.base_url.clone()
+        } else if provider.as_ref().is_some_and(|p| p.requires_gateway_url) {
+            return Err(AppError::BadRequest(
+                "This service requires an endpoint URL".to_string(),
+            ));
         } else {
             svc.base_url.clone()
         };
@@ -196,22 +228,25 @@ pub async fn create_key(
         // Determine credential type
         let credential_type = if is_ssh {
             "ssh_certificate".to_string()
+        } else if let Some(ref token) = existing_provider_token {
+            match token.token_type.as_str() {
+                "oauth2" => "oauth2".to_string(),
+                _ => "api_key".to_string(),
+            }
+        } else if matches!(provider_type, Some("oauth2" | "device_code")) {
+            "oauth2".to_string()
         } else if credential.is_empty() && node_id.is_some() {
             "node_managed".to_string()
-        } else if let Some(ref pid) = svc.provider_config_id {
-            let provider = db
-                .collection::<ProviderConfig>(PROVIDER_CONFIGS)
-                .find_one(doc! { "_id": pid })
-                .await?;
-            provider
-                .map(|p| p.provider_type.clone())
-                .unwrap_or_else(|| "api_key".to_string())
+        } else if let Some(kind) = provider_type {
+            normalized_provider_credential_type(kind).to_string()
         } else {
             svc.auth_type.as_deref().unwrap_or("api_key").to_string()
         };
 
         // Validate: credential required for direct routing (non-SSH, non-node-managed)
-        if credential.is_empty() && node_id.is_none() && !is_ssh {
+        let can_defer_direct_credential = existing_provider_token.is_some()
+            || matches!(provider_type, Some("oauth2" | "device_code"));
+        if credential.is_empty() && node_id.is_none() && !is_ssh && !can_defer_direct_credential {
             return Err(AppError::BadRequest(
                 "Credential is required for direct routing (or select a node)".to_string(),
             ));
@@ -225,16 +260,43 @@ pub async fn create_key(
             user_endpoint_service::create_endpoint(db, user_id, &svc.name, &ep_url, Some(&svc.id))
                 .await?;
 
-        let api_key = user_api_key_service::create_api_key(
-            db,
-            encryption_keys,
-            user_id,
-            label,
-            &credential_type,
-            credential,
-            provider_config_id,
-        )
-        .await?;
+        let api_key = if let Some(ref provider_token) = existing_provider_token {
+            user_api_key_service::create_api_key_from_provider_token(
+                db,
+                user_id,
+                label,
+                provider_config_id.expect("provider token implies provider config"),
+                provider_token,
+            )
+            .await?
+        } else {
+            let pending_oauth =
+                matches!(provider_type, Some("oauth2" | "device_code")) && credential.is_empty();
+            user_api_key_service::create_api_key(
+                db,
+                encryption_keys,
+                user_id,
+                user_api_key_service::CreateApiKeyParams {
+                    label,
+                    credential_type: &credential_type,
+                    credential,
+                    access_token: (credential_type == "oauth2" && !credential.is_empty())
+                        .then_some(credential),
+                    refresh_token: None,
+                    token_scopes: None,
+                    expires_at: None,
+                    provider_config_id,
+                    status: if pending_oauth {
+                        "pending_auth"
+                    } else {
+                        "active"
+                    },
+                    source: Some("user_created"),
+                    source_id: None,
+                },
+            )
+            .await?
+        };
 
         // Auto-suffix slug if one already exists for this user (e.g. llm-openai -> llm-openai-2)
         let unique_slug = resolve_unique_slug(db, user_id, &svc.slug).await?;
@@ -365,10 +427,19 @@ pub async fn create_key(
             db,
             encryption_keys,
             user_id,
-            label,
-            "ssh_certificate",
-            "",
-            None,
+            user_api_key_service::CreateApiKeyParams {
+                label,
+                credential_type: "ssh_certificate",
+                credential: "",
+                access_token: None,
+                refresh_token: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: None,
+                status: "active",
+                source: Some("user_created"),
+                source_id: None,
+            },
         )
         .await?;
 
@@ -434,10 +505,19 @@ pub async fn create_key(
             db,
             encryption_keys,
             user_id,
-            label,
-            credential_type,
-            credential,
-            None,
+            user_api_key_service::CreateApiKeyParams {
+                label,
+                credential_type,
+                credential,
+                access_token: None,
+                refresh_token: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: None,
+                status: "active",
+                source: Some("user_created"),
+                source_id: None,
+            },
         )
         .await?;
 

@@ -20,7 +20,7 @@ use crate::models::user_service_connection::{
 };
 use crate::services::delegation_service::DelegatedCredential;
 use crate::services::node_ws_manager::NodeWsManager;
-use crate::services::{user_api_key_service, user_service_service};
+use crate::services::{user_api_key_service, user_service_service, user_token_service};
 
 /// Result of resolving a proxy target.
 pub struct ProxyTarget {
@@ -270,6 +270,7 @@ pub struct UserServiceResolution {
     pub target: ProxyTarget,
     pub node_id: Option<String>,
     pub user_service_id: String,
+    pub has_server_credential: bool,
 }
 
 /// Resolve proxy target from the new UserService model.
@@ -325,6 +326,9 @@ pub async fn resolve_proxy_target_from_user_service(
             AppError::Internal("Data integrity error: API key not found".to_string())
         })?;
 
+    let api_key =
+        maybe_refresh_provider_backed_api_key(db, encryption_keys, user_id, api_key).await?;
+
     if api_key.status != "active" {
         return Err(AppError::BadRequest(format!(
             "API key is {}",
@@ -347,12 +351,14 @@ pub async fn resolve_proxy_target_from_user_service(
             },
             node_id: user_service.node_id.clone(),
             user_service_id: user_service.id.clone(),
+            has_server_credential: true,
         }));
     }
 
-    // Node-routed services: skip credential decryption entirely.
-    // The node agent injects credentials locally -- NyxID doesn't need them.
-    // This covers: node_managed, ssh_certificate, and any service with node_id set.
+    let credential = resolve_user_api_key_credential(&api_key, encryption_keys).await?;
+    let has_server_credential = credential.is_some() || user_service.auth_method == "none";
+
+    // Node-routed services may still have a server-side credential available for fallback.
     if user_service.node_id.is_some() {
         let now = chrono::Utc::now();
         let minimal_service = build_minimal_downstream_service(&user_service, &endpoint, now);
@@ -362,45 +368,17 @@ pub async fn resolve_proxy_target_from_user_service(
                 base_url: endpoint.url.clone(),
                 auth_method: user_service.auth_method.clone(),
                 auth_key_name: user_service.auth_key_name.clone(),
-                credential: String::new(),
+                credential: credential.unwrap_or_default(),
                 service: minimal_service,
             },
             node_id: user_service.node_id.clone(),
             user_service_id: user_service.id.clone(),
+            has_server_credential,
         }));
     }
 
-    // Direct routing: decrypt credential from NyxID storage
-    // (Node-routed services are already handled above and never reach here)
-    let credential = if api_key.credential_type == "oauth2" {
-        let needs_refresh = api_key
-            .expires_at
-            .is_some_and(|exp| exp <= chrono::Utc::now() + chrono::Duration::minutes(5));
-
-        if needs_refresh {
-            tracing::debug!(api_key_id = %api_key.id, "OAuth token expired or near-expiry, attempting refresh");
-        }
-
-        let encrypted = api_key.access_token_encrypted.as_ref().ok_or_else(|| {
-            AppError::BadRequest("OAuth token has no credential stored".to_string())
-        })?;
-        let decrypted_bytes = Zeroizing::new(encryption_keys.decrypt(encrypted).await?);
-        String::from_utf8((*decrypted_bytes).clone()).map_err(|e| {
-            tracing::error!("Credential UTF-8 decode failed: {e}");
-            AppError::Internal("Failed to decode credential".to_string())
-        })?
-    } else {
-        let encrypted = api_key.credential_encrypted.as_ref().ok_or_else(|| {
-            AppError::BadRequest(
-                "No credential stored. Add a credential or route through a node.".to_string(),
-            )
-        })?;
-        let decrypted_bytes = Zeroizing::new(encryption_keys.decrypt(encrypted).await?);
-        String::from_utf8((*decrypted_bytes).clone()).map_err(|e| {
-            tracing::error!("Credential UTF-8 decode failed: {e}");
-            AppError::Internal("Failed to decode credential".to_string())
-        })?
-    };
+    // Direct routing: require a server-side credential.
+    let credential = credential.ok_or_else(|| missing_user_api_key_credential_error(&api_key))?;
 
     // Fire-and-forget: update last_used_at
     let db_clone = db.clone();
@@ -422,7 +400,87 @@ pub async fn resolve_proxy_target_from_user_service(
         },
         node_id: user_service.node_id.clone(),
         user_service_id: user_service.id.clone(),
+        has_server_credential: true,
     }))
+}
+
+async fn maybe_refresh_provider_backed_api_key(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    api_key: UserApiKey,
+) -> AppResult<UserApiKey> {
+    let needs_refresh = api_key.credential_type == "oauth2"
+        && (api_key.access_token_encrypted.is_none()
+            || api_key
+                .expires_at
+                .is_some_and(|exp| exp <= chrono::Utc::now() + chrono::Duration::minutes(5)));
+
+    if !needs_refresh {
+        return Ok(api_key);
+    }
+
+    let provider_config_id = match api_key.provider_config_id.as_deref() {
+        Some(provider_config_id) => provider_config_id,
+        None => return Ok(api_key),
+    };
+
+    match user_token_service::get_active_token(db, encryption_keys, user_id, provider_config_id)
+        .await
+    {
+        Ok(_) => {
+            user_api_key_service::sync_provider_token_to_api_keys(db, user_id, provider_config_id)
+                .await?;
+
+            db.collection::<UserApiKey>(USER_API_KEYS)
+                .find_one(doc! { "_id": &api_key.id })
+                .await?
+                .ok_or_else(|| {
+                    AppError::Internal("API key disappeared after provider sync".to_string())
+                })
+        }
+        Err(AppError::NotFound(_)) => Ok(api_key),
+        Err(error) => Err(error),
+    }
+}
+
+async fn resolve_user_api_key_credential(
+    api_key: &UserApiKey,
+    encryption_keys: &EncryptionKeys,
+) -> AppResult<Option<String>> {
+    let encrypted = match api_key.credential_type.as_str() {
+        "oauth2" => api_key.access_token_encrypted.as_ref(),
+        "node_managed" | "ssh_certificate" => None,
+        _ => api_key.credential_encrypted.as_ref(),
+    };
+
+    let Some(encrypted) = encrypted else {
+        return Ok(None);
+    };
+
+    let decrypted_bytes = Zeroizing::new(encryption_keys.decrypt(encrypted).await?);
+    let credential = String::from_utf8((*decrypted_bytes).clone()).map_err(|e| {
+        tracing::error!("Credential UTF-8 decode failed: {e}");
+        AppError::Internal("Failed to decode credential".to_string())
+    })?;
+
+    if credential.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(credential))
+    }
+}
+
+fn missing_user_api_key_credential_error(api_key: &UserApiKey) -> AppError {
+    match api_key.credential_type.as_str() {
+        "oauth2" if api_key.provider_config_id.is_some() => AppError::BadRequest(
+            "OAuth connection is not complete. Connect your account first.".to_string(),
+        ),
+        "oauth2" => AppError::BadRequest("OAuth token has no credential stored".to_string()),
+        _ => AppError::BadRequest(
+            "No credential stored. Add a credential or route through a node.".to_string(),
+        ),
+    }
 }
 
 /// Build a minimal DownstreamService struct for backward compatibility with
