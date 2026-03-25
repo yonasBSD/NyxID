@@ -474,6 +474,13 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
+    approval_requests
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "status": 1, "expires_at": 1 })
+                .build(),
+        )
+        .await?;
     // Migration: drop the legacy auto-named index on idempotency_key if it exists.
     // The current index uses a stable explicit name to avoid accidental drop/recreate
     // loops on startup.

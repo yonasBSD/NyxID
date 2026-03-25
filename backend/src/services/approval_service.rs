@@ -4,6 +4,7 @@ use mongodb::Database;
 use mongodb::bson::{self, doc};
 use mongodb::options::{FindOneAndUpdateOptions, FindOptions, ReturnDocument};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::config::AppConfig;
@@ -257,6 +258,11 @@ pub async fn process_decision(
         Some(updated) => updated,
         None => {
             let existing = get_request(db, request_id).await?;
+            // Provide a specific error for expired requests instead of the
+            // generic "decision_state_conflict" from is_idempotent_replay.
+            if existing.status == "expired" {
+                return Err(AppError::Forbidden("Approval request expired".to_string()));
+            }
             if is_idempotent_replay(
                 &existing.status,
                 existing.decision_idempotency_key.as_deref(),
@@ -363,15 +369,21 @@ pub async fn expire_pending_requests(
     fcm_auth: Option<&FcmAuth>,
     apns_auth: Option<&ApnsAuth>,
 ) -> AppResult<u64> {
-    let now = bson::DateTime::from_chrono(Utc::now());
+    let sweep_time = bson::DateTime::from_chrono(Utc::now());
+    let sweep_marker = format!("expiry:{}", uuid::Uuid::new_v4());
 
     let expired: Vec<ApprovalRequest> = db
         .collection::<ApprovalRequest>(REQUESTS)
         .find(doc! {
             "status": "pending",
-            "expires_at": { "$lte": now },
+            "expires_at": { "$lte": sweep_time },
         })
-        .with_options(FindOptions::builder().limit(100).build())
+        .with_options(
+            FindOptions::builder()
+                .sort(doc! { "expires_at": 1 })
+                .limit(100)
+                .build(),
+        )
         .await?
         .try_collect()
         .await?;
@@ -380,19 +392,40 @@ pub async fn expire_pending_requests(
         return Ok(0);
     }
 
-    let count = expired.len() as u64;
-
-    // Batch update status to "expired"
+    // Batch update status to "expired", but ONLY if still pending.
+    // This prevents a race where a user approves/rejects a request between
+    // the find() above and this update_many(). Without the status guard,
+    // the sweep could overwrite an "approved" status back to "expired".
     let ids: Vec<&str> = expired.iter().map(|r| r.id.as_str()).collect();
-    db.collection::<ApprovalRequest>(REQUESTS)
+    let expire_result = db
+        .collection::<ApprovalRequest>(REQUESTS)
         .update_many(
-            doc! { "_id": { "$in": &ids } },
-            doc! { "$set": { "status": "expired" } },
+            doc! { "_id": { "$in": &ids }, "status": "pending" },
+            doc! { "$set": {
+                "status": "expired",
+                "decided_at": sweep_time,
+                "decision_idempotency_key": &sweep_marker,
+            } },
         )
         .await?;
 
+    let count = expire_result.modified_count;
+    if count == 0 {
+        return Ok(0);
+    }
+
+    // Re-query to get only the requests that were actually expired by the
+    // update_many above. A request that was approved/rejected between the
+    // initial find() and the update_many() will NOT have status "expired"
+    // in the DB (the status guard prevented the overwrite), so it will be
+    // excluded here. Matching on this sweep's unique marker also prevents
+    // overlapping sweep tasks from re-sending each other's expiry side
+    // effects for the same request IDs, even across multiple server
+    // instances.
+    let actually_expired = requests_updated_by_expiry_sweep(db, expired, &sweep_marker).await?;
+
     // Edit Telegram messages for expired requests (best-effort)
-    for req in &expired {
+    for req in &actually_expired {
         if req
             .notification_channel
             .as_deref()
@@ -419,7 +452,7 @@ pub async fn expire_pending_requests(
     }
 
     // Send silent push to update mobile app UI for expired requests (best-effort)
-    for req in &expired {
+    for req in &actually_expired {
         let mut data = std::collections::HashMap::new();
         data.insert("type".to_string(), "approval_expired".to_string());
         data.insert("request_id".to_string(), req.id.clone());
@@ -436,6 +469,47 @@ pub async fn expire_pending_requests(
     }
 
     Ok(count)
+}
+
+async fn requests_updated_by_expiry_sweep(
+    db: &Database,
+    candidates: Vec<ApprovalRequest>,
+    sweep_marker: &str,
+) -> AppResult<Vec<ApprovalRequest>> {
+    if candidates.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let ids: Vec<&str> = candidates
+        .iter()
+        .map(|request| request.id.as_str())
+        .collect();
+    let expired_ids: HashSet<String> = db
+        .collection::<bson::Document>(REQUESTS)
+        .find(doc! {
+            "_id": { "$in": &ids },
+            "status": "expired",
+            "decision_idempotency_key": sweep_marker,
+        })
+        .with_options(FindOptions::builder().projection(doc! { "_id": 1 }).build())
+        .await?
+        .try_collect::<Vec<bson::Document>>()
+        .await?
+        .into_iter()
+        .filter_map(|doc| doc.get_str("_id").ok().map(str::to_owned))
+        .collect();
+
+    Ok(retain_requests_with_ids(candidates, &expired_ids))
+}
+
+fn retain_requests_with_ids(
+    requests: Vec<ApprovalRequest>,
+    allowed_ids: &HashSet<String>,
+) -> Vec<ApprovalRequest> {
+    requests
+        .into_iter()
+        .filter(|request| allowed_ids.contains(&request.id))
+        .collect()
 }
 
 /// Block until an approval decision is made or the timeout expires.
@@ -724,6 +798,31 @@ fn is_duplicate_key_error(e: &mongodb::error::Error) -> bool {
 mod tests {
     use super::*;
 
+    fn make_request(id: &str, status: &str) -> ApprovalRequest {
+        let now = Utc::now();
+        ApprovalRequest {
+            id: id.to_string(),
+            user_id: "user-1".to_string(),
+            service_id: "service-1".to_string(),
+            service_name: "OpenAI API".to_string(),
+            service_slug: "openai".to_string(),
+            requester_type: "service_account".to_string(),
+            requester_id: "requester-1".to_string(),
+            requester_label: Some("CI Pipeline".to_string()),
+            operation_summary: "proxy:POST /v1/chat/completions".to_string(),
+            status: status.to_string(),
+            idempotency_key: format!("idem-{id}"),
+            notification_channel: Some("telegram".to_string()),
+            telegram_message_id: Some(12345),
+            telegram_chat_id: Some(67890),
+            expires_at: now,
+            decided_at: None,
+            decision_channel: None,
+            decision_idempotency_key: None,
+            created_at: now,
+        }
+    }
+
     #[test]
     fn resolve_approval_requirement_prefers_per_service_true_over_global_false() {
         assert!(resolve_approval_requirement(Some(true), Some(false)));
@@ -799,5 +898,93 @@ mod tests {
         let now = Utc::now();
         let expiry = resolve_grant_expiry(now, None, 30);
         assert_eq!(expiry, now + Duration::days(30));
+    }
+
+    #[test]
+    fn idempotent_replay_returns_conflict_for_expired_status() {
+        // When a request has been marked "expired" (by the background sweep),
+        // is_idempotent_replay should return Err(Conflict) because "expired"
+        // is not a user decision ("approved"/"rejected").
+        let result = is_idempotent_replay("expired", None, Some("k1"), true);
+        assert!(matches!(result, Err(AppError::Conflict(msg)) if msg == "decision_state_conflict"));
+    }
+
+    #[test]
+    fn idempotent_replay_returns_conflict_for_pending_status() {
+        // "pending" is not a decided state either.
+        let result = is_idempotent_replay("pending", None, Some("k1"), true);
+        assert!(matches!(result, Err(AppError::Conflict(msg)) if msg == "decision_state_conflict"));
+    }
+
+    #[test]
+    fn retain_requests_with_ids_excludes_requests_not_updated_by_sweep() {
+        let candidates = vec![
+            make_request("req-expired", "pending"),
+            make_request("req-approved", "pending"),
+        ];
+        let actually_expired_ids = HashSet::from_iter([String::from("req-expired")]);
+
+        let retained = retain_requests_with_ids(candidates, &actually_expired_ids);
+
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].id, "req-expired");
+    }
+
+    /// Regression test for #96: simulates the race window between find() and
+    /// update_many() in expire_pending_requests(). When a user approves a
+    /// request after the sweep's initial find() but before the guarded
+    /// update_many(), the sweep must NOT send side effects (Telegram edits,
+    /// push notifications) for that request.
+    ///
+    /// This test exercises the filtering pipeline that runs after
+    /// update_many(): only requests whose IDs appear in the "actually
+    /// expired" set (those that matched `status: "pending"` at update time
+    /// AND carry this sweep's unique marker) should trigger side effects.
+    #[test]
+    fn race_window_approved_request_excluded_from_expiry_side_effects() {
+        // Scenario: sweep finds 3 pending requests that have passed their
+        // expiry time. Between find() and update_many():
+        //  - req-2 was approved by the user (status changed to "approved")
+        //  - req-3 was rejected by the user (status changed to "rejected")
+        // Only req-1 remained "pending" and was actually expired.
+        let candidates = vec![
+            make_request("req-1", "pending"),
+            make_request("req-2", "pending"), // concurrently approved
+            make_request("req-3", "pending"), // concurrently rejected
+        ];
+
+        // After update_many with `status: "pending"` guard, only req-1 was
+        // modified. The re-query (requests_updated_by_expiry_sweep) returns
+        // only IDs that have status "expired" + this sweep's marker.
+        let actually_expired_ids = HashSet::from_iter([String::from("req-1")]);
+
+        let side_effect_targets = retain_requests_with_ids(candidates, &actually_expired_ids);
+
+        // req-2 and req-3 must NOT appear — they were decided by the user
+        // during the race window and must not receive expiry side effects.
+        assert_eq!(side_effect_targets.len(), 1);
+        assert_eq!(side_effect_targets[0].id, "req-1");
+    }
+
+    /// Regression test for #96: when ALL requests in the sweep's find()
+    /// were concurrently decided by users, the side-effect list must be
+    /// completely empty.
+    #[test]
+    fn race_window_all_requests_decided_yields_no_side_effects() {
+        let candidates = vec![
+            make_request("req-a", "pending"),
+            make_request("req-b", "pending"),
+        ];
+
+        // None of the candidates were actually expired (all were decided
+        // between find() and update_many()).
+        let actually_expired_ids: HashSet<String> = HashSet::new();
+
+        let side_effect_targets = retain_requests_with_ids(candidates, &actually_expired_ids);
+
+        assert!(
+            side_effect_targets.is_empty(),
+            "No side effects should be emitted when all requests were decided during the race window"
+        );
     }
 }

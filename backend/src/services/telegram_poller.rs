@@ -1,6 +1,7 @@
 use mongodb::bson::{self, doc};
 
 use crate::AppState;
+use crate::errors::AppError;
 use crate::models::notification_channel::{COLLECTION_NAME as CHANNELS, NotificationChannel};
 use crate::services::{approval_service, audit_service, telegram_service};
 
@@ -75,8 +76,13 @@ async fn handle_callback_query(
 
     let request = match approval_service::get_request(&state.db, &request_id).await {
         Ok(r) => r,
-        Err(_) => {
+        Err(crate::errors::AppError::NotFound(_)) => {
             answer_callback(state, &callback.id, "Request not found or expired").await;
+            return;
+        }
+        Err(e) => {
+            tracing::error!("Database error fetching approval request {request_id}: {e}");
+            answer_callback(state, &callback.id, "Server error, please try again").await;
             return;
         }
     };
@@ -143,8 +149,13 @@ async fn handle_callback_query(
             );
         }
         Err(e) => {
-            tracing::warn!("Failed to process approval decision: {e}");
-            answer_callback(state, &callback.id, "Already processed or expired").await;
+            let callback_message = decision_callback_message(&e);
+            if callback_message == "Server error, please try again" {
+                tracing::error!("Failed to process approval decision {request_id}: {e}");
+            } else {
+                tracing::warn!("Failed to process approval decision {request_id}: {e}");
+            }
+            answer_callback(state, &callback.id, callback_message).await;
         }
     }
 }
@@ -269,5 +280,52 @@ async fn answer_callback(state: &AppState, callback_id: &str, text: &str) {
             text,
         )
         .await;
+    }
+}
+
+fn decision_callback_message(error: &AppError) -> &'static str {
+    match error {
+        AppError::Forbidden(message) if message == "Approval request expired" => "Request expired",
+        AppError::Conflict(_) => "Already processed or expired",
+        AppError::NotFound(_) => "Request not found or expired",
+        _ => "Server error, please try again",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decision_callback_message_maps_expired_forbidden() {
+        let error = AppError::Forbidden("Approval request expired".to_string());
+        assert_eq!(decision_callback_message(&error), "Request expired");
+    }
+
+    #[test]
+    fn decision_callback_message_maps_conflict_to_processed() {
+        let error = AppError::Conflict("already_decided".to_string());
+        assert_eq!(
+            decision_callback_message(&error),
+            "Already processed or expired"
+        );
+    }
+
+    #[test]
+    fn decision_callback_message_maps_not_found() {
+        let error = AppError::NotFound("Approval request not found".to_string());
+        assert_eq!(
+            decision_callback_message(&error),
+            "Request not found or expired"
+        );
+    }
+
+    #[test]
+    fn decision_callback_message_maps_internal_to_server_error() {
+        let error = AppError::Internal("database timeout".to_string());
+        assert_eq!(
+            decision_callback_message(&error),
+            "Server error, please try again"
+        );
     }
 }
