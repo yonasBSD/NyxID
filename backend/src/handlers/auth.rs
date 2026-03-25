@@ -733,31 +733,33 @@ pub async fn setup(
 
 /// POST /api/v1/auth/cli-token
 ///
-/// Issue an access token for the CLI. Requires cookie-based session auth
-/// (used by the `/cli-auth` frontend page after browser login).
+/// Issue an access token and refresh token for the CLI. Requires cookie-based
+/// session auth (used by the `/cli-auth` frontend page after browser login).
 pub async fn cli_token(
     State(state): State<AppState>,
     auth_user: AuthUser,
 ) -> AppResult<Json<CliTokenResponse>> {
     let user_id_str = auth_user.user_id.to_string();
-    let scope = "openid profile email";
-    let rbac_data =
-        crate::services::rbac_helpers::build_rbac_claim_data(&state.db, &user_id_str, scope)
-            .await?;
-    let access_token = crate::crypto::jwt::generate_access_token(
-        &state.jwt_keys,
+    let tokens = token_service::create_session_and_issue_tokens(
+        &state.db,
         &state.config,
-        &auth_user.user_id,
-        scope,
-        Some(&rbac_data),
-    )?;
+        &state.jwt_keys,
+        &user_id_str,
+        None,
+        None,
+    )
+    .await?;
 
-    Ok(Json(CliTokenResponse { access_token }))
+    Ok(Json(CliTokenResponse {
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token,
+    }))
 }
 
 #[derive(Debug, Serialize)]
 pub struct CliTokenResponse {
     pub access_token: String,
+    pub refresh_token: String,
 }
 
 #[cfg(test)]

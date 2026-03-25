@@ -417,6 +417,36 @@ pub struct WsWebTerminalClosedMsg {
     pub error: Option<String>,
 }
 
+/// JSON message for pushing a credential update to a node.
+#[derive(Debug, Serialize)]
+struct WsCredentialUpdate {
+    #[serde(rename = "type")]
+    msg_type: &'static str,
+    service_slug: String,
+    injection_method: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    header_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    header_value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    param_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    param_value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_url: Option<String>,
+}
+
+/// Parameters for pushing a credential update to a node.
+pub struct CredentialUpdateParams {
+    pub service_slug: String,
+    pub injection_method: String,
+    pub header_name: Option<String>,
+    pub header_value: Option<String>,
+    pub param_name: Option<String>,
+    pub param_value: Option<String>,
+    pub target_url: Option<String>,
+}
+
 /// Compute HMAC-SHA256 signature for a proxy request.
 pub fn compute_hmac_signature(
     secret: &[u8],
@@ -918,6 +948,48 @@ impl NodeWsManager {
             .map_err(|_| {
                 AppError::NodeOffline(format!("Node {node_id} connection closed or buffer full"))
             })?;
+
+        Ok(())
+    }
+
+    /// Push a credential update to a connected node. Fire-and-forget.
+    /// Returns Ok(()) if the message was queued, Err if node is not connected.
+    pub fn send_credential_update(
+        &self,
+        node_id: &str,
+        params: &CredentialUpdateParams,
+    ) -> AppResult<()> {
+        let conn = self
+            .connections
+            .get(node_id)
+            .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
+
+        let msg = WsCredentialUpdate {
+            msg_type: "credential_update",
+            service_slug: params.service_slug.clone(),
+            injection_method: params.injection_method.clone(),
+            header_name: params.header_name.clone(),
+            header_value: params.header_value.clone(),
+            param_name: params.param_name.clone(),
+            param_value: params.param_value.clone(),
+            target_url: params.target_url.clone(),
+        };
+
+        let json = serde_json::to_string(&msg).map_err(|e| {
+            AppError::Internal(format!("Failed to serialize credential_update: {e}"))
+        })?;
+
+        conn.tx
+            .try_send(NodeOutboundMessage::Text(json))
+            .map_err(|_| {
+                AppError::NodeOffline(format!("Node {node_id} connection closed or buffer full"))
+            })?;
+
+        tracing::info!(
+            node_id = %node_id,
+            service_slug = %params.service_slug,
+            "Pushed credential update to node"
+        );
 
         Ok(())
     }

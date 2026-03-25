@@ -24,8 +24,7 @@ const SOCIAL_ERROR_MESSAGES: Record<string, string> = {
     "We couldn't retrieve an email address from your social account. Please ensure your email is public or use email/password sign-in.",
   social_auth_deactivated:
     "Your account has been deactivated. Please contact support for assistance.",
-  social_auth_failed:
-    "Social sign-in failed. Please try again.",
+  social_auth_failed: "Social sign-in failed. Please try again.",
   social_auth_exchange:
     "Social sign-in failed due to a temporary error. Please try again.",
 };
@@ -88,7 +87,9 @@ export function LoginForm({ returnTo, socialError }: LoginFormProps) {
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-col gap-2 text-center">
-        <h1 className="font-display text-[28px] font-normal tracking-tight">Welcome back</h1>
+        <h1 className="font-display text-[28px] font-normal tracking-tight">
+          Welcome back
+        </h1>
         <p className="text-sm text-muted-foreground">
           Sign in to your NyxID account
         </p>
@@ -106,7 +107,10 @@ export function LoginForm({ returnTo, socialError }: LoginFormProps) {
       )}
 
       <Form {...form}>
-        <form onSubmit={form.handleSubmit(onSubmit)} className="flex flex-col gap-4">
+        <form
+          onSubmit={form.handleSubmit(onSubmit)}
+          className="flex flex-col gap-4"
+        >
           {form.formState.errors.root && (
             <div
               role="alert"
@@ -182,7 +186,9 @@ export function LoginForm({ returnTo, socialError }: LoginFormProps) {
       <SocialLoginButtons returnTo={returnTo} />
 
       <div className="flex items-center justify-center gap-1.5">
-        <span className="text-xs text-text-tertiary">Don&apos;t have an account?</span>
+        <span className="text-xs text-text-tertiary">
+          Don&apos;t have an account?
+        </span>
         <Link
           to="/register"
           search={returnTo ? { return_to: returnTo } : {}}

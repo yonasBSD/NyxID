@@ -36,10 +36,14 @@ function buildWebSocketUrl(
       parsed.hash = "";
       wsBase = parsed.toString().replace(/\/$/, "");
     } catch {
-      wsBase = window.location.origin.replace(/^https:/, "wss:").replace(/^http:/, "ws:");
+      wsBase = window.location.origin
+        .replace(/^https:/, "wss:")
+        .replace(/^http:/, "ws:");
     }
   } else {
-    wsBase = window.location.origin.replace(/^https:/, "wss:").replace(/^http:/, "ws:");
+    wsBase = window.location.origin
+      .replace(/^https:/, "wss:")
+      .replace(/^http:/, "ws:");
   }
   const params = new URLSearchParams({
     principal,
@@ -77,7 +81,10 @@ export function SshWebTerminal({
       ws.onmessage = null;
       ws.onclose = null;
       ws.onerror = null;
-      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+      if (
+        ws.readyState === WebSocket.OPEN ||
+        ws.readyState === WebSocket.CONNECTING
+      ) {
         ws.close();
       }
       wsRef.current = null;
@@ -86,11 +93,13 @@ export function SshWebTerminal({
     const term = terminalRef.current;
     if (term !== null) {
       // Clean up resize observers
-      const observer = (term as unknown as Record<string, unknown>)._nyxidResizeObserver;
+      const observer = (term as unknown as Record<string, unknown>)
+        ._nyxidResizeObserver;
       if (observer instanceof ResizeObserver) {
         observer.disconnect();
       }
-      const windowHandler = (term as unknown as Record<string, unknown>)._nyxidWindowResizeHandler;
+      const windowHandler = (term as unknown as Record<string, unknown>)
+        ._nyxidWindowResizeHandler;
       if (typeof windowHandler === "function") {
         window.removeEventListener("resize", windowHandler as EventListener);
       }
@@ -112,7 +121,8 @@ export function SshWebTerminal({
     const terminal = new Terminal({
       cursorBlink: true,
       cursorStyle: "block",
-      fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', Menlo, Monaco, 'Courier New', monospace",
+      fontFamily:
+        "'JetBrains Mono', 'Fira Code', 'Cascadia Code', Menlo, Monaco, 'Courier New', monospace",
       fontSize: 14,
       lineHeight: 1.2,
       scrollback: 5000,
@@ -177,8 +187,11 @@ export function SshWebTerminal({
       });
       resizeObserver.observe(containerRef.current);
       // Store for cleanup
-      (terminal as unknown as Record<string, unknown>)._nyxidResizeObserver = resizeObserver;
-      (terminal as unknown as Record<string, unknown>)._nyxidWindowResizeHandler = handleWindowResize;
+      (terminal as unknown as Record<string, unknown>)._nyxidResizeObserver =
+        resizeObserver;
+      (
+        terminal as unknown as Record<string, unknown>
+      )._nyxidWindowResizeHandler = handleWindowResize;
     }
 
     const cols = terminal.cols;
@@ -186,7 +199,13 @@ export function SshWebTerminal({
 
     terminal.writeln("\x1b[90mConnecting...\x1b[0m");
 
-    const wsUrl = buildWebSocketUrl(serviceId, principal, cols, rows, nodeWsUrl);
+    const wsUrl = buildWebSocketUrl(
+      serviceId,
+      principal,
+      cols,
+      rows,
+      nodeWsUrl,
+    );
     const ws = new WebSocket(wsUrl);
     ws.binaryType = "arraybuffer";
     wsRef.current = ws;
@@ -225,13 +244,17 @@ export function SshWebTerminal({
           if (msg.type === "error") {
             setStatus("error");
             setErrorMessage(msg.message ?? "Unknown error");
-            terminal.writeln(`\r\n\x1b[31mError: ${msg.message ?? "Unknown error"}\x1b[0m`);
+            terminal.writeln(
+              `\r\n\x1b[31mError: ${msg.message ?? "Unknown error"}\x1b[0m`,
+            );
             return;
           }
 
           if (msg.type === "closed") {
             setStatus("disconnected");
-            terminal.writeln("\r\n\x1b[90mSession closed by remote host.\x1b[0m");
+            terminal.writeln(
+              "\r\n\x1b[90mSession closed by remote host.\x1b[0m",
+            );
             onDisconnect?.();
             return;
           }
@@ -268,17 +291,21 @@ export function SshWebTerminal({
     });
 
     // Debounced resize handler.
-    terminal.onResize(({ cols: newCols, rows: newRows }: { cols: number; rows: number }) => {
-      if (resizeTimerRef.current !== null) {
-        clearTimeout(resizeTimerRef.current);
-      }
-      resizeTimerRef.current = setTimeout(() => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "resize", cols: newCols, rows: newRows }));
+    terminal.onResize(
+      ({ cols: newCols, rows: newRows }: { cols: number; rows: number }) => {
+        if (resizeTimerRef.current !== null) {
+          clearTimeout(resizeTimerRef.current);
         }
-        resizeTimerRef.current = null;
-      }, 100);
-    });
+        resizeTimerRef.current = setTimeout(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(
+              JSON.stringify({ type: "resize", cols: newCols, rows: newRows }),
+            );
+          }
+          resizeTimerRef.current = null;
+        }, 100);
+      },
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [serviceId, principal, nodeWsUrl, cleanup]);
 
@@ -369,7 +396,10 @@ export function SshWebTerminal({
       </div>
 
       {/* Terminal container */}
-      <div ref={containerRef} className="flex-1 overflow-hidden bg-[#0f172a] p-1" />
+      <div
+        ref={containerRef}
+        className="flex-1 overflow-hidden bg-[#0f172a] p-1"
+      />
     </div>
   );
 }

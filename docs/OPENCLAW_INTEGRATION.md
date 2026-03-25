@@ -73,13 +73,33 @@ Then reference it in your OpenClaw plugin config (see Configuration below).
 
 ## Configuration
 
-### Quickstart: API key mode (simplest)
+### Quickstart: Using nyxid CLI (recommended)
 
-1. Log in to NyxID dashboard (`https://nyx.chrono-ai.fun`)
-2. Go to **API Keys** > **Create API Key**
-3. Name: `openclaw-agent`, Scope: `proxy`
-4. Copy the key (starts with `nyx_`)
-5. Configure OpenClaw -- add to `~/.openclaw/openclaw.json`:
+```bash
+# 1. Install the NyxID CLI
+cargo install --git https://github.com/ChronoAIProject/NyxID --bin nyxid
+
+# 2. Log in via browser SSO (saves URL; only needed once)
+nyxid login --base-url https://nyx-api.chrono-ai.fun
+
+# 3. Create an API key for OpenClaw
+nyxid api-key create --name "openclaw-agent" --scopes "proxy read"
+
+# 4. Add OpenClaw as an AI service (direct mode -- credential on NyxID)
+nyxid openclaw setup --url http://localhost:18789 --credential-env OPENCLAW_TOKEN
+
+# Or via node agent (credential stays local):
+nyxid service add llm-openclaw --via-node my-node --credential-env OPENCLAW_TOKEN
+# Then on the node: nyxid-node openclaw connect --url http://localhost:18789
+
+# 5. Verify (no --base-url needed after login)
+nyxid service list --output json
+nyxid proxy discover --output json
+```
+
+### OpenClaw skill configuration
+
+Configure the NyxID skill in OpenClaw using the API key from step 3:
 
 ```json
 {
@@ -88,7 +108,7 @@ Then reference it in your OpenClaw plugin config (see Configuration below).
       "nyxid": {
         "enabled": true,
         "env": {
-          "NYXID_API_KEY": "nyx_your_key_here"
+          "NYXID_API_KEY": "nyxid_your_key_here"
         }
       }
     }
@@ -96,20 +116,12 @@ Then reference it in your OpenClaw plugin config (see Configuration below).
 }
 ```
 
-Or set shell environment variables:
+Reload OpenClaw:
+- **Start a new chat session** -- simplest option
+- **Restart the gateway** -- `openclaw gateway restart`
+- Verify with `openclaw gateway status`
 
-```bash
-export NYXID_API_KEY="nyx_your_key_here"
-export NYXID_BASE_URL="https://nyx-api.chrono-ai.fun"  # optional, this is the default
-```
-
-6. Reload OpenClaw so the new skill is picked up:
-   - **Start a new chat session** -- simplest option, just open a new conversation
-   - **Restart the gateway** -- `openclaw gateway restart`
-   - **Docker** -- `docker compose restart openclaw-gateway`
-   - **Hot reload** -- set `"gateway": { "reload": { "mode": "hybrid" } }` in gateway config (this is the default; auto-restarts when new skills are detected)
-   - Verify with `openclaw gateway status`
-7. Ask: "What services do I have connected in NyxID?"
+Ask: "What services do I have connected in NyxID?"
 
 ### Full plugin config (OAuth mode)
 
@@ -148,85 +160,121 @@ Provide `clientId` with `baseUrl`. Add `clientSecret` for RFC 8693 token exchang
 
 Set `NYXID_ACCESS_TOKEN` if you already have a NyxID JWT from another source.
 
-## Using with other AI assistants
+## Using with AI Assistants
 
-The helper scripts work with any terminal-based AI assistant. Set the environment variables and the assistant can use the scripts directly.
+The `nyxid` CLI is the recommended way for AI agents to interact with NyxID. Install it and the agent can manage everything.
 
-### Claude Code
+### Claude Code / Codex / any terminal-based agent
 
 ```bash
-export NYXID_API_KEY="nyx_your_key_here"
-export NYXID_BASE_URL="https://nyx-api.chrono-ai.fun"
+# Install CLI and log in (one-time; saves URL for all future commands)
+cargo install --git https://github.com/ChronoAIProject/NyxID --bin nyxid
+nyxid login --base-url https://nyx-api.chrono-ai.fun
 
-# Then in Claude Code, the agent can run:
-# ./tools/services.sh          -- list connected services
-# ./tools/proxy.sh twitter POST /2/tweets '{"text":"Hello"}'
+# Add services non-interactively (credential from env var)
+nyxid service add llm-anthropic --credential-env ANTHROPIC_KEY --output json
+
+# Then the agent can:
+nyxid service list --output json                        # list services (includes IDs)
+nyxid proxy discover --output json                      # list available services
+nyxid proxy request openai /chat/completions -m POST \
+  -d '{"model":"gpt-4","messages":[{"role":"user","content":"Hello"}]}'
+nyxid catalog list --output json                        # browse available services
+nyxid node show my-server --output json                 # node commands accept names
 ```
-
-### Codex / other agents
-
-Same pattern -- set the env vars, then the agent calls `services.sh` to discover services and `proxy.sh` to make requests. The scripts are self-documenting and print usage on error.
 
 ### What the agent needs to know
 
-- `services.sh` returns a JSON list of connected services with their slugs
-- `proxy.sh <service> <method> <path> [body]` calls any connected service
+- `nyxid service list --output json` returns machine-readable service list with IDs
+- `nyxid proxy request <slug> <path> -m <METHOD> -d <BODY>` calls any service
+- `--credential-env <VAR>` reads secrets from env vars (fully non-interactive)
+- Node commands accept names (e.g., `nyxid node show test-server`)
+- Service `add` auto-fetches label from catalog -- no `--label` needed for catalog services
 - NyxID injects credentials server-side -- the agent never handles raw tokens
 - If a response has `error_code: 7000`, the user needs to approve the request
-- If a service shows `connected: false`, the user needs to connect it in NyxID first
+- Use `nyxid approval list` to check pending approvals
 
 ## Flow Summary
 
-### API key flow
+### CLI flow (recommended)
+
+1. User runs `nyxid login` (browser SSO) or sets `NYXID_API_KEY`
+2. `nyxid proxy discover` lists available services (or `nyxid service list`)
+3. `nyxid proxy request <slug> <path>` calls any service
+4. NyxID injects the user's credentials and forwards the request
+5. If approval required, `nyxid approval list` shows pending requests
+
+### API key flow (for OpenClaw skill)
 
 1. OpenClaw loads `NYXID_API_KEY` from env or config
-2. `nyxid_list_services` calls `GET /api/v1/proxy/services` with `X-API-Key`
-3. `nyxid_proxy` calls the slug-based proxy endpoint with the same key
-4. NyxID injects the user's downstream credentials and forwards the request
+2. Skill calls `GET /api/v1/proxy/services` with `X-API-Key` header
+3. Skill calls the slug-based proxy endpoint with the same key
+4. NyxID injects credentials and forwards the request
 
-### OAuth flow
+### OAuth flow (for OpenClaw plugin)
 
-1. OpenClaw authenticates the user via OAuth 2.0 Authorization Code + PKCE
-2. The plugin stores the access and refresh tokens in the OpenClaw auth profile
-3. `nyxid_list_services` calls `GET /api/v1/proxy/services` with the user access token
-4. `nyxid_proxy` exchanges the access token for a delegated token via RFC 8693
-5. NyxID injects the user's downstream credentials and forwards the request
+1. OpenClaw authenticates via OAuth 2.0 Authorization Code + PKCE
+2. Plugin stores tokens in the OpenClaw auth profile
+3. Proxy calls use the access token or delegated token via RFC 8693
 
-## Current Backend Constraints
+## Constraints
 
-- RFC 8693 token exchange requires a confidential NyxID OAuth client (`clientSecret` required)
-- Delegated NyxID tokens cannot call `GET /api/v1/proxy/services`; service discovery must use the base user token or API key
-- Approval-gated proxy calls are blocking and end in success or `403 Forbidden`
-- The bundled skill helper scripts accept either `NYXID_ACCESS_TOKEN` or `NYXID_API_KEY`
+- RFC 8693 token exchange requires a confidential NyxID OAuth client
+- Delegated tokens cannot call `GET /api/v1/proxy/services`; use base token or API key for discovery
+- Approval-gated proxy calls block until approved or timeout
 
 ## NyxID Backend Integration (NyxID-to-OpenClaw)
 
 In addition to the OpenClaw skill/plugin (OpenClaw-to-NyxID), NyxID natively supports OpenClaw as a provider and proxy target.
 
-### Provider connection
+### Connecting OpenClaw as an AI Service
 
-OpenClaw is pre-seeded as a provider with `requires_gateway_url: true`. Users connect with their self-hosted instance URL and bearer token:
+OpenClaw is pre-seeded in the NyxID catalog (`llm-openclaw`). Three ways to connect:
 
+**Option A -- Direct via nyxid CLI (credential on NyxID):**
 ```bash
-# Via API
-POST /api/v1/providers/{openclaw_id}/connect/api-key
-{"api_key": "<bearer_token>", "gateway_url": "http://localhost:18789"}
+nyxid openclaw setup --url http://localhost:18789 --credential-env OPENCLAW_TOKEN
+# Reads bearer token from env var, creates the service automatically
+```
 
-# Via node agent (recommended -- stores locally + registers remotely)
+**Option B -- Via node agent (credential stays local, recommended for privacy):**
+```bash
+# On NyxID:
+nyxid service add llm-openclaw --via-node my-node
+
+# On the node machine:
 nyxid-node openclaw connect --url http://localhost:18789
+```
+
+**Option C -- Node agent auto-setup (generic, works for any service):**
+```bash
+nyxid-node credentials setup --service llm-openclaw
+# Auto-detects: requires gateway URL → prompts for URL, then bearer token
+```
+
+**Option D -- Node agent OpenClaw-specific (legacy, still works):**
+```bash
+nyxid-node openclaw connect --url http://localhost:18789
+nyxid-node openclaw status
+nyxid-node openclaw disconnect
 ```
 
 ### Proxy passthrough
 
-Once connected, any OpenClaw API is accessible through NyxID's proxy:
+Once connected, proxy requests through the `nyxid` CLI or API:
 
-```
-/api/v1/proxy/s/llm-openclaw/v1/chat/completions  -- Chat completions
-/api/v1/proxy/s/llm-openclaw/v1/responses          -- OpenResponses API
-/api/v1/proxy/s/llm-openclaw/tools/invoke           -- Skills/tools
+```bash
+# Via CLI
+nyxid proxy request llm-openclaw /v1/chat/completions -m POST \
+  -d '{"model":"gpt-4","messages":[{"role":"user","content":"Hello"}]}'
+
+# Via API
+POST /api/v1/proxy/s/llm-openclaw/v1/chat/completions
+POST /api/v1/proxy/s/llm-openclaw/v1/responses
+POST /api/v1/proxy/s/llm-openclaw/tools/invoke
 ```
 
-Each user's requests route to their own OpenClaw instance (per-user `gateway_url`).
+Each user's requests route to their own OpenClaw instance.
 
 ### Channel integration
 
@@ -246,7 +294,24 @@ Each mapping has its own webhook secret (generated at creation, only shown once)
 
 ### Node agent support
 
-The node agent provides a one-command OpenClaw setup:
+**Setting up a node for OpenClaw (or any service):**
+
+```bash
+# Install and register the node agent (--keychain recommended)
+cargo install --git https://github.com/ChronoAIProject/NyxID --bin nyxid-node
+nyxid-node register \
+  --token "nyx_nreg_..." \
+  --url "wss://<server>/api/v1/nodes/ws" \
+  --keychain
+
+# Auto-setup credentials (detects requirements from catalog)
+nyxid-node credentials setup --service llm-openclaw
+
+# Start the agent
+nyxid-node start
+```
+
+**OpenClaw-specific one-command setup (legacy, still works):**
 
 ```bash
 nyxid-node openclaw connect --url http://localhost:18789 [--access-token <JWT>]
@@ -256,15 +321,16 @@ nyxid-node openclaw disconnect
 
 `connect` stores the bearer token locally (encrypted), registers the provider connection with NyxID, and creates the node service binding automatically.
 
+`credentials setup` is recommended for new setups -- it auto-detects the service type and guides through the right flow.
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| `Set NYXID_API_KEY or NYXID_ACCESS_TOKEN` | No credentials configured | Set one of the env vars |
-| `1001 unauthorized` | Key is invalid or expired | Generate a new API key in NyxID |
-| `1002 forbidden` | Missing scope or service not connected | Ensure key has `proxy` scope; connect service in NyxID |
-| `7000 approval_required` | Approval gating enabled for this service | Approve in NyxID mobile app or Telegram |
-| `8003 node_proxy_error` | Node-backed proxy failed | Check node agent is running |
-| Empty services list | No services connected | Connect services in NyxID dashboard |
+| `1001 unauthorized` | Token/key invalid or expired | Run `nyxid login` or create a new API key with `nyxid api-key create` |
+| `1002 forbidden` | Missing scope or service not connected | Ensure key has `proxy` scope; add service with `nyxid service add` |
+| `7000 approval_required` | Approval gating enabled | Check `nyxid approval list`; approve via mobile app or Telegram |
+| `8003 node_proxy_error` | Node-backed proxy failed | Check node agent with `nyxid node list`; ensure `nyxid-node start` is running |
+| Empty services list | No services configured | Browse catalog: `nyxid catalog list`; add: `nyxid service add <slug>` |
 | Skill not loading in OpenClaw | Skill not in a recognized directory | Copy to `~/.openclaw/skills/nyxid` or add `extraDirs` |
-| `curl: command not found` | curl not installed | Install curl (`brew install curl` / `apt install curl`) |
+| Can't reach OpenClaw | Wrong gateway URL or node offline | Verify with `nyxid-node openclaw status`; check URL with `nyxid service show <id>` |

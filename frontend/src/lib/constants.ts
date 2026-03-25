@@ -49,7 +49,8 @@ export const OAUTH_SCOPE_META: Readonly<Record<string, OAuthScopeMeta>> = {
   },
   email: {
     title: "Read your email",
-    description: "Lets the app access your email address and verification state.",
+    description:
+      "Lets the app access your email address and verification state.",
     risk: "medium",
   },
   offline_access: {
@@ -115,7 +116,10 @@ export function canConnectProvider(
   provider: ProviderConfig,
   hasUserCredentials = false,
 ): boolean {
-  if (provider.provider_type !== "oauth2" && provider.provider_type !== "device_code") {
+  if (
+    provider.provider_type !== "oauth2" &&
+    provider.provider_type !== "device_code"
+  ) {
     return true;
   }
   const mode = provider.credential_mode;

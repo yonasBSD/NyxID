@@ -1,7 +1,10 @@
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
-import { useCreateDeveloperApp, useDeveloperApps } from "@/hooks/use-developer-apps";
+import {
+  useCreateDeveloperApp,
+  useDeveloperApps,
+} from "@/hooks/use-developer-apps";
 import { parseRedirectUris } from "@/lib/oauth";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -39,8 +42,18 @@ const OIDC_SCOPES = [
   { id: "openid", label: "openid", required: true },
   { id: "profile", label: "profile", required: false },
   { id: "email", label: "email", required: false },
-  { id: "roles", label: "roles", required: false, hint: "Includes user roles and permissions in tokens" },
-  { id: "groups", label: "groups", required: false, hint: "Includes user group memberships in tokens" },
+  {
+    id: "roles",
+    label: "roles",
+    required: false,
+    hint: "Includes user roles and permissions in tokens",
+  },
+  {
+    id: "groups",
+    label: "groups",
+    required: false,
+    hint: "Includes user group memberships in tokens",
+  },
 ] as const;
 
 function StatCard({
@@ -161,105 +174,120 @@ export function DeveloperAppsPage() {
                 New Application
               </Button>
             </DialogTrigger>
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle>Create Developer App</DialogTitle>
-              <DialogDescription>
-                Register a new OAuth application for your product.
-              </DialogDescription>
-            </DialogHeader>
-            <div className="space-y-4">
-              <div className="space-y-2">
-                <label className="text-sm font-medium" htmlFor="app-name">
-                  Application Name
-                </label>
-                <Input
-                  id="app-name"
-                  value={name}
-                  onChange={(event) => setName(event.target.value)}
-                  placeholder="My SaaS App"
-                />
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm font-medium" htmlFor="redirect-uris">
-                  Redirect URIs (one per line)
-                </label>
-                <textarea
-                  id="redirect-uris"
-                  value={redirectUrisText}
-                  onChange={(event) => setRedirectUrisText(event.target.value)}
-                  placeholder={"https://app.example.com/oauth/callback\nmyapp://oauth/callback"}
-                  className="flex min-h-[120px] w-full rounded-[10px] border border-input bg-transparent px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                />
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm font-medium">Client Type</label>
-                <Select
-                  value={clientType}
-                  onValueChange={(value: "public" | "confidential") =>
-                    setClientType(value)
-                  }
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="public">Public (PKCE)</SelectItem>
-                    <SelectItem value="confidential">Confidential</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-3">
-                <label className="text-sm font-medium">Allowed Scopes</label>
-                <p className="text-xs text-muted-foreground">
-                  OIDC scopes this app can request. Determines what user data is included in tokens.
-                </p>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Create Developer App</DialogTitle>
+                <DialogDescription>
+                  Register a new OAuth application for your product.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-4">
                 <div className="space-y-2">
-                  {OIDC_SCOPES.map((scope) => (
-                    <div key={scope.id} className="flex items-start gap-2">
-                      <Checkbox
-                        id={`scope-create-${scope.id}`}
-                        checked={selectedScopes.includes(scope.id)}
-                        disabled={scope.required}
-                        onCheckedChange={(checked) => {
-                          setSelectedScopes(
-                            checked
-                              ? [...selectedScopes, scope.id]
-                              : selectedScopes.filter((s) => s !== scope.id),
-                          );
-                        }}
-                      />
-                      <div className="grid gap-0.5 leading-none">
-                        <label
-                          htmlFor={`scope-create-${scope.id}`}
-                          className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
-                        >
-                          {scope.label}
-                          {scope.required && (
-                            <span className="ml-1 text-xs text-muted-foreground">(required)</span>
+                  <label className="text-sm font-medium" htmlFor="app-name">
+                    Application Name
+                  </label>
+                  <Input
+                    id="app-name"
+                    value={name}
+                    onChange={(event) => setName(event.target.value)}
+                    placeholder="My SaaS App"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label
+                    className="text-sm font-medium"
+                    htmlFor="redirect-uris"
+                  >
+                    Redirect URIs (one per line)
+                  </label>
+                  <textarea
+                    id="redirect-uris"
+                    value={redirectUrisText}
+                    onChange={(event) =>
+                      setRedirectUrisText(event.target.value)
+                    }
+                    placeholder={
+                      "https://app.example.com/oauth/callback\nmyapp://oauth/callback"
+                    }
+                    className="flex min-h-[120px] w-full rounded-[10px] border border-input bg-transparent px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Client Type</label>
+                  <Select
+                    value={clientType}
+                    onValueChange={(value: "public" | "confidential") =>
+                      setClientType(value)
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="public">Public (PKCE)</SelectItem>
+                      <SelectItem value="confidential">Confidential</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-3">
+                  <label className="text-sm font-medium">Allowed Scopes</label>
+                  <p className="text-xs text-muted-foreground">
+                    OIDC scopes this app can request. Determines what user data
+                    is included in tokens.
+                  </p>
+                  <div className="space-y-2">
+                    {OIDC_SCOPES.map((scope) => (
+                      <div key={scope.id} className="flex items-start gap-2">
+                        <Checkbox
+                          id={`scope-create-${scope.id}`}
+                          checked={selectedScopes.includes(scope.id)}
+                          disabled={scope.required}
+                          onCheckedChange={(checked) => {
+                            setSelectedScopes(
+                              checked
+                                ? [...selectedScopes, scope.id]
+                                : selectedScopes.filter((s) => s !== scope.id),
+                            );
+                          }}
+                        />
+                        <div className="grid gap-0.5 leading-none">
+                          <label
+                            htmlFor={`scope-create-${scope.id}`}
+                            className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
+                          >
+                            {scope.label}
+                            {scope.required && (
+                              <span className="ml-1 text-xs text-muted-foreground">
+                                (required)
+                              </span>
+                            )}
+                          </label>
+                          {"hint" in scope && scope.hint && (
+                            <p className="text-xs text-muted-foreground">
+                              {scope.hint}
+                            </p>
                           )}
-                        </label>
-                        {"hint" in scope && scope.hint && (
-                          <p className="text-xs text-muted-foreground">{scope.hint}</p>
-                        )}
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    ))}
+                  </div>
                 </div>
               </div>
-            </div>
-            <DialogFooter>
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => setCreateOpen(false)}
-              >
-                Cancel
-              </Button>
-              <Button onClick={() => void handleCreate()} isLoading={createMutation.isPending}>
-                Create App
-              </Button>
-            </DialogFooter>
+              <DialogFooter>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setCreateOpen(false)}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  onClick={() => void handleCreate()}
+                  isLoading={createMutation.isPending}
+                >
+                  Create App
+                </Button>
+              </DialogFooter>
             </DialogContent>
           </Dialog>
         </div>
@@ -320,66 +348,70 @@ export function DeveloperAppsPage() {
 
         {!isLoading &&
           visibleApps.map((app) => (
-          <Card key={app.id}>
-            <CardHeader className="space-y-2">
-              <div className="flex items-center justify-between gap-3">
-                <CardTitle className="text-base">{app.client_name}</CardTitle>
-                <Badge variant={app.is_active ? "success" : "secondary"}>
-                  {app.is_active ? "active" : "inactive"}
-                </Badge>
-              </div>
-              <CardDescription className="break-all">
-                Client ID:{" "}
-                <span className="font-mono text-xs text-foreground">
-                  {app.id}
-                </span>
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="flex flex-wrap items-center gap-2">
-                <Badge variant="outline">{app.client_type}</Badge>
-                <Badge variant="outline">
-                  {app.redirect_uris.length} redirect URIs
-                </Badge>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {(app.allowed_scopes || "")
-                  .split(/\s+/)
-                  .filter(Boolean)
-                  .map((scope) => (
-                  <Badge key={scope} variant="secondary" className="text-xs">
-                    {scope}
+            <Card key={app.id}>
+              <CardHeader className="space-y-2">
+                <div className="flex items-center justify-between gap-3">
+                  <CardTitle className="text-base">{app.client_name}</CardTitle>
+                  <Badge variant={app.is_active ? "success" : "secondary"}>
+                    {app.is_active ? "active" : "inactive"}
                   </Badge>
-                  ))}
-              </div>
-              <div className="flex gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() =>
-                    void navigate({
-                      to: "/developer/apps/$clientId",
-                      params: { clientId: app.id },
-                    })
-                  }
-                >
-                  View Details
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() =>
-                    void navigate({
-                      to: "/developer/apps/$clientId",
-                      params: { clientId: app.id },
-                    })
-                  }
-                >
-                  Manage Credentials
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
+                </div>
+                <CardDescription className="break-all">
+                  Client ID:{" "}
+                  <span className="font-mono text-xs text-foreground">
+                    {app.id}
+                  </span>
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge variant="outline">{app.client_type}</Badge>
+                  <Badge variant="outline">
+                    {app.redirect_uris.length} redirect URIs
+                  </Badge>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {(app.allowed_scopes || "")
+                    .split(/\s+/)
+                    .filter(Boolean)
+                    .map((scope) => (
+                      <Badge
+                        key={scope}
+                        variant="secondary"
+                        className="text-xs"
+                      >
+                        {scope}
+                      </Badge>
+                    ))}
+                </div>
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() =>
+                      void navigate({
+                        to: "/developer/apps/$clientId",
+                        params: { clientId: app.id },
+                      })
+                    }
+                  >
+                    View Details
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() =>
+                      void navigate({
+                        to: "/developer/apps/$clientId",
+                        params: { clientId: app.id },
+                      })
+                    }
+                  >
+                    Manage Credentials
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
           ))}
 
         {!isLoading && visibleApps.length === 0 && (

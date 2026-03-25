@@ -63,7 +63,9 @@ export function ServiceDetailPage() {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 font-display text-lg font-semibold">Service not found</h3>
+        <h3 className="mb-2 font-display text-lg font-semibold">
+          Service not found
+        </h3>
         <p className="mb-4 text-sm text-muted-foreground">
           The service you are looking for does not exist or has been deleted.
         </p>
@@ -99,7 +101,9 @@ export function ServiceDetailPage() {
                   void navigate({
                     to: "/ssh/$serviceId/terminal",
                     params: { serviceId },
-                    search: { principal: service.ssh_config?.allowed_principals[0] },
+                    search: {
+                      principal: service.ssh_config?.allowed_principals[0],
+                    },
                   })
                 }
               >
@@ -137,19 +141,30 @@ export function ServiceDetailPage() {
         <DetailRow label="Slug" value={service.slug} />
         <DetailRow
           label="Service Type"
-          value={SERVICE_TYPE_LABELS[service.service_type] ?? service.service_type}
+          value={
+            SERVICE_TYPE_LABELS[service.service_type] ?? service.service_type
+          }
           badge
         />
         <DetailRow
           label="Category"
-          value={SERVICE_CATEGORY_LABELS[service.service_category] ?? service.service_category}
+          value={
+            SERVICE_CATEGORY_LABELS[service.service_category] ??
+            service.service_category
+          }
           badge
         />
         <DetailRow
           label="Visibility"
-          value={service.visibility === "private" ? "Private (only visible to you)" : "Public"}
+          value={
+            service.visibility === "private"
+              ? "Private (only visible to you)"
+              : "Public"
+          }
           badge
-          badgeVariant={service.visibility === "private" ? "outline" : "secondary"}
+          badgeVariant={
+            service.visibility === "private" ? "outline" : "secondary"
+          }
         />
         {!isSshService && (
           <>
@@ -259,8 +274,10 @@ export function ServiceDetailPage() {
                 <EndpointList
                   serviceId={service.id}
                   hasApiSpecUrl={
-                    (service.openapi_spec_url ?? service.api_spec_url) !== null &&
-                    (service.openapi_spec_url ?? service.api_spec_url) !== undefined
+                    (service.openapi_spec_url ?? service.api_spec_url) !==
+                      null &&
+                    (service.openapi_spec_url ?? service.api_spec_url) !==
+                      undefined
                   }
                 />
               </DetailSection>
@@ -280,22 +297,41 @@ export function ServiceDetailPage() {
                   <DetailRow
                     label="Mode"
                     value={
-                      PROPAGATION_MODE_LABELS[service.identity_propagation_mode] ??
-                      service.identity_propagation_mode
+                      PROPAGATION_MODE_LABELS[
+                        service.identity_propagation_mode
+                      ] ?? service.identity_propagation_mode
                     }
                     badge
                   />
                   {service.identity_include_user_id && (
-                    <DetailRow label="User ID" value="Included" badge badgeVariant="success" />
+                    <DetailRow
+                      label="User ID"
+                      value="Included"
+                      badge
+                      badgeVariant="success"
+                    />
                   )}
                   {service.identity_include_email && (
-                    <DetailRow label="Email" value="Included" badge badgeVariant="success" />
+                    <DetailRow
+                      label="Email"
+                      value="Included"
+                      badge
+                      badgeVariant="success"
+                    />
                   )}
                   {service.identity_include_name && (
-                    <DetailRow label="Display Name" value="Included" badge badgeVariant="success" />
+                    <DetailRow
+                      label="Display Name"
+                      value="Included"
+                      badge
+                      badgeVariant="success"
+                    />
                   )}
                   {service.identity_jwt_audience && (
-                    <DetailRow label="JWT Audience" value={service.identity_jwt_audience} />
+                    <DetailRow
+                      label="JWT Audience"
+                      value={service.identity_jwt_audience}
+                    />
                   )}
                 </DetailSection>
               </>
@@ -325,9 +361,7 @@ export function ServiceDetailPage() {
             <ServiceRequirementsView
               serviceId={service.id}
               userTokenProviderIds={
-                tokens
-                  ? new Set(tokens.map((t) => t.provider_id))
-                  : undefined
+                tokens ? new Set(tokens.map((t) => t.provider_id)) : undefined
               }
             />
           </DetailSection>

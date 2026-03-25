@@ -245,9 +245,7 @@ export function AdminServiceAccountsPage() {
                       {sa.client_id}
                     </TableCell>
                     <TableCell>
-                      <Badge
-                        variant={sa.is_active ? "success" : "destructive"}
-                      >
+                      <Badge variant={sa.is_active ? "success" : "destructive"}>
                         {sa.is_active ? "Active" : "Inactive"}
                       </Badge>
                     </TableCell>
@@ -382,8 +380,8 @@ export function AdminServiceAccountsPage() {
           ) : (
             <Form {...createForm}>
               <form
-                onSubmit={createForm.handleSubmit((data) =>
-                  void handleCreate(data),
+                onSubmit={createForm.handleSubmit(
+                  (data) => void handleCreate(data),
                 )}
                 className="space-y-4"
               >
@@ -399,10 +397,7 @@ export function AdminServiceAccountsPage() {
                     <FormItem>
                       <FormLabel>Name</FormLabel>
                       <FormControl>
-                        <Input
-                          placeholder="e.g. CI/CD Pipeline"
-                          {...field}
-                        />
+                        <Input placeholder="e.g. CI/CD Pipeline" {...field} />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
@@ -442,7 +437,9 @@ export function AdminServiceAccountsPage() {
                   name="role_ids"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Role IDs (comma-separated, optional)</FormLabel>
+                      <FormLabel>
+                        Role IDs (comma-separated, optional)
+                      </FormLabel>
                       <FormControl>
                         <Input placeholder="Optional" {...field} />
                       </FormControl>

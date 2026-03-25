@@ -22,12 +22,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import {
-  ShieldCheck,
-  Trash2,
-  ChevronLeft,
-  ChevronRight,
-} from "lucide-react";
+import { ShieldCheck, Trash2, ChevronLeft, ChevronRight } from "lucide-react";
 import { toast } from "sonner";
 
 export function ApprovalGrantsPage() {
@@ -74,10 +69,7 @@ export function ApprovalGrantsPage() {
       {isLoading ? (
         <div className="space-y-2">
           {Array.from({ length: 5 }).map((_, i) => (
-            <Skeleton
-              key={`grant-skel-${String(i)}`}
-              className="h-12 w-full"
-            />
+            <Skeleton key={`grant-skel-${String(i)}`} className="h-12 w-full" />
           ))}
         </div>
       ) : error ? (
@@ -199,17 +191,12 @@ export function ApprovalGrantsPage() {
             <DialogTitle>Revoke Grant</DialogTitle>
             <DialogDescription>
               Are you sure you want to revoke the grant for{" "}
-              {revokeTarget
-                ? `"${revokeTarget.service_name}"`
-                : "this service"}
+              {revokeTarget ? `"${revokeTarget.service_name}"` : "this service"}
               ? The requester will need to request approval again.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setRevokeGrantId(null)}
-            >
+            <Button variant="outline" onClick={() => setRevokeGrantId(null)}>
               Cancel
             </Button>
             <Button

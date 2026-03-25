@@ -36,13 +36,16 @@ interface SaConnectedServicesProps {
 }
 
 export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
-  const { data: saConnections, isLoading: connectionsLoading } = useSaConnections(saId);
+  const { data: saConnections, isLoading: connectionsLoading } =
+    useSaConnections(saId);
   const { data: allServices } = useServices();
   const connectServiceMutation = useConnectSaService();
   const updateConnectionCredentialMutation = useUpdateSaConnectionCredential();
   const disconnectServiceMutation = useDisconnectSaService();
 
-  const connectedServiceIds = new Set(saConnections?.map((c) => c.service_id) ?? []);
+  const connectedServiceIds = new Set(
+    saConnections?.map((c) => c.service_id) ?? [],
+  );
   const availableServices = (allServices ?? []).filter(
     (s) =>
       s.is_active &&
@@ -158,7 +161,9 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
               <TableBody>
                 {saConnections.map((conn) => (
                   <TableRow key={conn.service_id}>
-                    <TableCell className="font-medium">{conn.service_name}</TableCell>
+                    <TableCell className="font-medium">
+                      {conn.service_name}
+                    </TableCell>
                     <TableCell>
                       <Badge variant="outline">{conn.service_category}</Badge>
                     </TableCell>
@@ -166,7 +171,9 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
                       {conn.auth_type ?? "-"}
                     </TableCell>
                     <TableCell>
-                      <Badge variant={conn.has_credential ? "success" : "secondary"}>
+                      <Badge
+                        variant={conn.has_credential ? "success" : "secondary"}
+                      >
                         {conn.has_credential ? "Stored" : "None"}
                       </Badge>
                     </TableCell>
@@ -182,8 +189,12 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
                           <Button
                             variant="ghost"
                             size="sm"
-                            onClick={() => handleUpdateServiceCredential(conn.service_id)}
-                            disabled={updateConnectionCredentialMutation.isPending}
+                            onClick={() =>
+                              handleUpdateServiceCredential(conn.service_id)
+                            }
+                            disabled={
+                              updateConnectionCredentialMutation.isPending
+                            }
                           >
                             <KeyRound className="mr-1 h-3 w-3" />
                             Update
@@ -192,7 +203,9 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
                         <Button
                           variant="ghost"
                           size="sm"
-                          onClick={() => void handleDisconnectService(conn.service_id)}
+                          onClick={() =>
+                            void handleDisconnectService(conn.service_id)
+                          }
                           disabled={disconnectServiceMutation.isPending}
                         >
                           <Unlink className="mr-1 h-3 w-3" />
@@ -254,7 +267,7 @@ function ConnectServiceDropdown({
           Connect Service
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent>
+      <DropdownMenuContent style={{ maxHeight: "16rem", overflowY: "auto" }}>
         {services.map((s) => (
           <DropdownMenuItem key={s.id} onClick={() => onSelect(s)}>
             <span>{s.name}</span>

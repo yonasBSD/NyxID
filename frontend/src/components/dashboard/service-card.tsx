@@ -67,9 +67,7 @@ export function ServiceCard({
               Private
             </Badge>
           )}
-          {isOidcService(service) && (
-            <Badge variant="accent">OIDC</Badge>
-          )}
+          {isOidcService(service) && <Badge variant="accent">OIDC</Badge>}
           {service.service_type === "http" && (
             <Badge variant="info">{getAuthTypeLabel(service)}</Badge>
           )}
@@ -84,9 +82,7 @@ export function ServiceCard({
       )}
 
       {/* Target */}
-      <span className="text-xs text-text-tertiary">
-        {secondaryLabel}
-      </span>
+      <span className="text-xs text-text-tertiary">{secondaryLabel}</span>
     </div>
   );
 }

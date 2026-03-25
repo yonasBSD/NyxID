@@ -179,7 +179,9 @@ export function IntegrationGuidePage() {
                 </span>
               </div>
               <p className="mt-1 text-xs text-muted-foreground">
-                <span className="font-medium text-foreground">{meta.title}</span>
+                <span className="font-medium text-foreground">
+                  {meta.title}
+                </span>
                 {" - "}
                 {meta.description}
               </p>

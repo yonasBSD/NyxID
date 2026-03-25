@@ -72,7 +72,12 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
     let api_key_routes = Router::new()
         .route("/", get(handlers::api_keys::list_keys))
         .route("/", post(handlers::api_keys::create_key))
-        .route("/{key_id}", delete(handlers::api_keys::delete_key))
+        .route(
+            "/{key_id}",
+            get(handlers::api_keys::get_key)
+                .put(handlers::api_keys::update_key)
+                .delete(handlers::api_keys::delete_key),
+        )
         .route("/{key_id}/rotate", post(handlers::api_keys::rotate_key));
 
     let service_routes = Router::new()
@@ -470,6 +475,52 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
                 .delete(handlers::node_admin::delete_binding),
         );
 
+    let unified_key_routes = Router::new()
+        .route(
+            "/",
+            get(handlers::keys::list_keys).post(handlers::keys::create_key),
+        )
+        .route(
+            "/{key_id}",
+            get(handlers::keys::get_key)
+                .put(handlers::keys::update_key)
+                .delete(handlers::keys::delete_key),
+        );
+
+    let user_endpoint_routes = Router::new()
+        .route("/", get(handlers::user_endpoints::list_endpoints))
+        .route(
+            "/{endpoint_id}",
+            put(handlers::user_endpoints::update_endpoint)
+                .delete(handlers::user_endpoints::delete_endpoint),
+        );
+
+    let external_api_key_routes = Router::new()
+        .route(
+            "/",
+            get(handlers::user_api_keys_external::list_external_api_keys),
+        )
+        .route(
+            "/{key_id}",
+            put(handlers::user_api_keys_external::update_external_api_key)
+                .delete(handlers::user_api_keys_external::delete_external_api_key),
+        );
+
+    let user_service_routes = Router::new()
+        .route(
+            "/",
+            get(handlers::user_services_handler::list_user_services),
+        )
+        .route(
+            "/{service_id}",
+            put(handlers::user_services_handler::update_user_service)
+                .delete(handlers::user_services_handler::delete_user_service),
+        );
+
+    let catalog_routes = Router::new()
+        .route("/", get(handlers::catalog::list_catalog))
+        .route("/{slug}", get(handlers::catalog::get_catalog_entry));
+
     let developer_routes = Router::new()
         .route(
             "/oauth-clients",
@@ -554,6 +605,11 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .nest("/notifications", notification_routes)
         .nest("/approvals", approval_routes)
         .nest("/nodes", node_routes)
+        .nest("/keys", unified_key_routes)
+        .nest("/endpoints", user_endpoint_routes)
+        .nest("/api-keys/external", external_api_key_routes)
+        .nest("/user-services", user_service_routes)
+        .nest("/catalog", catalog_routes)
         .route(
             "/integrations/openclaw/mappings",
             post(handlers::openclaw_channel::create_mapping),

@@ -213,9 +213,7 @@ export function AdminUsersPage() {
                       }
                     }}
                   >
-                    <TableCell className="font-medium">
-                      {user.email}
-                    </TableCell>
+                    <TableCell className="font-medium">{user.email}</TableCell>
                     <TableCell>
                       {user.display_name ?? (
                         <span className="text-muted-foreground">--</span>
@@ -239,9 +237,7 @@ export function AdminUsersPage() {
                     </TableCell>
                     <TableCell>
                       <Badge
-                        variant={
-                          user.email_verified ? "success" : "warning"
-                        }
+                        variant={user.email_verified ? "success" : "warning"}
                       >
                         {user.email_verified ? "Verified" : "Unverified"}
                       </Badge>
@@ -270,7 +266,8 @@ export function AdminUsersPage() {
           <div className="flex items-center justify-between">
             <p className="text-sm text-muted-foreground">
               Showing {String((page - 1) * PER_PAGE + 1)}-
-              {String(Math.min(page * PER_PAGE, total))} of {String(total)} users
+              {String(Math.min(page * PER_PAGE, total))} of {String(total)}{" "}
+              users
             </p>
             <div className="flex items-center gap-2">
               <Button
@@ -310,8 +307,8 @@ export function AdminUsersPage() {
           </DialogHeader>
           <Form {...createForm}>
             <form
-              onSubmit={createForm.handleSubmit((data) =>
-                void handleCreate(data),
+              onSubmit={createForm.handleSubmit(
+                (data) => void handleCreate(data),
               )}
               className="space-y-4"
             >

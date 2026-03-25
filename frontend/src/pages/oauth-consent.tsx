@@ -56,13 +56,17 @@ export function OAuthConsentPage() {
     return (
       <div
         className="mx-auto flex min-h-dvh w-full max-w-2xl items-center px-6 py-10"
-        style={{ paddingTop: "max(2.5rem, var(--sat))", paddingBottom: "max(2.5rem, var(--sab))" }}
+        style={{
+          paddingTop: "max(2.5rem, var(--sat))",
+          paddingBottom: "max(2.5rem, var(--sab))",
+        }}
       >
         <Card className="w-full">
           <CardHeader>
             <CardTitle>Invalid consent request</CardTitle>
             <CardDescription>
-              Missing required OAuth parameters. Please restart the sign-in flow.
+              Missing required OAuth parameters. Please restart the sign-in
+              flow.
             </CardDescription>
           </CardHeader>
         </Card>
@@ -73,7 +77,10 @@ export function OAuthConsentPage() {
   return (
     <div
       className="mx-auto flex min-h-dvh w-full max-w-2xl items-center px-6 py-10"
-      style={{ paddingTop: "max(2.5rem, var(--sat))", paddingBottom: "max(2.5rem, var(--sab))" }}
+      style={{
+        paddingTop: "max(2.5rem, var(--sat))",
+        paddingBottom: "max(2.5rem, var(--sab))",
+      }}
     >
       <Card className="w-full">
         <CardHeader className="space-y-4">
@@ -97,11 +104,15 @@ export function OAuthConsentPage() {
             <div className="mt-2 space-y-1 text-xs text-muted-foreground">
               <p>
                 Application:{" "}
-                <span className="font-medium text-foreground">{clientName}</span>
+                <span className="font-medium text-foreground">
+                  {clientName}
+                </span>
               </p>
               <p>
                 Redirect host:{" "}
-                <span className="font-mono text-foreground">{redirectHost}</span>
+                <span className="font-mono text-foreground">
+                  {redirectHost}
+                </span>
               </p>
             </div>
           </div>
@@ -137,7 +148,9 @@ export function OAuthConsentPage() {
                     className="rounded-md border border-border bg-muted/50 px-3 py-2"
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <p className="font-mono text-xs text-foreground">{item}</p>
+                      <p className="font-mono text-xs text-foreground">
+                        {item}
+                      </p>
                       <span
                         className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${scopeRiskClass(meta.risk)}`}
                       >

@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::{AuthUser, OptionalAuthUser};
-use crate::services::{audit_service, provider_service, user_token_service};
+use crate::services::{
+    audit_service, credential_push_service, provider_service, user_token_service,
+};
 
 use super::services_helpers::validate_base_url;
 
@@ -380,6 +382,23 @@ async fn generic_oauth_callback_impl(
                 None,
                 None,
             );
+
+            // Fire-and-forget: push credential to any node-routed UserService
+            // that references this provider
+            {
+                let db = state.db.clone();
+                let enc = state.encryption_keys.clone();
+                let ws = state.node_ws_manager.clone();
+                let uid = token.user_id.clone();
+                let pid = provider_id.to_string();
+                tokio::spawn(async move {
+                    credential_push_service::push_oauth_credential_to_nodes(
+                        &db, &enc, &ws, &uid, &pid,
+                    )
+                    .await;
+                });
+            }
+
             if let Some(ref path) = redirect_path {
                 redirect_to_path(frontend_url, path, "success", None)
             } else {
@@ -643,6 +662,10 @@ mod tests {
             acting_client_id: None,
             approval_owner_user_id: None,
             auth_method: AuthMethod::Session,
+            allow_all_services: true,
+            allow_all_nodes: true,
+            allowed_service_ids: vec![],
+            allowed_node_ids: vec![],
         }
     }
 

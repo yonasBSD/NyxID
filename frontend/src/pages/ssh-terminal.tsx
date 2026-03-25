@@ -10,7 +10,10 @@ import { useCallback } from "react";
 
 export function SshTerminalPage() {
   const { serviceId } = useParams({ strict: false }) as { serviceId: string };
-  const search = useSearch({ strict: false }) as { principal?: string };
+  const search = useSearch({ strict: false }) as {
+    principal?: string;
+    returnKeyId?: string;
+  };
   const navigate = useNavigate();
 
   const { data: service, isLoading, error } = useService(serviceId);
@@ -19,19 +22,21 @@ export function SshTerminalPage() {
   const isSshService = service?.service_type === "ssh";
   const hasCertAuth = service?.ssh_config?.certificate_auth_enabled === true;
   const principal =
-    search.principal ??
-    service?.ssh_config?.allowed_principals[0] ??
-    "ubuntu";
+    search.principal ?? service?.ssh_config?.allowed_principals[0] ?? "ubuntu";
   const targetHost = service?.ssh_config
     ? `${service.ssh_config.host}:${String(service.ssh_config.port)}`
     : null;
 
   const handleBack = useCallback(() => {
-    void navigate({
-      to: "/services/$serviceId",
-      params: { serviceId },
-    });
-  }, [navigate, serviceId]);
+    if (search.returnKeyId) {
+      void navigate({
+        to: "/keys/$keyId",
+        params: { keyId: search.returnKeyId },
+      });
+    } else {
+      void navigate({ to: "/keys" });
+    }
+  }, [navigate, search.returnKeyId]);
 
   const handleDisconnect = useCallback(() => {
     // No-op for now; the terminal shows its own reconnect button.
@@ -62,7 +67,7 @@ export function SshTerminalPage() {
           The service you are looking for does not exist or has been deleted.
         </p>
         <Button variant="outline" onClick={handleBack}>
-          Back to Services
+          Back to AI Services
         </Button>
       </div>
     );
@@ -106,9 +111,7 @@ export function SshTerminalPage() {
             {service.name}
           </span>
           {targetHost !== null && (
-            <span className="text-xs text-slate-500">
-              {targetHost}
-            </span>
+            <span className="text-xs text-slate-500">{targetHost}</span>
           )}
         </div>
 

@@ -44,6 +44,22 @@ impl SecretBackend {
         }
     }
 
+    /// Build the backend from just the storage type string and config dir.
+    /// For keychain, loads the config first to get the node_id.
+    pub fn from_storage_backend_str(backend: &str, config_dir: &Path) -> Result<Self> {
+        match backend {
+            "keychain" => {
+                let config_file = config_dir.join("config.toml");
+                let config = crate::config::NodeConfig::load(&config_file)?;
+                Ok(Self::Keychain(KeychainVault::load(
+                    &config.node.id,
+                    &config,
+                )?))
+            }
+            _ => Ok(Self::File(LocalEncryption::load_or_generate(config_dir)?)),
+        }
+    }
+
     #[cfg(test)]
     pub fn new_mock_keychain(node_id: &str) -> Self {
         Self::Keychain(KeychainVault::new_mock(node_id))

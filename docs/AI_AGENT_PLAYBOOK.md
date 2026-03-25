@@ -13,12 +13,13 @@ This document is a reference for AI agents (Claude, Codex, ChatGPT, Gemini, etc.
 ## Table of Contents
 
 1. [What is NyxID](#1-what-is-nyxid)
+1b. [Install CLI Tools](#1b-install-cli-tools)
 2. [Key Concepts](#2-key-concepts)
 3. [Getting Started](#3-getting-started)
 4. [Register a Service (External API)](#4-register-a-service-external-api)
 5. [Register a Service (Internal / Shared Credential)](#5-register-a-service-internal--shared-credential)
 6. [Register a Service (OIDC / SSO Provider)](#6-register-a-service-oidc--sso-provider)
-7. [Connect User Credentials to a Service](#7-connect-user-credentials-to-a-service)
+7. [Add a Service (AI Services)](#7-add-a-service-ai-services)
 8. [Set Up MCP Proxy for AI Clients](#8-set-up-mcp-proxy-for-ai-clients)
 9. [Use the Credential Proxy](#9-use-the-credential-proxy)
 10. [Set Up a Provider (OAuth / API Key / Device Code)](#10-set-up-a-provider-oauth--api-key--device-code)
@@ -34,6 +35,7 @@ This document is a reference for AI agents (Claude, Codex, ChatGPT, Gemini, etc.
 20. [Error Code Reference](#20-error-code-reference)
 21. [Troubleshooting](#21-troubleshooting)
 22. [Common Pitfalls](#22-common-pitfalls)
+23. [NyxID CLI](#23-nyxid-cli)
 
 ---
 
@@ -49,33 +51,112 @@ NyxID is an Auth/SSO and credential management platform. Users interact with it 
 
 The dashboard is at http://localhost:3000. The API is at http://localhost:3001.
 
+### CLI Tools
+
+NyxID provides two CLI tools:
+
+- **`nyxid`** -- User CLI for managing services, keys, catalog, nodes, and more. Preferred over curl for AI agents.
+- **`nyxid-node`** -- Node agent CLI for on-premise credential management and proxy routing.
+
+See [section 1b](#1b-install-cli-tools) for installation instructions.
+
+---
+
+## 1b. Install CLI Tools
+
+### nyxid (User CLI)
+
+The `nyxid` CLI manages services, API keys, catalog browsing, MCP setup, and more. Authenticates via browser SSO or API key.
+
+```bash
+# Install from git (requires Rust toolchain)
+cargo install --git https://github.com/ChronoAIProject/NyxID --bin nyxid
+
+# Or clone and build locally
+git clone https://github.com/ChronoAIProject/NyxID && cd NyxID
+cargo install --path cli
+
+# Verify
+nyxid --help
+```
+
+**First-time setup:**
+
+```bash
+# Login via browser SSO (opens browser, stores token at ~/.nyxid/access_token)
+# --base-url is saved to ~/.nyxid/base_url -- all subsequent commands use it automatically
+nyxid login --base-url http://localhost:3001
+
+# Or use password login (for headless/AI-agent environments)
+nyxid login --base-url http://localhost:3001 --password --password-env NYXID_PASSWORD
+
+# Check connection (no --base-url needed after login)
+nyxid status
+```
+
+> **Note:** After `nyxid login --base-url <URL>`, the URL is persisted at `~/.nyxid/base_url`. You do not need to pass `--base-url` on subsequent commands.
+
+### nyxid-node (Node Agent CLI)
+
+The `nyxid-node` CLI manages on-premise credential storage and proxying. See [section 11](#11-deploy-a-node-agent-on-premise-credentials) for full setup.
+
+```bash
+# Install from git (requires Rust toolchain)
+cargo install --git https://github.com/ChronoAIProject/NyxID --bin nyxid-node
+
+# Or clone and build locally
+git clone https://github.com/ChronoAIProject/NyxID && cd NyxID
+cargo install --path node-agent
+
+# Verify
+nyxid-node version
+```
+
+### CLI vs API
+
+Throughout this playbook, both CLI commands and API calls are shown. **AI agents should prefer CLI commands** when the `nyxid` binary is available -- they are shorter, handle authentication automatically, and avoid manual JSON construction.
+
 ---
 
 ## 2. Key Concepts
 
+### Core Concepts
+
 | Concept | Description |
 |---------|-------------|
-| **Service** | A downstream app or API registered in NyxID. Has a base URL, auth method, and optional API endpoints. |
-| **Provider** | An external OAuth/API service users can connect to (e.g., Google, GitHub, OpenAI). |
-| **Connection** | A link between a user and a service, storing the user's credential for that service. |
+| **Catalog** | Read-only list of pre-configured service templates (OpenAI, Anthropic, etc.). Admin-managed via DownstreamService. Users browse the catalog to add services. |
+| **UserEndpoint** | A target URL owned by a user (e.g., `https://api.openai.com/v1`). Auto-provisioned from catalog defaults or set manually for custom endpoints. |
+| **UserApiKey** | A user's external credential (API key, OAuth token, bearer token). Encrypted at rest. |
+| **UserService** | Proxy routing config that binds a UserEndpoint + UserApiKey + auth method. Defines the slug used in `/proxy/s/{slug}/*`. Optionally routes through a node. |
+| **AI Services page** | Unified dashboard page at `/keys` with 2 tabs: **External Services** (UserEndpoint + UserApiKey + UserService) and **NyxID API Keys** (ApiKey with scope). Replaces the old Services, Connections, and Providers pages. |
 | **OAuth Client** | An app registered to use NyxID as its identity provider (gets a client_id). |
 | **Service Account** | A non-human identity for server-to-server auth (client_credentials grant). |
-| **Node** | An on-premise agent that holds credentials locally and proxies requests through NyxID. |
+| **Node** | An on-premise agent that holds credentials locally and proxies requests through NyxID. Node routing is configured per-service on the AI Services page. |
 | **MCP Proxy** | Exposes connected service endpoints as MCP tools at `/mcp`. |
 
-### Service Categories
+### How Users Add Services
 
-- **External** (`connection`) -- Users bring their own credentials (API key, bearer token, basic auth).
-- **Internal** (`internal`) -- Admin configures a shared credential. Users just enable access.
-- **Provider** (`provider`) -- OIDC identity provider. Used for federation.
+Users add services via a single action: `nyxid service add <slug>` (CLI) or `POST /api/v1/keys` (API). This auto-provisions all 3 records (UserEndpoint + UserApiKey + UserService) from catalog defaults or custom input. The old separate steps (register service, then connect credential, then bind node) are replaced by this one operation.
 
 ### Auth Methods for Credential Injection
 
-- `header` -- Inject credential as HTTP header (e.g., `Authorization: Bearer ...`)
+- `bearer` -- Inject credential as `Authorization: Bearer <credential>`
+- `header` -- Inject credential as a custom HTTP header (e.g., `X-API-Key: <credential>`)
 - `query` -- Inject credential as query parameter
-- `body` -- Inject credential into request body
-- `oidc` -- Full OIDC client with client_id/client_secret
+- `basic` -- Inject credential as HTTP Basic auth
 - `none` -- No credential injection
+
+### Admin-Only Concepts (Service Catalog Management)
+
+These are managed by admins and serve as templates for the user-facing catalog:
+
+| Concept | Description |
+|---------|-------------|
+| **DownstreamService** | A service template in the catalog. Has default base URL, auth method, slug. Admin-managed. |
+| **ProviderConfig** | OAuth/device-code plumbing for a provider (authorization_url, token_url, etc.). |
+| **ServiceProviderRequirement** | Links a catalog service to a provider config. |
+
+The old **Connection** and **Provider** concepts are now unified into the AI Services flow. Users no longer need to visit separate pages -- everything is managed from `/keys`.
 
 ---
 
@@ -91,7 +172,17 @@ The dashboard is at http://localhost:3000. The API is at http://localhost:3001.
 
 Create an API key so AI agents can make API calls on the user's behalf. The key should be stored as an environment variable -- **never paste it into AI chat**.
 
-**Step 1:** Create an API key via the dashboard at http://localhost:3000/api-keys, or via API:
+**Step 1:** Create an API key via the AI Services page at http://localhost:3000/keys (NyxID API Keys tab), via CLI, or via API:
+
+**Via CLI (recommended):**
+
+```bash
+nyxid login --base-url http://localhost:3001   # one-time; saves URL
+nyxid api-key create --name "AI Agent Key" --scopes "read write"
+# Returns the key value (one-time display)
+```
+
+**Via API:**
 
 ```bash
 # Login first to get an access token
@@ -176,17 +267,19 @@ Most operations can also be done in the NyxID dashboard at http://localhost:3000
 
 ## 4. Register a Service (External API)
 
-**Goal:** Register an external API so users can store their own credentials and proxy requests through NyxID.
+> **Admin-only.** This section covers registering a new service in the catalog. Normal users add services from the catalog via `POST /api/v1/keys` (see [section 7](#7-add-a-service-ai-services)). The catalog is browsable at `GET /api/v1/catalog`.
 
-### Via Dashboard
+**Goal:** Register an external API in the service catalog so users can add it from the AI Services page.
 
-1. Go to http://localhost:3000/services
+### Via Dashboard (admin)
+
+1. Go to http://localhost:3000/services (admin section)
 2. Click "New Service"
 3. Fill in: name, base URL, auth type (e.g., API Key / Bearer / Basic), auth key name (e.g., `Authorization`)
 4. Set category to "External" (users bring their own credentials)
-5. Save
+5. Save -- the service now appears in the catalog for all users
 
-### Via API
+### Via API (admin)
 
 ```bash
 curl -X POST http://localhost:3001/api/v1/services \
@@ -241,11 +334,13 @@ curl -X POST http://localhost:3001/api/v1/services/$SERVICE_ID/endpoints \
 
 ## 5. Register a Service (Internal / Shared Credential)
 
+> **Admin-only.** This creates a catalog entry with an admin-provided credential.
+
 **Goal:** Register a service where the admin provides a shared credential. Users just enable access without managing keys.
 
 ### Via API
 
-**Via Dashboard (recommended):** Create the service at http://localhost:3000/services and enter the shared credential in the form.
+**Via Dashboard (recommended):** Create the service at http://localhost:3000/services (admin section) and enter the shared credential in the form.
 
 **Via CLI:** First set the credential as an env var (user runs this themselves -- in Claude Code use `!` prefix):
 
@@ -285,11 +380,13 @@ curl -X POST http://localhost:3001/api/v1/connections/$SERVICE_ID \
 
 ## 6. Register a Service (OIDC / SSO Provider)
 
+> **Admin-only.** This registers an OIDC-enabled service in the catalog.
+
 **Goal:** Register a service where NyxID acts as the OIDC identity provider. Users sign in via NyxID's OAuth flow and the downstream app gets a client_id/client_secret pair.
 
-### Via Dashboard
+### Via Dashboard (admin)
 
-1. Go to http://localhost:3000/services
+1. Go to http://localhost:3000/services (admin section)
 2. Click "New Service"
 3. Set auth type to **OIDC**
 4. NyxID auto-generates a client_id and client_secret for the service
@@ -366,61 +463,114 @@ Returns the new `client_secret` (one-time display).
 
 ---
 
-## 7. Connect to a Service
+## 7. Add a Service (AI Services)
 
-There are two ways to connect to a service depending on how it's set up:
+Adding a service is now a single action. Use `nyxid service add <slug>` (CLI) or `POST /api/v1/keys` (API) to auto-provision all 3 records (UserEndpoint + UserApiKey + UserService) from catalog defaults or custom input.
 
-1. **Direct credential** -- Enter an API key, bearer token, or basic auth credential directly.
-2. **Via a provider** -- Connect through an OAuth flow, device code flow, or API key provider that's been registered in NyxID (see section 10).
+### Option A: Add from catalog (most common)
 
-### Option A: Direct credential
+**Via Dashboard (recommended):**
 
-For services where you have an API key or token.
+1. Go to http://localhost:3000/keys (AI Services page)
+2. Click "+ Add Key"
+3. Pick a service from the catalog (OpenAI, Anthropic, etc.)
+4. Enter your API key and an optional label
+5. Done -- the endpoint, credential, and proxy path are auto-configured
 
-**Via Dashboard (recommended for entering secrets):**
-
-1. Go to http://localhost:3000/connections
-2. Find the service and click "Connect"
-3. Enter your credential in the form field (input is masked)
-
-**Via CLI:** First have the user set the credential as an env var (in Claude Code use `!` prefix, in other tools use a separate terminal):
+**Via CLI (preferred for AI agents):** First have the user set the credential as an env var (in Claude Code use `!` prefix, in other tools use a separate terminal):
 
 ```bash
 # User runs this themselves (AI never sees the value):
-! export SERVICE_CREDENTIAL="Bearer sk-proj-..."
+! export SERVICE_CREDENTIAL="sk-proj-..."
 ```
 
 Then the AI can run:
 
 ```bash
-curl -X POST http://localhost:3001/api/v1/connections/$SERVICE_ID \
+# CLI (preferred)
+nyxid service add llm-openai --credential "$SERVICE_CREDENTIAL" --label "Production"
+
+# API equivalent
+curl -X POST http://localhost:3001/api/v1/keys \
   -H "X-API-Key: $NYXID_API_KEY" \
   -H "Content-Type: application/json" \
-  -d "{\"credential\": \"$SERVICE_CREDENTIAL\", \"credential_label\": \"My Key\"}"
+  -d "{\"service_slug\": \"llm-openai\", \"credential\": \"$SERVICE_CREDENTIAL\", \"label\": \"Production\"}"
 ```
 
-**Never** put the actual credential value in a command. Always use an env var or the dashboard.
+This auto-creates:
+- **UserEndpoint** with the catalog's default URL (e.g., `https://api.openai.com/v1`)
+- **UserApiKey** with the encrypted credential
+- **UserService** with the proxy slug, auth method, and auth key name from catalog defaults
 
-### Option B: Via a provider (OAuth / Device Code)
+### Option B: Add from catalog with custom endpoint URL
 
-For services that use a provider for authentication (e.g., OpenAI via Codex device code flow, GitHub via OAuth). These flows are safe because the secret exchange happens via OAuth redirect or device code -- no credential is typed into chat.
-
-**Via Dashboard:**
-
-1. Go to http://localhost:3000/providers
-2. Find the provider and click "Connect"
-3. Follow the OAuth flow, enter a device code, or paste an API key depending on the provider type
-
-**Via API:**
+For services like OpenClaw where the user provides their own instance URL:
 
 ```bash
-# OAuth provider -- initiates browser redirect (no secrets in chat)
-curl http://localhost:3001/api/v1/providers/$PROVIDER_ID/connect/oauth \
-  -H "X-API-Key: $NYXID_API_KEY"
+# User sets env var: ! export SERVICE_CREDENTIAL="my-bearer-token"
+
+# CLI
+nyxid service add llm-openclaw --credential "$SERVICE_CREDENTIAL" \
+  --endpoint-url "http://localhost:18789" --label "Local OpenClaw"
+
+# API equivalent
+curl -X POST http://localhost:3001/api/v1/keys \
+  -H "X-API-Key: $NYXID_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"service_slug\": \"llm-openclaw\",
+    \"credential\": \"$SERVICE_CREDENTIAL\",
+    \"endpoint_url\": \"http://localhost:18789\",
+    \"label\": \"Local OpenClaw\"
+  }"
+```
+
+### Option C: Fully custom endpoint (no catalog)
+
+For internal APIs or services not in the catalog:
+
+```bash
+# User sets env var: ! export SERVICE_CREDENTIAL="secret-token"
+
+# CLI
+nyxid service add-custom --label "Internal API" \
+  --endpoint-url "https://internal.corp.com/api" \
+  --credential "$SERVICE_CREDENTIAL" \
+  --auth-method header --auth-key-name "X-API-Key"
+
+# API equivalent
+curl -X POST http://localhost:3001/api/v1/keys \
+  -H "X-API-Key: $NYXID_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"label\": \"Internal API\",
+    \"endpoint_url\": \"https://internal.corp.com/api\",
+    \"credential\": \"$SERVICE_CREDENTIAL\",
+    \"auth_method\": \"header\",
+    \"auth_key_name\": \"X-API-Key\"
+  }"
+```
+
+The slug is auto-generated from the label (e.g., `internal-api`).
+
+### Option D: OAuth provider flow
+
+For services that use OAuth (e.g., GitHub, Codex):
+
+```bash
+# CLI -- opens browser for OAuth flow
+nyxid service add github --oauth
+
+# API equivalent -- start OAuth flow
+curl -X POST http://localhost:3001/api/v1/keys/oauth/authorize \
+  -H "X-API-Key: $NYXID_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"service_slug": "github"}'
 # Returns: { "authorization_url": "https://..." }
 # Open the URL in a browser to complete the OAuth flow.
+# Tokens are stored automatically as a UserApiKey.
 
-# Device code provider (e.g., Codex) -- no secrets needed
+# Device code flow (e.g., Codex) -- no secrets needed
 curl -X POST http://localhost:3001/api/v1/providers/$PROVIDER_ID/connect/device-code/initiate \
   -H "X-API-Key: $NYXID_API_KEY"
 # Returns: { "user_code": "ABCD-1234", "verification_uri": "https://..." }
@@ -429,33 +579,71 @@ curl -X POST http://localhost:3001/api/v1/providers/$PROVIDER_ID/connect/device-
   -H "X-API-Key: $NYXID_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"state": "STATE_FROM_INITIATE"}'
-
-# API key provider -- user sets env var first (! prefix in Claude Code):
-# ! export PROVIDER_KEY="sk-..."
-curl -X POST http://localhost:3001/api/v1/providers/$PROVIDER_ID/connect/api-key \
-  -H "X-API-Key: $NYXID_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d "{\"api_key\": \"$PROVIDER_KEY\", \"label\": \"My Key\"}"
 ```
 
-### Update or disconnect
+**Never** put actual credential values in commands. Always use env vars or the dashboard.
+
+### Browse the catalog
 
 ```bash
-# Update a direct credential -- user sets env var first:
-# ! export SERVICE_CREDENTIAL="Bearer sk-proj-new-key"
-curl -X PUT http://localhost:3001/api/v1/connections/$SERVICE_ID/credential \
-  -H "X-API-Key: $NYXID_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d "{\"credential\": \"$SERVICE_CREDENTIAL\", \"credential_label\": \"Rotated Key\"}"
+# CLI
+nyxid catalog list
+nyxid catalog show llm-openai
 
-# Disconnect from a service
-curl -X DELETE http://localhost:3001/api/v1/connections/$SERVICE_ID \
+# API equivalent
+curl http://localhost:3001/api/v1/catalog \
   -H "X-API-Key: $NYXID_API_KEY"
-
-# Disconnect from a provider
-curl -X DELETE http://localhost:3001/api/v1/providers/$PROVIDER_ID/disconnect \
+curl http://localhost:3001/api/v1/catalog/llm-openai \
   -H "X-API-Key: $NYXID_API_KEY"
 ```
+
+### Manage existing services
+
+```bash
+# CLI
+nyxid service list                              # List all your services
+nyxid service show <slug>                       # Get details
+nyxid service update <slug> --label "My Custom Name"  # Rename service
+nyxid service update <slug> --endpoint-url "http://localhost:8080/openai"  # Update endpoint
+nyxid service update <slug> --node-id "NODE_UUID"  # Route through a node
+nyxid service remove <slug>                     # Delete a service
+
+# API equivalents
+# List all your services (combined view: endpoint + key + service)
+curl http://localhost:3001/api/v1/keys \
+  -H "X-API-Key: $NYXID_API_KEY"
+
+# Get details for a specific service
+curl http://localhost:3001/api/v1/keys/$KEY_ID \
+  -H "X-API-Key: $NYXID_API_KEY"
+
+# Update service (label, endpoint, routing, etc.) via unified endpoint
+curl -X PUT http://localhost:3001/api/v1/keys/$KEY_ID \
+  -H "X-API-Key: $NYXID_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"label": "My Custom Name", "endpoint_url": "http://localhost:8080/openai"}'
+
+# Update the credential -- user sets env var first:
+# ! export NEW_CREDENTIAL="sk-new-key-..."
+curl -X PUT http://localhost:3001/api/v1/api-keys/external/$API_KEY_ID \
+  -H "X-API-Key: $NYXID_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{\"credential\": \"$NEW_CREDENTIAL\"}"
+
+# Update service routing (e.g., add node routing)
+curl -X PUT http://localhost:3001/api/v1/keys/$KEY_ID \
+  -H "X-API-Key: $NYXID_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"node_id": "NODE_UUID"}'
+
+# Delete a service (deactivates service + key)
+curl -X DELETE http://localhost:3001/api/v1/keys/$KEY_ID \
+  -H "X-API-Key: $NYXID_API_KEY"
+```
+
+### Deprecated routes (still functional)
+
+The old `/api/v1/connections` and `/api/v1/providers/*/connect/*` routes still work during the migration period. New integrations should use `/api/v1/keys`.
 
 ---
 
@@ -465,10 +653,18 @@ curl -X DELETE http://localhost:3001/api/v1/providers/$PROVIDER_ID/disconnect \
 
 ### Prerequisites
 
-1. At least one service with endpoints registered (see section 4)
-2. User has connected their credential to that service (see section 6)
+1. At least one service with endpoints registered in the catalog (see section 4, admin-only)
+2. User has added the service via AI Services (see [section 7](#7-add-a-service-ai-services))
 
-### Cursor
+### Via CLI (auto-configures your AI tool)
+
+```bash
+nyxid mcp setup cursor     # Generates .cursor/mcp.json
+nyxid mcp setup claude     # Generates .claude/settings.json MCP entry
+nyxid mcp setup codex      # Generates ~/.codex/config.toml entry
+```
+
+### Cursor (manual)
 
 Create or edit `.cursor/mcp.json` in your project root:
 
@@ -532,6 +728,16 @@ Built-in meta-tools let you search for tools and discover/connect to new service
 ### Proxy by slug (recommended)
 
 ```bash
+# CLI
+nyxid proxy request llm-openai v1/chat/completions \
+  -m POST -d '{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}]}'
+
+# With streaming
+nyxid proxy request llm-openai v1/chat/completions \
+  -m POST --stream \
+  -d '{"model": "gpt-4", "stream": true, "messages": [{"role": "user", "content": "Hello"}]}'
+
+# API
 curl http://localhost:3001/api/v1/proxy/s/openai/v1/chat/completions \
   -H "Authorization: Bearer $ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
@@ -541,6 +747,11 @@ curl http://localhost:3001/api/v1/proxy/s/openai/v1/chat/completions \
 ### Proxy by service ID
 
 ```bash
+# CLI
+nyxid proxy request $SERVICE_ID v1/chat/completions --by-id \
+  -m POST -d '{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}]}'
+
+# API
 curl http://localhost:3001/api/v1/proxy/$SERVICE_ID/v1/chat/completions \
   -H "Authorization: Bearer $ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
@@ -552,9 +763,22 @@ NyxID automatically injects the user's stored credential (e.g., `Authorization: 
 ### List proxyable services
 
 ```bash
+# CLI (recommended -- shows all user services including custom slugs)
+nyxid service list --output json
+
+# CLI (legacy catalog-only discovery)
+nyxid proxy discover
+
+# API (all user services)
+curl http://localhost:3001/api/v1/keys \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+
+# API (legacy catalog-only)
 curl http://localhost:3001/api/v1/proxy/services \
   -H "Authorization: Bearer $ACCESS_TOKEN"
 ```
+
+Use `nyxid service list` for complete discovery. If a user has multiple keys for the same service (e.g., `llm-anthropic` and `llm-anthropic-2`), only `service list` / `GET /api/v1/keys` shows both.
 
 ### Identity Propagation (optional)
 
@@ -569,11 +793,13 @@ Services can be configured to forward the NyxID user's identity to the downstrea
 
 ## 10. Set Up a Provider (OAuth / API Key / Device Code)
 
-**Goal:** Register an external provider that users can connect their accounts to.
+> **Admin-only.** This section covers registering provider configurations in the catalog. Users connect to providers through the AI Services page (`POST /api/v1/keys` or the OAuth flow at `POST /api/v1/keys/oauth/authorize`). See [section 7](#7-add-a-service-ai-services).
+
+**Goal:** Register an external provider configuration that enables OAuth/device-code/API-key flows when users add services from the catalog.
 
 ### OAuth 2.0 Provider (admin credentials)
 
-Admin provides a shared OAuth app. Users just authorize via the OAuth flow.
+Admin provides a shared OAuth app. Users authorize via OAuth when adding the service from AI Services.
 
 ```bash
 curl -X POST http://localhost:3001/api/v1/providers \
@@ -659,7 +885,7 @@ Users who want the default just call `GET /api/v1/providers/{id}/connect/oauth`.
 
 ### User credential management
 
-**Via Dashboard (recommended):** Go to http://localhost:3000/providers, select the provider, and enter credentials in the form.
+**Via Dashboard (recommended):** Go to http://localhost:3000/keys (AI Services page) to manage credentials.
 
 **Via CLI:** User sets their OAuth app credentials as env vars first (in Claude Code use `!` prefix):
 
@@ -798,7 +1024,8 @@ POST /api/v1/providers/{provider_id}/connect/device-code/poll
 
 ### Via Dashboard
 
-Go to http://localhost:3000/providers/manage to create and manage providers.
+Admin provider management: http://localhost:3000/providers/manage (admin section).
+Users add services and manage credentials from the AI Services page: http://localhost:3000/keys.
 
 ---
 
@@ -842,9 +1069,13 @@ nyxid-node version
 
 ### Step 2: Generate a registration token
 
-Via dashboard: http://localhost:3000/nodes, or via API:
+Via dashboard: http://localhost:3000/nodes, via CLI, or via API:
 
 ```bash
+# CLI
+nyxid node register-token
+
+# API equivalent
 curl -X POST http://localhost:3001/api/v1/nodes/register-token \
   -H "Authorization: Bearer $ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
@@ -860,39 +1091,42 @@ Registration tokens expire after 1 hour by default.
 On the target machine where the agent will run:
 
 ```bash
+# Recommended: use OS keychain for secure credential storage
+nyxid-node register \
+  --token "nyx_nreg_..." \
+  --url "wss://localhost:3001/api/v1/nodes/ws" \
+  --keychain
+
+# Or file-based encryption (creates .keyfile)
 nyxid-node register \
   --token "nyx_nreg_..." \
   --url "wss://localhost:3001/api/v1/nodes/ws"
 ```
 
-This creates a config file at `~/.nyxid-node/config.toml` and an encryption keyfile at `~/.nyxid-node/.keyfile`.
-
 **Options:**
+- `--keychain` (recommended) -- Use OS keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service) for credential storage
 - `--config <PATH>` -- Custom config directory (default: `~/.nyxid-node`)
-- `--keychain` -- Use OS keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service) instead of file-based encryption
 
 ### Step 4: Add credentials
 
-Add credentials for each service the node will handle. The secret value is prompted securely (not visible in shell history):
+Add credentials for each service the node will handle:
 
 ```bash
-# Header injection (most common -- e.g., Authorization header)
-nyxid-node credentials add --service "openai" --header "Authorization"
-# Prompts for: Enter secret value: (hidden input)
+# Recommended: auto-setup (fetches requirements from catalog, prompts accordingly)
+nyxid-node credentials setup --service llm-openai
+# Auto-detects: API key service → prompts for key, shows where to get it
+# Auto-detects: OAuth service → runs device code flow from the node
+# Auto-detects: gateway URL required → prompts for instance URL first
 
-# With automatic Bearer prefix
-nyxid-node credentials add --service "openai" --header "Authorization" --secret-format Bearer
-# Prompts for the API key, then stores as "Bearer <key>"
+# Manual: header injection
+nyxid-node credentials add --service "llm-openai" --header "Authorization" --secret-format Bearer
 
-# Query parameter injection
-nyxid-node credentials add --service "weather-api" --query-param "api_key"
-# Prompts for the key value
+# Manual: query parameter injection
+nyxid-node credentials add --service "llm-google-ai" --query-param "key"
+
+# OAuth: run device code flow from the node
+nyxid-node credentials add-oauth --service "api-twitter" --from-catalog
 ```
-
-**Secret formats:**
-- `Raw` (default) -- Store the value exactly as entered
-- `Bearer` -- Automatically prepend `Bearer ` to the value
-- `Basic` -- Base64-encode as `username:password` and prepend `Basic `
 
 **Manage credentials:**
 
@@ -901,19 +1135,70 @@ nyxid-node credentials list                      # List all configured credentia
 nyxid-node credentials remove --service "openai"  # Remove a credential
 ```
 
-### Step 5: Bind services to the node
+### Step 5: Route services through the node
 
-In the dashboard (http://localhost:3000/nodes/{nodeId}), or via API:
+Node routing is now configured per-service on the AI Services page, not through separate bindings.
+
+**Via CLI (preferred):**
 
 ```bash
-# Get the node ID (shown during registration, or from the dashboard)
-curl -X POST http://localhost:3001/api/v1/nodes/$NODE_ID/bindings \
-  -H "Authorization: Bearer $ACCESS_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"service_id": "SERVICE_UUID"}'
+# Route a service through a node
+nyxid service route $SERVICE_ID --node $NODE_ID
+
+# Switch back to direct routing
+nyxid service route $SERVICE_ID --direct
 ```
 
-Only bound services will be routed through this node. Unbound services use NyxID's direct proxy.
+**Via Dashboard:**
+
+1. Go to http://localhost:3000/keys (AI Services page)
+2. Click on a service card to expand it
+3. Under "Routing", click "Route via Node"
+4. Select your node from the picker
+
+**Via API:**
+
+```bash
+# Update a user service to route through a node
+curl -X PUT http://localhost:3001/api/v1/user-services/$SERVICE_ID \
+  -H "X-API-Key: $NYXID_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"node_id": "NODE_UUID"}'
+```
+
+You can also set node routing when adding a service:
+
+```bash
+curl -X POST http://localhost:3001/api/v1/keys \
+  -H "X-API-Key: $NYXID_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"service_slug\": \"llm-openai\",
+    \"credential\": \"$SERVICE_CREDENTIAL\",
+    \"node_id\": \"NODE_UUID\",
+    \"label\": \"OpenAI via Node\"
+  }"
+```
+
+Services without a `node_id` use NyxID's direct proxy. The old `POST /api/v1/nodes/{id}/bindings` route still works during migration.
+
+### Step 5b: Add credentials with target URL (optional)
+
+The node agent can store a custom target URL alongside the credential, useful when the node should forward requests to a local endpoint:
+
+```bash
+nyxid-node credentials add --service "my-api" --header "Authorization" --target-url "http://localhost:8080"
+# Prompts for the secret value
+```
+
+### Step 5c: Add OAuth credentials locally (optional)
+
+For OAuth-based services, the node agent can run a local OAuth flow and store the resulting tokens:
+
+```bash
+nyxid-node credentials add-oauth --service "github" --provider-slug "github"
+# Opens browser for OAuth authorization, stores tokens locally
+```
 
 ### Step 6: Start the agent
 
@@ -1001,21 +1286,34 @@ nyxid-node migrate --to file       # OS keychain -> file
 ### All CLI commands
 
 ```bash
-nyxid-node register   --token <TOKEN> [--url <WS_URL>] [--config <PATH>] [--keychain]
-nyxid-node start      [--config <PATH>] [--log-level <LEVEL>]
-nyxid-node status     [--config <PATH>]
-nyxid-node rekey      --auth-token <TOKEN> --signing-secret <HEX> [--config <PATH>]
-nyxid-node credentials add    --service <SLUG> [--header <NAME> | --query-param <NAME>] [--secret-format Raw|Bearer|Basic]
-nyxid-node credentials list   [--config <PATH>]
-nyxid-node credentials remove --service <SLUG> [--config <PATH>]
-nyxid-node openclaw connect    --url <GATEWAY_URL> [--token <TOKEN>] [--access-token <JWT>] [--api-url <URL>]
-nyxid-node openclaw status     [--config <PATH>]
-nyxid-node openclaw disconnect [--config <PATH>]
-nyxid-node migrate    --to <file|keychain> [--config <PATH>]
+nyxid-node register       --token <TOKEN> [--url <WS_URL>] [--config <PATH>] [--keychain]
+nyxid-node start          [--config <PATH>] [--log-level <LEVEL>]
+nyxid-node status         [--config <PATH>]
+nyxid-node rekey          --auth-token <TOKEN> --signing-secret <HEX> [--config <PATH>]
+nyxid-node credentials setup     --service <SLUG> [--api-url <URL>]  # Auto-detect and setup (recommended)
+nyxid-node credentials add       --service <SLUG> [--header <NAME> | --query-param <NAME>] [--secret-format Raw|Bearer|Basic] [--target-url <URL>]
+nyxid-node credentials add-oauth --service <SLUG> --from-catalog [--api-url <URL>]  # OAuth flow from node
+nyxid-node credentials list      [--config <PATH>]
+nyxid-node credentials remove    --service <SLUG> [--config <PATH>]
+nyxid-node openclaw connect      --url <GATEWAY_URL> [--token <TOKEN>] [--access-token <JWT>] [--api-url <URL>]
+nyxid-node openclaw status       [--config <PATH>]
+nyxid-node openclaw disconnect   [--config <PATH>]
+nyxid-node migrate        --to <file|keychain> [--config <PATH>]
 nyxid-node version
 ```
 
+The node agent also supports live credential updates via WebSocket `credential_update` messages from the server, enabling remote credential rotation without restarting the agent.
+
 Global option: `--log-level <trace|debug|info|warn|error>` (default: `info`)
+
+### Manage nodes from the nyxid CLI
+
+```bash
+nyxid node list                        # List your nodes
+nyxid node show $NODE_ID               # Node details (status, metrics, services)
+nyxid node delete $NODE_ID             # Delete a node (--yes to skip confirmation)
+nyxid node rotate-token $NODE_ID       # Rotate node auth token
+```
 
 ---
 
@@ -1320,6 +1618,10 @@ Token TTL defaults to 1 hour.
 ### Configure a service to require approval
 
 ```bash
+# CLI
+nyxid approval set-config $SERVICE_ID --require-approval true
+
+# API
 curl -X PUT http://localhost:3001/api/v1/approvals/service-configs/$SERVICE_ID \
   -H "Authorization: Bearer $ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
@@ -1328,9 +1630,14 @@ curl -X PUT http://localhost:3001/api/v1/approvals/service-configs/$SERVICE_ID \
 
 When a user tries to proxy a request to this service, they get a 403 with `error_code: 7000` and a `request_id`.
 
-### Poll for approval status
+### View and manage approval requests
 
 ```bash
+# CLI
+nyxid approval list                           # List all approval requests
+nyxid approval show $REQUEST_ID               # Show request details (includes status)
+
+# API
 curl http://localhost:3001/api/v1/approvals/requests/$REQUEST_ID/status \
   -H "Authorization: Bearer $ACCESS_TOKEN"
 # Returns: { "status": "pending" | "approved" | "denied", "expires_at": "..." }
@@ -1339,37 +1646,59 @@ curl http://localhost:3001/api/v1/approvals/requests/$REQUEST_ID/status \
 ### Approve or deny (admin / approver)
 
 ```bash
+# CLI
+nyxid approval approve $REQUEST_ID
+nyxid approval deny $REQUEST_ID --reason "Not authorized for production data"
+
+# API
 curl -X POST http://localhost:3001/api/v1/approvals/requests/$REQUEST_ID/decide \
   -H "Authorization: Bearer $ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"approved": true}'
 ```
 
-### View approval history and grants
+### View approval grants
 
 ```bash
-# List all approval requests
-GET /api/v1/approvals/requests
+# CLI
+nyxid approval grants                         # List active grants
+nyxid approval revoke-grant $GRANT_ID         # Revoke a grant
 
-# List active grants
+# API
 GET /api/v1/approvals/grants
-
-# Revoke a grant
 DELETE /api/v1/approvals/grants/{grant_id}
+```
+
+### View per-service approval configs
+
+```bash
+# CLI
+nyxid approval service-configs                # List all per-service configs
 ```
 
 ### Set up Telegram notifications
 
 ```bash
-# Link Telegram account (returns a link code to send to the NyxID bot)
+# CLI
+nyxid notification telegram-link              # Link Telegram account
+nyxid notification update --approval-telegram true
+nyxid notification telegram-disconnect        # Disconnect Telegram
+
+# API
 POST /api/v1/notifications/telegram/link
-
-# Configure notification preferences
-PUT /api/v1/notifications/settings
-{"approval_requests": true, "approval_grants": true}
-
-# Disconnect Telegram
+PUT /api/v1/notifications/settings {"approval_requests": true, "approval_grants": true}
 DELETE /api/v1/notifications/telegram
+```
+
+### Configure notification preferences
+
+```bash
+# CLI
+nyxid notification settings                   # Show current settings
+nyxid notification update \
+  --approval-email true \
+  --approval-push true \
+  --approval-telegram true
 ```
 
 ### Via Dashboard
@@ -1387,6 +1716,17 @@ DELETE /api/v1/notifications/telegram
 ### Register an SSH service
 
 ```bash
+# CLI
+nyxid service add-ssh \
+  --label "Production Server" \
+  --host 10.0.0.5 \
+  --port 22 \
+  --cert-auth \
+  --principals "ubuntu,deploy" \
+  --ttl 30 \
+  --via-node $NODE_ID
+
+# API (admin -- registers in the catalog)
 curl -X POST http://localhost:3001/api/v1/services \
   -H "Authorization: Bearer $ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
@@ -1411,6 +1751,13 @@ SSH services allow private IPs and localhost (they're admin-configured infrastru
 ### Issue an SSH certificate
 
 ```bash
+# CLI (accepts service ID, slug, or name)
+nyxid ssh issue-cert <SERVICE_ID_OR_SLUG> \
+  --public-key-file ~/.ssh/id_ed25519.pub \
+  --principal ubuntu \
+  --certificate-file ~/.ssh/id_ed25519-cert.pub
+
+# API
 curl -X POST http://localhost:3001/api/v1/ssh/$SERVICE_ID/certificate \
   -H "Authorization: Bearer $ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
@@ -1421,6 +1768,11 @@ curl -X POST http://localhost:3001/api/v1/ssh/$SERVICE_ID/certificate \
 ### Execute a remote command
 
 ```bash
+# CLI (accepts service ID, slug, or name -- auto-resolves to DownstreamService ID)
+nyxid ssh exec <SERVICE_ID_OR_SLUG> --principal ubuntu -- uptime
+nyxid ssh exec kw-office-spare-mac --principal ubuntu -- ls -la /var/log
+
+# API
 curl -X POST http://localhost:3001/api/v1/ssh/$SERVICE_ID/exec \
   -H "Authorization: Bearer $ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
@@ -1428,43 +1780,113 @@ curl -X POST http://localhost:3001/api/v1/ssh/$SERVICE_ID/exec \
 # Returns: { "stdout": "...", "stderr": "...", "exit_code": 0 }
 ```
 
-### Interactive terminal (WebSocket)
+### Interactive terminal
 
-```
-GET /api/v1/ssh/{service_id}/terminal  (WebSocket upgrade)
+```bash
+# CLI (auto-resolves principal from service config if --principal omitted)
+nyxid ssh terminal <SERVICE_ID_OR_SLUG>
+nyxid ssh terminal kw-office-spare-mac
+nyxid ssh terminal kw-office-spare-mac --principal ubuntu
+
+# API (WebSocket upgrade)
+GET /api/v1/ssh/{service_id}/terminal?principal=ubuntu
 ```
 
-### SSH tunnel (WebSocket)
+### SSH tunnel (ProxyCommand)
 
+```bash
+# CLI -- use as OpenSSH ProxyCommand (accepts ID, slug, or name)
+nyxid ssh proxy <SERVICE_ID_OR_SLUG>
+
+# With auto certificate issuance
+nyxid ssh proxy kw-office-spare-mac \
+  --issue-certificate \
+  --public-key-file ~/.ssh/id_ed25519.pub \
+  --principal ubuntu \
+  --certificate-file ~/.ssh/id_ed25519-cert.pub
+
+# In ~/.ssh/config:
+# Host kw-office
+#   ProxyCommand nyxid ssh proxy kw-office-spare-mac
+#   User chronoai
+#   CertificateFile ~/.ssh/id_ed25519-cert.pub
+
+# API (WebSocket upgrade, bidirectional SSH protocol)
+GET /api/v1/ssh/{service_id}
 ```
-GET /api/v1/ssh/{service_id}  (WebSocket upgrade, bidirectional SSH protocol)
+
+### Generate OpenSSH config
+
+```bash
+# CLI -- prints a config stanza you can append to ~/.ssh/config
+nyxid ssh config \
+  --host-alias prod-server \
+  --base-url http://localhost:3001 \
+  --service-id $SERVICE_ID \
+  --principal ubuntu \
+  --identity-file ~/.ssh/id_ed25519 \
+  --certificate-file ~/.ssh/id_ed25519-cert.pub
 ```
 
 ---
 
 ## 17. API Keys (Programmatic Access)
 
-**Goal:** Create API keys for CLI or programmatic access without going through the OAuth flow.
+**Goal:** Create NyxID API keys for CLI or programmatic access without going through the OAuth flow. Managed from the AI Services page under the "NyxID API Keys" tab at http://localhost:3000/keys.
 
 ```bash
-# Create an API key
+# CLI (list shows ID, scopes, service scope, node scope)
+nyxid api-key create --name "CI Pipeline Key" --scopes "proxy read"
+nyxid api-key list                                     # Shows: ID, Name, Scopes, Services, Nodes
+nyxid api-key show <ID>                                # Full details with scope info
+nyxid api-key rotate <ID>                              # Rotate
+nyxid api-key delete <ID>                              # Delete
+
+# Scope management
+nyxid api-key update <ID> --allowed-services "svc-id-1,svc-id-2"  # Restrict to specific services
+nyxid api-key update <ID> --allow-all-services true               # Allow all services again
+nyxid api-key update <ID> --allowed-nodes "node-id" --allow-all-nodes false  # Restrict nodes
+
+# API equivalents
 curl -X POST http://localhost:3001/api/v1/api-keys \
   -H "Authorization: Bearer $ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"name": "CI Pipeline Key"}'
 # Returns the key value (one-time display)
 
-# List API keys
-GET /api/v1/api-keys
-
-# Rotate a key
-POST /api/v1/api-keys/{key_id}/rotate
-
-# Delete a key
-DELETE /api/v1/api-keys/{key_id}
+GET /api/v1/api-keys               # List API keys
+POST /api/v1/api-keys/{key_id}/rotate   # Rotate
+DELETE /api/v1/api-keys/{key_id}        # Delete
 ```
 
 Use API keys as Bearer tokens: `Authorization: Bearer nyxid_key_...`
+
+### Scope fields
+
+API keys can be scoped to limit which services and nodes they can access:
+
+```bash
+curl -X POST http://localhost:3001/api/v1/api-keys \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Limited Agent Key",
+    "scopes": "read write",
+    "allowed_service_ids": ["service-uuid-1", "service-uuid-2"],
+    "allowed_node_ids": ["node-uuid-1"],
+    "allow_all_services": false,
+    "allow_all_nodes": false
+  }'
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `allowed_service_ids` | `[]` | List of service UUIDs this key can proxy through. Empty + `allow_all_services: false` = no proxy access. |
+| `allowed_node_ids` | `[]` | List of node UUIDs this key can route through. |
+| `allow_all_services` | `true` | If true, key can access all services (ignores `allowed_service_ids`). |
+| `allow_all_nodes` | `true` | If true, key can route through all nodes (ignores `allowed_node_ids`). |
+
+Scope is enforced at proxy time. A key with `allow_all_services: false` and an empty `allowed_service_ids` list has no proxy access (useful for management-only keys).
 
 ---
 
@@ -1550,12 +1972,55 @@ Base URL: `http://localhost:3001`
 | GET | `/api/v1/api-keys` | List API keys |
 | POST | `/api/v1/api-keys` | Create API key |
 
-### Services
+### AI Services (Unified Key Management) -- NEW
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/v1/services` | List services |
-| POST | `/api/v1/services` | Create service |
+| POST | `/api/v1/keys` | Add service from catalog or custom (auto-provisions endpoint + key + service) |
+| GET | `/api/v1/keys` | List all services (combined view) |
+| GET | `/api/v1/keys/{id}` | Get combined view |
+| DELETE | `/api/v1/keys/{id}` | Revoke (deactivates service + key) |
+| POST | `/api/v1/keys/oauth/authorize` | Start OAuth flow for a provider |
+| GET | `/api/v1/keys/oauth/callback` | OAuth callback |
+| POST | `/api/v1/keys/{id}/refresh` | Force token refresh |
+
+### Catalog (Read-Only) -- NEW
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/v1/catalog` | List available service templates |
+| GET | `/api/v1/catalog/{slug}` | Get template details |
+
+### User Endpoints -- NEW
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/v1/endpoints` | List user's endpoints |
+| PUT | `/api/v1/endpoints/{id}` | Update endpoint URL |
+| DELETE | `/api/v1/endpoints/{id}` | Delete endpoint |
+
+### User External API Keys -- NEW
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/v1/api-keys/external` | List user's external credentials |
+| PUT | `/api/v1/api-keys/external/{id}` | Update label, rotate credential |
+| DELETE | `/api/v1/api-keys/external/{id}` | Revoke key |
+
+### User Services (Proxy Routing) -- NEW
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/v1/user-services` | List user's service bindings |
+| PUT | `/api/v1/user-services/{id}` | Update auth config, node routing |
+| DELETE | `/api/v1/user-services/{id}` | Deactivate service |
+
+### Services (Admin -- Catalog Management)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/v1/services` | List services (admin) |
+| POST | `/api/v1/services` | Create service (admin) |
 | GET | `/api/v1/services/{id}` | Get service details |
 | PUT | `/api/v1/services/{id}` | Update service |
 | DELETE | `/api/v1/services/{id}` | Delete service |
@@ -1565,7 +2030,7 @@ Base URL: `http://localhost:3001`
 | PUT | `/api/v1/services/{id}/redirect-uris` | Update OIDC redirect URIs |
 | POST | `/api/v1/services/{id}/regenerate-secret` | Regenerate OIDC client secret |
 
-### Connections
+### Connections (DEPRECATED -- use `/api/v1/keys`)
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -1582,17 +2047,17 @@ Base URL: `http://localhost:3001`
 | ANY | `/api/v1/proxy/s/{slug}/{path}` | Proxy by slug |
 | GET | `/api/v1/proxy/services` | List proxyable services |
 
-### Providers
+### Providers (Admin config + DEPRECATED user connect -- use `/api/v1/keys`)
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/v1/providers` | List providers |
-| POST | `/api/v1/providers` | Create provider |
+| GET | `/api/v1/providers` | List providers (admin) |
+| POST | `/api/v1/providers` | Create provider (admin) |
 | GET | `/api/v1/providers/{id}` | Get provider |
-| PUT | `/api/v1/providers/{id}` | Update provider |
-| DELETE | `/api/v1/providers/{id}` | Delete provider |
-| GET | `/api/v1/providers/{id}/connect/oauth` | Initiate OAuth connect |
-| POST | `/api/v1/providers/{id}/connect/api-key` | Connect with API key |
+| PUT | `/api/v1/providers/{id}` | Update provider (admin) |
+| DELETE | `/api/v1/providers/{id}` | Delete provider (admin) |
+| GET | `/api/v1/providers/{id}/connect/oauth` | Initiate OAuth connect (deprecated -- use `/keys/oauth/authorize`) |
+| POST | `/api/v1/providers/{id}/connect/api-key` | Connect with API key (deprecated -- use `POST /keys`) |
 | POST | `/api/v1/providers/{id}/connect/device-code/initiate` | Start device code flow |
 | POST | `/api/v1/providers/{id}/connect/device-code/poll` | Poll device code status |
 | POST | `/api/v1/providers/{id}/refresh` | Refresh provider token |
@@ -1610,8 +2075,8 @@ Base URL: `http://localhost:3001`
 | GET | `/api/v1/nodes/{id}` | Get node details |
 | DELETE | `/api/v1/nodes/{id}` | Delete node |
 | POST | `/api/v1/nodes/{id}/rotate-token` | Rotate node auth token |
-| POST | `/api/v1/nodes/{id}/bindings` | Bind service to node |
-| DELETE | `/api/v1/nodes/{id}/bindings/{binding_id}` | Remove binding |
+| POST | `/api/v1/nodes/{id}/bindings` | Bind service to node (deprecated -- use `PUT /user-services/{id}` with `node_id`) |
+| DELETE | `/api/v1/nodes/{id}/bindings/{binding_id}` | Remove binding (deprecated) |
 
 ### Developer Apps (OAuth Clients)
 
@@ -1819,7 +2284,7 @@ curl -X POST http://localhost:3001/oauth/token \
 ### MCP client can't find tools
 
 1. Verify at least one service has endpoints defined
-2. Verify the user has connected to the service (`GET /api/v1/connections`)
+2. Verify the user has added the service via AI Services (`GET /api/v1/keys`)
 3. Restart the MCP client after configuration changes
 
 ### Node agent connection issues
@@ -1852,3 +2317,377 @@ curl -X POST http://localhost:3001/oauth/token \
 9. **MFA error code is 2002, not 2001.** 2001 is `token_expired`.
 
 10. **Node WebSocket URL must use `wss://` in production.** Use `ws://` only for local development.
+
+11. **Use `POST /api/v1/keys` for adding services, not the old routes.** The old `/connections` and `/providers/*/connect/*` routes still work but are deprecated.
+
+12. **Slugs are auto-generated from labels.** When using `POST /api/v1/keys` with a custom endpoint, the slug is derived from the label (e.g., "Internal API" becomes `internal-api`).
+
+---
+
+## 23. NyxID CLI
+
+The `nyxid` CLI manages services, API keys, catalog, nodes, MCP setup, approvals, notifications, SSH, and more. It reads `$NYXID_API_KEY` from the environment (via `--access-token-env`, default `NYXID_ACCESS_TOKEN`) or uses a stored session from `nyxid login`. **AI agents should prefer CLI commands over raw API calls** when the binary is available.
+
+### Installation
+
+```bash
+# Build from source (requires Rust toolchain)
+cargo install --path cli
+
+# Or build manually
+cargo build --release -p nyxid-cli
+cp target/release/nyxid /usr/local/bin/
+
+# Verify
+nyxid --help
+```
+
+### Global Options
+
+All authenticated commands accept:
+
+| Flag | Env Var | Description |
+|------|---------|-------------|
+| `--base-url <URL>` | `NYXID_URL` | NyxID server URL. **Saved to `~/.nyxid/base_url` on `nyxid login`** -- only needed on first login. |
+| `--access-token <TOKEN>` | -- | Override saved token |
+| `--access-token-env <VAR>` | -- | Env var to read token from (default: `NYXID_ACCESS_TOKEN`) |
+| `--output <FORMAT>` | -- | Output format: `table` (default) or `json` |
+
+### Non-Interactive Secret Handling
+
+Every command that accepts a secret (API keys, credentials, tokens, passwords) supports three modes:
+
+| Mode | Flag Example | Best For |
+|------|-------------|----------|
+| **Env var** | `--credential-env MY_API_KEY` | AI agents, CI/CD pipelines |
+| **Direct value** | `--credential <VALUE>` | Scripts (hidden from shell history on supported shells) |
+| **Interactive prompt** | *(default)* | Humans -- secure `rpassword` prompt, never echoed |
+
+Specific env-var flags by context:
+
+| Flag | Used By |
+|------|---------|
+| `--credential-env <VAR>` | `service add`, `service rotate-credential`, `openclaw setup` |
+| `--token-env <VAR>` | `service add --oauth`, `service add --device-code` |
+| `--password-env <VAR>` | `login --password`, `register` |
+| `--client-id-env <VAR>` | `service credentials` |
+| `--client-secret-env <VAR>` | `service credentials` |
+
+> **AI agents must always use `--credential-env` (or equivalent) flags** so that secrets are never exposed in command output or chat history.
+
+### Complete Command Reference
+
+#### Authentication and Account
+
+```bash
+nyxid login --base-url <URL>           # Log in (opens browser); saves URL to ~/.nyxid/base_url
+  [--password]                         #   Use email/password instead of browser
+  [--password-env <VAR>]               #   Read password from env var (non-interactive)
+  [--email <EMAIL>]                    #   Email (only with --password)
+nyxid logout                           # Log out and clear stored token
+nyxid register                         # Register a new account
+  --email <EMAIL>
+  [--name <NAME>]
+  [--password-env <VAR>]               #   Read password from env var (non-interactive)
+nyxid verify-email                     # Verify email with token from email
+  --token <TOKEN>
+nyxid forgot-password                  # Request password reset email
+  --email <EMAIL>
+nyxid reset-password                   # Reset password using reset token
+  --token <TOKEN>
+nyxid whoami                           # Show current user info
+nyxid status                           # Show account overview (services, keys, nodes)
+```
+
+> After `nyxid login --base-url <URL>`, the URL is saved. All subsequent commands use it automatically.
+
+#### Profile Management
+
+```bash
+nyxid profile update                   # Update profile
+  [--name <NAME>]
+nyxid profile delete                   # Delete your account
+  [--yes]                              #   Skip confirmation prompt
+nyxid profile consents                 # List OAuth consents
+nyxid profile revoke-consent <CID>     # Revoke an OAuth consent
+  [--yes]
+```
+
+#### Multi-Factor Authentication
+
+```bash
+nyxid mfa setup                        # Set up MFA (displays QR code URL and secret)
+nyxid mfa verify --code <CODE>         # Verify MFA setup with a TOTP code
+nyxid mfa status                       # Show current MFA status
+```
+
+#### Sessions
+
+```bash
+nyxid session list                     # List active sessions
+```
+
+#### Service Catalog
+
+```bash
+nyxid catalog list                     # Browse available service templates
+nyxid catalog show <SLUG>              # Show details for a catalog entry
+```
+
+#### Service Management (AI Services)
+
+```bash
+nyxid service add <SLUG>               # Add from catalog (auto-fetches label from catalog)
+  [--credential-env <VAR>]             #   Read credential from env var (non-interactive)
+  [--credential <VALUE>]               #   Pass credential directly (hidden)
+  [--custom]                           #   Add a fully custom endpoint
+  [--oauth]                            #   Use OAuth flow for authentication
+  [--device-code]                      #   Use device code flow for authentication
+  [--token-env <VAR>]                  #   Read OAuth/device-code token from env var
+  [--via-node <NODE_ID|NAME>]          #   Route traffic through a node (accepts name or ID)
+  [--endpoint-url <URL>]               #   Endpoint URL override
+  [--label <LABEL>]                    #   Display label (auto-fetched from catalog if omitted)
+  [--auth-method <METHOD>]             #   Auth method: bearer, header, query, basic
+  [--auth-key-name <NAME>]             #   Auth key name (e.g., Authorization, X-API-Key)
+nyxid service add-ssh                  # Add an SSH service
+  --label <LABEL>
+  --host <HOST>
+  [--port <PORT>]                      #   Default: 22
+  [--cert-auth]                        #   Enable certificate authentication
+  [--principals <LIST>]                #   Comma-separated SSH principals
+  [--ttl <MINUTES>]                    #   Certificate TTL in minutes (default: 30)
+  --via-node <NODE_ID|NAME>            #   Node to route through (required for SSH)
+nyxid service list                     # List user's configured services (includes ID column)
+nyxid service show <ID>                # Show service details
+nyxid service update <ID>              # Update service configuration
+  [--label <LABEL>]                    #   New display label
+  [--endpoint-url <URL>]
+  [--node-id <NODE_ID|NAME>]           #   New node for routing (accepts name or ID)
+  [--no-node]                          #   Remove node routing (direct mode)
+  [--active]                           #   Set service to active
+  [--inactive]                         #   Set service to inactive
+nyxid service delete <ID>              # Delete a service
+  [--yes]
+nyxid service rotate-credential <ID>   # Rotate external credential for a service
+  [--credential-env <VAR>]             #   Read new credential from env var
+nyxid service route <ID>               # Change service routing
+  [--node <NODE_ID|NAME>]              #   Route through this node (accepts name or ID)
+  [--direct]                           #   Use direct routing (no node)
+nyxid service credentials <SLUG>       # Set OAuth client credentials for a provider
+  --client-id <CID>
+  --client-secret <SECRET>
+  [--client-id-env <VAR>]              #   Read client ID from env var
+  [--client-secret-env <VAR>]          #   Read client secret from env var
+```
+
+> **Catalog slugs auto-fetch labels:** `nyxid service add llm-openai` auto-fills the label from the catalog. No `--label` needed for catalog services.
+>
+> **Unknown slug error:** If the slug is not in the catalog, the CLI shows a helpful message suggesting `nyxid catalog list` to browse available services or `--custom` to add a custom endpoint.
+>
+> **Service list shows IDs:** `nyxid service list` includes an ID column so AI agents can reference specific services by ID.
+
+#### NyxID API Keys
+
+```bash
+nyxid api-key create                   # Create a new NyxID API key
+  [--name <NAME>]
+  [--scopes <SCOPES>]                  #   Space-separated: read write proxy
+  [--expires-in-days <N>]              #   Expiry in days (0 = no expiry)
+  [--allowed-services <IDS>]           #   Comma-separated service IDs
+  [--allowed-nodes <IDS>]              #   Comma-separated node IDs
+  [--allow-all-services]               #   Allow access to all services
+  [--allow-all-nodes]                  #   Allow access to all nodes
+nyxid api-key list                     # List API keys
+nyxid api-key show <ID>                # Show key details
+nyxid api-key update <ID>              # Update key scope
+  [--name <NAME>]
+  [--scopes <SCOPES>]
+  [--allowed-services <IDS>]
+  [--allowed-nodes <IDS>]
+  [--allow-all-services <BOOL>]
+  [--allow-all-nodes <BOOL>]
+nyxid api-key rotate <ID>              # Rotate a key
+nyxid api-key delete <ID>              # Revoke a key
+  [--yes]
+```
+
+#### Node Management
+
+```bash
+nyxid node list                        # List user's nodes (includes ID column)
+nyxid node show <ID_OR_NAME>           # Show node details (accepts name or ID)
+nyxid node register-token              # Generate a registration token
+nyxid node delete <ID_OR_NAME>         # Delete a node (accepts name or ID)
+  [--yes]
+nyxid node rotate-token <ID_OR_NAME>   # Rotate node auth token (accepts name or ID)
+```
+
+> **Node commands accept names:** `nyxid node show test-server` resolves the name to an ID automatically. Same for `node delete` and `node rotate-token`.
+
+#### Proxy Requests
+
+```bash
+nyxid proxy discover                   # List proxyable services (service discovery)
+nyxid proxy request <SERVICE> [PATH]   # Send a request through the NyxID proxy
+  [-m, --method <METHOD>]              #   HTTP method (default: GET)
+  [-d, --data <BODY>]                  #   Request body (JSON, @file, or - for stdin)
+  [-H, --header <K:V>]                 #   Extra headers (repeatable)
+  [--stream]                           #   Stream the response (SSE/chunked)
+  [--by-id]                            #   Use service ID instead of slug
+```
+
+#### SSH
+
+```bash
+# All SSH commands accept service ID, slug, or name (auto-resolves)
+nyxid ssh issue-cert <SERVICE>         # Issue a short-lived SSH certificate
+  --public-key-file <PATH>
+  --principal <NAME>
+  --certificate-file <PATH>
+  [--ca-public-key-file <PATH>]
+nyxid ssh proxy <SERVICE>              # SSH-over-WebSocket tunnel (ProxyCommand)
+  [--issue-certificate]                #   Auto-issue certificate before connecting
+  [--public-key-file <PATH>]
+  [--principal <NAME>]
+  [--certificate-file <PATH>]
+  [--ca-public-key-file <PATH>]
+nyxid ssh config                       # Print an OpenSSH config stanza
+  --host-alias <ALIAS>
+  --base-url <URL>
+  --service-id <ID>
+  --principal <NAME>
+  --identity-file <PATH>
+  --certificate-file <PATH>
+  [--access-token-env <VAR>]
+  [--ca-public-key-file <PATH>]
+nyxid ssh exec <SERVICE>               # Execute a command on a remote host
+  --principal <NAME>
+  <COMMAND...>
+nyxid ssh terminal <SERVICE>           # Interactive SSH terminal
+  [--principal <NAME>]                 #   auto-resolved from service config if omitted
+```
+
+#### MCP Configuration
+
+```bash
+nyxid mcp config                       # Generate MCP configuration for AI tools
+  [--tool <TARGET>]                    #   Target: cursor, claude-code, vscode, generic (default: generic)
+```
+
+#### OpenClaw Integration
+
+```bash
+nyxid openclaw setup                   # OpenClaw setup
+  [--url <GATEWAY_URL>]
+  [--credential-env <VAR>]             #   Read bearer token from env var (non-interactive)
+```
+
+#### Notifications
+
+```bash
+nyxid notification settings            # Show current notification settings
+nyxid notification update              # Update notification settings
+  [--approval-email <BOOL>]
+  [--approval-push <BOOL>]
+  [--approval-telegram <BOOL>]
+nyxid notification telegram-link       # Link a Telegram account
+nyxid notification telegram-disconnect # Disconnect Telegram account
+```
+
+#### Approvals
+
+```bash
+nyxid approval list                    # List approval requests
+nyxid approval show <ID>               # Show approval request details
+nyxid approval approve <ID>            # Approve a request
+nyxid approval deny <ID>               # Deny a request
+  [--reason <REASON>]
+nyxid approval grants                  # List approval grants
+nyxid approval revoke-grant <ID>       # Revoke an approval grant
+  [--yes]
+nyxid approval service-configs         # List per-service approval configurations
+nyxid approval set-config <ID>         # Set approval configuration for a service
+  [--require-approval <BOOL>]
+```
+
+#### Endpoints (Low-Level)
+
+```bash
+nyxid endpoint list                    # List user endpoints
+nyxid endpoint update <ID> --url <URL> # Update an endpoint URL
+nyxid endpoint delete <ID>             # Delete an endpoint
+  [--yes]
+```
+
+#### External Keys (Low-Level)
+
+```bash
+nyxid external-key list                # List external API keys/credentials
+nyxid external-key rotate <ID>         # Rotate an external credential
+nyxid external-key delete <ID>         # Delete an external credential
+  [--yes]
+```
+
+### Using with AI Agents
+
+AI agents should check if `nyxid` is available before falling back to curl:
+
+```bash
+# Check if CLI is available
+command -v nyxid >/dev/null 2>&1 && echo "CLI available" || echo "Use API"
+```
+
+After `nyxid login --base-url <URL>`, the URL is saved to `~/.nyxid/base_url`. No need to set `$NYXID_URL` or pass `--base-url` on every command. The CLI also reads access tokens from `$NYXID_ACCESS_TOKEN` by default (configurable via `--access-token-env`).
+
+**Fully non-interactive AI agent workflow:**
+
+```bash
+# One-time login (saves base URL for all future commands)
+nyxid login --base-url http://localhost:3001
+
+# Add a service non-interactively (credential from env var)
+export OPENAI_KEY="sk-..."
+nyxid service add llm-openai --credential-env OPENAI_KEY --output json
+
+# List services (table includes IDs for programmatic reference)
+nyxid service list --output json
+
+# Node commands accept names instead of IDs
+nyxid node show my-server --output json
+
+# All secret-handling commands support --credential-env / --token-env / --password-env
+```
+
+### Common Workflows
+
+**First-time setup (one-time):**
+
+```bash
+nyxid login --base-url http://localhost:3001    # saves URL; only needed once
+nyxid catalog list --output json
+nyxid service add llm-openai --credential-env OPENAI_KEY  # non-interactive
+nyxid status
+```
+
+**Add a service and make a proxy request:**
+
+```bash
+nyxid service add llm-anthropic --credential-env ANTHROPIC_KEY  # auto-fetches label from catalog
+nyxid proxy request llm-anthropic v1/messages \
+  -m POST -d '{"model":"claude-sonnet-4-20250514","max_tokens":100,"messages":[{"role":"user","content":"Hello"}]}'
+```
+
+**Set up approval workflow:**
+
+```bash
+nyxid approval set-config <SERVICE_ID> --require-approval true
+nyxid notification update --approval-telegram true
+nyxid notification telegram-link
+```
+
+**SSH remote access (accepts ID, slug, or name):**
+
+```bash
+nyxid ssh exec <SERVICE_OR_SLUG> --principal ubuntu -- uptime
+nyxid ssh terminal <SERVICE_OR_SLUG>                    # auto-resolves principal
+```

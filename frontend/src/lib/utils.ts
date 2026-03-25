@@ -16,9 +16,7 @@ export function formatDate(dateStr: string | null | undefined): string {
   }).format(date);
 }
 
-export function formatRelativeTime(
-  dateStr: string | null | undefined,
-): string {
+export function formatRelativeTime(dateStr: string | null | undefined): string {
   if (!dateStr) return "N/A";
   const date = new Date(dateStr);
   if (Number.isNaN(date.getTime())) return "N/A";

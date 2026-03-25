@@ -66,8 +66,6 @@ describe("LoginForm social error", () => {
     render(<LoginForm socialError="social_auth_deactivated" />);
 
     const alert = screen.getByTestId("social-error");
-    expect(alert).toHaveTextContent(
-      "Your account has been deactivated",
-    );
+    expect(alert).toHaveTextContent("Your account has been deactivated");
   });
 });

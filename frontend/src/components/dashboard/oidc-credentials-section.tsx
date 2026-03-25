@@ -10,13 +10,7 @@ import { DiscoveryEndpoints } from "./discovery-endpoints";
 import { RedirectUriEditor } from "./redirect-uri-editor";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
-import {
-  Copy,
-  Eye,
-  EyeOff,
-  RefreshCw,
-  AlertTriangle,
-} from "lucide-react";
+import { Copy, Eye, EyeOff, RefreshCw, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
 
 interface OidcCredentialsSectionProps {
@@ -35,10 +29,8 @@ export function OidcCredentialsSection({
 
   const regenerateMutation = useRegenerateOidcSecret();
 
-  const {
-    data: credentials,
-    isLoading: credentialsLoading,
-  } = useOidcCredentials(serviceId, showCredentials);
+  const { data: credentials, isLoading: credentialsLoading } =
+    useOidcCredentials(serviceId, showCredentials);
 
   // SEC-9: Clean up cached credentials on unmount to prevent
   // decrypted secrets from lingering in memory
@@ -74,12 +66,7 @@ export function OidcCredentialsSection({
   return (
     <div className="space-y-3">
       {oauthClientId && (
-        <DetailRow
-          label="Client ID"
-          value={oauthClientId}
-          copyable
-          mono
-        />
+        <DetailRow label="Client ID" value={oauthClientId} copyable mono />
       )}
 
       {!showCredentials ? (
@@ -93,14 +80,11 @@ export function OidcCredentialsSection({
             Reveal credentials
           </Button>
           <p className="mt-1 text-xs text-muted-foreground">
-            Credentials should be stored securely and never shared
-            publicly.
+            Credentials should be stored securely and never shared publicly.
           </p>
         </div>
       ) : credentialsLoading ? (
-        <p className="text-sm text-muted-foreground">
-          Loading credentials...
-        </p>
+        <p className="text-sm text-muted-foreground">Loading credentials...</p>
       ) : credentials ? (
         <div className="space-y-3">
           <div className="rounded-md border border-warning/30 bg-warning/5 p-3">
@@ -109,9 +93,8 @@ export function OidcCredentialsSection({
               Store this secret securely
             </div>
             <p className="mt-1 text-xs text-muted-foreground">
-              The client secret provides full access to this OIDC
-              client. Never expose it in client-side code or version
-              control.
+              The client secret provides full access to this OIDC client. Never
+              expose it in client-side code or version control.
             </p>
           </div>
 
@@ -142,10 +125,7 @@ export function OidcCredentialsSection({
                 size="icon"
                 className="h-7 w-7 shrink-0"
                 onClick={() =>
-                  void handleCopy(
-                    credentials.client_secret,
-                    "Client secret",
-                  )
+                  void handleCopy(credentials.client_secret, "Client secret")
                 }
               >
                 <Copy className="h-3 w-3" />
@@ -172,12 +152,10 @@ export function OidcCredentialsSection({
                 <p className="mb-1 text-xs font-medium text-muted-foreground">
                   Delegation Scopes
                 </p>
-                <p className="text-sm">
-                  {credentials.delegation_scopes}
-                </p>
+                <p className="text-sm">{credentials.delegation_scopes}</p>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  Scopes this client can request via token exchange
-                  (RFC 8693). Empty means token exchange is disabled.
+                  Scopes this client can request via token exchange (RFC 8693).
+                  Empty means token exchange is disabled.
                 </p>
               </div>
             </>
@@ -208,13 +186,11 @@ export function OidcCredentialsSection({
             ) : (
               <div className="space-y-2 rounded-md border border-destructive/30 bg-destructive/5 p-3">
                 <p className="text-sm font-medium text-destructive">
-                  This will invalidate the current secret
-                  immediately.
+                  This will invalidate the current secret immediately.
                 </p>
                 <p className="text-xs text-muted-foreground">
-                  All existing integrations using the current
-                  secret will stop working until updated with the
-                  new secret.
+                  All existing integrations using the current secret will stop
+                  working until updated with the new secret.
                 </p>
                 <div className="flex gap-2">
                   <Button

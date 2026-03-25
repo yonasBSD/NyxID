@@ -92,47 +92,45 @@ interface QuickPrompt {
   readonly links: readonly DashboardLink[];
 }
 
-const API_KEY_PREAMBLE = `My NyxID API key is stored in the environment variable NYXID_API_KEY. Use $NYXID_API_KEY in commands -- NEVER ask me to paste it into chat. When I need to enter any secret (API keys, credentials, tokens for services or providers), ask me to set it as an environment variable first (e.g., tell me to run: ! export SECRET_NAME="value" in Claude Code, or set it in a separate terminal for other tools), then use $SECRET_NAME in commands. Alternatively, direct me to the NyxID dashboard UI to enter it securely. Never put secret values directly in commands. `;
+function buildPreamble(baseUrl: string): string {
+  return `I have the nyxid CLI installed. If I'm not logged in yet, run \`nyxid login --base-url ${baseUrl}\` to authenticate via browser SSO (this saves the URL for all future commands). Use the nyxid CLI for all operations (e.g., nyxid service add, nyxid catalog list, nyxid api-key create). For any secret (API keys, credentials, tokens), always use \`--credential-env VAR_NAME\` to read from environment variables -- NEVER ask me to paste secrets into chat or pass them as raw arguments. Use \`--output json\` for machine-readable output. Node commands accept names (e.g., nyxid node show my-server). `;
+}
 
 function buildQuickPrompts(baseUrl: string): readonly QuickPrompt[] {
   return [
     {
-      title: "Register a service and connect credentials",
+      title: "Add a key and connect credentials",
       description:
-        "Add an external API, internal service, or OIDC provider. Connect via direct credentials (API key, bearer token) or through a provider's OAuth flow (e.g., Codex, GitHub).",
-      prompt: `${API_KEY_PREAMBLE}Read ${baseUrl}/llms-full.txt then help me register a new service in NyxID and connect to it. I need help choosing the right auth method (header, bearer, basic, oidc, or none) and service category. Also show me how to connect credentials -- either by entering an API key directly, or by connecting through a provider's OAuth flow if one is available (e.g., OpenAI Codex device code flow, GitHub OAuth).`,
-      links: [
-        { to: "/services", label: "Services" },
-        { to: "/connections", label: "Connections" },
-        { to: "/providers", label: "Providers" },
-      ],
+        "Add an external API key from the catalog or create a custom endpoint. Use nyxid service add or the AI Services page.",
+      prompt: `${buildPreamble(baseUrl)}Read ${baseUrl}/llms-full.txt then help me add a new key in NyxID. I want to connect to an external API. Use \`nyxid catalog list --output json\` to browse available services, then \`nyxid service add <slug> --credential-env <VAR>\` to add one non-interactively. Alternatively, walk me through the AI Services page at /keys.`,
+      links: [{ to: "/keys", label: "AI Services" }],
     },
     {
       title: "Set up MCP proxy for AI clients",
       description:
-        "Configure Cursor, Claude Code, or Codex to use NyxID as an MCP proxy with automatic credential injection.",
-      prompt: `${API_KEY_PREAMBLE}Read ${baseUrl}/llms-full.txt then help me set up the NyxID MCP proxy in my AI coding tool so I can call APIs through it.`,
+        "Configure Cursor, Claude Code, or Codex to use NyxID as an MCP proxy. Use nyxid mcp setup for auto-configuration.",
+      prompt: `${buildPreamble(baseUrl)}Read ${baseUrl}/llms-full.txt then help me set up the NyxID MCP proxy in my AI coding tool so I can call APIs through it. If the nyxid CLI is available, use \`nyxid mcp setup cursor\` (or claude/codex) to auto-generate the config file.`,
       links: [],
     },
     {
       title: "Install and configure a node agent",
       description:
-        "Deploy an on-premise node agent that keeps credentials on your infrastructure. NyxID routes requests through it.",
-      prompt: `${API_KEY_PREAMBLE}Read ${baseUrl}/llms-full.txt then walk me through installing the nyxid-node agent, registering it, adding credentials, and binding services to it.`,
+        "Deploy an on-premise node agent that keeps credentials on your infrastructure. Use nyxid node and nyxid-node CLIs.",
+      prompt: `${buildPreamble(baseUrl)}Read ${baseUrl}/llms-full.txt then walk me through installing the nyxid-node agent, registering it, adding credentials, and routing services through it. Use \`nyxid node register-token\` to create a registration token, then \`nyxid-node register\` and \`nyxid-node credentials add\` on the target machine.`,
       links: [{ to: "/nodes", label: "Nodes" }],
     },
     {
-      title: "Set up a provider (OAuth / API Key / Device Code)",
+      title: "Connect an OAuth or device-code service",
       description:
-        "Register an external OAuth service (admin or user-provided credentials), API key provider, or device code flow.",
-      prompt: `${API_KEY_PREAMBLE}Read ${baseUrl}/llms-full.txt then help me set up a new provider in NyxID. I need to choose between credential modes (admin provides credentials, users bring their own developer app, or both) and provider types (oauth2, api_key, device_code).`,
-      links: [{ to: "/providers/manage", label: "Providers" }],
+        "Add a service that uses OAuth, device code, or API key authentication. Use nyxid service add --oauth or the AI Services page.",
+      prompt: `${buildPreamble(baseUrl)}Read ${baseUrl}/llms-full.txt then help me add a service that requires OAuth or device code authentication in NyxID. Use \`nyxid catalog list --output json\` to find the service, then \`nyxid service add <slug> --oauth\` or \`nyxid service add <slug> --device-code\` to start the auth flow. For client credentials, use \`--client-id-env\` and \`--client-secret-env\` flags. Alternatively, walk me through the AI Services page at /keys.`,
+      links: [{ to: "/keys", label: "AI Services" }],
     },
     {
       title: "Set up approvals and notifications",
       description:
         "Require approval before accessing sensitive services. Get notified via Telegram or push notifications when approval is needed.",
-      prompt: `${API_KEY_PREAMBLE}Read ${baseUrl}/llms-full.txt then help me set up approval workflows for my NyxID services. I want to configure which services require approval, set up Telegram notifications for approval requests, and understand how to approve or deny requests.`,
+      prompt: `${buildPreamble(baseUrl)}Read ${baseUrl}/llms-full.txt then help me set up approval workflows for my NyxID services. I want to configure which services require approval, set up Telegram notifications for approval requests, and understand how to approve or deny requests.`,
       links: [
         { to: "/approvals/settings", label: "Notifications" },
         { to: "/approvals/history", label: "Approvals" },
@@ -141,43 +139,47 @@ function buildQuickPrompts(baseUrl: string): readonly QuickPrompt[] {
     {
       title: "Set up SSH services",
       description:
-        "Register an SSH service with certificate-based auth, execute remote commands, or open interactive terminals.",
-      prompt: `${API_KEY_PREAMBLE}Read ${baseUrl}/llms-full.txt then help me register an SSH service in NyxID with certificate-based authentication, and show me how to issue certificates, execute remote commands, and open SSH tunnels.`,
-      links: [{ to: "/services", label: "Services" }],
+        "Register an SSH service with certificate-based auth. Use nyxid ssh exec and nyxid ssh terminal for remote access.",
+      prompt: `${buildPreamble(baseUrl)}Read ${baseUrl}/llms-full.txt then help me register an SSH service in NyxID with certificate-based authentication, and show me how to issue certificates, execute remote commands (via \`nyxid ssh exec\`), and open interactive terminals (via \`nyxid ssh terminal\`).`,
+      links: [{ to: "/keys", label: "AI Services" }],
     },
     {
-      title: "Use the LLM gateway",
+      title: "Make proxy requests",
       description:
-        "Proxy LLM API calls (OpenAI-compatible) through NyxID with automatic credential injection.",
-      prompt: `${API_KEY_PREAMBLE}Read ${baseUrl}/llms-full.txt then help me set up and use the NyxID LLM gateway to proxy requests to LLM providers like OpenAI with automatic credential injection.`,
-      links: [
-        { to: "/providers", label: "Providers" },
-        { to: "/connections", label: "Connections" },
-      ],
+        "Proxy API requests through NyxID with automatic credential injection. Use nyxid proxy request or curl.",
+      prompt: `${buildPreamble(baseUrl)}Read ${baseUrl}/llms-full.txt then help me make proxy requests through NyxID. Use \`nyxid proxy discover --output json\` to list available services, then \`nyxid proxy request <slug> <path> -m POST -d '{...}'\` to send requests. Show me how to proxy LLM calls, use streaming, and route through nodes.`,
+      links: [{ to: "/keys", label: "AI Services" }],
     },
     {
       title: "Connect OpenClaw AI gateway",
       description:
-        "Connect a self-hosted OpenClaw instance to NyxID. Route messages through OpenClaw channels, access skills and workspaces, and proxy requests through a node agent.",
-      prompt: `${API_KEY_PREAMBLE}Read ${baseUrl}/llms-full.txt then help me connect my self-hosted OpenClaw AI gateway to NyxID. I want to:\n1. Connect OpenClaw as a provider (gateway URL + bearer token)\n2. Set up a node agent to proxy requests through my local OpenClaw instance\n3. Optionally set up channel integration so NyxID can interact with OpenClaw messaging channels (WhatsApp, Telegram, Discord, etc.)\n\nMy OpenClaw gateway is running at http://localhost:18789. Walk me through the fastest setup path -- ideally using the node agent CLI.`,
+        "Connect a self-hosted OpenClaw instance to NyxID. Use nyxid openclaw connect or nyxid-node openclaw connect.",
+      prompt: `${buildPreamble(baseUrl)}Read ${baseUrl}/llms-full.txt then help me connect my self-hosted OpenClaw AI gateway to NyxID. I want to:\n1. Connect OpenClaw via \`nyxid openclaw setup --url http://localhost:18789 --credential-env OPENCLAW_TOKEN\` or \`nyxid service add llm-openclaw --credential-env OPENCLAW_TOKEN\`\n2. Set up a node agent to proxy requests through my local OpenClaw instance (\`nyxid-node openclaw connect\`)\n3. Optionally set up channel integration so NyxID can interact with OpenClaw messaging channels (WhatsApp, Telegram, Discord, etc.)\n\nMy OpenClaw gateway is running at http://localhost:18789. Walk me through the fastest setup path -- ideally using the CLI with non-interactive flags.`,
       links: [
-        { to: "/providers", label: "Providers" },
+        { to: "/keys", label: "AI Services" },
         { to: "/nodes", label: "Nodes" },
       ],
+    },
+    {
+      title: "Manage profile and security",
+      description:
+        "Update your profile, enable MFA, manage sessions, and review OAuth consents.",
+      prompt: `${buildPreamble(baseUrl)}Read ${baseUrl}/llms-full.txt then help me secure my NyxID account. Use \`nyxid mfa setup\` to enable multi-factor authentication, \`nyxid session list\` to review active sessions, and \`nyxid profile consents\` to review OAuth consents. Also show me how to update my profile with \`nyxid profile update\`.`,
+      links: [],
     },
     {
       title: "Add login to my app",
       description:
         "Register an OAuth client and integrate NyxID login into a React, Next.js, or any web app.",
-      prompt: `${API_KEY_PREAMBLE}Read ${baseUrl}/llms-full.txt then help me add "Sign in with NyxID" to my app. The NyxID server is at ${baseUrl}.`,
+      prompt: `${buildPreamble(baseUrl)}Read ${baseUrl}/llms-full.txt then help me add "Sign in with NyxID" to my app. The NyxID server is at ${baseUrl}.`,
       links: [{ to: "/developer/apps", label: "Developer Apps" }],
     },
     {
       title: "Create and manage API keys",
       description:
-        "Create API keys for programmatic access without going through the OAuth flow.",
-      prompt: `${API_KEY_PREAMBLE}Read ${baseUrl}/llms-full.txt then help me create and manage NyxID API keys for programmatic access.`,
-      links: [{ to: "/api-keys", label: "API Keys" }],
+        "Create API keys for programmatic access. Use nyxid api-key create or the AI Services page.",
+      prompt: `${buildPreamble(baseUrl)}Read ${baseUrl}/llms-full.txt then help me create and manage NyxID API keys for programmatic access. Use \`nyxid api-key create --name "My Key" --scopes "read write"\` or walk me through the AI Services page at /keys (NyxID API Keys tab).`,
+      links: [{ to: "/keys", label: "AI Services" }],
     },
   ] as const;
 }
@@ -199,44 +201,37 @@ function QuickPromptsCard({ baseUrl }: { readonly baseUrl: string }) {
       <CardHeader>
         <CardTitle className="text-base">Quick Start Prompts</CardTitle>
         <CardDescription>
-          Copy a prompt and paste it into your AI assistant. Each prompt
-          references <code className="text-[10px]">$NYXID_API_KEY</code> so
-          your AI can make API calls without the key appearing in chat.
+          Copy a prompt and paste it into your AI assistant. The prompts use the
+          nyxid CLI which handles authentication securely.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 space-y-3">
+        <div className="rounded-lg border border-border bg-muted/50 p-4 space-y-3">
           <p className="text-sm font-medium">Before you start</p>
           <p className="text-xs text-muted-foreground">
-            Create an API key with{" "}
-            <code className="rounded bg-muted px-1 py-0.5 text-[10px]">read write</code>{" "}
-            scopes from the{" "}
-            <Link to="/api-keys" className="text-primary underline underline-offset-2">
-              API Keys
-            </Link>{" "}
-            page, then set it as an environment variable:
+            Install the NyxID CLI and log in:
           </p>
           <div className="relative">
             <pre className="overflow-x-auto rounded-md border border-border bg-muted px-3 py-2 font-mono text-xs">
-              export NYXID_API_KEY="nyxid_..."
+              {`cargo install --git https://github.com/ChronoAIProject/NyxID --bin nyxid\nnyxid login --base-url ${baseUrl}`}
             </pre>
             <Button
               variant="ghost"
               size="icon"
               className="absolute right-1 top-1 h-6 w-6"
-              onClick={() => void handleCopy('export NYXID_API_KEY="nyxid_..."')}
+              onClick={() =>
+                void handleCopy(
+                  `cargo install --git https://github.com/ChronoAIProject/NyxID --bin nyxid\nnyxid login --base-url ${baseUrl}`,
+                )
+              }
             >
               <Copy className="h-3 w-3" />
             </Button>
           </div>
           <p className="text-[11px] text-muted-foreground">
-            Never paste secrets into AI chat. The prompts below tell your AI to
-            use <code className="rounded bg-muted px-1 py-0.5 text-[10px]">$NYXID_API_KEY</code>{" "}
-            from the environment. For other secrets (service API keys, provider
-            tokens), the AI will ask you to set them as env vars using{" "}
-            <code className="rounded bg-muted px-1 py-0.5 text-[10px]">! export</code>{" "}
-            (Claude Code) or in a separate terminal, or direct you to the
-            dashboard UI.
+            The CLI authenticates via browser SSO. Copy a prompt below and paste
+            it into your AI assistant. The CLI handles secrets securely -- your
+            AI never needs to see API keys or tokens.
           </p>
         </div>
         {prompts.map((p) => (
@@ -247,9 +242,7 @@ function QuickPromptsCard({ baseUrl }: { readonly baseUrl: string }) {
             <div className="flex items-start justify-between gap-2">
               <div className="min-w-0">
                 <p className="text-sm font-medium">{p.title}</p>
-                <p className="text-xs text-muted-foreground">
-                  {p.description}
-                </p>
+                <p className="text-xs text-muted-foreground">{p.description}</p>
               </div>
               <div className="flex shrink-0 gap-1">
                 {p.links.map((link) => (
@@ -350,8 +343,8 @@ function LlmsTxtCard({ baseUrl }: { readonly baseUrl: string }) {
           </Button>
         </div>
         <p className="text-xs text-muted-foreground">
-          Works with ChatGPT, Claude, Gemini, or any AI that can read URLs.
-          Just say: <em>"Read {shortUrl} and help me integrate NyxID."</em>
+          Works with ChatGPT, Claude, Gemini, or any AI that can read URLs. Just
+          say: <em>"Read {shortUrl} and help me integrate NyxID."</em>
         </p>
       </CardContent>
     </Card>
@@ -437,8 +430,8 @@ export function AiSetupPage() {
             <CardHeader>
               <CardTitle className="text-base">MCP Config Generator</CardTitle>
               <CardDescription>
-                Select your OAuth client and AI tool to generate a ready-to-paste
-                configuration file.
+                Select your OAuth client and AI tool to generate a
+                ready-to-paste configuration file.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">

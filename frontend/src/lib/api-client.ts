@@ -55,7 +55,9 @@ function buildFetchConfig(options: RequestOptions): RequestInit {
   return config;
 }
 
-async function parseErrorResponse(response: Response): Promise<ApiErrorResponse> {
+async function parseErrorResponse(
+  response: Response,
+): Promise<ApiErrorResponse> {
   try {
     return (await response.json()) as ApiErrorResponse;
   } catch {

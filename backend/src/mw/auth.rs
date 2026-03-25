@@ -45,6 +45,14 @@ pub struct AuthUser {
     pub approval_owner_user_id: Option<String>,
     /// How the user authenticated this request.
     pub auth_method: AuthMethod,
+    /// If true, key can access ALL of the user's external services (default for non-API-key auth).
+    pub allow_all_services: bool,
+    /// If true, key can route through ALL of the user's nodes (default for non-API-key auth).
+    pub allow_all_nodes: bool,
+    /// List of UserService IDs this key can access (only checked when allow_all_services is false).
+    pub allowed_service_ids: Vec<String>,
+    /// List of Node IDs this key can route through (only checked when allow_all_nodes is false).
+    pub allowed_node_ids: Vec<String>,
 }
 
 impl AuthUser {
@@ -148,6 +156,10 @@ impl FromRequestParts<AppState> for AuthUser {
                                         acting_client_id: None,
                                         approval_owner_user_id: None,
                                         auth_method: AuthMethod::ApiKey,
+                                        allow_all_services: api_key.allow_all_services,
+                                        allow_all_nodes: api_key.allow_all_nodes,
+                                        allowed_service_ids: api_key.allowed_service_ids.clone(),
+                                        allowed_node_ids: api_key.allowed_node_ids.clone(),
                                     });
                                 }
                                 Err(_) => return Err(jwt_err),
@@ -205,6 +217,10 @@ impl FromRequestParts<AppState> for AuthUser {
                             acting_client_id: None,
                             approval_owner_user_id: Some(sa.effective_owner_user_id().to_string()),
                             auth_method: AuthMethod::ServiceAccount,
+                            allow_all_services: true,
+                            allow_all_nodes: true,
+                            allowed_service_ids: vec![],
+                            allowed_node_ids: vec![],
                         });
                     }
 
@@ -243,6 +259,10 @@ impl FromRequestParts<AppState> for AuthUser {
                         acting_client_id: claims.act.map(|a| a.sub),
                         approval_owner_user_id: None,
                         auth_method,
+                        allow_all_services: true,
+                        allow_all_nodes: true,
+                        allowed_service_ids: vec![],
+                        allowed_node_ids: vec![],
                     });
                 }
             }
@@ -300,6 +320,10 @@ impl FromRequestParts<AppState> for AuthUser {
                                     acting_client_id: None,
                                     approval_owner_user_id: None,
                                     auth_method: AuthMethod::Session,
+                                    allow_all_services: true,
+                                    allow_all_nodes: true,
+                                    allowed_service_ids: vec![],
+                                    allowed_node_ids: vec![],
                                 });
                             }
                             _ => {
@@ -364,6 +388,10 @@ impl FromRequestParts<AppState> for AuthUser {
                     acting_client_id: None,
                     approval_owner_user_id: None,
                     auth_method: AuthMethod::ApiKey,
+                    allow_all_services: key.allow_all_services,
+                    allow_all_nodes: key.allow_all_nodes,
+                    allowed_service_ids: key.allowed_service_ids.clone(),
+                    allowed_node_ids: key.allowed_node_ids.clone(),
                 });
             }
 

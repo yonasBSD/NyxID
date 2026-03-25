@@ -143,6 +143,41 @@ export async function listServices(
   config: NyxIdPluginConfig,
   profile: TokenProfile,
 ): Promise<ServiceListResponse> {
+  // Use /api/v1/keys for full service discovery (includes user-created services
+  // with custom slugs like llm-anthropic-2). Falls back to /api/v1/proxy/services
+  // for backward compatibility with older backends.
+  const keysResponse = await fetchImpl(`${config.baseUrl}/api/v1/keys`, {
+    headers: buildAuthHeaders(profile),
+  });
+
+  if (keysResponse.ok) {
+    const keys = (await keysResponse.json()) as Array<{
+      id: string;
+      slug: string;
+      label: string;
+      status: string;
+      endpoint_url: string;
+      service_type: string;
+      catalog_service_name: string | null;
+      is_active: boolean;
+    }>;
+    return {
+      services: keys.map((k) => ({
+        id: k.id,
+        slug: k.slug,
+        name: k.label,
+        connected: k.is_active && k.status === "active",
+        requires_connection: false,
+        proxy_url_slug: `/api/v1/proxy/s/${k.slug}`,
+        service_category: k.service_type,
+      })),
+      total: keys.length,
+      page: 1,
+      per_page: keys.length,
+    };
+  }
+
+  // Fallback to legacy endpoint
   const response = await fetchImpl(`${config.baseUrl}/api/v1/proxy/services`, {
     headers: buildAuthHeaders(profile),
   });

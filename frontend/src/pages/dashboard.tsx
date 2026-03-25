@@ -88,7 +88,12 @@ export function DashboardPage() {
             {stat.loading ? (
               <Skeleton className="h-10 w-20" />
             ) : (
-              <div className={cn("font-display text-[28px] font-normal leading-tight md:text-[36px]", stat.valueColor ?? "text-foreground")}>
+              <div
+                className={cn(
+                  "font-display text-[28px] font-normal leading-tight md:text-[36px]",
+                  stat.valueColor ?? "text-foreground",
+                )}
+              >
                 {stat.value}
               </div>
             )}
@@ -105,8 +110,12 @@ export function DashboardPage() {
         <div className="flex flex-col gap-6 rounded-[10px] border border-border bg-transparent p-7">
           {/* Title */}
           <div className="flex flex-col gap-1">
-            <h3 className="font-display text-[22px] font-normal">Quick Actions</h3>
-            <p className="text-[13px] text-muted-foreground">Common tasks and shortcuts</p>
+            <h3 className="font-display text-[22px] font-normal">
+              Quick Actions
+            </h3>
+            <p className="text-[13px] text-muted-foreground">
+              Common tasks and shortcuts
+            </p>
           </div>
 
           {/* List */}
@@ -133,8 +142,12 @@ export function DashboardPage() {
         <div className="flex flex-col gap-6 rounded-[10px] border border-border bg-transparent p-7">
           {/* Title */}
           <div className="flex flex-col gap-1">
-            <h3 className="font-display text-[22px] font-normal">Account Info</h3>
-            <p className="text-[13px] text-muted-foreground">Your account details</p>
+            <h3 className="font-display text-[22px] font-normal">
+              Account Info
+            </h3>
+            <p className="text-[13px] text-muted-foreground">
+              Your account details
+            </p>
           </div>
 
           {/* List */}
@@ -154,7 +167,11 @@ export function DashboardPage() {
               label="Member since"
               value={
                 user?.created_at
-                  ? new Date(user.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
+                  ? new Date(user.created_at).toLocaleDateString("en-US", {
+                      month: "short",
+                      day: "numeric",
+                      year: "numeric",
+                    })
                   : "N/A"
               }
             />
@@ -202,7 +219,14 @@ const InfoRow = memo(function InfoRow({
   return (
     <div className="flex items-center justify-between">
       <span className="text-[13px] text-muted-foreground">{label}</span>
-      <span className={cn("text-[13px] font-medium", valueColor ?? "text-foreground")}>{value}</span>
+      <span
+        className={cn(
+          "text-[13px] font-medium",
+          valueColor ?? "text-foreground",
+        )}
+      >
+        {value}
+      </span>
     </div>
   );
 });

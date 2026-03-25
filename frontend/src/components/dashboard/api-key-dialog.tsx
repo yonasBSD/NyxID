@@ -88,9 +88,7 @@ export function ApiKeyDialog({
 
           {requiresGatewayUrl && (
             <div className="space-y-2">
-              <Label htmlFor="provider-gateway-url">
-                Gateway URL
-              </Label>
+              <Label htmlFor="provider-gateway-url">Gateway URL</Label>
               <Input
                 id="provider-gateway-url"
                 type="url"
@@ -119,9 +117,7 @@ export function ApiKeyDialog({
               maxLength={4096}
               autoComplete="off"
             />
-            <p className="text-xs text-muted-foreground">
-              Max 4096 characters
-            </p>
+            <p className="text-xs text-muted-foreground">Max 4096 characters</p>
           </div>
 
           <div className="space-y-2">
@@ -150,11 +146,7 @@ export function ApiKeyDialog({
             >
               Cancel
             </Button>
-            <Button
-              type="submit"
-              disabled={!canSubmit}
-              isLoading={isPending}
-            >
+            <Button type="submit" disabled={!canSubmit} isLoading={isPending}>
               {isPending ? "Validating..." : "Connect"}
             </Button>
           </DialogFooter>

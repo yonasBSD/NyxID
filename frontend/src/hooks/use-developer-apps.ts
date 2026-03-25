@@ -18,7 +18,9 @@ export function useDeveloperApps() {
   return useQuery({
     queryKey: ["developer", "oauth-clients"],
     queryFn: async (): Promise<DeveloperOAuthClientListResponse> => {
-      return api.get<DeveloperOAuthClientListResponse>("/developer/oauth-clients");
+      return api.get<DeveloperOAuthClientListResponse>(
+        "/developer/oauth-clients",
+      );
     },
   });
 }
@@ -37,7 +39,9 @@ export function useCreateDeveloperApp() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async (data: CreateDeveloperAppRequest): Promise<OAuthClient> => {
+    mutationFn: async (
+      data: CreateDeveloperAppRequest,
+    ): Promise<OAuthClient> => {
       return api.post<OAuthClient>("/developer/oauth-clients", data);
     },
     onSuccess: (created) => {
@@ -75,7 +79,10 @@ export function useUpdateDeveloperApp() {
       readonly clientId: string;
       readonly data: UpdateDeveloperAppRequest;
     }): Promise<OAuthClient> => {
-      return api.patch<OAuthClient>(`/developer/oauth-clients/${clientId}`, data);
+      return api.patch<OAuthClient>(
+        `/developer/oauth-clients/${clientId}`,
+        data,
+      );
     },
     onSuccess: (updated) => {
       void queryClient.invalidateQueries({
@@ -94,7 +101,9 @@ export function useDeleteDeveloperApp() {
 
   return useMutation({
     mutationFn: async (clientId: string): Promise<{ message: string }> => {
-      return api.delete<{ message: string }>(`/developer/oauth-clients/${clientId}`);
+      return api.delete<{ message: string }>(
+        `/developer/oauth-clients/${clientId}`,
+      );
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({

@@ -7,9 +7,7 @@ function getServiceAuthKind(
   return service.auth_type ?? service.auth_method;
 }
 
-export function isSshService(
-  service: DownstreamService | undefined,
-): boolean {
+export function isSshService(service: DownstreamService | undefined): boolean {
   return service?.service_type === "ssh";
 }
 

@@ -12,7 +12,14 @@ import {
 
 describe("constants", () => {
   it("AUTH_TYPES contains expected values", () => {
-    expect(AUTH_TYPES).toEqual(["none", "api_key", "oauth2", "basic", "bearer", "oidc"]);
+    expect(AUTH_TYPES).toEqual([
+      "none",
+      "api_key",
+      "oauth2",
+      "basic",
+      "bearer",
+      "oidc",
+    ]);
   });
 
   it("SERVICE_CATEGORIES contains expected values", () => {

@@ -1,5 +1,9 @@
 import { useState } from "react";
-import { useAdminNodes, useAdminDisconnectNode, useAdminDeleteNode } from "@/hooks/use-admin-nodes";
+import {
+  useAdminNodes,
+  useAdminDisconnectNode,
+  useAdminDeleteNode,
+} from "@/hooks/use-admin-nodes";
 import { ApiError } from "@/lib/api-client";
 import { formatRelativeTime } from "@/lib/utils";
 import { PageHeader } from "@/components/shared/page-header";
@@ -355,9 +359,7 @@ export function AdminNodesPage() {
                 disconnectMutation.isPending || deleteMutation.isPending
               }
             >
-              {actionTarget?.action === "disconnect"
-                ? "Disconnect"
-                : "Delete"}
+              {actionTarget?.action === "disconnect" ? "Disconnect" : "Delete"}
             </Button>
           </DialogFooter>
         </DialogContent>

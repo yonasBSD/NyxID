@@ -31,10 +31,7 @@ interface DeviceCodeDialogProps {
   readonly onClose: () => void;
 }
 
-export function DeviceCodeDialog({
-  provider,
-  onClose,
-}: DeviceCodeDialogProps) {
+export function DeviceCodeDialog({ provider, onClose }: DeviceCodeDialogProps) {
   const [step, setStep] = useState<FlowStep>("requesting");
   const [userCode, setUserCode] = useState("");
   const [verificationUri, setVerificationUri] = useState("");
@@ -120,9 +117,7 @@ export function DeviceCodeDialog({
                   setStep("success");
                   break;
                 case "expired":
-                  setErrorMessage(
-                    "Authentication expired. Please try again.",
-                  );
+                  setErrorMessage("Authentication expired. Please try again.");
                   setStep("error");
                   break;
                 case "denied":
@@ -269,12 +264,7 @@ export function DeviceCodeDialog({
 
             {/* Verification link */}
             <div className="flex justify-center">
-              <Button
-                type="button"
-                variant="default"
-                size="lg"
-                asChild
-              >
+              <Button type="button" variant="default" size="lg" asChild>
                 <a
                   href={verificationUri}
                   target="_blank"

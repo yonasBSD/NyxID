@@ -1,0 +1,35 @@
+[package]
+name = "nyxid-cli"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "nyxid"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+
+anyhow = "1"
+clap = { version = "4.5", features = ["derive", "env"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
+dirs = "6"
+open = "5"
+rpassword = "7"
+urlencoding = "2.1"
+rand = "0.8"
+hex = "0.4"
+comfy-table = "7"
+url = "2"
+
+# SSH subcommand
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
+
+[dev-dependencies]
+tempfile = "3"

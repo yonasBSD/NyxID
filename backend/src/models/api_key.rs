@@ -11,7 +11,7 @@ pub struct ApiKey {
     pub id: String,
     pub user_id: String,
     pub name: String,
-    /// First 8 characters of the key, used for identification in the UI
+    /// First 8+ characters of the key, used for identification in the UI
     pub key_prefix: String,
     /// SHA-256 hash of the full API key
     pub key_hash: String,
@@ -23,6 +23,35 @@ pub struct ApiKey {
     pub is_active: bool,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
+
+    // --- Service Scope (absorbed from AgentGroup) ---
+    /// Optional description of what this key is used for
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+
+    /// List of UserService IDs this key can access via proxy.
+    /// Only checked when `allow_all_services` is false.
+    #[serde(default)]
+    pub allowed_service_ids: Vec<String>,
+
+    /// List of Node IDs this key can route through.
+    /// Only checked when `allow_all_nodes` is false.
+    #[serde(default)]
+    pub allowed_node_ids: Vec<String>,
+
+    /// If true, key can access ALL of the user's external services.
+    /// Default: true (backward compatible -- existing keys have no restrictions).
+    #[serde(default = "default_true")]
+    pub allow_all_services: bool,
+
+    /// If true, key can route through ALL of the user's nodes.
+    /// Default: true (backward compatible).
+    #[serde(default = "default_true")]
+    pub allow_all_nodes: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -46,6 +75,11 @@ mod tests {
             expires_at: None,
             is_active: true,
             created_at: Utc::now(),
+            description: None,
+            allowed_service_ids: vec![],
+            allowed_node_ids: vec![],
+            allow_all_services: true,
+            allow_all_nodes: true,
         }
     }
 

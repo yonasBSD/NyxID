@@ -23,7 +23,9 @@ export function useAdminUsers(page: number, perPage: number, search?: string) {
         per_page: String(perPage),
       });
       if (search) params.set("search", search);
-      return api.get<AdminUserListResponse>(`/admin/users?${params.toString()}`);
+      return api.get<AdminUserListResponse>(
+        `/admin/users?${params.toString()}`,
+      );
     },
   });
 }
@@ -139,9 +141,7 @@ export function useForcePasswordReset() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async (
-      userId: string,
-    ): Promise<AdminActionResponse> => {
+    mutationFn: async (userId: string): Promise<AdminActionResponse> => {
       return api.post<AdminActionResponse>(
         `/admin/users/${userId}/reset-password`,
       );

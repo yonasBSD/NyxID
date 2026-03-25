@@ -35,7 +35,11 @@ export function DetailRow({
         {badge ? (
           <Badge variant={badgeVariant}>{value}</Badge>
         ) : (
-          <span className={mono ? "font-mono text-xs text-foreground" : "text-foreground"}>
+          <span
+            className={
+              mono ? "font-mono text-xs text-foreground" : "text-foreground"
+            }
+          >
             {value}
           </span>
         )}
