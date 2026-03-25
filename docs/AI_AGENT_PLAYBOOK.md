@@ -64,12 +64,27 @@ See [section 1b](#1b-install-cli-tools) for installation instructions.
 
 ## 1b. Install CLI Tools
 
+### Prerequisites: Rust toolchain
+
+Both CLIs are Rust binaries. Install Rust if you don't have it:
+
+```bash
+# macOS / Linux
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+
+# Verify
+rustc --version && cargo --version
+```
+
+> On macOS, you may also need Xcode command line tools: `xcode-select --install`
+
 ### nyxid (User CLI)
 
 The `nyxid` CLI manages services, API keys, catalog browsing, MCP setup, and more. Authenticates via browser SSO or API key.
 
 ```bash
-# Install from git (requires Rust toolchain)
+# Install from git
 cargo install --git https://github.com/ChronoAIProject/NyxID --bin nyxid
 
 # Or clone and build locally
@@ -95,6 +110,16 @@ nyxid status
 ```
 
 > **Note:** After `nyxid login --base-url <URL>`, the URL is persisted at `~/.nyxid/base_url`. You do not need to pass `--base-url` on subsequent commands.
+
+**Without the CLI (API key only):**
+
+If you can't install the CLI, set a NyxID API key as an environment variable and use curl:
+
+```bash
+export NYXID_API_KEY="nyxid_..."
+export NYXID_BASE_URL="http://localhost:3001"
+curl -H "X-API-Key: $NYXID_API_KEY" "$NYXID_BASE_URL/api/v1/keys"
+```
 
 ### nyxid-node (Node Agent CLI)
 

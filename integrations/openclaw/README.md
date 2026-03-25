@@ -4,11 +4,18 @@
 
 ## Quickstart
 
-### Step 1: Install the NyxID CLI and log in
+### Step 1: Install Rust and the NyxID CLI
 
 ```bash
+# Install Rust (macOS / Linux)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+
+# Install NyxID CLI
 cargo install --git https://github.com/ChronoAIProject/NyxID --bin nyxid
-nyxid login --base-url https://nyx-api.chrono-ai.fun   # saves URL; only needed once
+
+# Log in (opens browser, saves URL for all future commands)
+nyxid login --base-url https://nyx-api.chrono-ai.fun
 ```
 
 ### Step 2: Create an API key for OpenClaw
@@ -18,6 +25,8 @@ nyxid api-key create --name "openclaw-agent" --scopes "proxy read"
 ```
 
 Copy the generated key (starts with `nyxid_`).
+
+> **Without CLI:** Create the API key from the NyxID dashboard (AI Services > NyxID API Keys tab) and set `NYXID_API_KEY` as an environment variable instead.
 
 ### Step 3: Add some AI services
 

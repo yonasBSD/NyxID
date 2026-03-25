@@ -26,19 +26,30 @@ NyxID is the credential broker. The agent should use the `nyxid` CLI to discover
 
 ## Setup
 
-Install the NyxID CLI and log in (one-time):
+Install the Rust toolchain and NyxID CLI (one-time):
 
 ```bash
+# Install Rust (macOS / Linux)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+
+# Install NyxID CLI
 cargo install --git https://github.com/ChronoAIProject/NyxID --bin nyxid
-nyxid login --base-url https://nyx-api.chrono-ai.fun   # saves URL; only needed once
+
+# Log in (opens browser, saves URL for all future commands)
+nyxid login --base-url https://nyx-api.chrono-ai.fun
 ```
 
-The CLI stores tokens at `~/.nyxid/` and auto-refreshes them. The base URL is saved to `~/.nyxid/base_url` on login -- all subsequent commands use it automatically. No manual token management needed.
+The CLI stores tokens at `~/.nyxid/` and auto-refreshes them. The base URL is saved on login -- all subsequent commands use it automatically.
 
-For environments without Rust toolchain, set environment variables instead:
+**Without Rust toolchain (API key fallback):**
 
+Set these environment variables instead of installing the CLI:
+
+- `NYXID_API_KEY` -- NyxID API key (create from dashboard: AI Services > NyxID API Keys tab)
 - `NYXID_BASE_URL` -- NyxID instance URL (default: `https://nyx-api.chrono-ai.fun`)
-- `NYXID_API_KEY` -- API key for direct access (create with `nyxid api-key create`)
+
+The helper scripts (`tools/services.sh`, `tools/proxy.sh`) will use these env vars with curl.
 
 ## Discover Services
 

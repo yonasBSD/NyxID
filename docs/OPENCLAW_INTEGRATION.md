@@ -76,6 +76,10 @@ Then reference it in your OpenClaw plugin config (see Configuration below).
 ### Quickstart: Using nyxid CLI (recommended)
 
 ```bash
+# 0. Install Rust if needed (macOS / Linux)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+
 # 1. Install the NyxID CLI
 cargo install --git https://github.com/ChronoAIProject/NyxID --bin nyxid
 
@@ -97,9 +101,20 @@ nyxid service list --output json
 nyxid proxy discover --output json
 ```
 
+### Without the CLI (API key only)
+
+If you can't install the Rust toolchain, create an API key from the NyxID dashboard (AI Services > NyxID API Keys tab) and set it as an environment variable:
+
+```bash
+export NYXID_API_KEY="nyxid_your_key_here"
+export NYXID_BASE_URL="https://nyx-api.chrono-ai.fun"
+```
+
+The OpenClaw skill and helper scripts will use these env vars automatically.
+
 ### OpenClaw skill configuration
 
-Configure the NyxID skill in OpenClaw using the API key from step 3:
+Configure the NyxID skill in OpenClaw using the API key from step 3 (or from the dashboard):
 
 ```json
 {
