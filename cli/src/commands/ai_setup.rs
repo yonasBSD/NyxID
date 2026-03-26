@@ -132,17 +132,6 @@ fn home_dir() -> Result<PathBuf> {
     dirs::home_dir().context("Could not determine home directory")
 }
 
-/// Extract the post-install message from SKILL.md (between marker comments).
-fn extract_post_install(skill_md: &str) -> Option<String> {
-    let start = skill_md.find("<!-- begin:post-install -->")?;
-    let end = skill_md.find("<!-- end:post-install -->")?;
-    if end <= start {
-        return None;
-    }
-    let section = &skill_md[start + "<!-- begin:post-install -->".len()..end];
-    Some(section.trim().to_string())
-}
-
 fn skill_paths(tool: AiToolTarget) -> Result<Vec<(String, PathBuf)>> {
     let home = home_dir()?;
     match tool {
@@ -172,6 +161,7 @@ fn skill_paths(tool: AiToolTarget) -> Result<Vec<(String, PathBuf)>> {
 struct SkillContent {
     skill_md: String,
     playbook: String,
+    post_install: String,
     services_sh: String,
     proxy_sh: String,
 }
@@ -183,6 +173,10 @@ async fn fetch_skill_content(base_url: &str) -> Result<SkillContent> {
     let skill_md_raw = fetch_github(&format!("{SKILL_DIR}/SKILL.md")).await?;
     let skill_md = substitute_urls(&skill_md_raw, base_url, &dashboard);
 
+    let post_install = fetch_github(&format!("{SKILL_DIR}/POST_INSTALL.md"))
+        .await
+        .unwrap_or_default();
+
     eprintln!("  Fetching playbook from {base_url}/llms.txt...");
     let playbook = fetch_playbook(base_url).await?;
 
@@ -192,6 +186,7 @@ async fn fetch_skill_content(base_url: &str) -> Result<SkillContent> {
     Ok(SkillContent {
         skill_md,
         playbook,
+        post_install,
         services_sh,
         proxy_sh,
     })
@@ -215,8 +210,8 @@ async fn install(tool: AiToolTarget, base_url: &Option<String>) -> Result<()> {
     }
 }
 
-/// Print the post-install summary extracted from SKILL.md, plus tool-specific notes.
-fn print_post_install(tool: AiToolTarget, skill_md: &str) {
+/// Print the post-install summary plus tool-specific notes.
+fn print_post_install(tool: AiToolTarget, content: &SkillContent) {
     // Tool-specific restart / activation notes
     match tool {
         AiToolTarget::ClaudeCode => {
@@ -240,11 +235,9 @@ fn print_post_install(tool: AiToolTarget, skill_md: &str) {
         }
     }
 
-    eprintln!();
-
-    // Extract and print the "what you can do" section from SKILL.md
-    if let Some(post_install) = extract_post_install(skill_md) {
-        for line in post_install.lines() {
+    if !content.post_install.is_empty() {
+        eprintln!();
+        for line in content.post_install.lines() {
             eprintln!("{line}");
         }
     }
@@ -257,7 +250,7 @@ async fn install_claude_code(content: &SkillContent) -> Result<()> {
     write_file(&dir.join("references/playbook.md"), &content.playbook)?;
 
     eprintln!();
-    print_post_install(AiToolTarget::ClaudeCode, &content.skill_md);
+    print_post_install(AiToolTarget::ClaudeCode, content);
     Ok(())
 }
 
@@ -269,7 +262,7 @@ fn install_cursor(content: &SkillContent) -> Result<()> {
     write_file(&PathBuf::from(".cursor/rules/nyxid.mdc"), &mdc)?;
 
     eprintln!();
-    print_post_install(AiToolTarget::Cursor, &content.skill_md);
+    print_post_install(AiToolTarget::Cursor, content);
     Ok(())
 }
 
@@ -280,7 +273,7 @@ fn install_codex(content: &SkillContent) -> Result<()> {
     write_file(&dir.join("references/playbook.md"), &content.playbook)?;
 
     eprintln!();
-    print_post_install(AiToolTarget::Codex, &content.skill_md);
+    print_post_install(AiToolTarget::Codex, content);
     Ok(())
 }
 
@@ -299,7 +292,7 @@ fn install_openclaw(content: &SkillContent) -> Result<()> {
     }
 
     eprintln!();
-    print_post_install(AiToolTarget::Openclaw, &content.skill_md);
+    print_post_install(AiToolTarget::Openclaw, content);
     Ok(())
 }
 
