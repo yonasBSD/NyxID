@@ -255,7 +255,7 @@ When working in parallel, each agent has its own workpad (e.g., `## Symphony Wor
 2. Write a **focused plan** with only the tasks needed for THIS issue.
 3. Implement the changes. Update the workpad as tasks complete.
 4. Run tests relevant to your changes.
-5. Commit and push. Create a PR if one doesn't exist (see Git Workflow).
+5. Commit and push. **MANDATORY: Create a PR before finishing** (see Git Workflow).
 6. **STOP implementing.** Symphony will automatically move the issue to `code-review` when all parallel agents finish. It will also remove routing labels (`backend`, `frontend`).
 
 ## Rework Flow
