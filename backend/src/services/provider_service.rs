@@ -965,15 +965,53 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
+    // Upgrade existing lark/feishu providers with corrected documentation URLs
+    let old_lark_doc_url = "https://open.larksuite.com/document/server-docs/authentication-management/access-token/authorize-user-access-token";
+    if let Some(existing) = collection
+        .find_one(doc! { "slug": "lark", "documentation_url": old_lark_doc_url })
+        .await?
+    {
+        collection
+            .update_one(
+                doc! { "_id": &existing.id },
+                doc! { "$set": {
+                    "documentation_url": "https://open.larksuite.com/document/common-capabilities/sso/api/obtain-oauth-code",
+                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                }},
+            )
+            .await?;
+        tracing::info!(
+            slug = "lark",
+            "Updated existing provider with corrected documentation URL"
+        );
+    }
+    let old_feishu_doc_url = "https://open.feishu.cn/document/server-docs/authentication-management/access-token/authorize-user-access-token";
+    if let Some(existing) = collection
+        .find_one(doc! { "slug": "feishu", "documentation_url": old_feishu_doc_url })
+        .await?
+    {
+        collection
+            .update_one(
+                doc! { "_id": &existing.id },
+                doc! { "$set": {
+                    "documentation_url": "https://open.feishu.cn/document/common-capabilities/sso/api/obtain-oauth-code",
+                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                }},
+            )
+            .await?;
+        tracing::info!(
+            slug = "feishu",
+            "Updated existing provider with corrected documentation URL"
+        );
+    }
+
     // 20. Lark / Larksuite (OAuth2)
     if !slug_exists!("lark") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
             slug: "lark".to_string(),
             name: "Lark".to_string(),
-            description: Some(
-                "Lark (Larksuite) account access via OAuth 2.0".to_string(),
-            ),
+            description: Some("Lark (Larksuite) account access via OAuth 2.0".to_string()),
             provider_type: "oauth2".to_string(),
             authorization_url: Some(
                 "https://open.larksuite.com/open-apis/authen/v1/index".to_string(),
@@ -997,7 +1035,7 @@ pub async fn seed_default_providers(
             api_key_url: None,
             icon_url: None,
             documentation_url: Some(
-                "https://open.larksuite.com/document/server-docs/authentication-management/access-token/authorize-user-access-token"
+                "https://open.larksuite.com/document/common-capabilities/sso/api/obtain-oauth-code"
                     .to_string(),
             ),
             is_active: true,
@@ -1026,12 +1064,8 @@ pub async fn seed_default_providers(
                 "Feishu (飞书) account access via OAuth 2.0 (China region)".to_string(),
             ),
             provider_type: "oauth2".to_string(),
-            authorization_url: Some(
-                "https://open.feishu.cn/open-apis/authen/v1/index".to_string(),
-            ),
-            token_url: Some(
-                "https://open.feishu.cn/open-apis/authen/v2/oauth/token".to_string(),
-            ),
+            authorization_url: Some("https://open.feishu.cn/open-apis/authen/v1/index".to_string()),
+            token_url: Some("https://open.feishu.cn/open-apis/authen/v2/oauth/token".to_string()),
             revocation_url: None,
             default_scopes: Some(vec![
                 "contact:user.base:readonly".to_string(),
@@ -1048,7 +1082,7 @@ pub async fn seed_default_providers(
             api_key_url: None,
             icon_url: None,
             documentation_url: Some(
-                "https://open.feishu.cn/document/server-docs/authentication-management/access-token/authorize-user-access-token"
+                "https://open.feishu.cn/document/common-capabilities/sso/api/obtain-oauth-code"
                     .to_string(),
             ),
             is_active: true,
