@@ -81,6 +81,8 @@ pub struct ApprovalRequest {
     pub decision_channel: Option<String>,
 
     /// Idempotency key used for the final decision submission.
+    /// System-generated expiry sweeps may also stamp an internal marker here
+    /// to identify the rows they expired.
     #[serde(default)]
     pub decision_idempotency_key: Option<String>,
 

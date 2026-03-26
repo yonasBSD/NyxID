@@ -355,6 +355,11 @@ async fn main() {
     tokio::spawn(async move {
         let mut interval =
             tokio::time::interval(std::time::Duration::from_secs(expiry_interval_secs));
+        // Prevent rapid-fire catch-up sweeps when a tick is delayed (e.g. under
+        // database backpressure). Burst mode (the default) would fire consecutive
+        // sweeps immediately, widening the race window between find() and
+        // update_many() in expire_pending_requests.
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
             if let Err(e) = services::approval_service::expire_pending_requests(
