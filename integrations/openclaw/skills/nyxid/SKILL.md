@@ -10,7 +10,7 @@ metadata:
       bins:
         - nyxid
     setup:
-      - cargo install --git https://github.com/ChronoAIProject/NyxID --bin nyxid
+      - cargo install --git https://github.com/ChronoAIProject/NyxID -p nyxid-cli
   clawdbot:
     emoji: "key"
     primaryEnv: NYXID_ACCESS_TOKEN
@@ -34,7 +34,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
 
 # Install NyxID CLI
-cargo install --git https://github.com/ChronoAIProject/NyxID --bin nyxid
+cargo install --git https://github.com/ChronoAIProject/NyxID -p nyxid-cli
 
 # Log in (opens browser, saves URL for all future commands)
 nyxid login --base-url https://nyx-api.chrono-ai.fun
@@ -151,7 +151,7 @@ nyxid api-key update <ID> --allow-all-services true    # unrestrict
 nyxid node register-token
 
 # Step 2: Install nyxid CLI on the target machine
-cargo install --git https://github.com/ChronoAIProject/NyxID --bin nyxid
+cargo install --git https://github.com/ChronoAIProject/NyxID -p nyxid-cli
 
 # Step 3: Register the node (--keychain recommended for secure storage)
 nyxid node register \

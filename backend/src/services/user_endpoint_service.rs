@@ -8,6 +8,15 @@ use crate::handlers::services_helpers::validate_base_url;
 use crate::models::user_endpoint::{COLLECTION_NAME, UserEndpoint};
 use crate::models::user_service::COLLECTION_NAME as USER_SERVICES;
 
+fn validate_endpoint_url(url: &str) -> AppResult<()> {
+    // Skip URL validation for node-resolved endpoints (empty URL) and SSH endpoints.
+    if url.is_empty() || url.starts_with("ssh://") {
+        return Ok(());
+    }
+
+    validate_base_url(url)
+}
+
 /// List all endpoints for a user, sorted by created_at descending.
 pub async fn list_endpoints(db: &mongodb::Database, user_id: &str) -> AppResult<Vec<UserEndpoint>> {
     let endpoints: Vec<UserEndpoint> = db
@@ -45,10 +54,7 @@ pub async fn create_endpoint(
             "Label must be between 1 and 200 characters".to_string(),
         ));
     }
-    // Skip URL validation for node-resolved endpoints (empty URL)
-    if !url.is_empty() {
-        validate_base_url(url)?;
-    }
+    validate_endpoint_url(url)?;
 
     let now = Utc::now();
     let endpoint = UserEndpoint {
@@ -87,7 +93,7 @@ pub async fn update_endpoint(
     };
 
     if let Some(u) = url {
-        validate_base_url(u)?;
+        validate_endpoint_url(u)?;
         set_doc.insert("url", u);
     }
     if let Some(l) = label {
@@ -143,4 +149,26 @@ pub async fn delete_endpoint(
         .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_endpoint_url;
+
+    #[test]
+    fn validate_endpoint_url_accepts_empty_and_ssh_urls() {
+        assert!(validate_endpoint_url("").is_ok());
+        assert!(validate_endpoint_url("ssh://example.internal:22").is_ok());
+    }
+
+    #[test]
+    fn validate_endpoint_url_accepts_http_urls() {
+        assert!(validate_endpoint_url("https://api.example.com").is_ok());
+        assert!(validate_endpoint_url("http://localhost:3000").is_ok());
+    }
+
+    #[test]
+    fn validate_endpoint_url_rejects_non_http_non_ssh_urls() {
+        assert!(validate_endpoint_url("ftp://example.com").is_err());
+    }
 }
