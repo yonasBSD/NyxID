@@ -95,17 +95,16 @@ The response includes `auth_type` which tells you what the service needs. Use th
   nyxid service add llm-openai --device-code
   ```
 
-- **API key** (`--credential-env`): The user needs to get an API key from the provider's website. Guide them:
+- **API key**: The user needs to get an API key from the provider's website. Guide them:
   1. Check the common portals table below for the provider's developer portal URL
   2. If the provider is not listed, search the web for "<provider name> API key" to find the right page, then tell the user exactly where to go
   3. Walk them through creating a key on the provider's site
-  4. Ask the user to paste the key, then run the command yourself:
+  4. Tell them to run the command **without** `--credential-env` -- the CLI will securely prompt for the key (input is hidden, never shown on screen):
      ```bash
-     export NYXID_CRED="<key the user gave you>"
-     nyxid service add llm-openai --credential-env NYXID_CRED
-     unset NYXID_CRED
+     nyxid service add llm-openai
+     # CLI prompts: "Enter API key/credential:" (input hidden)
      ```
-  The user just pastes the key -- you handle the rest. Never log or echo the key back.
+  Never ask the user to paste secrets into chat. The CLI's secure prompt keeps the key out of shell history and conversation logs.
 
 ### Step 3: Common provider portals
 
