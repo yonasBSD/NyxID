@@ -1,4 +1,4 @@
-export type AiTool = "cursor" | "claude-code" | "codex" | "chatgpt";
+export type AiTool = "cursor" | "claude-code" | "codex" | "openclaw" | "chatgpt";
 
 export interface AiToolMeta {
   readonly id: AiTool;
@@ -29,6 +29,13 @@ export const AI_TOOLS: readonly AiToolMeta[] = [
     description: "MCP via TOML config",
     configFileName: "config.toml",
     configFilePath: "~/.codex/config.toml",
+  },
+  {
+    id: "openclaw",
+    name: "OpenClaw",
+    description: "Provider-level integration via system prompt",
+    configFileName: "system-prompt",
+    configFilePath: "",
   },
   {
     id: "chatgpt",
@@ -104,10 +111,33 @@ function chatgptConfig(params: AiToolConfigParams): string {
   ].join("\n");
 }
 
+function openclawConfig(params: AiToolConfigParams): string {
+  return [
+    `# NyxID + OpenClaw Integration`,
+    ``,
+    `NyxID provides credential proxying for OpenClaw.`,
+    ``,
+    `## Setup`,
+    ``,
+    `1. Install the CLI: \`cargo install --git https://github.com/ChronoAIProject/NyxID nyxid-cli\``,
+    `2. Log in: \`nyxid login --base-url ${params.baseUrl}\``,
+    `3. Run: \`nyxid openclaw setup --url <OPENCLAW_GATEWAY_URL>\``,
+    ``,
+    `## Via Node Agent`,
+    ``,
+    `\`nyxid node openclaw connect --url <OPENCLAW_GATEWAY_URL>\``,
+    ``,
+    `## Full Guide`,
+    ``,
+    `See: ${params.baseUrl}/llms.txt (section: Using NyxID in OpenClaw)`,
+  ].join("\n");
+}
+
 const GENERATORS: Record<AiTool, (params: AiToolConfigParams) => string> = {
   cursor: cursorConfig,
   "claude-code": claudeCodeConfig,
   codex: codexConfig,
+  openclaw: openclawConfig,
   chatgpt: chatgptConfig,
 };
 
@@ -117,3 +147,123 @@ export function generateToolConfig(
 ): string {
   return GENERATORS[tool](params);
 }
+
+// ---------------------------------------------------------------------------
+// Setup prompts -- tool-specific instructions for installing persistent skills
+// ---------------------------------------------------------------------------
+
+export interface SetupPromptParams {
+  readonly baseUrl: string;
+  readonly dashboardUrl: string;
+}
+
+function toolSetupPrompt(
+  tool: AiTool,
+  p: SetupPromptParams,
+): string {
+  const cliInstall = [
+    `1. Install the NyxID CLI:`,
+    `   cargo install --git https://github.com/ChronoAIProject/NyxID nyxid-cli`,
+    `   nyxid login --base-url ${p.baseUrl}`,
+  ];
+
+  if (tool === "chatgpt") {
+    return [
+      `Read ${p.baseUrl}/llms.txt to understand what NyxID can do, then help me with whatever I need.`,
+      `The NyxID server is at ${p.baseUrl} and the dashboard is at ${p.dashboardUrl}.`,
+      `Use the nyxid CLI for all operations -- if it's not installed, help me install it first`,
+      `(requires Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh).`,
+      `For secrets, always use --credential-env to read from environment variables.`,
+      `Use --output json for machine-readable output.`,
+    ].join(" ");
+  }
+
+  const toolFlag = tool === "claude-code" ? "claude-code" : tool;
+
+  const lines = [
+    `Install the NyxID skill so you have NyxID context in every future session:`,
+    ``,
+    ...cliInstall,
+    ``,
+    `2. Install the skill:`,
+    `   nyxid ai-setup install --tool ${toolFlag}`,
+    ``,
+  ];
+
+  const toolNotes: Record<string, string[]> = {
+    "claude-code": [
+      `This fetches the canonical NyxID skill from GitHub and the latest playbook`,
+      `from ${p.baseUrl}/llms.txt, then installs:`,
+      `  ~/.claude/skills/nyxid/SKILL.md              (concise skill, loaded on demand)`,
+      `  ~/.claude/skills/nyxid/references/playbook.md (full reference, loaded when needed)`,
+      ``,
+      `Claude loads the description at startup. Full content loads when you ask about NyxID.`,
+      `Use /nyxid as a slash command, or just ask and it activates automatically.`,
+    ],
+    cursor: [
+      `This fetches the NyxID skill from GitHub and installs it as a Cursor rule:`,
+      `  .cursor/rules/nyxid.mdc (concise skill, always applied in this project)`,
+      ``,
+      `Note: Cursor rules are project-level. Run this command in each project.`,
+    ],
+    codex: [
+      `This fetches the NyxID skill from GitHub and the latest playbook, then installs:`,
+      `  ~/.codex/skills/nyxid/SKILL.md              (concise skill, loaded on demand)`,
+      `  ~/.codex/skills/nyxid/references/playbook.md (full reference, loaded when needed)`,
+    ],
+    openclaw: [
+      `This fetches the NyxID skill from GitHub and installs into OpenClaw:`,
+      `  ~/.openclaw/skills/nyxid/SKILL.md              (concise skill)`,
+      `  ~/.openclaw/skills/nyxid/references/playbook.md (full reference)`,
+      `  ~/.openclaw/skills/nyxid/tools/                 (shell tool wrappers)`,
+      ``,
+      `After install: start a new OpenClaw chat or run openclaw gateway restart.`,
+      `Verify: openclaw skills check (should show NyxID as ready).`,
+    ],
+  };
+
+  lines.push(...(toolNotes[tool] ?? []));
+  lines.push(``, `To update: nyxid ai-setup update --tool ${toolFlag}`);
+
+  return lines.join("\n");
+}
+
+const SETUP_PROMPT_GENERATORS: Record<AiTool, (p: SetupPromptParams) => string> = {
+  "claude-code": (p) => toolSetupPrompt("claude-code", p),
+  cursor: (p) => toolSetupPrompt("cursor", p),
+  codex: (p) => toolSetupPrompt("codex", p),
+  openclaw: (p) => toolSetupPrompt("openclaw", p),
+  chatgpt: (p) => toolSetupPrompt("chatgpt", p),
+};
+
+export function generateSetupPrompt(
+  tool: AiTool,
+  params: SetupPromptParams,
+): string {
+  return SETUP_PROMPT_GENERATORS[tool](params);
+}
+
+export type AiToolSkillType = "auto-refresh" | "manual-refresh" | "provider-level" | "paste-prompt";
+
+export const AI_TOOL_SKILL_INFO: Record<AiTool, { type: AiToolSkillType; note: string }> = {
+  "claude-code": {
+    type: "manual-refresh",
+    note: "Same SKILL.md from GitHub + playbook from server. Update: nyxid ai-setup update",
+  },
+  cursor: {
+    type: "manual-refresh",
+    note: "Concise skill as Cursor rule (project-level). Update: nyxid ai-setup update --tool cursor",
+  },
+  codex: {
+    type: "manual-refresh",
+    note: "Same SKILL.md from GitHub + playbook from server. Update: nyxid ai-setup update",
+  },
+  openclaw: {
+    type: "manual-refresh",
+    note: "Full skill bundle with tool scripts. Update: nyxid ai-setup update --tool openclaw",
+  },
+  chatgpt: {
+    type: "paste-prompt",
+    note: "Paste the prompt into each new chat session",
+  },
+};

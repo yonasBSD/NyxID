@@ -1,3 +1,4 @@
+pub mod ai_setup;
 pub mod api_key;
 pub mod approval;
 pub mod auth_flows;

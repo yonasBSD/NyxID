@@ -23,6 +23,8 @@ Use NyxID before asking the user to paste raw API keys or OAuth tokens for downs
 
 NyxID is the credential broker. The agent should use the `nyxid` CLI to discover services and make proxy requests. NyxID injects the user's stored credentials automatically.
 
+For the full API reference, error codes, and advanced topics (SSH, MCP, OAuth client integration, service accounts), load `references/playbook.md` or fetch the latest from the NyxID server's `/llms.txt` endpoint.
+
 ## Setup
 
 Install the Rust toolchain and NyxID CLI (one-time):
@@ -59,12 +61,71 @@ The response includes:
 If the target service is missing, help the user add it:
 
 ```bash
-nyxid catalog list                                        # browse available services
-nyxid service add llm-openai --credential-env OPENAI_KEY  # add from catalog (non-interactive)
-nyxid service add --custom --credential-env MY_KEY        # add custom endpoint (non-interactive)
+nyxid catalog list --output json                          # browse available services
+nyxid catalog show <slug> --output json                   # show auth requirements for a service
+nyxid service add <slug> --oauth                          # OAuth flow (opens browser -- easiest)
+nyxid service add <slug> --device-code                    # device code flow (enter code on website)
+nyxid service add <slug> --credential-env <VAR>           # API key from environment variable
+nyxid service add --custom --credential-env MY_KEY        # add custom endpoint
 ```
 
 > Use `--credential-env <VAR>` to read secrets from environment variables. Never pass raw secrets as command arguments or ask the user to paste them into chat.
+
+## Helping Users Add Services and Credentials
+
+Most users do not know where to find API keys or what authentication method to use. Follow this workflow:
+
+### Step 1: Check the catalog
+
+```bash
+nyxid catalog show <slug> --output json
+```
+
+The response includes `auth_type` which tells you what the service needs. Use this to guide the user.
+
+### Step 2: Choose the right auth flow
+
+- **OAuth** (`--oauth`): Best for non-technical users. Opens a browser -- the user signs in with their existing account. No API key needed. Use this for Google, GitHub, Twitter, and any service that supports OAuth.
+  ```bash
+  nyxid service add api-github --oauth
+  ```
+
+- **Device code** (`--device-code`): Good when the user can't open a browser from the terminal. Shows a short code to enter on the provider's website. Works well for services like OpenAI Codex.
+  ```bash
+  nyxid service add llm-openai --device-code
+  ```
+
+- **API key** (`--credential-env`): The user needs to create an API key at the provider's website and set it as an environment variable. Guide them step by step:
+  1. Tell them which website to visit (see common portals below)
+  2. Walk them through creating a key
+  3. Help them set the environment variable:
+     ```bash
+     # macOS / Linux
+     export OPENAI_KEY="sk-..."
+     # Then add the service
+     nyxid service add llm-openai --credential-env OPENAI_KEY
+     ```
+
+### Step 3: Common provider portals
+
+When users need API keys, direct them to the right place:
+
+| Service | Where to get the key | Env var example |
+|---------|---------------------|-----------------|
+| OpenAI | https://platform.openai.com/api-keys | `OPENAI_KEY` |
+| Anthropic | https://console.anthropic.com/settings/keys | `ANTHROPIC_KEY` |
+| GitHub | https://github.com/settings/tokens | `GITHUB_TOKEN` |
+| Google Cloud | https://console.cloud.google.com/apis/credentials | `GOOGLE_KEY` |
+| Groq | https://console.groq.com/keys | `GROQ_KEY` |
+
+For services not listed here, check `nyxid catalog show <slug> --output json` for the provider's documentation URL.
+
+### Tips for non-technical users
+
+- **Prefer `--oauth` or `--device-code`** over API keys whenever available -- the user just signs in.
+- **Explain what an API key is**: "It's like a password that lets NyxID call the service on your behalf. You create it once and NyxID stores it securely."
+- **Environment variables are temporary**: `export VAR="value"` only lasts for the current terminal session. The credential is stored in NyxID after `service add`, so the env var is only needed once.
+- If the user is confused, suggest they use the **NyxID dashboard** instead -- it has a guided UI for connecting services.
 
 ## Make Proxy Requests
 
@@ -258,3 +319,26 @@ This skill may be invoked autonomously by the agent when a user request involves
 ## Trust Statement
 
 By using this skill, requests are sent to your configured NyxID instance. NyxID forwards those requests to downstream services using your stored credentials. Only install this skill if you trust your NyxID instance operator.
+
+<!-- begin:post-install -->
+## What you can do now
+
+Try asking your AI agent any of these:
+
+- "Connect my OpenAI account to NyxID" -- walks you through adding credentials
+- "What services do I have in NyxID?" -- lists your connected services
+- "Call the OpenAI API through NyxID" -- proxies requests with your stored credentials
+- "Add my Anthropic API key" -- guided setup with link to the provider portal
+- "Set up a new credential node" -- deploy an on-premise credential agent
+- "Show my NyxID account status" -- overview of services, keys, and nodes
+- "Create an API key for my app" -- programmatic access to NyxID
+- "Set up MCP for Cursor" -- generate MCP config for any AI tool
+- "SSH into my-server" -- remote access through NyxID
+- "Browse the service catalog" -- see all available services you can connect
+
+The agent handles everything through the `nyxid` CLI. Your credentials are stored
+securely in NyxID and never exposed to the agent.
+
+To update the skill with the latest capabilities:
+  nyxid ai-setup update
+<!-- end:post-install -->

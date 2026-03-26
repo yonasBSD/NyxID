@@ -71,5 +71,8 @@ async fn run() -> Result<()> {
 
         // I25-I26: External keys
         Commands::ExternalKey { command } => commands::external_key::run(command).await,
+
+        // AI skill setup
+        Commands::AiSetup { command } => commands::ai_setup::run(command).await,
     }
 }
