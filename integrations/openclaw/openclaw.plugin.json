@@ -43,6 +43,6 @@
     "nyxidApiKey": "NYXID_API_KEY"
   },
   "skills": [
-    "./skills/nyxid"
+    "../../skills/nyxid"
   ]
 }

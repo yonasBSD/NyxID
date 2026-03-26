@@ -2742,7 +2742,7 @@ nyxid ssh terminal <SERVICE_OR_SLUG>                    # auto-resolves principa
 
 ## 24. Using NyxID in OpenClaw
 
-NyxID ships an OpenClaw skill at `integrations/openclaw/skills/nyxid` that lets OpenClaw agents discover and call external services through NyxID's credential proxy. The skill uses the `nyxid` CLI exclusively -- no environment variables or HTTP fallback.
+NyxID ships an OpenClaw skill at `skills/nyxid` that lets OpenClaw agents discover and call external services through NyxID's credential proxy. The skill uses the `nyxid` CLI exclusively -- no environment variables or HTTP fallback.
 
 For the full integration guide (plugin setup, channel integration, node agent support), see [`docs/OPENCLAW_INTEGRATION.md`](OPENCLAW_INTEGRATION.md).
 
@@ -2772,7 +2772,7 @@ Copy the skill to OpenClaw's managed skills directory:
 
 ```bash
 mkdir -p ~/.openclaw/skills
-cp -r integrations/openclaw/skills/nyxid ~/.openclaw/skills/nyxid
+cp -r skills/nyxid ~/.openclaw/skills/nyxid
 ```
 
 Verify the skill passes the eligibility check:

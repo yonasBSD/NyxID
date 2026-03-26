@@ -1,11 +1,14 @@
-import { memo } from "react";
+import { memo, useState, useCallback } from "react";
 import { Link } from "@tanstack/react-router";
 import { useAuthStore } from "@/stores/auth-store";
 import { useApiKeys } from "@/hooks/use-api-keys";
 import { useServices, useConnections } from "@/hooks/use-services";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Key, Server, Link2, ShieldCheck, ShieldOff } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Key, Server, Link2, ShieldCheck, ShieldOff, Sparkles, X } from "lucide-react";
 import { cn } from "@/lib/utils";
+
+const AI_SETUP_DISMISSED_KEY = "nyxid:ai-setup-dismissed";
 
 interface StatItem {
   readonly title: string;
@@ -56,6 +59,15 @@ export function DashboardPage() {
     },
   ];
 
+  const [aiSetupDismissed, setAiSetupDismissed] = useState(
+    () => localStorage.getItem(AI_SETUP_DISMISSED_KEY) === "true",
+  );
+
+  const dismissAiSetup = useCallback(() => {
+    localStorage.setItem(AI_SETUP_DISMISSED_KEY, "true");
+    setAiSetupDismissed(true);
+  }, []);
+
   return (
     <div className="flex flex-col gap-12">
       <div className="flex flex-col gap-2">
@@ -66,6 +78,37 @@ export function DashboardPage() {
           Here is an overview of your NyxID account
         </p>
       </div>
+
+      {!aiSetupDismissed && (
+        <div className="relative flex items-start gap-4 rounded-[10px] border border-primary/20 bg-primary/5 p-5">
+          <Sparkles className="mt-0.5 h-5 w-5 shrink-0 text-primary" aria-hidden="true" />
+          <div className="flex flex-1 flex-col gap-1.5">
+            <h3 className="text-sm font-medium text-foreground">
+              Set up AI skills
+            </h3>
+            <p className="text-[13px] text-muted-foreground">
+              Install NyxID skills in your AI agent (Claude Code, Cursor, Codex,
+              OpenClaw) so it can help you manage services, credentials, and
+              more -- no setup prompt needed each session.
+            </p>
+            <Link
+              to="/ai-setup"
+              className="mt-1 text-[13px] font-medium text-primary hover:underline"
+            >
+              Go to AI Setup
+            </Link>
+          </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="absolute right-2 top-2 h-7 w-7 p-0 text-muted-foreground hover:text-foreground"
+            onClick={dismissAiSetup}
+            aria-label="Dismiss"
+          >
+            <X className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+      )}
 
       <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
         {stats.map((stat) => (

@@ -310,7 +310,7 @@ struct PublicConfig {
     frontend_url: String,
 }
 
-async fn fetch_frontend_url(base_url: &str) -> Result<String> {
+pub async fn fetch_frontend_url(base_url: &str) -> Result<String> {
     let config_url = format!("{base_url}/api/v1/public/config");
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))

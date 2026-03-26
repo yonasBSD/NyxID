@@ -45,13 +45,13 @@ nyxid service list --output json                                  # verify (incl
 
 ```bash
 mkdir -p ~/.openclaw/skills
-cp -r integrations/openclaw/skills/nyxid ~/.openclaw/skills/nyxid
+cp -r skills/nyxid ~/.openclaw/skills/nyxid
 ```
 
 **Option B -- Copy to a workspace:**
 
 ```bash
-cp -r integrations/openclaw/skills/nyxid /path/to/your/workspace/skills/nyxid
+cp -r skills/nyxid /path/to/your/workspace/skills/nyxid
 ```
 
 **Option C -- Install from ClawHub (when published):**

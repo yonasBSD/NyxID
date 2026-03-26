@@ -278,43 +278,36 @@ impl ApiClient {
         let method_parsed = reqwest::Method::from_bytes(method.to_uppercase().as_bytes())
             .with_context(|| format!("Invalid HTTP method: {method}"))?;
 
-        let mut req = self
-            .client
-            .request(method_parsed.clone(), &url)
-            .bearer_auth(&self.access_token);
+        let has_content_type = headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
 
-        for (k, v) in headers {
-            req = req.header(k.as_str(), v.as_str());
-        }
-
-        if let Some(body) = body {
-            req = req
-                .header("content-type", "application/json")
-                .body(body.to_string());
-        }
-
-        let resp = req
-            .send()
-            .await
-            .with_context(|| format!("Proxy request to {path} failed"))?;
-
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
-            let mut req = self
-                .client
-                .request(method_parsed, &url)
-                .bearer_auth(&self.access_token);
+        let build_req = |client: &reqwest::Client, token: &str| {
+            let mut req = client
+                .request(method_parsed.clone(), &url)
+                .bearer_auth(token);
 
             for (k, v) in headers {
                 req = req.header(k.as_str(), v.as_str());
             }
 
             if let Some(body) = body {
-                req = req
-                    .header("content-type", "application/json")
-                    .body(body.to_string());
+                if !has_content_type {
+                    req = req.header("content-type", "application/json");
+                }
+                req = req.body(body.to_string());
             }
 
-            return req
+            req
+        };
+
+        let resp = build_req(&self.client, &self.access_token)
+            .send()
+            .await
+            .with_context(|| format!("Proxy request to {path} failed"))?;
+
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
+            return build_req(&self.client, &self.access_token)
                 .send()
                 .await
                 .with_context(|| format!("Proxy request to {path} failed (retry)"));

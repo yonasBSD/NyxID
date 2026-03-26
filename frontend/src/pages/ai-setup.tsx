@@ -25,7 +25,9 @@ import { useDeveloperApps } from "@/hooks/use-developer-apps";
 import { usePublicConfig } from "@/hooks/use-public-config";
 import {
   AI_TOOLS,
+  AI_TOOL_SKILL_INFO,
   generateToolConfig,
+  generateSetupPrompt,
   type AiTool,
   type AiToolConfigParams,
 } from "@/lib/ai-tool-configs";
@@ -81,12 +83,29 @@ function EmptyState() {
 }
 
 
-function buildPrompt(baseUrl: string, dashboardUrl: string): string {
-  return `Read ${baseUrl}/llms.txt to understand what NyxID can do, then help me with whatever I need. The NyxID server is at ${baseUrl} and the dashboard is at ${dashboardUrl}. Use the nyxid CLI for all operations -- if it's not installed, help me install it first (requires Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh). For secrets, always use --credential-env to read from environment variables. Use --output json for machine-readable output.`;
-}
+const SKILL_TOOLS: readonly AiTool[] = [
+  "claude-code",
+  "cursor",
+  "codex",
+  "openclaw",
+  "chatgpt",
+];
 
-function AiPromptCard({ baseUrl, dashboardUrl }: { readonly baseUrl: string; readonly dashboardUrl: string }) {
-  const prompt = useMemo(() => buildPrompt(baseUrl, dashboardUrl), [baseUrl, dashboardUrl]);
+function AiSkillSetupCard({
+  baseUrl,
+  dashboardUrl,
+}: {
+  readonly baseUrl: string;
+  readonly dashboardUrl: string;
+}) {
+  const [selectedSkillTool, setSelectedSkillTool] = useState<AiTool>("claude-code");
+
+  const setupPrompt = useMemo(
+    () => generateSetupPrompt(selectedSkillTool, { baseUrl, dashboardUrl }),
+    [selectedSkillTool, baseUrl, dashboardUrl],
+  );
+
+  const skillInfo = AI_TOOL_SKILL_INFO[selectedSkillTool];
 
   const handleCopy = useCallback(async (text: string) => {
     try {
@@ -100,36 +119,81 @@ function AiPromptCard({ baseUrl, dashboardUrl }: { readonly baseUrl: string; rea
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">AI Agent Prompt</CardTitle>
+        <CardTitle className="text-base">Install AI Skills</CardTitle>
         <CardDescription>
-          Copy this prompt and paste it into any AI assistant (Claude, Cursor,
-          Codex, ChatGPT, etc.). The AI will read the NyxID playbook and help
-          you with anything -- adding services, managing keys, setting up nodes,
-          SSH, MCP, approvals, and more.
+          Install persistent NyxID skills so your AI agent automatically knows
+          about NyxID in every session. No need to paste a prompt each time.
         </CardDescription>
       </CardHeader>
-      <CardContent className="space-y-4">
-        <div className="relative">
-          <pre className="overflow-x-auto whitespace-pre-wrap rounded-lg border border-border bg-muted p-4 font-mono text-xs leading-relaxed">
-            {prompt}
-          </pre>
-          <Button
-            variant="outline"
-            size="sm"
-            className="absolute right-2 top-2 h-7 gap-1 text-xs"
-            onClick={() => void handleCopy(prompt)}
-          >
-            <Copy className="h-3 w-3" />
-            Copy
-          </Button>
-        </div>
+      <CardContent className="space-y-5">
+        <Tabs
+          value={selectedSkillTool}
+          onValueChange={(v) => setSelectedSkillTool(v as AiTool)}
+          className="space-y-4"
+        >
+          <TabsList>
+            {SKILL_TOOLS.map((id) => {
+              const tool = AI_TOOLS.find((t) => t.id === id);
+              return tool ? (
+                <TabsTrigger key={id} value={id}>
+                  {tool.name}
+                </TabsTrigger>
+              ) : null;
+            })}
+          </TabsList>
+
+          {SKILL_TOOLS.map((id) => (
+            <TabsContent key={id} value={id}>
+              <div className="space-y-4">
+                <div className="relative">
+                  <pre className="overflow-x-auto whitespace-pre-wrap rounded-lg border border-border bg-muted p-4 font-mono text-xs leading-relaxed">
+                    {setupPrompt}
+                  </pre>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="absolute right-2 top-2 h-7 gap-1 text-xs"
+                    onClick={() => void handleCopy(setupPrompt)}
+                  >
+                    <Copy className="h-3 w-3" />
+                    Copy
+                  </Button>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <Badge
+                    variant={
+                      skillInfo.type === "auto-refresh" ? "default" : "outline"
+                    }
+                    className="text-[10px]"
+                  >
+                    {skillInfo.type === "auto-refresh"
+                      ? "Auto-refresh"
+                      : skillInfo.type === "manual-refresh"
+                        ? "Manual refresh"
+                        : skillInfo.type === "provider-level"
+                          ? "Provider-level"
+                          : "Per-session"}
+                  </Badge>
+                  <span className="text-[11px] text-muted-foreground">
+                    {skillInfo.note}
+                  </span>
+                </div>
+              </div>
+            </TabsContent>
+          ))}
+        </Tabs>
+
         <p className="text-[11px] text-muted-foreground">
-          The AI reads the full playbook at{" "}
+          Skills are powered by the NyxID playbook at{" "}
           <code className="rounded bg-muted px-1 py-0.5 text-[10px]">
             {baseUrl}/llms.txt
-          </code>{" "}
-          which contains all CLI commands, API endpoints, setup guides, and
-          troubleshooting. One prompt covers everything.
+          </code>
+          . Tools with auto-refresh fetch the latest version automatically.
+          Check skill status:{" "}
+          <code className="rounded bg-muted px-1 py-0.5 text-[10px]">
+            nyxid ai-setup status
+          </code>
         </p>
       </CardContent>
     </Card>
@@ -202,7 +266,7 @@ export function AiSetupPage() {
         </p>
       </div>
 
-      <AiPromptCard baseUrl={baseUrl} dashboardUrl={window.location.origin} />
+      <AiSkillSetupCard baseUrl={baseUrl} dashboardUrl={window.location.origin} />
 
       <Separator />
 

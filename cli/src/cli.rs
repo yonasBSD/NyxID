@@ -103,6 +103,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: ExternalKeyCommands,
     },
+    /// Set up persistent AI skills for coding assistants
+    AiSetup {
+        #[command(subcommand)]
+        command: AiSetupCommands,
+    },
 }
 
 // ---- Shared auth args ----
@@ -1118,4 +1123,53 @@ pub enum ExternalKeyCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
+}
+
+// ---- AI Setup ----
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum AiToolTarget {
+    /// Claude Code (Anthropic CLI)
+    ClaudeCode,
+    /// Cursor editor
+    Cursor,
+    /// OpenAI Codex CLI
+    Codex,
+    /// OpenClaw AI gateway
+    Openclaw,
+}
+
+impl std::fmt::Display for AiToolTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ClaudeCode => write!(f, "claude-code"),
+            Self::Cursor => write!(f, "cursor"),
+            Self::Codex => write!(f, "codex"),
+            Self::Openclaw => write!(f, "openclaw"),
+        }
+    }
+}
+
+#[derive(Subcommand)]
+pub enum AiSetupCommands {
+    /// Install persistent NyxID skills for an AI tool
+    Install {
+        /// Target AI tool
+        #[arg(long, value_enum)]
+        tool: AiToolTarget,
+        /// NyxID base URL (uses saved URL from login if omitted)
+        #[arg(long, env = "NYXID_URL")]
+        base_url: Option<String>,
+    },
+    /// Update installed skills to the latest version
+    Update {
+        /// Update only this tool (updates all installed if omitted)
+        #[arg(long, value_enum)]
+        tool: Option<AiToolTarget>,
+        /// NyxID base URL
+        #[arg(long, env = "NYXID_URL")]
+        base_url: Option<String>,
+    },
+    /// Show which AI skills are currently installed
+    Status,
 }

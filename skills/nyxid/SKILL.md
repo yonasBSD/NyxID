@@ -23,6 +23,8 @@ Use NyxID before asking the user to paste raw API keys or OAuth tokens for downs
 
 NyxID is the credential broker. The agent should use the `nyxid` CLI to discover services and make proxy requests. NyxID injects the user's stored credentials automatically.
 
+For the full API reference, error codes, and advanced topics (SSH, MCP, OAuth client integration, service accounts), load `references/playbook.md` or fetch the latest from the NyxID server's `/llms.txt` endpoint.
+
 ## Setup
 
 Install the Rust toolchain and NyxID CLI (one-time):
@@ -59,33 +61,143 @@ The response includes:
 If the target service is missing, help the user add it:
 
 ```bash
-nyxid catalog list                                        # browse available services
-nyxid service add llm-openai --credential-env OPENAI_KEY  # add from catalog (non-interactive)
-nyxid service add --custom --credential-env MY_KEY        # add custom endpoint (non-interactive)
+nyxid catalog list --output json                          # browse available services
+nyxid catalog show <slug> --output json                   # show auth requirements for a service
+nyxid service add <slug> --oauth                          # OAuth flow (opens browser -- easiest)
+nyxid service add <slug> --device-code                    # device code flow (enter code on website)
+nyxid service add <slug> --credential-env <VAR>           # API key from environment variable
+nyxid service add --custom --credential-env MY_KEY        # add custom endpoint
 ```
 
 > Use `--credential-env <VAR>` to read secrets from environment variables. Never pass raw secrets as command arguments or ask the user to paste them into chat.
 
-## Make Proxy Requests
+## Helping Users Add Services and Credentials
 
-Use the CLI:
+Most users do not know where to find API keys or what authentication method to use. Follow this workflow:
+
+### Step 1: Check the catalog
 
 ```bash
-nyxid proxy request <slug> <path> -m <METHOD> -d '<json-body>'
+nyxid catalog show <slug> --output json
 ```
 
-Examples:
+The response includes `auth_type` which tells you what the service needs. Use this to guide the user.
+
+### Step 2: Choose the right auth flow
+
+- **OAuth** (`--oauth`): Best for non-technical users. Opens a browser -- the user signs in with their existing account. No API key needed. Use this for Google, GitHub, Twitter, and any service that supports OAuth.
+  ```bash
+  nyxid service add api-github --oauth
+  ```
+
+- **Device code** (`--device-code`): Good when the user can't open a browser from the terminal. Shows a short code to enter on the provider's website. Works well for services like OpenAI Codex.
+  ```bash
+  nyxid service add llm-openai --device-code
+  ```
+
+- **API key**: The user needs to get an API key from the provider's website. Guide them:
+  1. Check the common portals table below for the provider's developer portal URL
+  2. If the provider is not listed, search the web for "<provider name> API key" to find the right page, then tell the user exactly where to go
+  3. Walk them through creating a key on the provider's site
+  4. Tell them to run the command **without** `--credential-env` -- the CLI will securely prompt for the key (input is hidden, never shown on screen):
+     ```bash
+     nyxid service add llm-openai
+     # CLI prompts: "Enter API key/credential:" (input hidden)
+     ```
+  Never ask the user to paste secrets into chat. The CLI's secure prompt keeps the key out of shell history and conversation logs.
+
+### Step 3: Common provider portals
+
+When users need API keys, direct them to the right place:
+
+| Service | Where to get the key | Env var example |
+|---------|---------------------|-----------------|
+| OpenAI | https://platform.openai.com/api-keys | `OPENAI_KEY` |
+| Anthropic | https://console.anthropic.com/settings/keys | `ANTHROPIC_KEY` |
+| GitHub | https://github.com/settings/tokens | `GITHUB_TOKEN` |
+| Google Cloud | https://console.cloud.google.com/apis/credentials | `GOOGLE_KEY` |
+| Groq | https://console.groq.com/keys | `GROQ_KEY` |
+
+For services not listed here, check `nyxid catalog show <slug> --output json` for the provider's documentation URL.
+
+### Tips for non-technical users
+
+- **Prefer `--oauth` or `--device-code`** over API keys whenever available -- the user just signs in.
+- **Explain what an API key is**: "It's like a password that lets NyxID call the service on your behalf. You create it once and NyxID stores it securely."
+- **Environment variables are temporary**: `export VAR="value"` only lasts for the current terminal session. The credential is stored in NyxID after `service add`, so the env var is only needed once.
+- If the user is confused, break it into smaller steps. For example: "First, let's check what services are available" then `nyxid catalog list`.
+
+## Make Proxy Requests
+
+NyxID proxies requests to downstream services -- it handles authentication, but you need to
+know the correct API paths, methods, and body formats for each service.
+
+### How to find the right API paths
+
+NyxID is just a proxy. The paths, methods, and request bodies are the same as calling
+the downstream service directly. To figure out what to send:
+
+1. Check the catalog for documentation: `nyxid catalog show <slug> --output json`
+   - Look for `documentation_url` -- this links to the provider's API docs
+2. If no documentation URL is available, **search the web** for "<service name> API documentation"
+   (e.g., "OpenAI API documentation", "Twitter API v2 documentation")
+3. Use the provider's docs to determine the correct path, method, headers, and body format
+4. Use `-H "Content-Type: ..."` if the service expects something other than JSON
+
+### Important: paths are relative to the service's base URL
+
+Each service in NyxID has a configured `endpoint_url` (base URL) that may already include
+a version prefix. For example, `api-twitter` uses `https://api.x.com/2` as its base URL.
+When making a proxy request, the path you provide is appended to that base URL:
+
+- Service base URL: `https://api.x.com/2`
+- Your path: `/tweets`
+- Actual request: `https://api.x.com/2/tweets`
+
+So do NOT duplicate the version prefix in your path. Check `nyxid service show <id> --output json`
+to see the `endpoint_url` if you're unsure.
+
+### Making the request
 
 ```bash
-# Call OpenAI through NyxID
+nyxid proxy request <slug> <path> -m <METHOD> -d '<body>'
+
+# Custom content type (default is application/json)
+nyxid proxy request <slug> <path> -m POST -H "Content-Type: application/xml" -d '<xml>...</xml>'
+
+# Stream SSE responses (for LLM completions, etc.)
+nyxid proxy request <slug> <path> -m POST --stream -d '<body>'
+
+# Read body from file
+nyxid proxy request <slug> <path> -m POST -d @request.json
+
+# Read body from stdin
+echo '{"prompt":"hello"}' | nyxid proxy request <slug> <path> -m POST -d -
+```
+
+### Common service examples
+
+Paths below are relative to each service's base URL. Check `nyxid service show <id> --output json`
+for the `endpoint_url` if unsure.
+
+```bash
+# OpenAI (base: https://api.openai.com/v1) -- POST /chat/completions
 nyxid proxy request llm-openai /chat/completions -m POST \
   -d '{"model":"gpt-4","messages":[{"role":"user","content":"Hello"}]}'
 
-# Post a tweet through NyxID
-nyxid proxy request api-twitter /2/tweets -m POST \
-  -d '{"text":"Hello from OpenClaw via NyxID"}'
+# Anthropic (base: https://api.anthropic.com/v1) -- POST /messages
+nyxid proxy request llm-anthropic /messages -m POST \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{"model":"claude-sonnet-4-20250514","max_tokens":1024,"messages":[{"role":"user","content":"Hello"}]}'
 
-# Discover available proxy services
+# GitHub API (base: https://api.github.com) -- GET /user/repos
+nyxid proxy request api-github /user/repos -m GET
+
+# Twitter / X (base: https://api.x.com/2) -- POST /tweets (not /2/tweets!)
+nyxid proxy request api-twitter /tweets -m POST \
+  -d '{"text":"Hello from NyxID"}'
+
+# Discover all available proxy services
 nyxid proxy discover --output json
 ```
 
@@ -258,3 +370,4 @@ This skill may be invoked autonomously by the agent when a user request involves
 ## Trust Statement
 
 By using this skill, requests are sent to your configured NyxID instance. NyxID forwards those requests to downstream services using your stored credentials. Only install this skill if you trust your NyxID instance operator.
+
