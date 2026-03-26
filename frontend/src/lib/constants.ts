@@ -116,6 +116,9 @@ export function canConnectProvider(
   provider: ProviderConfig,
   hasUserCredentials = false,
 ): boolean {
+  if (provider.provider_type === "telegram_widget") {
+    return provider.has_oauth_config;
+  }
   if (
     provider.provider_type !== "oauth2" &&
     provider.provider_type !== "device_code"
@@ -140,9 +143,9 @@ export function getProviderConnectLabel(
     return "Setup required";
   }
 
-  return provider.provider_type === "device_code"
-    ? "Connect via OAuth"
-    : "Connect";
+  if (provider.provider_type === "device_code") return "Connect via OAuth";
+  if (provider.provider_type === "telegram_widget") return "Login with Telegram";
+  return "Connect";
 }
 
 export function getProviderConnectHint(
@@ -150,6 +153,9 @@ export function getProviderConnectHint(
   hasUserCredentials = false,
 ): string | null {
   if (!canConnectProvider(provider, hasUserCredentials)) {
+    if (provider.provider_type === "telegram_widget") {
+      return "Admin must configure the Telegram bot username and bot token first.";
+    }
     const mode = provider.credential_mode;
     if (mode === "user") {
       return "Set up your OAuth app credentials first.";

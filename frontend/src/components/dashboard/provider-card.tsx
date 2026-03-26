@@ -12,7 +12,7 @@ import {
 import { ProviderStatusBadge } from "./provider-status-badge";
 import { LlmReadyBadge } from "./llm-ready-badge";
 import { getProviderBrand, hasKnownBrand } from "@/lib/provider-branding";
-import { formatDate } from "@/lib/utils";
+import { formatDate, sanitizeAvatarUrl } from "@/lib/utils";
 import {
   Card,
   CardContent,
@@ -142,7 +142,9 @@ export function ProviderCard({
                   ? "API Key"
                   : provider.provider_type === "device_code"
                     ? "Device Code"
-                    : "OAuth"}
+                    : provider.provider_type === "telegram_widget"
+                      ? "Telegram"
+                      : "OAuth"}
               </Badge>
             </div>
           </div>
@@ -152,6 +154,22 @@ export function ProviderCard({
         {isConnected && token ? (
           <div className="flex flex-col gap-3">
             <div className="flex flex-col gap-0.5">
+              {provider.provider_type === "telegram_widget" && token.metadata && (
+                <div className="flex items-center gap-2">
+                  {sanitizeAvatarUrl(token.metadata.photo_url) && (
+                    <img
+                      src={sanitizeAvatarUrl(token.metadata.photo_url)!}
+                      alt=""
+                      className="h-5 w-5 rounded-full"
+                    />
+                  )}
+                  <span className="text-xs font-medium">
+                    {token.metadata.username
+                      ? `@${token.metadata.username}`
+                      : token.metadata.first_name ?? "Telegram User"}
+                  </span>
+                </div>
+              )}
               <span className="text-xs text-muted-foreground">
                 Connected {formatDate(token.connected_at)}
               </span>
