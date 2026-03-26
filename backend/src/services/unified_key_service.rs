@@ -19,7 +19,7 @@ use crate::models::user_provider_token::{
 };
 use crate::models::user_service::UserService;
 use crate::services::{
-    ssh_service, user_api_key_service, user_endpoint_service, user_service_service,
+    node_service, ssh_service, user_api_key_service, user_endpoint_service, user_service_service,
 };
 
 /// Generate a slug from a label: lowercase, replace non-alphanumeric with
@@ -205,6 +205,8 @@ pub async fn create_key(
     node_id: Option<&str>,
     ssh_params: Option<SshCreateParams<'_>>,
 ) -> AppResult<CreateKeyResult> {
+    let node_id = node_id.filter(|nid| !nid.is_empty());
+
     if let Some(slug) = service_slug {
         // -- Catalog path --
         let svc = db
@@ -379,6 +381,10 @@ pub async fn create_key(
         )
         .await?;
 
+        // Auto-sync NodeServiceBinding for the catalog service.
+        node_service::sync_node_binding_for_user_service(db, user_id, Some(&svc.id), node_id, None)
+            .await?;
+
         let (
             ssh_host,
             ssh_port,
@@ -522,6 +528,10 @@ pub async fn create_key(
         )
         .await?;
 
+        // Auto-sync NodeServiceBinding for the custom SSH service.
+        node_service::sync_node_binding_for_user_service(db, user_id, Some(&ds_id), node_id, None)
+            .await?;
+
         Ok(CreateKeyResult {
             endpoint,
             api_key,
@@ -599,6 +609,9 @@ pub async fn create_key(
             "http",
         )
         .await?;
+
+        // Auto-sync NodeServiceBinding (no-op for custom HTTP without catalog_service_id).
+        node_service::sync_node_binding_for_user_service(db, user_id, None, node_id, None).await?;
 
         Ok(CreateKeyResult {
             endpoint,
@@ -761,6 +774,17 @@ pub async fn revoke_key(db: &mongodb::Database, user_id: &str, service_id: &str)
     let svc = user_service_service::get_user_service(db, user_id, service_id).await?;
     user_service_service::deactivate_user_service(db, user_id, service_id).await?;
     user_api_key_service::revoke_api_key(db, user_id, &svc.api_key_id).await?;
+
+    // Deactivate the node binding if this service was node-routed.
+    node_service::sync_node_binding_for_user_service(
+        db,
+        user_id,
+        svc.catalog_service_id.as_deref(),
+        None, // cleared
+        svc.node_id.as_deref(),
+    )
+    .await?;
+
     Ok(())
 }
 

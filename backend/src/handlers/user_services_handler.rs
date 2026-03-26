@@ -11,7 +11,7 @@ use crate::AppState;
 use crate::errors::AppResult;
 use crate::models::user_service::UserService;
 use crate::mw::auth::AuthUser;
-use crate::services::{unified_key_service, user_service_service};
+use crate::services::{node_service, unified_key_service, user_service_service};
 
 #[derive(Deserialize, ToSchema)]
 pub struct UpdateUserServiceRequest {
@@ -88,6 +88,11 @@ pub async fn update_user_service(
     Json(body): Json<UpdateUserServiceRequest>,
 ) -> AppResult<Json<UserServiceResponse>> {
     let user_id_str = auth_user.user_id.to_string();
+
+    // Load current state before update (needed for node binding sync).
+    let current =
+        user_service_service::get_user_service(&state.db, &user_id_str, &service_id).await?;
+
     user_service_service::update_user_service(
         &state.db,
         &user_id_str,
@@ -105,6 +110,18 @@ pub async fn update_user_service(
             &state.db,
             &user_id_str,
             &service_id,
+        )
+        .await?;
+    }
+
+    // Auto-sync NodeServiceBinding when node_id changes.
+    if body.node_id.is_some() {
+        node_service::sync_node_binding_for_user_service(
+            &state.db,
+            &user_id_str,
+            current.catalog_service_id.as_deref(),
+            body.node_id.as_deref(),
+            current.node_id.as_deref(),
         )
         .await?;
     }
@@ -133,7 +150,23 @@ pub async fn delete_user_service(
     Path(service_id): Path<String>,
 ) -> AppResult<impl IntoResponse> {
     let user_id_str = auth_user.user_id.to_string();
+
+    // Load current state to clean up node binding.
+    let current =
+        user_service_service::get_user_service(&state.db, &user_id_str, &service_id).await?;
+
     user_service_service::deactivate_user_service(&state.db, &user_id_str, &service_id).await?;
+
+    // Deactivate the node binding if this service was node-routed.
+    node_service::sync_node_binding_for_user_service(
+        &state.db,
+        &user_id_str,
+        current.catalog_service_id.as_deref(),
+        None, // new node_id = none (cleared)
+        current.node_id.as_deref(),
+    )
+    .await?;
+
     Ok(StatusCode::NO_CONTENT)
 }
 
