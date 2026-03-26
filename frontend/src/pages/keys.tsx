@@ -7,7 +7,9 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Plus, Globe, KeyRound, Server, Router, Terminal } from "lucide-react";
+import { Plus, Globe, KeyRound, Server, Router, Terminal, Zap } from "lucide-react";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
 import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
 import { ApiKeyTable } from "@/components/dashboard/api-key-table";
 import { ApiKeyCreateDialog } from "@/components/dashboard/api-key-create-dialog";
@@ -56,6 +58,9 @@ function KeyCard({ keyInfo }: { readonly keyInfo: KeyInfo }) {
               )}
             </div>
             <div className="flex shrink-0 items-center gap-2">
+              {keyInfo.auto_connected && (
+                <Badge variant="secondary">Auto-connected</Badge>
+              )}
               {isSsh && <Badge variant="outline">SSH</Badge>}
               <Badge variant={statusVariant(keyInfo.status)}>
                 {keyInfo.status}
@@ -74,13 +79,19 @@ function KeyCard({ keyInfo }: { readonly keyInfo: KeyInfo }) {
               <span className="truncate">{displayUrl}</span>
             </div>
             <div className="flex items-center gap-1.5">
-              <KeyRound className="h-3 w-3 shrink-0" />
+              {keyInfo.auto_connected ? (
+                <Zap className="h-3 w-3 shrink-0" />
+              ) : (
+                <KeyRound className="h-3 w-3 shrink-0" />
+              )}
               <span>
-                {isSsh
-                  ? hasSshCertificateAuth
-                    ? "certificate"
-                    : "ssh tunnel"
-                  : keyInfo.credential_type}
+                {keyInfo.auto_connected
+                  ? "No auth required"
+                  : isSsh
+                    ? hasSshCertificateAuth
+                      ? "certificate"
+                      : "ssh tunnel"
+                    : keyInfo.credential_type}
               </span>
             </div>
             <div className="flex items-center gap-1.5">
@@ -132,7 +143,13 @@ function LoadingSkeleton() {
   );
 }
 
-function ExternalServicesTab({ onAdd }: { readonly onAdd: () => void }) {
+function ExternalServicesTab({
+  onAdd,
+  showAutoConnected,
+}: {
+  readonly onAdd: () => void;
+  readonly showAutoConnected: boolean;
+}) {
   const { data: keys, isLoading, error } = useKeys();
 
   if (isLoading) return <LoadingSkeleton />;
@@ -147,13 +164,21 @@ function ExternalServicesTab({ onAdd }: { readonly onAdd: () => void }) {
     );
   }
 
-  if (!keys || keys.length === 0) {
+  const userKeys = (keys ?? []).filter((k) => !k.auto_connected);
+  const autoKeys = (keys ?? []).filter((k) => k.auto_connected);
+  const visibleKeys = showAutoConnected ? (keys ?? []) : userKeys;
+
+  if (visibleKeys.length === 0 && autoKeys.length === 0) {
+    return <ServicesEmptyState onAdd={onAdd} />;
+  }
+
+  if (visibleKeys.length === 0) {
     return <ServicesEmptyState onAdd={onAdd} />;
   }
 
   return (
     <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-      {keys.map((k) => (
+      {visibleKeys.map((k) => (
         <KeyCard key={k.id} keyInfo={k} />
       ))}
     </div>
@@ -192,6 +217,34 @@ function AddButton({
   return null;
 }
 
+function AutoConnectedToggle({
+  checked,
+  onCheckedChange,
+  count,
+}: {
+  readonly checked: boolean;
+  readonly onCheckedChange: (checked: boolean) => void;
+  readonly count: number;
+}) {
+  if (count === 0) return null;
+
+  return (
+    <div className="flex items-center gap-2">
+      <Switch
+        id="show-auto-connected"
+        checked={checked}
+        onCheckedChange={onCheckedChange}
+      />
+      <Label
+        htmlFor="show-auto-connected"
+        className="text-sm text-muted-foreground"
+      >
+        Show auto-connected ({count})
+      </Label>
+    </div>
+  );
+}
+
 export function KeysPage() {
   const search: { tab?: string } = useSearch({ strict: false });
   const navigate = useNavigate();
@@ -199,6 +252,10 @@ export function KeysPage() {
   const tab: TabValue = rawTab === "nyxid" ? "nyxid" : "services";
 
   const [addServiceOpen, setAddServiceOpen] = useState(false);
+  const [showAutoConnected, setShowAutoConnected] = useState(false);
+
+  const { data: keys } = useKeys();
+  const autoCount = (keys ?? []).filter((k) => k.auto_connected).length;
 
   function setTab(value: string) {
     void navigate({ to: "/keys", search: { tab: value }, replace: true });
@@ -210,7 +267,19 @@ export function KeysPage() {
         title="AI Services"
         description="Manage your AI service credentials and NyxID API keys."
         actions={
-          <AddButton tab={tab} onAddService={() => setAddServiceOpen(true)} />
+          <div className="flex items-center gap-4">
+            {tab === "services" && (
+              <AutoConnectedToggle
+                checked={showAutoConnected}
+                onCheckedChange={setShowAutoConnected}
+                count={autoCount}
+              />
+            )}
+            <AddButton
+              tab={tab}
+              onAddService={() => setAddServiceOpen(true)}
+            />
+          </div>
         }
       />
 
@@ -221,7 +290,10 @@ export function KeysPage() {
         </TabsList>
 
         <TabsContent value="services" className="mt-6">
-          <ExternalServicesTab onAdd={() => setAddServiceOpen(true)} />
+          <ExternalServicesTab
+            onAdd={() => setAddServiceOpen(true)}
+            showAutoConnected={showAutoConnected}
+          />
         </TabsContent>
 
         <TabsContent value="nyxid" className="mt-6">

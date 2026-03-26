@@ -907,12 +907,23 @@ export function KeyDetailPage() {
         />
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex flex-col gap-2">
-            <LabelEditor keyId={keyInfo.id} currentLabel={keyInfo.label} />
-            <p className="text-sm text-muted-foreground">
-              {keyInfo.catalog_service_name
-                ? `${keyInfo.catalog_service_name} -- /proxy/s/${keyInfo.slug}`
-                : `/proxy/s/${keyInfo.slug}`}
-            </p>
+            {keyInfo.auto_connected ? (
+              <h2 className="font-display text-3xl font-normal tracking-tight md:text-5xl">
+                {keyInfo.label}
+              </h2>
+            ) : (
+              <LabelEditor keyId={keyInfo.id} currentLabel={keyInfo.label} />
+            )}
+            <div className="flex items-center gap-2">
+              <p className="text-sm text-muted-foreground">
+                {keyInfo.catalog_service_name
+                  ? `${keyInfo.catalog_service_name} -- /proxy/s/${keyInfo.slug}`
+                  : `/proxy/s/${keyInfo.slug}`}
+              </p>
+              {keyInfo.auto_connected && (
+                <Badge variant="secondary">Auto-connected</Badge>
+              )}
+            </div>
           </div>
           <div className="flex items-center gap-2">
             {hasCertAuth && sshServiceId && (
@@ -934,57 +945,101 @@ export function KeyDetailPage() {
                 Terminal
               </Button>
             )}
-            <Button
-              variant="destructive"
-              size="sm"
-              onClick={() => setDeleteOpen(true)}
-            >
-              <Trash2 className="mr-2 h-4 w-4" />
-              Delete
-            </Button>
+            {!keyInfo.auto_connected && (
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={() => setDeleteOpen(true)}
+              >
+                <Trash2 className="mr-2 h-4 w-4" />
+                Delete
+              </Button>
+            )}
           </div>
         </div>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2">
-        <EndpointSection
-          endpointUrl={keyInfo.endpoint_url}
-          endpointId={keyInfo.endpoint_id}
-          nodeRouted={keyInfo.node_id !== null}
-        />
-
-        {keyInfo.service_type === "ssh" &&
-        keyInfo.ssh_host &&
-        keyInfo.ssh_port !== null ? (
-          <SshConnectionSection
-            sshHost={keyInfo.ssh_host}
-            sshPort={keyInfo.ssh_port}
-            caPublicKey={keyInfo.ssh_ca_public_key}
-            principals={keyInfo.ssh_allowed_principals}
-            certTtlMinutes={keyInfo.ssh_certificate_ttl_minutes}
+      {keyInfo.auto_connected ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Service Details</CardTitle>
+            <CardDescription>
+              This service requires no authentication and was auto-connected
+              from the catalog. It is managed by the platform and cannot be
+              modified.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="grid grid-cols-2 gap-4 text-sm">
+              <div>
+                <span className="text-xs font-medium text-muted-foreground">
+                  Endpoint
+                </span>
+                <p className="truncate font-mono text-xs">
+                  {keyInfo.endpoint_url}
+                </p>
+              </div>
+              <div>
+                <span className="text-xs font-medium text-muted-foreground">
+                  Proxy Path
+                </span>
+                <p className="font-mono text-xs">/proxy/s/{keyInfo.slug}</p>
+              </div>
+              <div>
+                <span className="text-xs font-medium text-muted-foreground">
+                  Auth Method
+                </span>
+                <p className="text-xs">None (no credentials required)</p>
+              </div>
+              <div>
+                <span className="text-xs font-medium text-muted-foreground">
+                  Routing
+                </span>
+                <p className="text-xs">Direct</p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      ) : (
+        <div className="grid gap-4 md:grid-cols-2">
+          <EndpointSection
+            endpointUrl={keyInfo.endpoint_url}
+            endpointId={keyInfo.endpoint_id}
+            nodeRouted={keyInfo.node_id !== null}
           />
-        ) : (
-          <ApiKeySection
-            apiKeyId={keyInfo.api_key_id}
-            credentialType={keyInfo.credential_type}
-            status={keyInfo.status}
-            expiresAt={keyInfo.expires_at}
-            lastUsedAt={keyInfo.last_used_at}
-            errorMessage={keyInfo.error_message}
+
+          {keyInfo.service_type === "ssh" &&
+          keyInfo.ssh_host &&
+          keyInfo.ssh_port !== null ? (
+            <SshConnectionSection
+              sshHost={keyInfo.ssh_host}
+              sshPort={keyInfo.ssh_port}
+              caPublicKey={keyInfo.ssh_ca_public_key}
+              principals={keyInfo.ssh_allowed_principals}
+              certTtlMinutes={keyInfo.ssh_certificate_ttl_minutes}
+            />
+          ) : keyInfo.api_key_id ? (
+            <ApiKeySection
+              apiKeyId={keyInfo.api_key_id}
+              credentialType={keyInfo.credential_type}
+              status={keyInfo.status}
+              expiresAt={keyInfo.expires_at}
+              lastUsedAt={keyInfo.last_used_at}
+              errorMessage={keyInfo.error_message}
+            />
+          ) : null}
+
+          <ServiceSection
+            slug={keyInfo.slug}
+            authMethod={keyInfo.auth_method}
+            authKeyName={keyInfo.auth_key_name}
+            isActive={keyInfo.is_active}
+            serviceId={keyInfo.id}
           />
-        )}
 
-        <ServiceSection
-          slug={keyInfo.slug}
-          authMethod={keyInfo.auth_method}
-          authKeyName={keyInfo.auth_key_name}
-          isActive={keyInfo.is_active}
-          serviceId={keyInfo.id}
-        />
+          <RoutingSection nodeId={keyInfo.node_id} serviceId={keyInfo.id} />
 
-        <RoutingSection nodeId={keyInfo.node_id} serviceId={keyInfo.id} />
-
-        {keyInfo.node_id && !isSsh && (
+          {keyInfo.node_id && !isSsh && (
           <NodeSetupHelper
             slug={keyInfo.slug}
             endpointUrl={keyInfo.endpoint_url}
@@ -992,8 +1047,9 @@ export function KeyDetailPage() {
             authKeyName={keyInfo.auth_key_name}
             catalogServiceName={keyInfo.catalog_service_name}
           />
-        )}
-      </div>
+          )}
+        </div>
+      )}
 
       {sshConfig && sshServiceId && (
         <Card>

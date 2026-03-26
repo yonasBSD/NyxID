@@ -108,21 +108,35 @@ pub async fn create_user_service(
     user_id: &str,
     slug: &str,
     endpoint_id: &str,
-    api_key_id: &str,
+    api_key_id: Option<&str>,
     auth_method: &str,
     auth_key_name: &str,
     catalog_service_id: Option<&str>,
     node_id: Option<&str>,
     node_priority: i32,
     service_type: &str,
+    source: Option<&str>,
+    source_id: Option<&str>,
 ) -> AppResult<UserService> {
     validate_slug(slug)?;
     validate_auth_method(auth_method)?;
     let node_id = node_id.filter(|nid| !nid.is_empty());
 
+    if source.is_some() != source_id.is_some() {
+        return Err(AppError::ValidationError(
+            "source and source_id must be provided together".to_string(),
+        ));
+    }
+
     if auth_key_name.len() > 200 || auth_key_name.contains('\r') || auth_key_name.contains('\n') {
         return Err(AppError::ValidationError(
             "Invalid auth_key_name".to_string(),
+        ));
+    }
+
+    if api_key_id.is_none() && auth_method != "none" {
+        return Err(AppError::ValidationError(
+            "Services without an API key must use auth_method 'none'".to_string(),
         ));
     }
 
@@ -137,15 +151,17 @@ pub async fn create_user_service(
         ));
     }
 
-    // Verify api_key exists and belongs to user
-    let ak_count = db
-        .collection::<mongodb::bson::Document>(USER_API_KEYS)
-        .count_documents(doc! { "_id": api_key_id, "user_id": user_id })
-        .await?;
-    if ak_count == 0 {
-        return Err(AppError::NotFound(
-            "API key not found or does not belong to user".to_string(),
-        ));
+    // Verify api_key exists and belongs to user (skip for no-auth services)
+    if let Some(ak_id) = api_key_id {
+        let ak_count = db
+            .collection::<mongodb::bson::Document>(USER_API_KEYS)
+            .count_documents(doc! { "_id": ak_id, "user_id": user_id })
+            .await?;
+        if ak_count == 0 {
+            return Err(AppError::NotFound(
+                "API key not found or does not belong to user".to_string(),
+            ));
+        }
     }
 
     // Check slug uniqueness for active services
@@ -166,7 +182,7 @@ pub async fn create_user_service(
         user_id: user_id.to_string(),
         slug: slug.to_string(),
         endpoint_id: endpoint_id.to_string(),
-        api_key_id: api_key_id.to_string(),
+        api_key_id: api_key_id.map(|s| s.to_string()),
         auth_method: auth_method.to_string(),
         auth_key_name: auth_key_name.to_string(),
         catalog_service_id: catalog_service_id.map(|s| s.to_string()),
@@ -174,8 +190,8 @@ pub async fn create_user_service(
         node_priority,
         service_type: service_type.to_string(),
         is_active: true,
-        source: None,
-        source_id: None,
+        source: source.map(str::to_string),
+        source_id: source_id.map(str::to_string),
         created_at: now,
         updated_at: now,
     };
@@ -199,12 +215,19 @@ pub async fn update_user_service(
     node_priority: Option<i32>,
     is_active: Option<bool>,
 ) -> AppResult<()> {
+    let current = get_user_service(db, user_id, service_id).await?;
     let mut set_doc = doc! {
         "updated_at": bson::DateTime::from_chrono(Utc::now()),
     };
 
     if let Some(am) = auth_method {
         validate_auth_method(am)?;
+        if am != "none" && current.api_key_id.is_none() {
+            return Err(AppError::BadRequest(
+                "This service has no stored credential. Add one before changing auth_method."
+                    .to_string(),
+            ));
+        }
         set_doc.insert("auth_method", am);
     }
     if let Some(akn) = auth_key_name {

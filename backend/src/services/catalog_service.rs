@@ -49,6 +49,8 @@ pub struct CatalogEntry {
     pub extra_auth_params: Option<HashMap<String, String>>,
     pub oauth_client_id: Option<String>,
     pub client_id_param_name: Option<String>,
+    /// Whether this catalog entry needs credential setup instead of direct no-auth access.
+    pub requires_credential: bool,
 }
 
 fn build_catalog_entry(
@@ -57,6 +59,12 @@ fn build_catalog_entry(
     spr: Option<&ServiceProviderRequirement>,
     oauth_client_id: Option<String>,
 ) -> CatalogEntry {
+    // A service requires a credential if:
+    // 1. It requires per-user credentials (connection services), OR
+    // 2. It has an actual auth method (not "none"), OR
+    // 3. It has auth_method "none" but an SPR exists (uses master credentials)
+    let requires_credential =
+        svc.requires_user_credential || svc.auth_method != "none" || spr.is_some();
     CatalogEntry {
         service_type: svc.service_type.clone(),
         ssh_host: svc.ssh_config.as_ref().map(|c| c.host.clone()),
@@ -109,6 +117,7 @@ fn build_catalog_entry(
         extra_auth_params: provider.and_then(|p| p.extra_auth_params.clone()),
         oauth_client_id,
         client_id_param_name: provider.and_then(|p| p.client_id_param_name.clone()),
+        requires_credential,
     }
 }
 
@@ -145,6 +154,7 @@ pub async fn list_catalog(
                 { "requires_user_credential": true },
                 { "provider_config_id": { "$ne": null } },
                 { "service_type": "ssh" },
+                { "auth_method": "none", "requires_user_credential": false },
             ],
             "service_category": { "$in": ["connection", "internal"] },
         })

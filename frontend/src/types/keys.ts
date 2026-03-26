@@ -4,7 +4,7 @@ export interface KeyInfo {
   readonly slug: string;
   readonly endpoint_url: string;
   readonly endpoint_id: string;
-  readonly api_key_id: string;
+  readonly api_key_id?: string | null;
   readonly credential_type: string;
   readonly auth_method: string;
   readonly auth_key_name: string;
@@ -14,6 +14,7 @@ export interface KeyInfo {
   readonly node_id: string | null;
   readonly node_priority: number;
   readonly is_active: boolean;
+  readonly auto_connected: boolean;
   readonly expires_at: string | null;
   readonly last_used_at: string | null;
   readonly error_message: string | null;
@@ -58,6 +59,7 @@ export interface CatalogEntry {
   readonly supports_pkce: boolean | null;
   readonly oauth_client_id: string | null;
   readonly client_id_param_name: string | null;
+  readonly requires_credential: boolean;
 }
 
 export interface CatalogListResponse {
@@ -77,7 +79,7 @@ export interface UserServiceInfo {
   readonly id: string;
   readonly slug: string;
   readonly endpoint_id: string;
-  readonly api_key_id: string;
+  readonly api_key_id?: string | null;
   readonly auth_method: string;
   readonly auth_key_name: string;
   readonly catalog_service_id: string | null;

@@ -313,30 +313,7 @@ pub async fn resolve_proxy_target_from_user_service(
             AppError::Internal("Data integrity error: endpoint not found".to_string())
         })?;
 
-    // Load the api key
-    let api_key = db
-        .collection::<UserApiKey>(USER_API_KEYS)
-        .find_one(doc! { "_id": &user_service.api_key_id })
-        .await?
-        .ok_or_else(|| {
-            tracing::error!(
-                api_key_id = %user_service.api_key_id,
-                "UserService references missing API key"
-            );
-            AppError::Internal("Data integrity error: API key not found".to_string())
-        })?;
-
-    let api_key =
-        maybe_refresh_provider_backed_api_key(db, encryption_keys, user_id, api_key).await?;
-
-    if api_key.status != "active" {
-        return Err(AppError::BadRequest(format!(
-            "API key is {}",
-            api_key.status
-        )));
-    }
-
-    // Handle no-auth services
+    // Handle no-auth services (may have no api_key_id)
     if user_service.auth_method == "none" {
         let now = chrono::Utc::now();
         let minimal_service = build_minimal_downstream_service(&user_service, &endpoint, now);
@@ -353,6 +330,37 @@ pub async fn resolve_proxy_target_from_user_service(
             user_service_id: user_service.id.clone(),
             has_server_credential: true,
         }));
+    }
+
+    // Load the api key (required for auth services)
+    let ak_id = user_service.api_key_id.as_deref().ok_or_else(|| {
+        tracing::error!(
+            user_service_id = %user_service.id,
+            "Non-none auth service missing api_key_id"
+        );
+        AppError::Internal("Data integrity error: api_key_id missing".to_string())
+    })?;
+
+    let api_key = db
+        .collection::<UserApiKey>(USER_API_KEYS)
+        .find_one(doc! { "_id": ak_id })
+        .await?
+        .ok_or_else(|| {
+            tracing::error!(
+                api_key_id = %ak_id,
+                "UserService references missing API key"
+            );
+            AppError::Internal("Data integrity error: API key not found".to_string())
+        })?;
+
+    let api_key =
+        maybe_refresh_provider_backed_api_key(db, encryption_keys, user_id, api_key).await?;
+
+    if api_key.status != "active" {
+        return Err(AppError::BadRequest(format!(
+            "API key is {}",
+            api_key.status
+        )));
     }
 
     let credential = resolve_user_api_key_credential(&api_key, encryption_keys).await?;

@@ -383,6 +383,10 @@ function KeyForm({
   const isCustom = catalogEntry === null;
   const endpointEditable =
     isCustom || (catalogEntry?.requires_gateway_url ?? false);
+  const requiresCredential = isCustom
+    ? form.authMethod !== "none"
+    : (catalogEntry?.auth_method ?? "bearer") !== "none";
+  const requiresEndpoint = isCustom || (catalogEntry?.requires_gateway_url ?? false);
 
   return (
     <div className="space-y-4">
@@ -425,9 +429,7 @@ function KeyForm({
 
       <div className="space-y-3">
         <div className="space-y-1.5">
-          <Label htmlFor="add-key-label">
-            Label <span className="text-destructive">*</span>
-          </Label>
+          <Label htmlFor="add-key-label">Label <span className="text-destructive">*</span></Label>
           <Input
             id="add-key-label"
             placeholder={
@@ -445,14 +447,26 @@ function KeyForm({
         </div>
 
         <div className="space-y-1.5">
-          <Label htmlFor="add-key-credential">API Key / Credential</Label>
+          <Label htmlFor="add-key-credential">
+            API Key / Credential
+            {requiresCredential && <span className="text-destructive"> *</span>}
+          </Label>
           <Input
             id="add-key-credential"
-            type="password"
-            placeholder="sk-..."
-            value={form.credential}
+            type={requiresCredential ? "password" : "text"}
+            placeholder={
+              requiresCredential ? "sk-..." : "No credential required for this service"
+            }
+            value={requiresCredential ? form.credential : ""}
             onChange={(e) => onChange({ credential: e.target.value })}
+            disabled={!requiresCredential}
+            className={!requiresCredential ? "bg-muted text-muted-foreground" : ""}
           />
+          {!requiresCredential && (
+            <p className="text-[11px] text-muted-foreground">
+              This service can be used without storing a user credential in NyxID.
+            </p>
+          )}
         </div>
 
         <div className="space-y-1.5">
@@ -523,7 +537,12 @@ function KeyForm({
       <Button
         className="w-full"
         onClick={onSubmit}
-        disabled={isPending || !form.credential.trim() || !form.label.trim()}
+        disabled={
+          isPending ||
+          !form.label.trim() ||
+          (requiresCredential && !form.credential.trim()) ||
+          (requiresEndpoint && !form.endpointUrl.trim())
+        }
       >
         {isPending ? "Creating..." : "Create Service"}
       </Button>
