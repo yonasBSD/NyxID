@@ -1,9 +1,10 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
+use utoipa::ToSchema;
 
 /// Structured JSON error response returned by all API error paths.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ErrorResponse {
     /// Machine-readable error category (e.g. "unauthorized")
     pub error: String,
@@ -104,7 +105,7 @@ pub enum AppError {
     #[error("Social authentication failed: {0}")]
     SocialAuthFailed(String),
 
-    #[error("Social auth conflict: email already linked to another provider")]
+    #[error("Social auth conflict: social identity already linked to another account")]
     SocialAuthConflict,
 
     #[error("Social auth: no verified email from provider")]
@@ -139,6 +140,15 @@ pub enum AppError {
 
     #[error("Node registration failed: {0}")]
     NodeRegistrationFailed(String),
+
+    #[error("API key scope forbidden: {0}")]
+    ApiKeyScopeForbidden(String),
+
+    #[error("API key scope inactive")]
+    ApiKeyScopeInactive,
+
+    #[error("API key scope not found: {0}")]
+    ApiKeyScopeNotFound(String),
 }
 
 impl AppError {
@@ -178,6 +188,9 @@ impl AppError {
             Self::NodeOffline(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::NodeProxyTimeout => StatusCode::GATEWAY_TIMEOUT,
             Self::NodeRegistrationFailed(_) => StatusCode::BAD_REQUEST,
+            Self::ApiKeyScopeForbidden(_) => StatusCode::FORBIDDEN,
+            Self::ApiKeyScopeInactive => StatusCode::FORBIDDEN,
+            Self::ApiKeyScopeNotFound(_) => StatusCode::NOT_FOUND,
             Self::Internal(_) | Self::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -222,6 +235,9 @@ impl AppError {
             Self::NodeOffline(_) => 8001,
             Self::NodeProxyTimeout => 8002,
             Self::NodeRegistrationFailed(_) => 8003,
+            Self::ApiKeyScopeForbidden(_) => 9000,
+            Self::ApiKeyScopeInactive => 9001,
+            Self::ApiKeyScopeNotFound(_) => 9002,
         }
     }
 
@@ -296,6 +312,9 @@ impl AppError {
             Self::NodeOffline(_) => "node_offline",
             Self::NodeProxyTimeout => "node_proxy_timeout",
             Self::NodeRegistrationFailed(_) => "node_registration_failed",
+            Self::ApiKeyScopeForbidden(_) => "api_key_scope_forbidden",
+            Self::ApiKeyScopeInactive => "api_key_scope_inactive",
+            Self::ApiKeyScopeNotFound(_) => "api_key_scope_not_found",
         }
     }
 }
@@ -511,6 +530,18 @@ mod tests {
             AppError::NodeRegistrationFailed("x".into()).status_code(),
             StatusCode::BAD_REQUEST
         );
+        assert_eq!(
+            AppError::ApiKeyScopeForbidden("x".into()).status_code(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            AppError::ApiKeyScopeInactive.status_code(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            AppError::ApiKeyScopeNotFound("x".into()).status_code(),
+            StatusCode::NOT_FOUND
+        );
     }
 
     #[test]
@@ -558,6 +589,9 @@ mod tests {
             AppError::NodeOffline("".into()).error_code(),
             AppError::NodeProxyTimeout.error_code(),
             AppError::NodeRegistrationFailed("".into()).error_code(),
+            AppError::ApiKeyScopeForbidden("".into()).error_code(),
+            AppError::ApiKeyScopeInactive.error_code(),
+            AppError::ApiKeyScopeNotFound("".into()).error_code(),
         ];
         let unique: std::collections::HashSet<u32> = codes.iter().copied().collect();
         assert_eq!(
@@ -688,6 +722,18 @@ mod tests {
         assert_eq!(
             AppError::NodeRegistrationFailed("".into()).error_key(),
             "node_registration_failed"
+        );
+        assert_eq!(
+            AppError::ApiKeyScopeForbidden("".into()).error_key(),
+            "api_key_scope_forbidden"
+        );
+        assert_eq!(
+            AppError::ApiKeyScopeInactive.error_key(),
+            "api_key_scope_inactive"
+        );
+        assert_eq!(
+            AppError::ApiKeyScopeNotFound("".into()).error_key(),
+            "api_key_scope_not_found"
         );
     }
 

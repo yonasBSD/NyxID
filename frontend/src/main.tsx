@@ -30,7 +30,10 @@ function Root() {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
 
   useEffect(() => {
-    useAuthStore.getState().checkAuth().finally(() => setReady(true));
+    useAuthStore
+      .getState()
+      .checkAuth()
+      .finally(() => setReady(true));
   }, []);
 
   // When auth state is cleared (e.g. after failed token refresh),

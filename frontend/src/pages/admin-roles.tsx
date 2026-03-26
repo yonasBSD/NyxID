@@ -243,8 +243,8 @@ export function AdminRolesPage() {
           </DialogHeader>
           <Form {...createForm}>
             <form
-              onSubmit={createForm.handleSubmit((data) =>
-                void handleCreate(data),
+              onSubmit={createForm.handleSubmit(
+                (data) => void handleCreate(data),
               )}
               className="space-y-4"
             >

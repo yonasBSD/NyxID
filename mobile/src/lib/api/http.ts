@@ -4,6 +4,7 @@ import {
   persistAuthSession,
 } from "../auth/sessionStore";
 import {
+  ApprovalMode,
   AccountProfile,
   ApprovalItem,
   ChallengeDetail,
@@ -88,6 +89,8 @@ type BackendApprovalRequestItem = {
   requester_type: string;
   requester_label?: string | null;
   operation_summary: string;
+  action_description?: string | null;
+  approval_mode: ApprovalMode;
   status: string;
   created_at: string;
 };
@@ -294,18 +297,20 @@ function deriveChallengeExpiry(createdAt: string): string {
 }
 
 function mapBackendRequestToChallenge(item: BackendApprovalRequestItem): ChallengeDetail {
-  const parsed = parseOperationSummary(item.operation_summary);
+  const summary = item.action_description ?? item.operation_summary;
+  const parsed = parseOperationSummary(summary);
 
   return {
     id: item.id,
     title: sanitizeDisplayValue(item.service_name, "Unknown Service"),
     action: parsed.action,
     resource: parsed.resource,
+    approval_mode: item.approval_mode,
     risk_level: deriveRiskLevel(parsed.action),
     status: mapChallengeStatus(item.status),
     created_at: item.created_at,
     expires_at: deriveChallengeExpiry(item.created_at),
-    summary: item.operation_summary,
+    summary,
     request_context: {
       client: sanitizeDisplayValue(item.requester_type, "Unknown"),
       location: sanitizeDisplayValue(

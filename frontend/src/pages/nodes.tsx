@@ -129,7 +129,7 @@ function RegisterNodeDialog() {
                     File-based storage (default, works on servers)
                   </p>
                   <code className="text-xs text-foreground break-all">
-                    nyxid-node register --token {createdToken.token}
+                    nyxid node register --token {createdToken.token}
                     {urlFlag}
                   </code>
                 </div>
@@ -139,7 +139,7 @@ function RegisterNodeDialog() {
                     Manager)
                   </p>
                   <code className="text-xs text-foreground break-all">
-                    nyxid-node register --token {createdToken.token}
+                    nyxid node register --token {createdToken.token}
                     {urlFlag} --keychain
                   </code>
                 </div>

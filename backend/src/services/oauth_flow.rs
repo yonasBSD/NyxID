@@ -235,6 +235,7 @@ mod tests {
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            requires_gateway_url: false,
             created_by: "test".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),

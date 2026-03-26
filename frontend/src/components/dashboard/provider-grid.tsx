@@ -35,9 +35,7 @@ export function ProviderGrid() {
   const disconnectMutation = useDisconnectProvider();
   const refreshMutation = useRefreshProviderToken();
 
-  const [apiKeyDialog, setApiKeyDialog] = useState<ProviderConfig | null>(
-    null,
-  );
+  const [apiKeyDialog, setApiKeyDialog] = useState<ProviderConfig | null>(null);
   const [deviceCodeDialog, setDeviceCodeDialog] =
     useState<ProviderConfig | null>(null);
   const [telegramDialog, setTelegramDialog] =
@@ -52,7 +50,8 @@ export function ProviderGrid() {
   function handleConnect(provider: ProviderConfig, hasUserCredentials = false) {
     if (!canConnectProvider(provider, hasUserCredentials)) {
       toast.error(
-        getProviderConnectHint(provider, hasUserCredentials) ?? "Provider is not ready to connect.",
+        getProviderConnectHint(provider, hasUserCredentials) ??
+          "Provider is not ready to connect.",
       );
       return;
     }
@@ -84,7 +83,11 @@ export function ProviderGrid() {
     }
   }
 
-  async function handleApiKeySubmit(apiKey: string, label?: string) {
+  async function handleApiKeySubmit(
+    apiKey: string,
+    label?: string,
+    gatewayUrl?: string,
+  ) {
     if (!apiKeyDialog) return;
     setActiveProviderId(apiKeyDialog.id);
     try {
@@ -92,6 +95,7 @@ export function ProviderGrid() {
         providerId: apiKeyDialog.id,
         apiKey,
         label,
+        gatewayUrl,
       });
       toast.success(`Connected to ${apiKeyDialog.name}`);
       setApiKeyDialog(null);
@@ -111,9 +115,7 @@ export function ProviderGrid() {
     setActiveProviderId(providerId);
     try {
       await disconnectMutation.mutateAsync(providerId);
-      toast.success(
-        `Disconnected from ${provider?.name ?? "provider"}`,
-      );
+      toast.success(`Disconnected from ${provider?.name ?? "provider"}`);
     } catch (error) {
       if (error instanceof ApiError) {
         toast.error(error.message);
@@ -205,7 +207,9 @@ export function ProviderGrid() {
       {apiKeyDialog !== null && (
         <ApiKeyDialog
           provider={apiKeyDialog}
-          onSubmit={(key, label) => void handleApiKeySubmit(key, label)}
+          onSubmit={(key, label, gatewayUrl) =>
+            void handleApiKeySubmit(key, label, gatewayUrl)
+          }
           onCancel={() => setApiKeyDialog(null)}
           isPending={connectApiKeyMutation.isPending}
         />
@@ -240,10 +244,7 @@ export function ProviderGrid() {
  * then renders the presentational ProviderCard with credential data.
  */
 function ProviderCardWithCredentials(
-  props: Omit<
-    React.ComponentProps<typeof ProviderCard>,
-    "hasUserCredentials"
-  >,
+  props: Omit<React.ComponentProps<typeof ProviderCard>, "hasUserCredentials">,
 ) {
   const showCreds = needsUserCredentials(props.provider);
   const { data: credentials } = useMyProviderCredentials(
@@ -251,10 +252,5 @@ function ProviderCardWithCredentials(
   );
   const hasUserCredentials = credentials?.has_credentials === true;
 
-  return (
-    <ProviderCard
-      {...props}
-      hasUserCredentials={hasUserCredentials}
-    />
-  );
+  return <ProviderCard {...props} hasUserCredentials={hasUserCredentials} />;
 }

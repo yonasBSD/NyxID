@@ -13,12 +13,32 @@ export interface User {
 export interface ApiKey {
   readonly id: string;
   readonly name: string;
+  readonly description: string | null;
   readonly key_prefix: string;
   readonly scopes: string;
   readonly created_at: string;
   readonly last_used_at: string | null;
   readonly expires_at: string | null;
   readonly is_active: boolean;
+  readonly allowed_service_ids: readonly string[];
+  readonly allowed_node_ids: readonly string[];
+  readonly allow_all_services: boolean;
+  readonly allow_all_nodes: boolean;
+  readonly allowed_services: readonly AllowedServiceInfo[];
+  readonly allowed_nodes: readonly AllowedNodeInfo[];
+}
+
+export interface AllowedServiceInfo {
+  readonly id: string;
+  readonly slug: string;
+  readonly label: string;
+  readonly catalog_service_name: string | null;
+}
+
+export interface AllowedNodeInfo {
+  readonly id: string;
+  readonly name: string;
+  readonly status: string;
 }
 
 export interface ApiKeyCreateResponse {
@@ -48,12 +68,18 @@ export interface DownstreamService {
   readonly slug: string;
   readonly description: string | null;
   readonly base_url: string;
+  readonly service_type: string;
+  readonly visibility: string;
   readonly auth_method: string;
   readonly auth_type: string | null;
   readonly auth_key_name: string;
   readonly is_active: boolean;
   readonly oauth_client_id: string | null;
+  readonly openapi_spec_url?: string | null;
   readonly api_spec_url: string | null;
+  readonly asyncapi_spec_url?: string | null;
+  readonly streaming_supported?: boolean;
+  readonly ssh_config?: SshServiceConfig | null;
   readonly service_category: string;
   readonly requires_user_credential: boolean;
   readonly created_by: string;
@@ -67,6 +93,67 @@ export interface DownstreamService {
   readonly inject_delegation_token?: boolean;
   readonly delegation_token_scope?: string;
 }
+
+export interface SshServiceConfig {
+  readonly host: string;
+  readonly port: number;
+  readonly certificate_auth_enabled: boolean;
+  readonly certificate_ttl_minutes: number;
+  readonly allowed_principals: readonly string[];
+  readonly ca_public_key: string | null;
+}
+
+export interface SshServiceConfigInput {
+  readonly host: string;
+  readonly port: number;
+  readonly certificate_auth_enabled: boolean;
+  readonly certificate_ttl_minutes: number;
+  readonly allowed_principals: readonly string[];
+}
+
+export type CreateServicePayload =
+  | {
+      readonly name: string;
+      readonly description?: string;
+      readonly service_type: "http";
+      readonly visibility?: string;
+      readonly base_url: string;
+      readonly auth_type: string;
+      readonly service_category?: string;
+    }
+  | {
+      readonly name: string;
+      readonly description?: string;
+      readonly service_type: "ssh";
+      readonly visibility?: string;
+      readonly service_category?: string;
+      readonly ssh_config: SshServiceConfigInput;
+    };
+
+export type UpdateServicePayload =
+  | {
+      readonly name?: string;
+      readonly description?: string;
+      readonly visibility?: string;
+      readonly base_url?: string;
+      readonly is_active?: boolean;
+      readonly openapi_spec_url?: string;
+      readonly asyncapi_spec_url?: string;
+      readonly identity_propagation_mode?: string;
+      readonly identity_include_user_id?: boolean;
+      readonly identity_include_email?: boolean;
+      readonly identity_include_name?: boolean;
+      readonly identity_jwt_audience?: string;
+      readonly inject_delegation_token?: boolean;
+      readonly delegation_token_scope?: string;
+    }
+  | {
+      readonly name?: string;
+      readonly description?: string;
+      readonly visibility?: string;
+      readonly is_active?: boolean;
+      readonly ssh_config?: SshServiceConfigInput;
+    };
 
 export interface ServiceEndpoint {
   readonly id: string;
@@ -218,6 +305,7 @@ export interface ProviderConfig {
   readonly extra_auth_params: Readonly<Record<string, string>> | null;
   readonly device_code_format: string;
   readonly client_id_param_name: string | null;
+  readonly requires_gateway_url: boolean;
   readonly icon_url: string | null;
   readonly documentation_url: string | null;
   readonly is_active: boolean;
@@ -240,6 +328,7 @@ export interface UserProviderToken {
   readonly provider_type: string;
   readonly status: "active" | "expired" | "revoked" | "refresh_failed";
   readonly label: string | null;
+  readonly gateway_url: string | null;
   readonly expires_at: string | null;
   readonly last_used_at: string | null;
   readonly connected_at: string;
@@ -320,7 +409,9 @@ export type SocialTokenExchangeProvider = "google" | "github" | "apple";
 export interface SocialTokenExchangeRequest {
   readonly grant_type: "urn:ietf:params:oauth:grant-type:token-exchange";
   readonly subject_token: string;
-  readonly subject_token_type: "urn:ietf:params:oauth:token-type:id_token" | "urn:ietf:params:oauth:token-type:access_token";
+  readonly subject_token_type:
+    | "urn:ietf:params:oauth:token-type:id_token"
+    | "urn:ietf:params:oauth:token-type:access_token";
   readonly client_id: string;
   readonly client_secret?: string;
   readonly provider: SocialTokenExchangeProvider;

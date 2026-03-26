@@ -1,5 +1,6 @@
 use mongodb::bson::doc;
 use serde::Serialize;
+use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
@@ -9,7 +10,7 @@ use crate::models::downstream_service::{
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::AuthUser;
 
-use super::services::ServiceResponse;
+use super::services::{ServiceResponse, SshServiceConfigResponse};
 
 /// Verify that the authenticated user has admin privileges.
 pub async fn require_admin(state: &AppState, auth_user: &AuthUser) -> AppResult<()> {
@@ -71,12 +72,25 @@ pub fn service_to_response(s: DownstreamService) -> ServiceResponse {
         slug: s.slug,
         description: s.description,
         base_url: s.base_url,
+        service_type: s.service_type,
+        visibility: s.visibility,
         auth_method: s.auth_method,
         auth_type: s.auth_type,
         auth_key_name: s.auth_key_name,
         is_active: s.is_active,
         oauth_client_id: s.oauth_client_id,
-        api_spec_url: s.api_spec_url,
+        openapi_spec_url: s.openapi_spec_url.clone(),
+        api_spec_url: s.openapi_spec_url,
+        asyncapi_spec_url: s.asyncapi_spec_url,
+        streaming_supported: s.streaming_supported,
+        ssh_config: s.ssh_config.map(|ssh| SshServiceConfigResponse {
+            host: ssh.host,
+            port: ssh.port,
+            certificate_auth_enabled: ssh.certificate_auth_enabled,
+            certificate_ttl_minutes: ssh.certificate_ttl_minutes,
+            allowed_principals: ssh.allowed_principals,
+            ca_public_key: ssh.ca_public_key,
+        }),
         service_category: s.service_category,
         requires_user_credential: s.requires_user_credential,
         identity_propagation_mode: s.identity_propagation_mode,
@@ -92,11 +106,12 @@ pub fn service_to_response(s: DownstreamService) -> ServiceResponse {
     }
 }
 
-/// Validate that a base_url is safe to proxy to (not a private/internal address).
+/// Validate that a URL has a valid scheme and hostname.
 ///
-/// In development mode, private/internal addresses (localhost, 127.0.0.1, etc.)
-/// are allowed so that locally-running downstream services can be registered.
-pub fn validate_base_url(url: &str, allow_private: bool) -> AppResult<()> {
+/// Cloud metadata endpoints (169.254.169.254, metadata.google.internal)
+/// are blocked in every environment.  Private IPs and localhost are
+/// allowed so that self-hosted nodes and services remain reachable.
+pub fn validate_base_url(url: &str) -> AppResult<()> {
     // Must start with https:// or http://
     if !url.starts_with("https://") && !url.starts_with("http://") {
         return Err(AppError::ValidationError(
@@ -112,57 +127,90 @@ pub fn validate_base_url(url: &str, allow_private: bool) -> AppResult<()> {
         .host_str()
         .ok_or_else(|| AppError::ValidationError("base_url must contain a hostname".to_string()))?;
 
-    // Skip private-address checks in development mode
-    if allow_private {
-        return Ok(());
+    // Block cloud metadata endpoints -- dangerous in any environment
+    if is_cloud_metadata_host(host) {
+        return Err(AppError::ValidationError(
+            "URL must not point to a cloud metadata endpoint".to_string(),
+        ));
     }
 
-    // Block private/reserved hostnames
-    let blocked_hosts = [
-        "localhost",
-        "127.0.0.1",
-        "0.0.0.0",
-        "[::1]",
-        "metadata.google.internal",
-    ];
-    let host_lower = host.to_lowercase();
-    for blocked in &blocked_hosts {
-        if host_lower == *blocked {
-            return Err(AppError::ValidationError(
-                "base_url must not point to a private or internal address".to_string(),
-            ));
-        }
+    Ok(())
+}
+
+/// Returns true if the hostname is a known cloud metadata endpoint.
+fn is_cloud_metadata_host(host: &str) -> bool {
+    let normalized = host.trim_end_matches('.').to_ascii_lowercase();
+    normalized == "metadata.google.internal"
+        || normalized == "169.254.169.254"
+        || normalized == "[fd00:ec2::254]"
+}
+
+/// Validate an optional documentation spec URL.
+pub fn validate_optional_spec_url(url: &str) -> AppResult<()> {
+    if url.len() > 2048 {
+        return Err(AppError::ValidationError(
+            "Spec URL must not exceed 2048 characters".to_string(),
+        ));
     }
 
-    // Block common private IP ranges (CR-2/SEC-3: includes IPv6 private ranges)
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        let is_private = match ip {
-            std::net::IpAddr::V4(ipv4) => {
-                ipv4.is_loopback()
-                    || ipv4.is_private()
-                    || ipv4.is_link_local()
-                    || ipv4.octets()[0] == 169 && ipv4.octets()[1] == 254
-            }
-            std::net::IpAddr::V6(ipv6) => {
-                ipv6.is_loopback()
-                    || (ipv6.segments()[0] & 0xfe00) == 0xfc00 // unique-local fc00::/7
-                    || (ipv6.segments()[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
-                    || ipv6.to_ipv4_mapped().is_some_and(|v4| v4.is_private() || v4.is_loopback())
-            }
-        };
+    validate_base_url(url)
+}
 
-        if is_private {
-            return Err(AppError::ValidationError(
-                "base_url must not point to a private or internal IP address".to_string(),
-            ));
-        }
+pub fn require_http_service(service: &DownstreamService) -> AppResult<()> {
+    if service.service_type != "http" {
+        return Err(AppError::BadRequest(
+            "This operation is only supported for HTTP services".to_string(),
+        ));
     }
 
     Ok(())
 }
 
 /// Typed response for delete operations (CR-16).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct DeleteServiceResponse {
     pub message: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{validate_base_url, validate_optional_spec_url};
+
+    #[test]
+    fn validate_base_url_accepts_public_url() {
+        assert!(validate_base_url("https://api.example.com").is_ok());
+        assert!(validate_base_url("http://api.example.com").is_ok());
+    }
+
+    #[test]
+    fn validate_base_url_accepts_private_ips() {
+        assert!(validate_base_url("http://localhost:3000").is_ok());
+        assert!(validate_base_url("http://127.0.0.1:8080").is_ok());
+        assert!(validate_base_url("http://192.168.1.50:3000").is_ok());
+        assert!(validate_base_url("http://10.0.0.5:8080").is_ok());
+        assert!(validate_base_url("http://100.64.0.10:3000").is_ok());
+        assert!(validate_base_url("http://172.16.0.1:3000").is_ok());
+    }
+
+    #[test]
+    fn validate_base_url_rejects_cloud_metadata() {
+        assert!(validate_base_url("http://metadata.google.internal").is_err());
+        assert!(validate_base_url("http://169.254.169.254").is_err());
+    }
+
+    #[test]
+    fn validate_base_url_rejects_invalid_scheme() {
+        assert!(validate_base_url("ftp://example.com").is_err());
+        assert!(validate_base_url("javascript:alert(1)").is_err());
+    }
+
+    #[test]
+    fn validate_optional_spec_url_accepts_public_https_url() {
+        assert!(validate_optional_spec_url("https://example.com/openapi.json").is_ok());
+    }
+
+    #[test]
+    fn validate_optional_spec_url_rejects_metadata() {
+        assert!(validate_optional_spec_url("http://169.254.169.254/latest").is_err());
+    }
 }

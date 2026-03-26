@@ -14,6 +14,7 @@ import { ApiError } from "@/lib/api-client";
 import {
   buildNodeCredentialCommand,
   getNodeCredentialPromptHint,
+  isSshService,
 } from "@/lib/node-credentials";
 import { formatDate, formatRelativeTime } from "@/lib/utils";
 import { PageHeader } from "@/components/shared/page-header";
@@ -21,6 +22,7 @@ import { CopyableField } from "@/components/shared/copyable-field";
 import { DetailRow } from "@/components/shared/detail-row";
 import { DetailSection } from "@/components/shared/detail-section";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -88,17 +90,15 @@ export function NodeDetailPage() {
   } | null>(null);
   const [setupCommandSlug, setSetupCommandSlug] = useState<string | null>(null);
 
-  const servicesBySlug = new Map(
-    (services ?? []).map((s) => [s.slug, s]),
-  );
+  const servicesBySlug = new Map((services ?? []).map((s) => [s.slug, s]));
   const setupService =
-    setupCommandSlug !== null ? servicesBySlug.get(setupCommandSlug) : undefined;
+    setupCommandSlug !== null
+      ? servicesBySlug.get(setupCommandSlug)
+      : undefined;
   const setupCommandHint = getNodeCredentialPromptHint(setupService);
 
   // Filter out services that already have bindings
-  const boundServiceIds = new Set(
-    (bindings ?? []).map((b) => b.service_id),
-  );
+  const boundServiceIds = new Set((bindings ?? []).map((b) => b.service_id));
   const availableServices = (services ?? []).filter(
     (s) => s.is_active && !boundServiceIds.has(s.id),
   );
@@ -218,10 +218,7 @@ export function NodeDetailPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        breadcrumbs={[
-          { label: "Nodes", to: "/nodes" },
-          { label: node.name },
-        ]}
+        breadcrumbs={[{ label: "Nodes", to: "/nodes" }, { label: node.name }]}
         title={node.name}
         description="Manage node settings and service bindings."
         actions={
@@ -251,7 +248,10 @@ export function NodeDetailPage() {
         <div className="flex items-center justify-between border-b border-border py-2 text-sm last:border-b-0">
           <span className="text-text-tertiary">Status</span>
           <div className="flex items-center gap-1">
-            <NodeStatusBadge status={node.status} isConnected={node.is_connected} />
+            <NodeStatusBadge
+              status={node.status}
+              isConnected={node.is_connected}
+            />
           </div>
         </div>
         <DetailRow label="Created" value={formatDate(node.created_at)} />
@@ -330,7 +330,9 @@ export function NodeDetailPage() {
           {node.metrics.last_success_at && (
             <DetailRow
               label="Last Successful Request"
-              value={formatRelativeTime(node.metrics.last_success_at) ?? "Never"}
+              value={
+                formatRelativeTime(node.metrics.last_success_at) ?? "Never"
+              }
             />
           )}
         </DetailSection>
@@ -389,7 +391,14 @@ export function NodeDetailPage() {
                 {bindings.map((binding) => (
                   <TableRow key={binding.id}>
                     <TableCell className="font-medium">
-                      {binding.service_name}
+                      <div className="flex items-center gap-2">
+                        {binding.service_name}
+                        {binding.service_slug === "llm-openclaw" && (
+                          <Badge variant="outline" className="text-[10px]">
+                            Gateway
+                          </Badge>
+                        )}
+                      </div>
                     </TableCell>
                     <TableCell>
                       <code className="text-xs text-muted-foreground">
@@ -522,8 +531,9 @@ export function NodeDetailPage() {
               <DialogHeader>
                 <DialogTitle>Node Credentials Rotated</DialogTitle>
                 <DialogDescription>
-                  Copy both values now. The old credentials have been invalidated
-                  immediately, and these secrets will not be shown again.
+                  Copy both values now. The old credentials have been
+                  invalidated immediately, and these secrets will not be shown
+                  again.
                 </DialogDescription>
               </DialogHeader>
               <div className="space-y-3">
@@ -540,8 +550,9 @@ export function NodeDetailPage() {
                     Run on your node
                   </p>
                   <code className="text-xs text-foreground break-all">
-                    nyxid-node rekey --auth-token {rotatedCredentials.auth_token}{" "}
-                    --signing-secret {rotatedCredentials.signing_secret}
+                    nyxid node rekey --auth-token{" "}
+                    {rotatedCredentials.auth_token} --signing-secret{" "}
+                    {rotatedCredentials.signing_secret}
                   </code>
                 </div>
               </div>
@@ -599,12 +610,15 @@ export function NodeDetailPage() {
           <DialogHeader>
             <DialogTitle>Bind Service</DialogTitle>
             <DialogDescription>
-              Select a service to route through this node. Proxy requests for the
-              bound service will be forwarded to this node for credential
+              Select a service to route through this node. Proxy requests for
+              the bound service will be forwarded to this node for credential
               injection.
             </DialogDescription>
           </DialogHeader>
-          <Select value={selectedServiceId} onValueChange={setSelectedServiceId}>
+          <Select
+            value={selectedServiceId}
+            onValueChange={setSelectedServiceId}
+          >
             <SelectTrigger>
               <SelectValue placeholder="Select a service..." />
             </SelectTrigger>
@@ -677,38 +691,82 @@ export function NodeDetailPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Node Credential Setup</DialogTitle>
+            <DialogTitle>
+              {isSshService(setupService)
+                ? "SSH Service Bound"
+                : "Node Credential Setup"}
+            </DialogTitle>
             <DialogDescription>
-              Run this command on your node to configure the credential for{" "}
-              <strong>{setupCommandSlug ?? ""}</strong>. You will be prompted
-              to enter the secret value securely.
+              {isSshService(setupService)
+                ? `SSH service "${setupCommandSlug ?? ""}" is now bound to this node. The node agent will tunnel SSH connections to the target -- no credential setup needed.`
+                : `Run this command on your node to configure the credential for "${setupCommandSlug ?? ""}". You will be prompted to enter the secret value securely.`}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
-            <CopyableField
-              label="Setup Command"
-              value={buildNodeCredentialCommand(setupCommandSlug ?? "", setupService)}
-            />
-            {setupCommandHint && (
-              <p className="text-xs text-muted-foreground">{setupCommandHint}</p>
-            )}
-            {setupService && (
+            {isSshService(setupService) ? (
               <div className="rounded-md bg-muted p-3 text-xs text-muted-foreground space-y-1">
                 <p>
                   <span className="font-medium text-foreground">Service:</span>{" "}
-                  {setupService.name}
+                  {setupService?.name}
                 </p>
                 <p>
-                  <span className="font-medium text-foreground">Auth method:</span>{" "}
-                  {setupService.auth_method} ({setupService.auth_key_name})
+                  <span className="font-medium text-foreground">Target:</span>{" "}
+                  {setupService?.ssh_config
+                    ? `${setupService.ssh_config.host}:${String(setupService.ssh_config.port)}`
+                    : "Not configured"}
                 </p>
-                {setupService.auth_type && (
-                  <p>
-                    <span className="font-medium text-foreground">Auth type:</span>{" "}
-                    {setupService.auth_type}
+                <p className="pt-1">
+                  The node agent opens a raw TCP connection to the SSH target on
+                  its local network. SSH authentication (password or
+                  certificate) happens end-to-end between the client and target.
+                </p>
+              </div>
+            ) : (
+              <>
+                {buildNodeCredentialCommand(
+                  setupCommandSlug ?? "",
+                  setupService,
+                ) && (
+                  <CopyableField
+                    label="Setup Command"
+                    value={
+                      buildNodeCredentialCommand(
+                        setupCommandSlug ?? "",
+                        setupService,
+                      ) ?? ""
+                    }
+                  />
+                )}
+                {setupCommandHint && (
+                  <p className="text-xs text-muted-foreground">
+                    {setupCommandHint}
                   </p>
                 )}
-              </div>
+                {setupService && (
+                  <div className="rounded-md bg-muted p-3 text-xs text-muted-foreground space-y-1">
+                    <p>
+                      <span className="font-medium text-foreground">
+                        Service:
+                      </span>{" "}
+                      {setupService.name}
+                    </p>
+                    <p>
+                      <span className="font-medium text-foreground">
+                        Auth method:
+                      </span>{" "}
+                      {setupService.auth_method} ({setupService.auth_key_name})
+                    </p>
+                    {setupService.auth_type && (
+                      <p>
+                        <span className="font-medium text-foreground">
+                          Auth type:
+                        </span>{" "}
+                        {setupService.auth_type}
+                      </p>
+                    )}
+                  </div>
+                )}
+              </>
             )}
           </div>
           <DialogFooter>

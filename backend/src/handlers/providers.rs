@@ -150,6 +150,7 @@ pub struct ProviderResponse {
     pub extra_auth_params: Option<std::collections::HashMap<String, String>>,
     pub device_code_format: String,
     pub client_id_param_name: Option<String>,
+    pub requires_gateway_url: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -190,6 +191,7 @@ fn provider_to_response(p: crate::models::provider_config::ProviderConfig) -> Pr
         extra_auth_params: p.extra_auth_params,
         device_code_format: p.device_code_format,
         client_id_param_name: p.client_id_param_name,
+        requires_gateway_url: p.requires_gateway_url,
         created_at: p.created_at.to_rfc3339(),
         updated_at: p.updated_at.to_rfc3339(),
     }
@@ -322,10 +324,10 @@ pub async fn create_provider(
         })?;
 
         // SSRF validation on OAuth provider URLs
-        validate_base_url(authorization_url, state.config.is_development())?;
-        validate_base_url(token_url, state.config.is_development())?;
+        validate_base_url(authorization_url)?;
+        validate_base_url(token_url)?;
         if let Some(ref url) = body.revocation_url {
-            validate_base_url(url, state.config.is_development())?;
+            validate_base_url(url)?;
         }
 
         let client_id = body.client_id.clone();
@@ -385,15 +387,15 @@ pub async fn create_provider(
         })?;
 
         // SSRF validation on all URLs
-        validate_base_url(authorization_url, state.config.is_development())?;
-        validate_base_url(token_url, state.config.is_development())?;
-        validate_base_url(device_code_url, state.config.is_development())?;
-        validate_base_url(device_token_url, state.config.is_development())?;
+        validate_base_url(authorization_url)?;
+        validate_base_url(token_url)?;
+        validate_base_url(device_code_url)?;
+        validate_base_url(device_token_url)?;
         if let Some(ref url) = body.device_verification_url {
-            validate_base_url(url, state.config.is_development())?;
+            validate_base_url(url)?;
         }
         if let Some(ref url) = body.hosted_callback_url {
-            validate_base_url(url, state.config.is_development())?;
+            validate_base_url(url)?;
         }
 
         let client_id = body.client_id.clone();
@@ -522,25 +524,25 @@ pub async fn update_provider(
 
     // SSRF validation on URLs if provided
     if let Some(ref url) = body.authorization_url {
-        validate_base_url(url, state.config.is_development())?;
+        validate_base_url(url)?;
     }
     if let Some(ref url) = body.token_url {
-        validate_base_url(url, state.config.is_development())?;
+        validate_base_url(url)?;
     }
     if let Some(ref url) = body.revocation_url {
-        validate_base_url(url, state.config.is_development())?;
+        validate_base_url(url)?;
     }
     if let Some(ref url) = body.device_code_url {
-        validate_base_url(url, state.config.is_development())?;
+        validate_base_url(url)?;
     }
     if let Some(ref url) = body.device_token_url {
-        validate_base_url(url, state.config.is_development())?;
+        validate_base_url(url)?;
     }
     if let Some(ref url) = body.device_verification_url {
-        validate_base_url(url, state.config.is_development())?;
+        validate_base_url(url)?;
     }
     if let Some(ref url) = body.hosted_callback_url {
-        validate_base_url(url, state.config.is_development())?;
+        validate_base_url(url)?;
     }
 
     let updates = provider_service::ProviderUpdateInput {
@@ -644,6 +646,7 @@ mod tests {
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            requires_gateway_url: false,
             created_by: "system".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),

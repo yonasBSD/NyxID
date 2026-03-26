@@ -121,6 +121,37 @@ describe("connectApiKeySchema", () => {
     });
     expect(result.success).toBe(false);
   });
+
+  it("accepts API key with valid gateway_url", () => {
+    const result = connectApiKeySchema.safeParse({
+      api_key: "sk-valid",
+      gateway_url: "http://localhost:18789",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts API key without gateway_url", () => {
+    const result = connectApiKeySchema.safeParse({
+      api_key: "sk-valid",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts API key with empty gateway_url", () => {
+    const result = connectApiKeySchema.safeParse({
+      api_key: "sk-valid",
+      gateway_url: "",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects invalid gateway_url", () => {
+    const result = connectApiKeySchema.safeParse({
+      api_key: "sk-valid",
+      gateway_url: "not-a-url",
+    });
+    expect(result.success).toBe(false);
+  });
 });
 
 describe("telegramLoginDataSchema", () => {

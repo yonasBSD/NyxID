@@ -14,6 +14,7 @@ import type {
   DeleteServiceApprovalConfigResponse,
   PushDevicesResponse,
   RemoveDeviceResponse,
+  ApprovalMode,
 } from "@/types/approvals";
 
 // --- Notification Settings ---
@@ -66,9 +67,7 @@ export function useTelegramDisconnect() {
 
   return useMutation({
     mutationFn: async (): Promise<TelegramDisconnectResponse> => {
-      return api.delete<TelegramDisconnectResponse>(
-        "/notifications/telegram",
-      );
+      return api.delete<TelegramDisconnectResponse>("/notifications/telegram");
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({
@@ -180,9 +179,7 @@ export function useRevokeGrant() {
 
   return useMutation({
     mutationFn: async (grantId: string): Promise<RevokeGrantResponse> => {
-      return api.delete<RevokeGrantResponse>(
-        `/approvals/grants/${grantId}`,
-      );
+      return api.delete<RevokeGrantResponse>(`/approvals/grants/${grantId}`);
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({
@@ -212,13 +209,20 @@ export function useSetServiceApprovalConfig() {
     mutationFn: async ({
       serviceId,
       approvalRequired,
+      approvalMode,
     }: {
       readonly serviceId: string;
-      readonly approvalRequired: boolean;
+      readonly approvalRequired?: boolean;
+      readonly approvalMode?: ApprovalMode;
     }): Promise<SetServiceApprovalConfigResponse> => {
       return api.put<SetServiceApprovalConfigResponse>(
         `/approvals/service-configs/${serviceId}`,
-        { approval_required: approvalRequired },
+        {
+          ...(approvalRequired !== undefined
+            ? { approval_required: approvalRequired }
+            : {}),
+          ...(approvalMode !== undefined ? { approval_mode: approvalMode } : {}),
+        },
       );
     },
     onSuccess: () => {

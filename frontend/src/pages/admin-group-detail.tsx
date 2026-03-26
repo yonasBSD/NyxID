@@ -183,7 +183,9 @@ export function AdminGroupDetailPage() {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 font-display text-lg font-semibold">Group not found</h3>
+        <h3 className="mb-2 font-display text-lg font-semibold">
+          Group not found
+        </h3>
         <p className="mb-4 text-sm text-muted-foreground">
           The group you are looking for does not exist or has been deleted.
         </p>
@@ -228,10 +230,7 @@ export function AdminGroupDetailPage() {
         <DetailRow label="ID" value={group.id} copyable mono />
         <DetailRow label="Name" value={group.name} />
         <DetailRow label="Slug" value={group.slug} copyable mono />
-        <DetailRow
-          label="Members"
-          value={String(group.member_count)}
-        />
+        <DetailRow label="Members" value={String(group.member_count)} />
         {group.parent_group_id && (
           <DetailRow
             label="Parent Group"

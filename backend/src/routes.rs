@@ -43,6 +43,7 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .route("/login", post(handlers::auth::login))
         .route("/logout", post(handlers::auth::logout))
         .route("/refresh", post(handlers::auth::refresh))
+        .route("/cli-token", post(handlers::auth::cli_token))
         .route("/verify-email", post(handlers::auth::verify_email))
         .route("/forgot-password", post(handlers::auth::forgot_password))
         .route("/reset-password", post(handlers::auth::reset_password))
@@ -71,7 +72,12 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
     let api_key_routes = Router::new()
         .route("/", get(handlers::api_keys::list_keys))
         .route("/", post(handlers::api_keys::create_key))
-        .route("/{key_id}", delete(handlers::api_keys::delete_key))
+        .route(
+            "/{key_id}",
+            get(handlers::api_keys::get_key)
+                .put(handlers::api_keys::update_key)
+                .delete(handlers::api_keys::delete_key),
+        )
         .route("/{key_id}/rotate", post(handlers::api_keys::rotate_key));
 
     let service_routes = Router::new()
@@ -329,6 +335,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
                 .delete(handlers::admin_roles::delete_role),
         )
         .route(
+            "/roles/{role_id}/assign-bulk",
+            post(handlers::admin_roles::bulk_assign_role),
+        )
+        .route(
             "/groups",
             get(handlers::admin_groups::list_groups).post(handlers::admin_groups::create_group),
         )
@@ -473,6 +483,52 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
                 .delete(handlers::node_admin::delete_binding),
         );
 
+    let unified_key_routes = Router::new()
+        .route(
+            "/",
+            get(handlers::keys::list_keys).post(handlers::keys::create_key),
+        )
+        .route(
+            "/{key_id}",
+            get(handlers::keys::get_key)
+                .put(handlers::keys::update_key)
+                .delete(handlers::keys::delete_key),
+        );
+
+    let user_endpoint_routes = Router::new()
+        .route("/", get(handlers::user_endpoints::list_endpoints))
+        .route(
+            "/{endpoint_id}",
+            put(handlers::user_endpoints::update_endpoint)
+                .delete(handlers::user_endpoints::delete_endpoint),
+        );
+
+    let external_api_key_routes = Router::new()
+        .route(
+            "/",
+            get(handlers::user_api_keys_external::list_external_api_keys),
+        )
+        .route(
+            "/{key_id}",
+            put(handlers::user_api_keys_external::update_external_api_key)
+                .delete(handlers::user_api_keys_external::delete_external_api_key),
+        );
+
+    let user_service_routes = Router::new()
+        .route(
+            "/",
+            get(handlers::user_services_handler::list_user_services),
+        )
+        .route(
+            "/{service_id}",
+            put(handlers::user_services_handler::update_user_service)
+                .delete(handlers::user_services_handler::delete_user_service),
+        );
+
+    let catalog_routes = Router::new()
+        .route("/", get(handlers::catalog::list_catalog))
+        .route("/{slug}", get(handlers::catalog::get_catalog_entry));
+
     let developer_routes = Router::new()
         .route(
             "/oauth-clients",
@@ -499,6 +555,18 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             "/approvals/requests/{request_id}/status",
             get(handlers::approvals::get_request_status),
         )
+        .route(
+            "/proxy/services/{service_id}/docs",
+            get(handlers::docs::service_docs_ui),
+        )
+        .route(
+            "/proxy/services/{service_id}/openapi.json",
+            get(handlers::docs::service_openapi_json),
+        )
+        .route(
+            "/proxy/services/{service_id}/asyncapi.json",
+            get(handlers::docs::service_asyncapi_json),
+        )
         .route("/proxy/services", get(handlers::proxy::list_proxy_services))
         .route(
             "/proxy/s/{slug}/{*path}",
@@ -521,6 +589,23 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .nest("/users", user_routes)
         .nest("/api-keys", api_key_routes)
         .nest("/services", service_routes)
+        .route("/docs", get(handlers::docs::docs_ui))
+        .route("/docs/catalog", get(handlers::docs::catalog_ui))
+        .route("/docs/openapi.json", get(handlers::docs::openapi_json))
+        .route("/docs/asyncapi.json", get(handlers::docs::asyncapi_json))
+        .route(
+            "/ssh/{service_id}/certificate",
+            post(handlers::ssh_tunnel::issue_ssh_certificate),
+        )
+        .route(
+            "/ssh/{service_id}",
+            get(handlers::ssh_tunnel::ssh_tunnel_ws),
+        )
+        .route("/ssh/{service_id}/exec", post(handlers::ssh_exec::ssh_exec))
+        .route(
+            "/ssh/{service_id}/terminal",
+            get(handlers::ssh_web_terminal::ssh_web_terminal),
+        )
         .nest("/sessions", session_routes)
         .nest("/mcp", mcp_routes)
         .nest("/developer", developer_routes)
@@ -528,6 +613,15 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .nest("/notifications", notification_routes)
         .nest("/approvals", approval_routes)
         .nest("/nodes", node_routes)
+        .nest("/keys", unified_key_routes)
+        .nest("/endpoints", user_endpoint_routes)
+        .nest("/api-keys/external", external_api_key_routes)
+        .nest("/user-services", user_service_routes)
+        .nest("/catalog", catalog_routes)
+        .route(
+            "/integrations/openclaw/mappings",
+            post(handlers::openclaw_channel::create_mapping),
+        )
         .route("/public/config", get(handlers::health::public_config))
         .layer(middleware::from_fn(reject_delegated_tokens))
         .layer(middleware::from_fn(reject_service_account_tokens));
@@ -560,9 +654,18 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
     let webhook_routes =
         Router::new().route("/telegram", post(handlers::webhooks::telegram_webhook));
 
+    // Integration webhook routes -- unauthenticated (verified by HMAC signature)
+    let integration_routes = Router::new().route(
+        "/openclaw/channel",
+        post(handlers::openclaw_channel::handle_channel_message),
+    );
+
     let private = Router::new()
         .route("/health", get(handlers::health::health_check))
+        .route("/llms.txt", get(handlers::llms_txt::llms_txt))
+        .route("/llms-full.txt", get(handlers::llms_txt::llms_full_txt))
         .nest("/api/v1/webhooks", webhook_routes)
+        .nest("/api/v1/integrations", integration_routes)
         .nest("/api/v1", api_v1)
         // WebSocket endpoint for node agents. Auth happens in-message (not middleware).
         // Rate limiting: global per-IP rate limiter covers HTTP upgrade requests.

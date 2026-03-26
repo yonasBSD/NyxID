@@ -8,6 +8,8 @@ node_modules/
 dist/
 build/
 *.tsbuildinfo
+.npm-cache/
+.cargo-home/
 
 # ─── Environment ───
 .env
@@ -43,3 +45,8 @@ k8s/
 .playwright-mcp
 
 mobile/screenshots
+
+# Internal working documents
+docs/IMPLEMENTATION_SPEC*.md
+docs/CLI_AUDIT_GAPS.md
+docs/STREAMLINE_SERVICES_PROPOSAL.md

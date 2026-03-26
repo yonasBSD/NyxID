@@ -4,6 +4,7 @@ use mongodb::Database;
 use mongodb::bson::{self, doc};
 use mongodb::options::{FindOneAndUpdateOptions, FindOptions, ReturnDocument};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::config::AppConfig;
@@ -12,10 +13,24 @@ use crate::models::approval_grant::{ApprovalGrant, COLLECTION_NAME as GRANTS};
 use crate::models::approval_request::{ApprovalRequest, COLLECTION_NAME as REQUESTS};
 use crate::models::notification_channel::{COLLECTION_NAME as CHANNELS, NotificationChannel};
 use crate::models::service_approval_config::{
-    COLLECTION_NAME as SERVICE_APPROVAL_CONFIGS, ServiceApprovalConfig,
+    ApprovalMode, COLLECTION_NAME as SERVICE_APPROVAL_CONFIGS, ServiceApprovalConfig,
 };
 use crate::services::notification_service;
 use crate::services::push_service::{ApnsAuth, FcmAuth};
+
+/// Resolve the approval mode for a (user, service) pair.
+pub async fn resolve_approval_mode(
+    db: &Database,
+    user_id: &str,
+    service_id: &str,
+) -> AppResult<ApprovalMode> {
+    let per_service = db
+        .collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
+        .find_one(doc! { "user_id": user_id, "service_id": service_id })
+        .await?;
+
+    Ok(per_service.map(|c| c.approval_mode).unwrap_or_default())
+}
 
 /// Check whether a user has the global approval system enabled.
 pub async fn user_requires_approval(db: &Database, user_id: &str) -> AppResult<bool> {
@@ -85,9 +100,12 @@ pub async fn check_approval(
     Ok(grant.is_some())
 }
 
-/// Create an approval request (idempotent via idempotency_key).
-/// If a pending request with the same key exists, returns it.
-/// Sends notification via the configured channel.
+/// Create an approval request.
+///
+/// Grant mode keeps the legacy dedupe behavior for a pending
+/// `(user, service, requester)` tuple.
+/// Per-request mode always creates a distinct pending request so concurrent
+/// calls cannot piggyback on a single approval.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_approval_request(
     db: &Database,
@@ -103,11 +121,18 @@ pub async fn create_approval_request(
     requester_id: &str,
     requester_label: Option<&str>,
     operation_summary: &str,
+    action_description: Option<&str>,
+    approval_mode: ApprovalMode,
     timeout_secs: u32,
 ) -> AppResult<ApprovalRequest> {
     let collection = db.collection::<ApprovalRequest>(REQUESTS);
-    let idempotency_key =
-        compute_idempotency_key(user_id, service_id, requester_type, requester_id);
+    let idempotency_key = compute_pending_request_idempotency_key(
+        &approval_mode,
+        user_id,
+        service_id,
+        requester_type,
+        requester_id,
+    );
     let mut inserted_request: Option<ApprovalRequest> = None;
     for _attempt in 0..2 {
         // Check for existing pending request with the same idempotency key.
@@ -135,6 +160,8 @@ pub async fn create_approval_request(
             requester_id: requester_id.to_string(),
             requester_label: requester_label.map(String::from),
             operation_summary: operation_summary.to_string(),
+            action_description: action_description.map(String::from),
+            approval_mode: approval_mode.clone(),
             status: "pending".to_string(),
             idempotency_key: idempotency_key.clone(),
             notification_channel: None,
@@ -257,6 +284,11 @@ pub async fn process_decision(
         Some(updated) => updated,
         None => {
             let existing = get_request(db, request_id).await?;
+            // Provide a specific error for expired requests instead of the
+            // generic "decision_state_conflict" from is_idempotent_replay.
+            if existing.status == "expired" {
+                return Err(AppError::Forbidden("Approval request expired".to_string()));
+            }
             if is_idempotent_replay(
                 &existing.status,
                 existing.decision_idempotency_key.as_deref(),
@@ -269,8 +301,9 @@ pub async fn process_decision(
         }
     };
 
-    // On approval: create a grant
-    if approved {
+    // On approval: create a grant ONLY in grant mode.
+    // In per_request mode, the approved ApprovalRequest is the only record.
+    if approved && updated.approval_mode == ApprovalMode::Grant {
         let channel = notification_service::get_or_create_channel(db, &updated.user_id).await?;
         let grant_expiry = resolve_grant_expiry(now, duration_sec, channel.grant_expiry_days);
 
@@ -363,15 +396,21 @@ pub async fn expire_pending_requests(
     fcm_auth: Option<&FcmAuth>,
     apns_auth: Option<&ApnsAuth>,
 ) -> AppResult<u64> {
-    let now = bson::DateTime::from_chrono(Utc::now());
+    let sweep_time = bson::DateTime::from_chrono(Utc::now());
+    let sweep_marker = format!("expiry:{}", uuid::Uuid::new_v4());
 
     let expired: Vec<ApprovalRequest> = db
         .collection::<ApprovalRequest>(REQUESTS)
         .find(doc! {
             "status": "pending",
-            "expires_at": { "$lte": now },
+            "expires_at": { "$lte": sweep_time },
         })
-        .with_options(FindOptions::builder().limit(100).build())
+        .with_options(
+            FindOptions::builder()
+                .sort(doc! { "expires_at": 1 })
+                .limit(100)
+                .build(),
+        )
         .await?
         .try_collect()
         .await?;
@@ -380,19 +419,40 @@ pub async fn expire_pending_requests(
         return Ok(0);
     }
 
-    let count = expired.len() as u64;
-
-    // Batch update status to "expired"
+    // Batch update status to "expired", but ONLY if still pending.
+    // This prevents a race where a user approves/rejects a request between
+    // the find() above and this update_many(). Without the status guard,
+    // the sweep could overwrite an "approved" status back to "expired".
     let ids: Vec<&str> = expired.iter().map(|r| r.id.as_str()).collect();
-    db.collection::<ApprovalRequest>(REQUESTS)
+    let expire_result = db
+        .collection::<ApprovalRequest>(REQUESTS)
         .update_many(
-            doc! { "_id": { "$in": &ids } },
-            doc! { "$set": { "status": "expired" } },
+            doc! { "_id": { "$in": &ids }, "status": "pending" },
+            doc! { "$set": {
+                "status": "expired",
+                "decided_at": sweep_time,
+                "decision_idempotency_key": &sweep_marker,
+            } },
         )
         .await?;
 
+    let count = expire_result.modified_count;
+    if count == 0 {
+        return Ok(0);
+    }
+
+    // Re-query to get only the requests that were actually expired by the
+    // update_many above. A request that was approved/rejected between the
+    // initial find() and the update_many() will NOT have status "expired"
+    // in the DB (the status guard prevented the overwrite), so it will be
+    // excluded here. Matching on this sweep's unique marker also prevents
+    // overlapping sweep tasks from re-sending each other's expiry side
+    // effects for the same request IDs, even across multiple server
+    // instances.
+    let actually_expired = requests_updated_by_expiry_sweep(db, expired, &sweep_marker).await?;
+
     // Edit Telegram messages for expired requests (best-effort)
-    for req in &expired {
+    for req in &actually_expired {
         if req
             .notification_channel
             .as_deref()
@@ -419,7 +479,7 @@ pub async fn expire_pending_requests(
     }
 
     // Send silent push to update mobile app UI for expired requests (best-effort)
-    for req in &expired {
+    for req in &actually_expired {
         let mut data = std::collections::HashMap::new();
         data.insert("type".to_string(), "approval_expired".to_string());
         data.insert("request_id".to_string(), req.id.clone());
@@ -436,6 +496,47 @@ pub async fn expire_pending_requests(
     }
 
     Ok(count)
+}
+
+async fn requests_updated_by_expiry_sweep(
+    db: &Database,
+    candidates: Vec<ApprovalRequest>,
+    sweep_marker: &str,
+) -> AppResult<Vec<ApprovalRequest>> {
+    if candidates.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let ids: Vec<&str> = candidates
+        .iter()
+        .map(|request| request.id.as_str())
+        .collect();
+    let expired_ids: HashSet<String> = db
+        .collection::<bson::Document>(REQUESTS)
+        .find(doc! {
+            "_id": { "$in": &ids },
+            "status": "expired",
+            "decision_idempotency_key": sweep_marker,
+        })
+        .with_options(FindOptions::builder().projection(doc! { "_id": 1 }).build())
+        .await?
+        .try_collect::<Vec<bson::Document>>()
+        .await?
+        .into_iter()
+        .filter_map(|doc| doc.get_str("_id").ok().map(str::to_owned))
+        .collect();
+
+    Ok(retain_requests_with_ids(candidates, &expired_ids))
+}
+
+fn retain_requests_with_ids(
+    requests: Vec<ApprovalRequest>,
+    allowed_ids: &HashSet<String>,
+) -> Vec<ApprovalRequest> {
+    requests
+        .into_iter()
+        .filter(|request| allowed_ids.contains(&request.id))
+        .collect()
 }
 
 /// Block until an approval decision is made or the timeout expires.
@@ -618,11 +719,15 @@ pub async fn set_service_approval_config(
     user_id: &str,
     service_id: &str,
     service_name: &str,
-    approval_required: bool,
+    approval_required: Option<bool>,
+    approval_mode: Option<&ApprovalMode>,
 ) -> AppResult<ServiceApprovalConfig> {
     let now = bson::DateTime::from_chrono(Utc::now());
     let collection = db.collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS);
     let filter = doc! { "user_id": user_id, "service_id": service_id };
+    let existing = collection.find_one(filter.clone()).await?;
+    let (approval_required, approval_mode) =
+        resolve_service_config_update(existing.as_ref(), approval_required, approval_mode)?;
 
     for _attempt in 0..2 {
         let config = collection
@@ -631,6 +736,7 @@ pub async fn set_service_approval_config(
                 doc! {
                     "$set": {
                         "approval_required": approval_required,
+                        "approval_mode": approval_mode.as_str(),
                         "service_name": service_name,
                         "updated_at": now,
                     },
@@ -711,6 +817,43 @@ fn compute_idempotency_key(
     hex::encode(hasher.finalize())
 }
 
+fn compute_pending_request_idempotency_key(
+    approval_mode: &ApprovalMode,
+    user_id: &str,
+    service_id: &str,
+    requester_type: &str,
+    requester_id: &str,
+) -> String {
+    match approval_mode {
+        ApprovalMode::Grant => {
+            compute_idempotency_key(user_id, service_id, requester_type, requester_id)
+        }
+        ApprovalMode::PerRequest => uuid::Uuid::new_v4().to_string(),
+    }
+}
+
+fn resolve_service_config_update(
+    existing: Option<&ServiceApprovalConfig>,
+    approval_required: Option<bool>,
+    approval_mode: Option<&ApprovalMode>,
+) -> AppResult<(bool, ApprovalMode)> {
+    let resolved_required = approval_required
+        .or_else(|| existing.map(|config| config.approval_required))
+        .ok_or_else(|| {
+            AppError::ValidationError(
+                "approval_required is required when creating a new per-service approval config"
+                    .to_string(),
+            )
+        })?;
+
+    let resolved_mode = approval_mode
+        .cloned()
+        .or_else(|| existing.map(|config| config.approval_mode.clone()))
+        .unwrap_or_default();
+
+    Ok((resolved_required, resolved_mode))
+}
+
 fn is_duplicate_key_error(e: &mongodb::error::Error) -> bool {
     if let mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(we)) =
         e.kind.as_ref()
@@ -723,6 +866,33 @@ fn is_duplicate_key_error(e: &mongodb::error::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn make_request(id: &str, status: &str) -> ApprovalRequest {
+        let now = Utc::now();
+        ApprovalRequest {
+            id: id.to_string(),
+            user_id: "user-1".to_string(),
+            service_id: "service-1".to_string(),
+            service_name: "OpenAI API".to_string(),
+            service_slug: "openai".to_string(),
+            requester_type: "service_account".to_string(),
+            requester_id: "requester-1".to_string(),
+            requester_label: Some("CI Pipeline".to_string()),
+            operation_summary: "proxy:POST /v1/chat/completions".to_string(),
+            status: status.to_string(),
+            idempotency_key: format!("idem-{id}"),
+            notification_channel: Some("telegram".to_string()),
+            telegram_message_id: Some(12345),
+            telegram_chat_id: Some(67890),
+            expires_at: now,
+            decided_at: None,
+            decision_channel: None,
+            decision_idempotency_key: None,
+            action_description: None,
+            approval_mode: ApprovalMode::PerRequest,
+            created_at: now,
+        }
+    }
 
     #[test]
     fn resolve_approval_requirement_prefers_per_service_true_over_global_false() {
@@ -746,24 +916,70 @@ mod tests {
     }
 
     #[test]
-    fn idempotency_key_deterministic() {
-        let key1 = compute_idempotency_key("user1", "svc1", "sa", "req1");
-        let key2 = compute_idempotency_key("user1", "svc1", "sa", "req1");
+    fn grant_mode_idempotency_key_deterministic() {
+        let key1 = compute_pending_request_idempotency_key(
+            &ApprovalMode::Grant,
+            "user1",
+            "svc1",
+            "sa",
+            "req1",
+        );
+        let key2 = compute_pending_request_idempotency_key(
+            &ApprovalMode::Grant,
+            "user1",
+            "svc1",
+            "sa",
+            "req1",
+        );
         assert_eq!(key1, key2);
     }
 
     #[test]
-    fn idempotency_key_differs_for_different_inputs() {
-        let key1 = compute_idempotency_key("user1", "svc1", "sa", "req1");
-        let key2 = compute_idempotency_key("user2", "svc1", "sa", "req1");
+    fn grant_mode_idempotency_key_differs_for_different_inputs() {
+        let key1 = compute_pending_request_idempotency_key(
+            &ApprovalMode::Grant,
+            "user1",
+            "svc1",
+            "sa",
+            "req1",
+        );
+        let key2 = compute_pending_request_idempotency_key(
+            &ApprovalMode::Grant,
+            "user2",
+            "svc1",
+            "sa",
+            "req1",
+        );
         assert_ne!(key1, key2);
     }
 
     #[test]
-    fn idempotency_key_is_hex_sha256() {
-        let key = compute_idempotency_key("u", "s", "t", "r");
+    fn grant_mode_idempotency_key_is_hex_sha256() {
+        let key = compute_pending_request_idempotency_key(&ApprovalMode::Grant, "u", "s", "t", "r");
         assert_eq!(key.len(), 64);
         assert!(key.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn per_request_idempotency_key_is_unique_uuid() {
+        let key1 = compute_pending_request_idempotency_key(
+            &ApprovalMode::PerRequest,
+            "user1",
+            "svc1",
+            "sa",
+            "req1",
+        );
+        let key2 = compute_pending_request_idempotency_key(
+            &ApprovalMode::PerRequest,
+            "user1",
+            "svc1",
+            "sa",
+            "req1",
+        );
+
+        assert_ne!(key1, key2);
+        assert!(uuid::Uuid::parse_str(&key1).is_ok());
+        assert!(uuid::Uuid::parse_str(&key2).is_ok());
     }
 
     #[test]
@@ -799,5 +1015,119 @@ mod tests {
         let now = Utc::now();
         let expiry = resolve_grant_expiry(now, None, 30);
         assert_eq!(expiry, now + Duration::days(30));
+    }
+
+    #[test]
+    fn idempotent_replay_returns_conflict_for_expired_status() {
+        // When a request has been marked "expired" (by the background sweep),
+        // is_idempotent_replay should return Err(Conflict) because "expired"
+        // is not a user decision ("approved"/"rejected").
+        let result = is_idempotent_replay("expired", None, Some("k1"), true);
+        assert!(matches!(result, Err(AppError::Conflict(msg)) if msg == "decision_state_conflict"));
+    }
+
+    #[test]
+    fn idempotent_replay_returns_conflict_for_pending_status() {
+        // "pending" is not a decided state either.
+        let result = is_idempotent_replay("pending", None, Some("k1"), true);
+        assert!(matches!(result, Err(AppError::Conflict(msg)) if msg == "decision_state_conflict"));
+    }
+
+    #[test]
+    fn retain_requests_with_ids_excludes_requests_not_updated_by_sweep() {
+        let candidates = vec![
+            make_request("req-expired", "pending"),
+            make_request("req-approved", "pending"),
+        ];
+        let actually_expired_ids = HashSet::from_iter([String::from("req-expired")]);
+
+        let retained = retain_requests_with_ids(candidates, &actually_expired_ids);
+
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].id, "req-expired");
+    }
+
+    /// Regression test for #96: simulates the race window between find() and
+    /// update_many() in expire_pending_requests(). When a user approves a
+    /// request after the sweep's initial find() but before the guarded
+    /// update_many(), the sweep must NOT send side effects (Telegram edits,
+    /// push notifications) for that request.
+    ///
+    /// This test exercises the filtering pipeline that runs after
+    /// update_many(): only requests whose IDs appear in the "actually
+    /// expired" set (those that matched `status: "pending"` at update time
+    /// AND carry this sweep's unique marker) should trigger side effects.
+    #[test]
+    fn race_window_approved_request_excluded_from_expiry_side_effects() {
+        // Scenario: sweep finds 3 pending requests that have passed their
+        // expiry time. Between find() and update_many():
+        //  - req-2 was approved by the user (status changed to "approved")
+        //  - req-3 was rejected by the user (status changed to "rejected")
+        // Only req-1 remained "pending" and was actually expired.
+        let candidates = vec![
+            make_request("req-1", "pending"),
+            make_request("req-2", "pending"), // concurrently approved
+            make_request("req-3", "pending"), // concurrently rejected
+        ];
+
+        // After update_many with `status: "pending"` guard, only req-1 was
+        // modified. The re-query (requests_updated_by_expiry_sweep) returns
+        // only IDs that have status "expired" + this sweep's marker.
+        let actually_expired_ids = HashSet::from_iter([String::from("req-1")]);
+
+        let side_effect_targets = retain_requests_with_ids(candidates, &actually_expired_ids);
+
+        // req-2 and req-3 must NOT appear — they were decided by the user
+        // during the race window and must not receive expiry side effects.
+        assert_eq!(side_effect_targets.len(), 1);
+        assert_eq!(side_effect_targets[0].id, "req-1");
+    }
+
+    /// Regression test for #96: when ALL requests in the sweep's find()
+    /// were concurrently decided by users, the side-effect list must be
+    /// completely empty.
+    #[test]
+    fn race_window_all_requests_decided_yields_no_side_effects() {
+        let candidates = vec![
+            make_request("req-a", "pending"),
+            make_request("req-b", "pending"),
+        ];
+
+        // None of the candidates were actually expired (all were decided
+        // between find() and update_many()).
+        let actually_expired_ids: HashSet<String> = HashSet::new();
+
+        let side_effect_targets = retain_requests_with_ids(candidates, &actually_expired_ids);
+
+        assert!(
+            side_effect_targets.is_empty(),
+            "No side effects should be emitted when all requests were decided during the race window"
+        );
+    }
+
+    #[test]
+    fn resolve_service_config_update_preserves_existing_mode_when_omitted() {
+        let existing = ServiceApprovalConfig {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: "user1".to_string(),
+            service_id: "svc1".to_string(),
+            service_name: "OpenAI".to_string(),
+            approval_required: true,
+            approval_mode: ApprovalMode::Grant,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let (approval_required, approval_mode) =
+            resolve_service_config_update(Some(&existing), Some(false), None).expect("ok");
+
+        assert!(!approval_required);
+        assert_eq!(approval_mode, ApprovalMode::Grant);
+    }
+
+    #[test]
+    fn resolve_service_config_update_requires_approval_required_for_new_config() {
+        let result = resolve_service_config_update(None, None, Some(&ApprovalMode::Grant));
+        assert!(matches!(result, Err(AppError::ValidationError(_))));
     }
 }

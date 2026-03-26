@@ -1,0 +1,1121 @@
+use std::path::PathBuf;
+
+use clap::{Args, Parser, Subcommand, ValueEnum};
+
+#[derive(Parser)]
+#[command(
+    name = "nyxid",
+    about = "NyxID CLI -- manage your NyxID account from the terminal",
+    version
+)]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Commands,
+}
+
+#[derive(Subcommand)]
+pub enum Commands {
+    /// Log in to NyxID (opens browser by default)
+    Login(LoginArgs),
+    /// Log out and clear stored token
+    Logout(BaseUrlArgs),
+    /// Register a new account
+    Register(RegisterArgs),
+    /// Verify email address with token
+    VerifyEmail(VerifyEmailArgs),
+    /// Request a password reset email
+    ForgotPassword(ForgotPasswordArgs),
+    /// Reset password using a reset token
+    ResetPassword(ResetPasswordArgs),
+    /// Show current user info
+    Whoami(AuthArgs),
+    /// Show account overview (services, keys, nodes)
+    Status(AuthArgs),
+    /// Manage user profile
+    Profile {
+        #[command(subcommand)]
+        command: ProfileCommands,
+    },
+    /// Manage multi-factor authentication
+    Mfa {
+        #[command(subcommand)]
+        command: MfaCommands,
+    },
+    /// Manage sessions
+    Session {
+        #[command(subcommand)]
+        command: SessionCommands,
+    },
+    /// Browse the service catalog
+    Catalog {
+        #[command(subcommand)]
+        command: CatalogCommands,
+    },
+    /// Manage AI services (external APIs)
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommands,
+    },
+    /// Manage NyxID API keys
+    ApiKey {
+        #[command(subcommand)]
+        command: ApiKeyCommands,
+    },
+    /// Manage credential nodes
+    Node {
+        #[command(subcommand)]
+        command: NodeCommands,
+    },
+    /// Proxy requests through NyxID
+    Proxy {
+        #[command(subcommand)]
+        command: ProxyCommands,
+    },
+    /// SSH client helper commands
+    Ssh(SshCli),
+    /// Set up OpenClaw integration
+    Openclaw {
+        #[command(subcommand)]
+        command: OpenClawCommands,
+    },
+    /// Generate MCP configuration for AI tools
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommands,
+    },
+    /// Manage notification settings
+    Notification {
+        #[command(subcommand)]
+        command: NotificationCommands,
+    },
+    /// Manage approval requests and grants
+    Approval {
+        #[command(subcommand)]
+        command: ApprovalCommands,
+    },
+    /// Manage user endpoints
+    Endpoint {
+        #[command(subcommand)]
+        command: EndpointCommands,
+    },
+    /// Manage external API keys/credentials
+    ExternalKey {
+        #[command(subcommand)]
+        command: ExternalKeyCommands,
+    },
+}
+
+// ---- Shared auth args ----
+
+#[derive(Args, Clone)]
+pub struct AuthArgs {
+    /// NyxID base URL, e.g. https://auth.nyxid.dev (saved from login)
+    #[arg(long, env = "NYXID_URL")]
+    pub base_url: Option<String>,
+    /// Access token (overrides saved token)
+    #[arg(long)]
+    pub access_token: Option<String>,
+    /// Environment variable to read the access token from
+    #[arg(long, default_value = "NYXID_ACCESS_TOKEN")]
+    pub access_token_env: String,
+    /// Output format: table or json
+    #[arg(long, default_value = "table")]
+    pub output: OutputFormat,
+}
+
+impl AuthArgs {
+    /// Resolve base_url: flag > env > saved from login
+    pub fn resolved_base_url(&self) -> anyhow::Result<String> {
+        if let Some(url) = &self.base_url {
+            return Ok(url.clone());
+        }
+        if let Some(url) = crate::auth::read_saved_base_url() {
+            return Ok(url);
+        }
+        anyhow::bail!(
+            "No base URL configured. Run `nyxid login --base-url <URL>` first, \
+             or pass --base-url, or set NYXID_URL"
+        )
+    }
+}
+
+#[derive(Args, Clone)]
+pub struct BaseUrlArgs {
+    /// NyxID base URL (saved from login)
+    #[arg(long, env = "NYXID_URL")]
+    pub base_url: Option<String>,
+}
+
+impl BaseUrlArgs {
+    pub fn resolved_base_url(&self) -> anyhow::Result<String> {
+        if let Some(url) = &self.base_url {
+            return Ok(url.clone());
+        }
+        if let Some(url) = crate::auth::read_saved_base_url() {
+            return Ok(url);
+        }
+        anyhow::bail!(
+            "No base URL configured. Run `nyxid login --base-url <URL>` first, \
+             or pass --base-url, or set NYXID_URL"
+        )
+    }
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum OutputFormat {
+    Table,
+    Json,
+}
+
+// ---- Login ----
+
+#[derive(Args)]
+pub struct LoginArgs {
+    /// NyxID base URL, e.g. https://auth.nyxid.dev
+    #[arg(long, env = "NYXID_URL")]
+    pub base_url: String,
+    /// Use email/password login instead of opening the browser
+    #[arg(long)]
+    pub password: bool,
+    /// Email address (only used with --password)
+    #[arg(long)]
+    pub email: Option<String>,
+}
+
+// ---- Register (C1) ----
+
+#[derive(Args)]
+pub struct RegisterArgs {
+    /// NyxID base URL
+    #[arg(long, env = "NYXID_URL")]
+    pub base_url: String,
+    /// Email address
+    #[arg(long)]
+    pub email: String,
+    /// Display name
+    #[arg(long)]
+    pub name: Option<String>,
+    /// Read password from this environment variable
+    #[arg(long)]
+    pub password_env: Option<String>,
+}
+
+// ---- VerifyEmail (C2) ----
+
+#[derive(Args)]
+pub struct VerifyEmailArgs {
+    /// NyxID base URL
+    #[arg(long, env = "NYXID_URL")]
+    pub base_url: String,
+    /// Verification token from email
+    #[arg(long)]
+    pub token: String,
+}
+
+// ---- ForgotPassword (C3) ----
+
+#[derive(Args)]
+pub struct ForgotPasswordArgs {
+    /// NyxID base URL
+    #[arg(long, env = "NYXID_URL")]
+    pub base_url: String,
+    /// Email address
+    #[arg(long)]
+    pub email: String,
+}
+
+// ---- ResetPassword (C4) ----
+
+#[derive(Args)]
+pub struct ResetPasswordArgs {
+    /// NyxID base URL
+    #[arg(long, env = "NYXID_URL")]
+    pub base_url: String,
+    /// Reset token from email
+    #[arg(long)]
+    pub token: String,
+    /// Read new password from this environment variable
+    #[arg(long)]
+    pub password_env: Option<String>,
+}
+
+// ---- Profile (C5, I1-I3) ----
+
+#[derive(Subcommand)]
+pub enum ProfileCommands {
+    /// Update profile (name, etc.)
+    Update {
+        /// New display name
+        #[arg(long)]
+        name: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Delete your account
+    Delete {
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// List OAuth consents
+    Consents {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Revoke an OAuth consent
+    RevokeConsent {
+        /// OAuth client ID to revoke
+        client_id: String,
+        /// Skip confirmation
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+// ---- MFA (C6) ----
+
+#[derive(Subcommand)]
+pub enum MfaCommands {
+    /// Set up MFA (displays QR code URL and secret)
+    Setup {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Verify MFA setup with a TOTP code
+    Verify {
+        /// TOTP code from authenticator app
+        #[arg(long)]
+        code: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Show current MFA status
+    Status {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+// ---- Session (C7) ----
+
+#[derive(Subcommand)]
+pub enum SessionCommands {
+    /// List active sessions
+    List {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+// ---- Catalog ----
+
+#[derive(Subcommand)]
+pub enum CatalogCommands {
+    /// List available services from the catalog
+    List {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Show details for a catalog entry
+    Show {
+        /// Service slug (e.g., llm-openai)
+        slug: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+// ---- Service (C11-C13, I21-I23) ----
+
+#[derive(Subcommand)]
+pub enum ServiceCommands {
+    /// Add a service from catalog or custom endpoint
+    Add {
+        /// Catalog slug (e.g., llm-openai). Omit with --custom for a custom endpoint.
+        slug: Option<String>,
+        /// Add a fully custom endpoint (interactive prompts)
+        #[arg(long)]
+        custom: bool,
+        /// Use OAuth flow for authentication
+        #[arg(long)]
+        oauth: bool,
+        /// Use device code flow for authentication
+        #[arg(long)]
+        device_code: bool,
+        /// Route traffic through a node
+        #[arg(long)]
+        via_node: Option<String>,
+        /// Endpoint URL override
+        #[arg(long)]
+        endpoint_url: Option<String>,
+        /// Label for this service
+        #[arg(long)]
+        label: Option<String>,
+        /// Auth method (bearer, header, query, basic)
+        #[arg(long)]
+        auth_method: Option<String>,
+        /// Auth key name (e.g., Authorization, X-API-Key)
+        #[arg(long)]
+        auth_key_name: Option<String>,
+        /// Credential value (hidden from help -- use --credential-env instead)
+        #[arg(long, hide = true)]
+        credential: Option<String>,
+        /// Read credential from this environment variable instead of prompting
+        #[arg(long)]
+        credential_env: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Add an SSH service
+    AddSsh {
+        /// Label for this service
+        #[arg(long)]
+        label: String,
+        /// SSH host
+        #[arg(long)]
+        host: String,
+        /// SSH port
+        #[arg(long, default_value = "22")]
+        port: u16,
+        /// Enable certificate authentication
+        #[arg(long)]
+        cert_auth: bool,
+        /// SSH principals (comma-separated)
+        #[arg(long)]
+        principals: Option<String>,
+        /// Certificate TTL in minutes
+        #[arg(long, default_value = "30")]
+        ttl: u32,
+        /// Node to route through (required for SSH)
+        #[arg(long)]
+        via_node: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// List user's configured services
+    List {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Show service details
+    Show {
+        /// Service ID
+        id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Delete a service
+    Delete {
+        /// Service ID
+        id: String,
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Update service configuration
+    Update {
+        /// Service ID
+        id: String,
+        /// New display label
+        #[arg(long)]
+        label: Option<String>,
+        /// New endpoint URL
+        #[arg(long)]
+        endpoint_url: Option<String>,
+        /// New node ID for routing
+        #[arg(long)]
+        node_id: Option<String>,
+        /// Remove node routing (direct mode)
+        #[arg(long)]
+        no_node: bool,
+        /// Set service to active
+        #[arg(long, conflicts_with = "inactive")]
+        active: bool,
+        /// Set service to inactive
+        #[arg(long, conflicts_with = "active")]
+        inactive: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Rotate external credential for a service
+    RotateCredential {
+        /// Service ID
+        id: String,
+        /// Read new credential from this environment variable
+        #[arg(long)]
+        credential_env: Option<String>,
+        /// New credential value (hidden from help -- use --credential-env instead)
+        #[arg(long, hide = true)]
+        credential: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Change service routing (node or direct)
+    Route {
+        /// Service ID
+        id: String,
+        /// Route through this node
+        #[arg(long, conflicts_with = "direct")]
+        node: Option<String>,
+        /// Use direct routing (no node)
+        #[arg(long, conflicts_with = "node")]
+        direct: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Set OAuth client credentials for a service's provider
+    Credentials {
+        /// Service slug or ID
+        slug: String,
+        /// Read OAuth client ID from this environment variable
+        #[arg(long)]
+        client_id_env: Option<String>,
+        /// OAuth client ID (hidden from help -- use --client-id-env instead)
+        #[arg(long, hide = true)]
+        client_id: Option<String>,
+        /// Read OAuth client secret from this environment variable
+        #[arg(long)]
+        client_secret_env: Option<String>,
+        /// OAuth client secret (hidden from help -- use --client-secret-env instead)
+        #[arg(long, hide = true)]
+        client_secret: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+// ---- API Key ----
+
+#[derive(Subcommand)]
+pub enum ApiKeyCommands {
+    /// Create a new NyxID API key
+    Create {
+        /// Key name
+        #[arg(long)]
+        name: Option<String>,
+        /// Scopes (space-separated: read write proxy)
+        #[arg(long)]
+        scopes: Option<String>,
+        /// Expiry in days (0 = no expiry)
+        #[arg(long)]
+        expires_in_days: Option<u32>,
+        /// Allowed service IDs (comma-separated)
+        #[arg(long)]
+        allowed_services: Option<String>,
+        /// Allowed node IDs (comma-separated)
+        #[arg(long)]
+        allowed_nodes: Option<String>,
+        /// Allow access to all services
+        #[arg(long)]
+        allow_all_services: bool,
+        /// Allow access to all nodes
+        #[arg(long)]
+        allow_all_nodes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// List API keys
+    List {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Show key details
+    Show {
+        id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Rotate a key
+    Rotate {
+        id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Revoke a key
+    Delete {
+        id: String,
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Update key scope
+    Update {
+        id: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        scopes: Option<String>,
+        #[arg(long)]
+        allowed_services: Option<String>,
+        #[arg(long)]
+        allowed_nodes: Option<String>,
+        #[arg(long)]
+        allow_all_services: Option<bool>,
+        #[arg(long)]
+        allow_all_nodes: Option<bool>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+// ---- Node (I4-I5 user side + agent side) ----
+
+#[derive(Subcommand)]
+pub enum NodeCommands {
+    // --- User-side commands (API calls) ---
+    /// List user's nodes
+    List {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Show node details
+    Show {
+        id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Generate a registration token
+    RegisterToken {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Delete a node
+    Delete {
+        /// Node ID
+        id: String,
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Rotate node auth token
+    RotateToken {
+        /// Node ID
+        id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+
+    // --- Agent-side commands (local node operations) ---
+    /// Register this node with a NyxID server
+    Register {
+        /// One-time registration token (nyx_nreg_...)
+        #[arg(long)]
+        token: String,
+        /// WebSocket URL of the NyxID server
+        #[arg(long)]
+        url: Option<String>,
+        /// Path to config directory
+        #[arg(long)]
+        config: Option<String>,
+        /// Store secrets in the OS keychain instead of encrypted file
+        #[arg(long)]
+        keychain: bool,
+    },
+    /// Start the node agent (connect and serve)
+    Start {
+        /// Path to config directory
+        #[arg(long)]
+        config: Option<String>,
+        /// Log level (trace, debug, info, warn, error)
+        #[arg(long)]
+        log_level: Option<String>,
+    },
+    /// Show node connection status (local)
+    #[command(name = "agent-status")]
+    AgentStatus {
+        /// Path to config directory
+        #[arg(long)]
+        config: Option<String>,
+    },
+    /// Update the node's auth token and signing secret after a server-side rotation
+    Rekey {
+        /// Replacement auth token (nyx_nauth_...)
+        #[arg(long)]
+        auth_token: String,
+        /// Replacement HMAC signing secret (64 hex chars)
+        #[arg(long)]
+        signing_secret: String,
+        /// Path to config directory
+        #[arg(long)]
+        config: Option<String>,
+    },
+    /// Manage local credentials
+    Credentials {
+        #[command(subcommand)]
+        command: NodeCredentialCommands,
+        /// Path to config directory
+        #[arg(long)]
+        config: Option<String>,
+    },
+    /// Migrate secret storage from file to OS keychain (or vice versa)
+    Migrate {
+        /// Target backend: "keychain" or "file"
+        #[arg(long)]
+        to: String,
+        /// Path to config directory
+        #[arg(long)]
+        config: Option<String>,
+    },
+    /// Manage OpenClaw integration (connect, status, disconnect)
+    #[command(name = "openclaw")]
+    NodeOpenclaw {
+        #[command(subcommand)]
+        command: NodeOpenClawCommands,
+        /// Path to config directory
+        #[arg(long)]
+        config: Option<String>,
+    },
+    /// Show node agent version
+    #[command(name = "agent-version")]
+    AgentVersion,
+}
+
+// ---- Node Credential subcommands ----
+
+#[derive(Subcommand)]
+pub enum NodeCredentialCommands {
+    /// Add a credential for a service (prompts for the secret value securely)
+    Add {
+        /// Service slug (e.g., "openai", "github-api")
+        #[arg(long)]
+        service: String,
+        /// Target URL for this service (e.g., "https://api.openai.com/v1")
+        #[arg(long)]
+        url: Option<String>,
+        /// Header name to inject (e.g., "Authorization")
+        #[arg(long)]
+        header: Option<String>,
+        /// Query parameter name to inject (e.g., "api_key")
+        #[arg(long)]
+        query_param: Option<String>,
+        /// How to format the prompted secret before storing it
+        #[arg(long, value_enum, default_value_t = CredentialSecretFormat::Raw)]
+        secret_format: CredentialSecretFormat,
+        /// Inline secret value (skips interactive prompt; NOT recommended)
+        #[arg(long, hide = true)]
+        value: Option<String>,
+    },
+    /// Add an OAuth credential for a service (runs device code or authorization code flow)
+    AddOauth {
+        /// Service slug (e.g., "api-twitter", "llm-openai")
+        #[arg(long)]
+        service: String,
+        /// Fetch OAuth config from NyxID catalog
+        #[arg(long)]
+        from_catalog: bool,
+        /// OAuth client ID
+        #[arg(long)]
+        client_id: Option<String>,
+        /// OAuth client secret
+        #[arg(long)]
+        client_secret: Option<String>,
+        /// OAuth authorization URL
+        #[arg(long)]
+        authorization_url: Option<String>,
+        /// OAuth token URL
+        #[arg(long)]
+        token_url: Option<String>,
+        /// Device code URL
+        #[arg(long)]
+        device_code_url: Option<String>,
+        /// Scopes to request (space-separated)
+        #[arg(long)]
+        scopes: Option<String>,
+        /// Target URL for this service
+        #[arg(long)]
+        url: Option<String>,
+        /// NyxID API base URL
+        #[arg(long)]
+        api_url: Option<String>,
+        /// NyxID access token
+        #[arg(long)]
+        access_token: Option<String>,
+    },
+    /// Auto-setup credentials for a service (fetches requirements from catalog)
+    Setup {
+        /// Service slug (e.g., "llm-openai", "api-twitter")
+        #[arg(long)]
+        service: String,
+        /// NyxID API base URL
+        #[arg(long)]
+        api_url: Option<String>,
+        /// NyxID access token
+        #[arg(long)]
+        access_token: Option<String>,
+    },
+    /// List configured credentials
+    List,
+    /// Remove a credential for a service
+    Remove {
+        /// Service slug to remove
+        #[arg(long)]
+        service: String,
+    },
+}
+
+// ---- Node OpenClaw subcommands ----
+
+#[derive(Subcommand)]
+pub enum NodeOpenClawCommands {
+    /// Connect to an OpenClaw gateway
+    Connect {
+        /// OpenClaw gateway URL (e.g., http://localhost:18789)
+        #[arg(long)]
+        url: String,
+        /// OpenClaw gateway bearer token
+        #[arg(long)]
+        token: Option<String>,
+        /// NyxID API base URL
+        #[arg(long)]
+        api_url: Option<String>,
+        /// NyxID access token
+        #[arg(long)]
+        access_token: Option<String>,
+    },
+    /// Show OpenClaw connection status
+    Status,
+    /// Disconnect from OpenClaw
+    Disconnect,
+}
+
+// ---- Credential secret format ----
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum CredentialSecretFormat {
+    /// Store the secret exactly as entered.
+    Raw,
+    /// Prefix the secret with "Bearer ".
+    Bearer,
+    /// Base64-encode "username:password" and prefix it with "Basic ".
+    Basic,
+}
+
+// ---- Proxy (C8-C10) ----
+
+#[derive(Subcommand)]
+pub enum ProxyCommands {
+    /// List proxyable services (service discovery)
+    Discover {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Send a request through the NyxID proxy
+    Request {
+        /// Service slug or UUID
+        service: String,
+        /// Request path (e.g., v1/chat/completions)
+        #[arg(default_value = "")]
+        path: String,
+        /// HTTP method
+        #[arg(long, short, default_value = "GET")]
+        method: String,
+        /// Request body (JSON string, or @file to read from file, or - for stdin)
+        #[arg(long, short)]
+        data: Option<String>,
+        /// Extra headers (repeatable, format: Key:Value)
+        #[arg(long = "header", short = 'H')]
+        headers: Vec<String>,
+        /// Stream the response (for SSE/chunked)
+        #[arg(long)]
+        stream: bool,
+        /// Use service ID instead of slug
+        #[arg(long)]
+        by_id: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+// ---- SSH (I27-I28) ----
+
+#[derive(Args)]
+pub struct SshCli {
+    #[command(subcommand)]
+    pub command: SshCommand,
+}
+
+#[derive(Subcommand)]
+pub enum SshCommand {
+    /// Issue a short-lived SSH certificate
+    IssueCert {
+        /// Service ID, slug, or name
+        service_id: String,
+        #[arg(long)]
+        public_key_file: PathBuf,
+        #[arg(long)]
+        principal: String,
+        #[arg(long)]
+        certificate_file: PathBuf,
+        #[arg(long)]
+        ca_public_key_file: Option<PathBuf>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Open an SSH-over-WebSocket tunnel (ProxyCommand)
+    Proxy {
+        /// Service ID, slug, or name
+        service_id: String,
+        #[arg(long, default_value_t = false)]
+        issue_certificate: bool,
+        #[arg(long)]
+        public_key_file: Option<PathBuf>,
+        #[arg(long)]
+        principal: Option<String>,
+        #[arg(long)]
+        certificate_file: Option<PathBuf>,
+        #[arg(long)]
+        ca_public_key_file: Option<PathBuf>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Print an OpenSSH config stanza
+    Config {
+        #[arg(long)]
+        host_alias: String,
+        #[arg(long)]
+        base_url: String,
+        #[arg(long)]
+        service_id: String,
+        #[arg(long)]
+        principal: String,
+        #[arg(long)]
+        identity_file: PathBuf,
+        #[arg(long)]
+        certificate_file: PathBuf,
+        #[arg(long, default_value = "NYXID_ACCESS_TOKEN")]
+        access_token_env: String,
+        #[arg(long)]
+        ca_public_key_file: Option<PathBuf>,
+    },
+    /// Execute a command on a remote host via SSH
+    Exec {
+        /// Service ID, slug, or name
+        service_id: String,
+        /// SSH principal (username)
+        #[arg(long)]
+        principal: String,
+        /// Command to execute
+        #[arg(trailing_var_arg = true, required = true)]
+        command: Vec<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Open an interactive SSH terminal
+    Terminal {
+        /// Service ID, slug, or name
+        service_id: String,
+        /// SSH principal (username)
+        #[arg(long)]
+        principal: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+// ---- OpenClaw ----
+
+#[derive(Subcommand)]
+pub enum OpenClawCommands {
+    /// Interactive OpenClaw setup
+    Setup {
+        /// OpenClaw gateway URL
+        #[arg(long)]
+        url: Option<String>,
+        /// Read bearer token from this environment variable
+        #[arg(long)]
+        token_env: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+// ---- MCP ----
+
+#[derive(Subcommand)]
+pub enum McpCommands {
+    /// Generate MCP configuration for AI tools
+    Config {
+        /// Target tool: cursor, claude-code, vscode, generic
+        #[arg(long, default_value = "generic")]
+        tool: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+// ---- Notification (I11-I14) ----
+
+#[derive(Subcommand)]
+pub enum NotificationCommands {
+    /// Show current notification settings
+    Settings {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Update notification settings
+    Update {
+        /// Enable/disable approval email notifications
+        #[arg(long)]
+        approval_email: Option<bool>,
+        /// Enable/disable approval push notifications
+        #[arg(long)]
+        approval_push: Option<bool>,
+        /// Enable/disable approval Telegram notifications
+        #[arg(long)]
+        approval_telegram: Option<bool>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Link a Telegram account
+    TelegramLink {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Disconnect Telegram account
+    TelegramDisconnect {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+// ---- Approval (I15-I20) ----
+
+#[derive(Subcommand)]
+pub enum ApprovalCommands {
+    /// List approval requests
+    List {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Show approval request details
+    Show {
+        /// Request ID
+        id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Approve a request
+    Approve {
+        /// Request ID
+        id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Deny a request
+    Deny {
+        /// Request ID
+        id: String,
+        /// Reason for denial
+        #[arg(long)]
+        reason: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// List approval grants
+    Grants {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Revoke an approval grant
+    RevokeGrant {
+        /// Grant ID
+        id: String,
+        /// Skip confirmation
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// List per-service approval configurations
+    ServiceConfigs {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Set approval configuration for a service
+    SetConfig {
+        /// Service config ID or service ID
+        id: String,
+        /// Require approval for this service
+        #[arg(long)]
+        require_approval: Option<bool>,
+        /// Approval mode: "per_request" (every call needs approval) or "grant" (approval creates a time-based grant)
+        #[arg(long)]
+        approval_mode: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+// ---- Endpoint (I24) ----
+
+#[derive(Subcommand)]
+pub enum EndpointCommands {
+    /// List user endpoints
+    List {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Update an endpoint
+    Update {
+        /// Endpoint ID
+        id: String,
+        /// New URL
+        #[arg(long)]
+        url: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Delete an endpoint
+    Delete {
+        /// Endpoint ID
+        id: String,
+        /// Skip confirmation
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+// ---- ExternalKey (I25-I26) ----
+
+#[derive(Subcommand)]
+pub enum ExternalKeyCommands {
+    /// List external API keys/credentials
+    List {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Rotate an external credential
+    Rotate {
+        /// External key ID
+        id: String,
+        /// Read new credential from this environment variable
+        #[arg(long)]
+        credential_env: Option<String>,
+        /// New credential value (hidden from help -- use --credential-env instead)
+        #[arg(long, hide = true)]
+        credential: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Delete an external credential
+    Delete {
+        /// External key ID
+        id: String,
+        /// Skip confirmation
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}

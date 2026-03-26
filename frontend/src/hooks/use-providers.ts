@@ -56,14 +56,20 @@ export function useConnectApiKey() {
       providerId,
       apiKey,
       label,
+      gatewayUrl,
     }: {
       readonly providerId: string;
       readonly apiKey: string;
       readonly label?: string;
+      readonly gatewayUrl?: string;
     }): Promise<ProviderActionResponse> => {
       return api.post<ProviderActionResponse>(
         `/providers/${providerId}/connect/api-key`,
-        { api_key: apiKey, label },
+        {
+          api_key: apiKey,
+          label,
+          gateway_url: gatewayUrl || undefined,
+        },
       );
     },
     onSuccess: () => {
@@ -76,9 +82,21 @@ export function useConnectApiKey() {
 
 export function useInitiateOAuth() {
   return useMutation({
-    mutationFn: async (providerId: string): Promise<OAuthInitiateResponse> => {
+    mutationFn: async (
+      input:
+        | string
+        | {
+            readonly providerId: string;
+            readonly redirectPath?: string;
+          },
+    ): Promise<OAuthInitiateResponse> => {
+      const params =
+        typeof input === "string" ? { providerId: input } : input;
+      const query = params.redirectPath
+        ? `?redirect_path=${encodeURIComponent(params.redirectPath)}`
+        : "";
       return api.get<OAuthInitiateResponse>(
-        `/providers/${providerId}/connect/oauth`,
+        `/providers/${params.providerId}/connect/oauth${query}`,
       );
     },
   });

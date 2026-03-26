@@ -1,9 +1,7 @@
 import { useRouterState, Link } from "@tanstack/react-router";
 import {
   LayoutDashboard,
-  Key,
   Server,
-  Link2,
   Plug,
   Settings,
   BookOpen,
@@ -18,6 +16,8 @@ import {
   ClipboardList,
   Lock,
   HardDrive,
+  Sparkles,
+  Cable,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth-store";
@@ -26,10 +26,7 @@ import { PortalMarkLogo } from "@/components/shared/portal-mark-logo";
 /* ── Navigation Config ── */
 const NAV_ITEMS = [
   { to: "/", icon: LayoutDashboard, label: "Dashboard" },
-  { to: "/api-keys", icon: Key, label: "API Keys" },
-  { to: "/services", icon: Server, label: "Services" },
-  { to: "/connections", icon: Link2, label: "Connections" },
-  { to: "/providers", icon: Plug, label: "Providers" },
+  { to: "/keys", icon: Cable, label: "AI Services" },
   { to: "/nodes", icon: HardDrive, label: "Nodes" },
   { to: "/settings", icon: Settings, label: "Settings" },
   { to: "/settings/consents", icon: KeyRound, label: "Authorized Apps" },
@@ -44,6 +41,7 @@ const APPROVAL_NAV_ITEMS = [
 
 const DEVELOPER_NAV_ITEMS = [
   { to: "/developer/apps", icon: Code, label: "Developer Apps" },
+  { to: "/ai-setup", icon: Sparkles, label: "AI Setup" },
   { to: "/integration-guide", icon: BookMarked, label: "Integration Guide" },
 ] as const;
 
@@ -53,6 +51,8 @@ const ADMIN_NAV_ITEMS = [
   { to: "/admin/roles", icon: ShieldCheck, label: "Roles" },
   { to: "/admin/groups", icon: UsersRound, label: "Groups" },
   { to: "/admin/nodes", icon: HardDrive, label: "Nodes" },
+  { to: "/services", icon: Server, label: "Services" },
+  { to: "/providers", icon: Plug, label: "Providers" },
 ] as const;
 
 /** Check if a nav item is the best (most specific) match for the current path. */
@@ -79,7 +79,11 @@ function NavLink({
   isActive,
   onClick,
 }: {
-  readonly item: { readonly to: string; readonly icon: React.ComponentType<{ className?: string }>; readonly label: string };
+  readonly item: {
+    readonly to: string;
+    readonly icon: React.ComponentType<{ className?: string }>;
+    readonly label: string;
+  };
   readonly isActive: boolean;
   readonly onClick?: () => void;
 }) {
@@ -93,31 +97,47 @@ function NavLink({
           ? "bg-primary/[0.15] font-medium text-foreground"
           : "font-normal text-muted-foreground hover:bg-accent hover:text-accent-foreground",
       )}
-      style={isActive ? { boxShadow: "inset 2px 0 0 0 var(--color-primary)" } : undefined}
+      style={
+        isActive
+          ? { boxShadow: "inset 2px 0 0 0 var(--color-primary)" }
+          : undefined
+      }
     >
-      <item.icon className={cn("h-[18px] w-[18px] shrink-0", isActive ? "text-primary" : "text-text-tertiary")} />
+      <item.icon
+        className={cn(
+          "h-[18px] w-[18px] shrink-0",
+          isActive ? "text-primary" : "text-text-tertiary",
+        )}
+      />
       {item.label}
     </Link>
   );
 }
 
 /* ── VoidPortal Sidebar ── */
-export function Sidebar({ onNavigate }: { readonly onNavigate?: () => void } = {}) {
+export function Sidebar({
+  onNavigate,
+}: { readonly onNavigate?: () => void } = {}) {
   const routerState = useRouterState();
   const user = useAuthStore((s) => s.user);
   const currentPath = routerState.location.pathname;
 
   /* Initials from user name or email */
   const initials = user?.name
-    ? user.name.split(" ").map((w) => w[0]).join("").slice(0, 2).toUpperCase()
-    : user?.email?.slice(0, 2).toUpperCase() ?? "U";
+    ? user.name
+        .split(" ")
+        .map((w) => w[0])
+        .join("")
+        .slice(0, 2)
+        .toUpperCase()
+    : (user?.email?.slice(0, 2).toUpperCase() ?? "U");
 
   return (
-    <aside className="flex h-full w-[280px] flex-col justify-between overflow-y-auto border-r border-border bg-sidebar px-7 py-10">
-      {/* ── Top: Logo + Navigation ── */}
-      <div className="flex flex-col gap-12">
+    <aside className="flex h-full w-[280px] flex-col overflow-y-auto border-r border-border bg-sidebar px-7 py-10">
+      {/* ── Navigation ── */}
+      <div className="flex flex-1 flex-col gap-6">
         {/* Logo */}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 mb-6">
           <PortalMarkLogo size={36} className="shrink-0" />
           <span className="logo-wordmark text-[22px]">NyxID</span>
         </div>
@@ -133,10 +153,7 @@ export function Sidebar({ onNavigate }: { readonly onNavigate?: () => void } = {
             />
           ))}
         </nav>
-      </div>
 
-      {/* ── Bottom: Developer + Admin + Account ── */}
-      <div className="flex flex-col gap-6">
         {/* Approvals section */}
         <div className="flex flex-col gap-1">
           <p className="mb-1 px-4 text-[11px] font-semibold uppercase tracking-[1px] text-text-tertiary">
@@ -183,20 +200,22 @@ export function Sidebar({ onNavigate }: { readonly onNavigate?: () => void } = {
             ))}
           </div>
         )}
+      </div>
 
-        {/* Account row */}
-        <div className="flex items-center gap-3 border-t border-border pt-4">
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-primary">
-            <span className="text-xs font-semibold text-void-400">{initials}</span>
-          </div>
-          <div className="flex min-w-0 flex-col gap-0.5">
-            <span className="truncate text-[13px] font-medium text-foreground">
-              {user?.name ?? "User"}
-            </span>
-            <span className="truncate text-[11px] text-text-tertiary">
-              {user?.email ?? ""}
-            </span>
-          </div>
+      {/* ── Account ── */}
+      <div className="flex items-center gap-3 border-t border-border mt-6 pt-4">
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-primary">
+          <span className="text-xs font-semibold text-void-400">
+            {initials}
+          </span>
+        </div>
+        <div className="flex min-w-0 flex-col gap-0.5">
+          <span className="truncate text-[13px] font-medium text-foreground">
+            {user?.name ?? "User"}
+          </span>
+          <span className="truncate text-[11px] text-text-tertiary">
+            {user?.email ?? ""}
+          </span>
         </div>
       </div>
     </aside>

@@ -146,16 +146,15 @@ export function ConsentsPage() {
             <DialogTitle>Revoke Access</DialogTitle>
             <DialogDescription>
               Are you sure you want to revoke access for{" "}
-              {revokeTarget ? `"${revokeTarget.client_name}"` : "this application"}
+              {revokeTarget
+                ? `"${revokeTarget.client_name}"`
+                : "this application"}
               ? The application will no longer be able to access your account
               with the granted scopes.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setRevokeClientId(null)}
-            >
+            <Button variant="outline" onClick={() => setRevokeClientId(null)}>
               Cancel
             </Button>
             <Button

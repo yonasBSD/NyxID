@@ -45,8 +45,7 @@ interface EndpointFormDialogProps {
 }
 
 const DESCRIPTION_MAX_LENGTH = 500;
-const DESCRIPTION_MAX_ERROR =
-  "Description must be at most 500 characters";
+const DESCRIPTION_MAX_ERROR = "Description must be at most 500 characters";
 
 function serializeJson(value: unknown): string {
   if (value === null || value === undefined) return "";

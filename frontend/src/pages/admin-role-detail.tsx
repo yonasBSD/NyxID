@@ -2,7 +2,12 @@ import { useState } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useRole, useUpdateRole, useDeleteRole } from "@/hooks/use-rbac";
+import {
+  useRole,
+  useUpdateRole,
+  useDeleteRole,
+  useBulkAssignRole,
+} from "@/hooks/use-rbac";
 import { updateRoleSchema, type UpdateRoleFormData } from "@/schemas/rbac";
 import { ApiError } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
@@ -30,7 +35,7 @@ import {
   FormLabel,
   FormMessage,
 } from "@/components/ui/form";
-import { Pencil, Trash2, AlertCircle } from "lucide-react";
+import { Pencil, Trash2, AlertCircle, Users } from "lucide-react";
 import { toast } from "sonner";
 import { Checkbox } from "@/components/ui/checkbox";
 
@@ -41,9 +46,11 @@ export function AdminRoleDetailPage() {
   const { data: role, isLoading, error } = useRole(roleId);
   const updateMutation = useUpdateRole();
   const deleteMutation = useDeleteRole();
+  const bulkAssignMutation = useBulkAssignRole();
 
   const [editOpen, setEditOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [bulkAssignOpen, setBulkAssignOpen] = useState(false);
 
   const form = useForm<UpdateRoleFormData>({
     resolver: zodResolver(updateRoleSchema),
@@ -111,6 +118,21 @@ export function AdminRoleDetailPage() {
     }
   }
 
+  async function handleBulkAssignAll() {
+    try {
+      const result = await bulkAssignMutation.mutateAsync({
+        roleId,
+        data: { all: true },
+      });
+      toast.success(result.message);
+      setBulkAssignOpen(false);
+    } catch (err) {
+      toast.error(
+        err instanceof ApiError ? err.message : "Failed to bulk assign role",
+      );
+    }
+  }
+
   if (isLoading) {
     return (
       <div className="space-y-6">
@@ -124,7 +146,9 @@ export function AdminRoleDetailPage() {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 font-display text-lg font-semibold">Role not found</h3>
+        <h3 className="mb-2 font-display text-lg font-semibold">
+          Role not found
+        </h3>
         <p className="mb-4 text-sm text-muted-foreground">
           The role you are looking for does not exist or has been deleted.
         </p>
@@ -149,6 +173,14 @@ export function AdminRoleDetailPage() {
         description={role.description ?? undefined}
         actions={
           <>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setBulkAssignOpen(true)}
+            >
+              <Users className="mr-1 h-3 w-3" />
+              Assign to All Users
+            </Button>
             <Button variant="outline" size="sm" onClick={openEditDialog}>
               <Pencil className="mr-1 h-3 w-3" />
               Edit
@@ -331,8 +363,9 @@ export function AdminRoleDetailPage() {
           <DialogHeader>
             <DialogTitle>Delete Role</DialogTitle>
             <DialogDescription>
-              Are you sure you want to delete &quot;{role.name}&quot;? It will be
-              removed from all users and groups. This action cannot be undone.
+              Are you sure you want to delete &quot;{role.name}&quot;? It will
+              be removed from all users and groups. This action cannot be
+              undone.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -345,6 +378,31 @@ export function AdminRoleDetailPage() {
               isLoading={deleteMutation.isPending}
             >
               Delete Role
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Bulk Assign Confirmation */}
+      <Dialog open={bulkAssignOpen} onOpenChange={setBulkAssignOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Assign Role to All Users</DialogTitle>
+            <DialogDescription>
+              This will assign the &quot;{role.name}&quot; role to every
+              existing user who does not already have it. Users who already have
+              this role will not be affected.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setBulkAssignOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => void handleBulkAssignAll()}
+              isLoading={bulkAssignMutation.isPending}
+            >
+              Assign to All Users
             </Button>
           </DialogFooter>
         </DialogContent>

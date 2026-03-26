@@ -9,11 +9,12 @@ use futures::{StreamExt, TryStreamExt};
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
-    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, legacy_http_service_type_filter,
 };
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::models::user_service_connection::{
@@ -22,8 +23,9 @@ use crate::models::user_service_connection::{
 use crate::mw::auth::AuthUser;
 use crate::services::node_ws_manager::{NodeProxyRequest, ProxyResponseType, StreamChunk};
 use crate::services::{
-    approval_service, audit_service, chatgpt_translator, delegation_service, identity_service,
-    node_metrics_service, node_routing_service, node_service, notification_service, proxy_service,
+    action_description, approval_service, audit_service, chatgpt_translator, delegation_service,
+    identity_service, node_metrics_service, node_routing_service, node_service,
+    notification_service, proxy_service,
 };
 
 /// Response headers that are safe to forward back to the client.
@@ -55,37 +57,137 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
     "x-correlation-id",
 ];
 
-/// ANY /api/v1/proxy/{service_id}/{*path}
+/// Pre-resolved proxy target from the new UserService path.
+struct PreResolved {
+    target: proxy_service::ProxyTarget,
+    node_id: Option<String>,
+    /// The UserService ID for API key scope checks.
+    user_service_id: Option<String>,
+    has_server_credential: bool,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/proxy/{service_id}/{path}",
+    params(
+        ("service_id" = String, Path, description = "Downstream service ID (UUID)"),
+        ("path" = String, Path, description = "Downstream API path")
+    ),
+    responses(
+        (status = 200, description = "Proxied response from downstream service"),
+        (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse),
+        (status = 403, description = "Forbidden / approval required", body = crate::errors::ErrorResponse),
+        (status = 404, description = "Service not found", body = crate::errors::ErrorResponse)
+    ),
+    tag = "Proxy"
+)]
+/// ANY /api/v1/proxy/:service_id/*path
 ///
 /// Forward the request to the downstream service with credential injection,
 /// identity propagation, and delegated provider credentials.
+/// Tries the new UserService path first (by catalog_service_id), falls back to old.
 pub async fn proxy_request(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Path((service_id, path)): Path<(String, String)>,
     request: Request<Body>,
 ) -> AppResult<Response> {
+    let user_id_str = auth_user.user_id.to_string();
+
+    // Try new UserService path first (lookup by catalog_service_id)
+    if let Some(resolved) = proxy_service::resolve_proxy_target_from_user_service(
+        &state.db,
+        &state.encryption_keys,
+        &state.node_ws_manager,
+        &user_id_str,
+        None,
+        Some(&service_id),
+    )
+    .await?
+    {
+        let effective_service_id = resolved.target.service.id.clone();
+        return execute_proxy_inner(
+            &state,
+            &auth_user,
+            &effective_service_id,
+            &path,
+            request,
+            Some(PreResolved {
+                target: resolved.target,
+                node_id: resolved.node_id,
+                user_service_id: Some(resolved.user_service_id),
+                has_server_credential: resolved.has_server_credential,
+            }),
+        )
+        .await;
+    }
+
+    // Fall back to old path
     execute_proxy(&state, &auth_user, &service_id, &path, request).await
 }
 
-/// ANY /api/v1/proxy/s/{slug}/{*path}
+#[utoipa::path(
+    post,
+    path = "/api/v1/proxy/s/{slug}/{path}",
+    params(
+        ("slug" = String, Path, description = "Service slug (e.g., llm-openai, api-github)"),
+        ("path" = String, Path, description = "Downstream API path")
+    ),
+    responses(
+        (status = 200, description = "Proxied response from downstream service"),
+        (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse),
+        (status = 403, description = "Forbidden / approval required", body = crate::errors::ErrorResponse),
+        (status = 404, description = "Service not found", body = crate::errors::ErrorResponse)
+    ),
+    tag = "Proxy"
+)]
+/// ANY /api/v1/proxy/s/:slug/*path
 ///
 /// Resolve the service by slug, then forward via the shared proxy pipeline.
+/// Tries the new UserService path first (by slug), then falls back to old
+/// DownstreamService resolution.
 pub async fn proxy_request_by_slug(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Path((slug, path)): Path<(String, String)>,
     request: Request<Body>,
 ) -> AppResult<Response> {
+    let user_id_str = auth_user.user_id.to_string();
+
+    // Try new UserService path first (by slug)
+    if let Some(resolved) = proxy_service::resolve_proxy_target_from_user_service(
+        &state.db,
+        &state.encryption_keys,
+        &state.node_ws_manager,
+        &user_id_str,
+        Some(&slug),
+        None,
+    )
+    .await?
+    {
+        let effective_service_id = resolved.target.service.id.clone();
+        return execute_proxy_inner(
+            &state,
+            &auth_user,
+            &effective_service_id,
+            &path,
+            request,
+            Some(PreResolved {
+                target: resolved.target,
+                node_id: resolved.node_id,
+                user_service_id: Some(resolved.user_service_id),
+                has_server_credential: resolved.has_server_credential,
+            }),
+        )
+        .await;
+    }
+
+    // Fall back to old path
     let service = proxy_service::resolve_service_by_slug(&state.db, &slug).await?;
     execute_proxy(&state, &auth_user, &service.id, &path, request).await
 }
 
-/// Core proxy execution logic shared by UUID and slug handlers.
-///
-/// Takes the resolved service_id (UUID string) and executes the full proxy
-/// pipeline: resolve target, build identity headers, inject delegation token,
-/// resolve delegated credentials, forward request, and return response.
+/// Core proxy execution logic shared by UUID and slug handlers (old path).
 async fn execute_proxy(
     state: &AppState,
     auth_user: &AuthUser,
@@ -93,25 +195,33 @@ async fn execute_proxy(
     path: &str,
     request: Request<Body>,
 ) -> AppResult<Response> {
-    let user_id_str = auth_user.user_id.to_string();
-    let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
-    proxy_service::validate_requested_proxy_path(path)?;
+    execute_proxy_inner(state, auth_user, service_id, path, request, None).await
+}
 
-    // Resolve node routing FIRST so node-backed users bypass credential checks
-    let node_route = node_routing_service::resolve_node_route(
+/// Resolve proxy target and node routing via the old DownstreamService path.
+async fn resolve_via_downstream_service(
+    state: &AppState,
+    user_id_str: &str,
+    service_id: &str,
+) -> AppResult<(
+    Option<node_routing_service::NodeRoute>,
+    proxy_service::ProxyTarget,
+    bool,
+    Option<String>,
+)> {
+    let nr = node_routing_service::resolve_node_route(
         &state.db,
-        &user_id_str,
+        user_id_str,
         service_id,
         &state.node_ws_manager,
     )
     .await?;
 
-    let (target, has_server_credential) = if node_route.is_some() {
-        // Node route available: use lenient resolution (no credential required)
+    let (t, has_cred) = if nr.is_some() {
         match proxy_service::resolve_proxy_target_lenient(
             &state.db,
             &state.encryption_keys,
-            &user_id_str,
+            user_id_str,
             service_id,
         )
         .await
@@ -120,7 +230,7 @@ async fn execute_proxy(
             Err(e) => {
                 audit_service::log_async(
                     state.db.clone(),
-                    Some(user_id_str.clone()),
+                    Some(user_id_str.to_string()),
                     "proxy_request_denied".to_string(),
                     Some(serde_json::json!({
                         "service_id": service_id,
@@ -133,11 +243,10 @@ async fn execute_proxy(
             }
         }
     } else {
-        // No node route: strict credential resolution (unchanged behavior)
         match proxy_service::resolve_proxy_target(
             &state.db,
             &state.encryption_keys,
-            &user_id_str,
+            user_id_str,
             service_id,
         )
         .await
@@ -146,7 +255,7 @@ async fn execute_proxy(
             Err(e) => {
                 audit_service::log_async(
                     state.db.clone(),
-                    Some(user_id_str.clone()),
+                    Some(user_id_str.to_string()),
                     "proxy_request_denied".to_string(),
                     Some(serde_json::json!({
                         "service_id": service_id,
@@ -160,65 +269,106 @@ async fn execute_proxy(
         }
     };
 
-    // Check approval if user has it enabled for this service.
-    // Only direct browser sessions bypass approval; API keys, delegated tokens,
-    // and service accounts all require approval since they represent programmatic access.
-    let requires_approval = approval_service::requires_approval_for_service(
+    Ok((nr, t, has_cred, None))
+}
+
+async fn build_pre_resolved_node_route(
+    state: &AppState,
+    user_id: &str,
+    service_id: &str,
+    explicit_node_id: Option<&str>,
+) -> AppResult<Option<node_routing_service::NodeRoute>> {
+    let Some(explicit_node_id) = explicit_node_id else {
+        return Ok(None);
+    };
+
+    let fallback_node_ids = node_routing_service::list_viable_binding_node_ids(
         &state.db,
-        &approval_owner_user_id,
+        user_id,
         service_id,
+        state.node_ws_manager.as_ref(),
     )
-    .await?;
+    .await?
+    .into_iter()
+    .filter(|node_id| node_id != explicit_node_id)
+    .collect();
 
-    if should_enforce_runtime_approval(requires_approval, &auth_user.auth_method) {
-        let requester_type = auth_user.approval_requester_type().ok_or_else(|| {
-            AppError::Forbidden("Session auth does not require approval".to_string())
-        })?;
-        let requester_id = auth_user.approval_requester_id();
+    Ok(Some(node_routing_service::NodeRoute {
+        node_id: explicit_node_id.to_string(),
+        fallback_node_ids,
+    }))
+}
 
-        let has_grant = approval_service::check_approval(
-            &state.db,
-            &approval_owner_user_id,
-            service_id,
-            requester_type,
-            &requester_id,
-        )
-        .await?;
+/// Inner proxy execution with optional pre-resolved target from UserService path.
+///
+/// When `pre_resolved` is `Some`, the target and node routing are already known
+/// (from `resolve_proxy_target_from_user_service`). When `None`, falls back to
+/// the original DownstreamService resolution.
+async fn execute_proxy_inner(
+    state: &AppState,
+    auth_user: &AuthUser,
+    service_id: &str,
+    path: &str,
+    request: Request<Body>,
+    pre_resolved: Option<PreResolved>,
+) -> AppResult<Response> {
+    let user_id_str = auth_user.user_id.to_string();
+    let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
 
-        if !has_grant {
-            let channel =
-                notification_service::get_or_create_channel(&state.db, &approval_owner_user_id)
-                    .await?;
-
-            let request_method = request.method().as_str().to_string();
-            let timeout_secs = channel.approval_timeout_secs;
-            let approval_request = approval_service::create_approval_request(
-                &state.db,
-                &state.config,
-                &state.http_client,
-                state.fcm_auth.as_deref(),
-                state.apns_auth.as_deref(),
-                &approval_owner_user_id,
-                service_id,
-                &target.service.name,
-                &target.service.slug,
-                requester_type,
-                &requester_id,
-                None,
-                &format!("proxy:{} {}", request_method, path),
-                timeout_secs,
-            )
-            .await?;
-
-            // Block until the user approves/rejects or timeout expires
-            approval_service::wait_for_decision(&state.db, &approval_request.id, timeout_secs)
+    // Resolve target and node routing
+    let (node_route, target, has_server_credential, _resolved_user_service_id) = if let Some(pre) =
+        pre_resolved
+    {
+        // New UserService path: target already resolved
+        let mut node_route =
+            build_pre_resolved_node_route(state, &user_id_str, service_id, pre.node_id.as_deref())
                 .await?;
+
+        // API key scope enforcement
+        if let Some(ref us_id) = pre.user_service_id
+            && !auth_user.allow_all_services
+            && !auth_user.allowed_service_ids.contains(us_id)
+        {
+            return Err(AppError::ApiKeyScopeForbidden(
+                "API key does not have access to this service".to_string(),
+            ));
         }
-    }
+        if let Some(ref nid) = pre.node_id
+            && !auth_user.allow_all_nodes
+            && !auth_user.allowed_node_ids.contains(nid)
+        {
+            return Err(AppError::ApiKeyScopeForbidden(
+                "API key does not have access to this node".to_string(),
+            ));
+        }
+        if !auth_user.allow_all_nodes
+            && let Some(route) = node_route.as_mut()
+        {
+            route
+                .fallback_node_ids
+                .retain(|nid| auth_user.allowed_node_ids.contains(nid));
+        }
+
+        (
+            node_route,
+            pre.target,
+            pre.has_server_credential,
+            pre.user_service_id,
+        )
+    } else {
+        // Old DownstreamService path -- scoped keys must use configured services
+        if !auth_user.allow_all_services {
+            return Err(AppError::ApiKeyScopeForbidden(
+                "Scoped API keys must use configured services".to_string(),
+            ));
+        }
+
+        resolve_via_downstream_service(state, &user_id_str, service_id).await?
+    };
 
     // === Request Decomposition ===
-    // Extract method, query, headers, and body before branching between
-    // node proxy and standard proxy paths, since both need them.
+    // Extract method, query, headers, and body BEFORE approval check so we can
+    // build a rich action description for the approval notification.
     let method = request.method().clone();
     let method_str = method.as_str().to_string();
     let query = request.uri().query().map(String::from);
@@ -239,11 +389,88 @@ async fn execute_proxy(
             }
         })
         .collect();
-
     // Read the request body (10MB limit)
     let body_bytes = axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024)
         .await
         .map_err(|e| AppError::BadRequest(format!("Failed to read body: {e}")))?;
+
+    // Check approval if user has it enabled for this service.
+    // Only direct browser sessions bypass approval; API keys, delegated tokens,
+    // and service accounts all require approval since they represent programmatic access.
+    let requires_approval = approval_service::requires_approval_for_service(
+        &state.db,
+        &approval_owner_user_id,
+        service_id,
+    )
+    .await?;
+
+    if should_enforce_runtime_approval(requires_approval, &auth_user.auth_method) {
+        let requester_type = auth_user.approval_requester_type().ok_or_else(|| {
+            AppError::Forbidden("Session auth does not require approval".to_string())
+        })?;
+        let requester_id = auth_user.approval_requester_id();
+
+        let approval_mode =
+            approval_service::resolve_approval_mode(&state.db, &approval_owner_user_id, service_id)
+                .await?;
+
+        // In grant mode, check for existing grant first.
+        // In per_request mode, skip grant check -- every request needs fresh approval.
+        let has_grant =
+            if approval_mode == crate::models::service_approval_config::ApprovalMode::Grant {
+                approval_service::check_approval(
+                    &state.db,
+                    &approval_owner_user_id,
+                    service_id,
+                    requester_type,
+                    &requester_id,
+                )
+                .await?
+            } else {
+                false
+            };
+
+        if !has_grant {
+            let channel =
+                notification_service::get_or_create_channel(&state.db, &approval_owner_user_id)
+                    .await?;
+
+            let action_desc = action_description::build_action_description(
+                &method_str,
+                path,
+                if body_bytes.is_empty() {
+                    None
+                } else {
+                    Some(&body_bytes)
+                },
+            );
+
+            let timeout_secs = channel.approval_timeout_secs;
+            let approval_request = approval_service::create_approval_request(
+                &state.db,
+                &state.config,
+                &state.http_client,
+                state.fcm_auth.as_deref(),
+                state.apns_auth.as_deref(),
+                &approval_owner_user_id,
+                service_id,
+                &target.service.name,
+                &target.service.slug,
+                requester_type,
+                &requester_id,
+                None,
+                &format!("proxy:{} {}", method_str, path),
+                Some(&action_desc),
+                approval_mode.clone(),
+                timeout_secs,
+            )
+            .await?;
+
+            // Block until the user approves/rejects or timeout expires
+            approval_service::wait_for_decision(&state.db, &approval_request.id, timeout_secs)
+                .await?;
+        }
+    }
 
     let body = if body_bytes.is_empty() {
         None
@@ -403,47 +630,29 @@ async fn execute_proxy(
             // Resolve signing secret for this specific node. When HMAC signing is
             // enabled, unsigned requests are treated as a routing failure rather
             // than silently downgrading integrity guarantees.
-            let signing_secret: Option<Vec<u8>> = if state.config.node_hmac_signing_enabled {
-                let Some(node) = node_service::get_node_by_id(&state.db, node_id).await? else {
-                    last_error = Some(AppError::NodeNotFound(format!(
-                        "Node {node_id} not found during proxy routing"
-                    )));
-                    continue;
-                };
-
-                let Some(encrypted_secret) = node.signing_secret_encrypted.as_deref() else {
-                    tracing::warn!(
-                        node_id = %node_id,
-                        "Skipping node route because signing secret is missing"
-                    );
-                    last_error = Some(AppError::NodeOffline(format!(
-                        "Node {node_id} is missing its signing secret"
-                    )));
-                    continue;
-                };
-
-                let secret_hex = String::from_utf8(
-                    state
-                        .encryption_keys
-                        .decrypt(encrypted_secret)
-                        .await
-                        .map_err(|e| {
-                            AppError::Internal(format!(
-                                "Failed to decrypt node signing secret for {node_id}: {e}"
-                            ))
-                        })?,
+            let signing_secret = if state.config.node_hmac_signing_enabled {
+                match node_service::get_node_signing_secret(
+                    &state.db,
+                    state.encryption_keys.as_ref(),
+                    node_id,
                 )
-                .map_err(|e| {
-                    AppError::Internal(format!(
-                        "Node signing secret for {node_id} is not valid UTF-8: {e}"
-                    ))
-                })?;
-
-                Some(hex::decode(&secret_hex).map_err(|e| {
-                    AppError::Internal(format!(
-                        "Node signing secret for {node_id} is not valid hex: {e}"
-                    ))
-                })?)
+                .await
+                {
+                    Ok(secret) => Some(secret),
+                    Err(AppError::NodeNotFound(message)) => {
+                        last_error = Some(AppError::NodeNotFound(message));
+                        continue;
+                    }
+                    Err(AppError::NodeOffline(message)) => {
+                        tracing::warn!(
+                            node_id = %node_id,
+                            "Skipping node route because signing secret is missing"
+                        );
+                        last_error = Some(AppError::NodeOffline(message));
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
             } else {
                 None
             };
@@ -451,7 +660,11 @@ async fn execute_proxy(
             let start = std::time::Instant::now();
             let result = state
                 .node_ws_manager
-                .send_proxy_request(node_id, attempt_request, signing_secret.as_deref())
+                .send_proxy_request(
+                    node_id,
+                    attempt_request,
+                    signing_secret.as_ref().map(|secret| secret.as_slice()),
+                )
                 .await;
             let latency_ms = start.elapsed().as_millis() as u64;
 
@@ -719,11 +932,14 @@ async fn execute_proxy(
     let status = StatusCode::from_u16(downstream_response.status().as_u16())
         .unwrap_or(StatusCode::BAD_GATEWAY);
 
-    let is_sse = downstream_response
+    let upstream_is_sse = downstream_response
         .headers()
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .is_some_and(|ct| ct.contains("text/event-stream"));
+    // `streaming_supported` is discovery metadata only; runtime passthrough
+    // follows the upstream response on each request.
+    let is_sse = upstream_is_sse;
 
     let mut response_builder = Response::builder().status(status);
 
@@ -1169,7 +1385,7 @@ mod tests {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ProxyServiceItem {
     pub id: String,
     pub name: String,
@@ -1186,6 +1402,14 @@ pub struct ProxyServiceItem {
     pub proxy_url: String,
     /// Slug-based proxy URL (developer-friendly)
     pub proxy_url_slug: String,
+    /// Whether NyxID can serve a Scalar UI for this service
+    pub docs_url: Option<String>,
+    /// Proxied OpenAPI JSON URL
+    pub openapi_url: Option<String>,
+    /// Proxied AsyncAPI JSON URL
+    pub asyncapi_url: Option<String>,
+    /// Whether the service advertises streaming support
+    pub streaming_supported: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1194,7 +1418,7 @@ pub struct ProxyServicesQuery {
     pub per_page: Option<u64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ProxyServicesResponse {
     pub services: Vec<ProxyServiceItem>,
     pub total: u64,
@@ -1207,6 +1431,19 @@ pub struct ProxyServicesResponse {
 /// List downstream services available for proxying with their proxy URLs.
 /// Excludes "provider" category services (not proxyable).
 /// Supports pagination via `page` and `per_page` query parameters.
+#[utoipa::path(
+    get,
+    path = "/api/v1/proxy/services",
+    params(
+        ("page" = Option<u64>, Query, description = "Page number"),
+        ("per_page" = Option<u64>, Query, description = "Items per page")
+    ),
+    responses(
+        (status = 200, description = "Proxyable downstream services", body = ProxyServicesResponse),
+        (status = 400, description = "Validation error", body = crate::errors::ErrorResponse)
+    ),
+    tag = "Proxy"
+)]
 pub async fn list_proxy_services(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -1219,10 +1456,11 @@ pub async fn list_proxy_services(
     let per_page = query.per_page.unwrap_or(50).min(100);
     let offset = (page - 1) * per_page;
 
-    let filter = doc! {
+    let mut filter = doc! {
         "is_active": true,
         "service_category": { "$ne": "provider" },
     };
+    filter.extend(legacy_http_service_type_filter());
 
     // Get total count for pagination metadata
     let total = state
@@ -1284,6 +1522,20 @@ pub async fn list_proxy_services(
             has_node_binding: node_bound_set.contains(s.id.as_str()),
             proxy_url: format!("{base}/api/v1/proxy/{}/{{path}}", s.id),
             proxy_url_slug: format!("{base}/api/v1/proxy/s/{}/{{path}}", s.slug),
+            docs_url: s
+                .openapi_spec_url
+                .as_ref()
+                .or(s.asyncapi_spec_url.as_ref())
+                .map(|_| format!("{base}/api/v1/proxy/services/{}/docs", s.id)),
+            openapi_url: s
+                .openapi_spec_url
+                .as_ref()
+                .map(|_| format!("{base}/api/v1/proxy/services/{}/openapi.json", s.id)),
+            asyncapi_url: s
+                .asyncapi_spec_url
+                .as_ref()
+                .map(|_| format!("{base}/api/v1/proxy/services/{}/asyncapi.json", s.id)),
+            streaming_supported: s.streaming_supported,
         })
         .collect();
 

@@ -22,7 +22,11 @@ import type {
   SaServiceConnectionActionResponse,
 } from "@/types/service-accounts";
 
-export function useServiceAccounts(page: number, perPage: number, search?: string) {
+export function useServiceAccounts(
+  page: number,
+  perPage: number,
+  search?: string,
+) {
   return useQuery({
     queryKey: ["admin", "service-accounts", page, perPage, search],
     queryFn: async (): Promise<ServiceAccountListResponse> => {
@@ -79,10 +83,7 @@ export function useUpdateServiceAccount() {
       readonly saId: string;
       readonly data: UpdateServiceAccountRequest;
     }): Promise<ServiceAccount> => {
-      return api.put<ServiceAccount>(
-        `/admin/service-accounts/${saId}`,
-        data,
-      );
+      return api.put<ServiceAccount>(`/admin/service-accounts/${saId}`, data);
     },
     onSuccess: (_, { saId }) => {
       void queryClient.invalidateQueries({
@@ -100,9 +101,7 @@ export function useDeleteServiceAccount() {
 
   return useMutation({
     mutationFn: async (saId: string): Promise<AdminActionResponse> => {
-      return api.delete<AdminActionResponse>(
-        `/admin/service-accounts/${saId}`,
-      );
+      return api.delete<AdminActionResponse>(`/admin/service-accounts/${saId}`);
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({

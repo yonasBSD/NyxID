@@ -61,10 +61,7 @@ export function RedirectUriEditor({
     <div className="space-y-3">
       <div className="space-y-2">
         {uris.map((uri, index) => (
-          <div
-            key={uri}
-            className="flex items-center gap-2"
-          >
+          <div key={uri} className="flex items-center gap-2">
             <code className="flex-1 truncate rounded bg-muted px-2 py-1 text-xs">
               {uri}
             </code>

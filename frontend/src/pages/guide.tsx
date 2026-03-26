@@ -10,7 +10,13 @@ import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { usePublicConfig } from "@/hooks/use-public-config";
 
-function CodeBlock({ children, label }: { readonly children: string; readonly label?: string }) {
+function CodeBlock({
+  children,
+  label,
+}: {
+  readonly children: string;
+  readonly label?: string;
+}) {
   return (
     <div className="relative">
       {label && (
@@ -48,11 +54,7 @@ function Section({
 }
 
 function buildCursorExample(mcpUrl: string): string {
-  return JSON.stringify(
-    { mcpServers: { nyxid: { url: mcpUrl } } },
-    null,
-    2,
-  );
+  return JSON.stringify({ mcpServers: { nyxid: { url: mcpUrl } } }, null, 2);
 }
 
 function buildClaudeCodeExample(mcpUrl: string): string {
@@ -95,46 +97,53 @@ export function GuidePage() {
   return (
     <div className="space-y-8">
       <div>
-        <h2 className="font-display text-3xl md:text-5xl font-normal tracking-tight">Guide</h2>
+        <h2 className="font-display text-3xl md:text-5xl font-normal tracking-tight">
+          Guide
+        </h2>
         <p className="text-muted-foreground">
-          Learn how to set up and use NyxID for identity management and MCP proxy access.
+          Learn how to set up and use NyxID for identity management and MCP
+          proxy access.
         </p>
       </div>
 
-      <Section
-        title="Overview"
-        description="What NyxID does and how it works"
-      >
+      <Section title="Overview" description="What NyxID does and how it works">
         <p className="text-sm text-muted-foreground leading-relaxed">
           NyxID is an identity and access management platform that also acts as
           an MCP (Model Context Protocol) proxy. It lets you manage
           authentication for services and expose their API endpoints as MCP
-          tools that AI clients like Cursor, Claude Code, and Codex can call directly.
+          tools that AI clients like Cursor, Claude Code, and Codex can call
+          directly.
         </p>
         <div className="space-y-2">
           <h4 className="text-sm font-medium">Service Types</h4>
           <div className="grid gap-3 sm:grid-cols-3">
             <div className="rounded-lg border p-3">
               <div className="mb-1 flex items-center gap-2">
-                <Badge variant="secondary" className="text-xs">SSO Provider</Badge>
+                <Badge variant="secondary" className="text-xs">
+                  SSO Provider
+                </Badge>
               </div>
               <p className="text-xs text-muted-foreground">
-                OIDC-based authentication. Users sign in via the provider's OAuth flow.
-                Typically used for identity federation.
+                OIDC-based authentication. Users sign in via the provider's
+                OAuth flow. Typically used for identity federation.
               </p>
             </div>
             <div className="rounded-lg border p-3">
               <div className="mb-1 flex items-center gap-2">
-                <Badge variant="secondary" className="text-xs">External Service</Badge>
+                <Badge variant="secondary" className="text-xs">
+                  External Service
+                </Badge>
               </div>
               <p className="text-xs text-muted-foreground">
-                Users bring their own credentials (API key, bearer token, or basic auth)
-                to connect to third-party APIs.
+                Users bring their own credentials (API key, bearer token, or
+                basic auth) to connect to third-party APIs.
               </p>
             </div>
             <div className="rounded-lg border p-3">
               <div className="mb-1 flex items-center gap-2">
-                <Badge variant="secondary" className="text-xs">Internal Service</Badge>
+                <Badge variant="secondary" className="text-xs">
+                  Internal Service
+                </Badge>
               </div>
               <p className="text-xs text-muted-foreground">
                 Admin configures a shared credential. Users just enable access
@@ -183,8 +192,8 @@ export function GuidePage() {
             <h4 className="text-sm font-medium mb-1">Adding API Endpoints</h4>
             <p className="text-sm text-muted-foreground leading-relaxed">
               After creating a service, add the API endpoints that should be
-              exposed as MCP tools. You can define them manually or auto-discover
-              them by providing an OpenAPI specification URL.
+              exposed as MCP tools. You can define them manually or
+              auto-discover them by providing an OpenAPI specification URL.
             </p>
           </div>
         </div>
@@ -195,15 +204,25 @@ export function GuidePage() {
         description="How users connect their accounts to available services"
       >
         <ol className="list-decimal list-inside space-y-2 text-sm text-muted-foreground leading-relaxed">
-          <li>Navigate to the <strong className="text-foreground">Connections</strong> page from the sidebar.</li>
-          <li>Browse the list of available services and click <strong className="text-foreground">Connect</strong> on the one you want.</li>
           <li>
-            For <strong className="text-foreground">External Services</strong>: enter your API key, bearer token,
-            or credentials in the form that appears.
+            Navigate to the{" "}
+            <strong className="text-foreground">Connections</strong> page from
+            the sidebar.
           </li>
           <li>
-            For <strong className="text-foreground">Internal Services</strong>: click <strong className="text-foreground">Enable</strong> --
-            no credentials needed since the admin has configured a shared one.
+            Browse the list of available services and click{" "}
+            <strong className="text-foreground">Connect</strong> on the one you
+            want.
+          </li>
+          <li>
+            For <strong className="text-foreground">External Services</strong>:
+            enter your API key, bearer token, or credentials in the form that
+            appears.
+          </li>
+          <li>
+            For <strong className="text-foreground">Internal Services</strong>:
+            click <strong className="text-foreground">Enable</strong> -- no
+            credentials needed since the admin has configured a shared one.
           </li>
         </ol>
       </Section>
@@ -230,12 +249,12 @@ export function GuidePage() {
             <ol className="list-decimal list-inside space-y-1 text-sm text-muted-foreground leading-relaxed mb-3">
               <li>
                 Create or edit{" "}
-                <code className="rounded bg-muted px-1.5 py-0.5 text-xs">.cursor/mcp.json</code>{" "}
+                <code className="rounded bg-muted px-1.5 py-0.5 text-xs">
+                  .cursor/mcp.json
+                </code>{" "}
                 in your project root.
               </li>
-              <li>
-                Add the NyxID MCP server configuration below.
-              </li>
+              <li>Add the NyxID MCP server configuration below.</li>
               <li>Restart Cursor -- it will connect to NyxID's MCP proxy.</li>
               <li>When prompted, authenticate via the browser OAuth flow.</li>
               <li>All tools from your connected services will be available.</li>
@@ -250,18 +269,23 @@ export function GuidePage() {
             <ol className="list-decimal list-inside space-y-1 text-sm text-muted-foreground leading-relaxed mb-3">
               <li>
                 Edit{" "}
-                <code className="rounded bg-muted px-1.5 py-0.5 text-xs">~/.claude/settings.json</code>{" "}
+                <code className="rounded bg-muted px-1.5 py-0.5 text-xs">
+                  ~/.claude/settings.json
+                </code>{" "}
                 or the project-level{" "}
-                <code className="rounded bg-muted px-1.5 py-0.5 text-xs">.claude/settings.json</code>.
+                <code className="rounded bg-muted px-1.5 py-0.5 text-xs">
+                  .claude/settings.json
+                </code>
+                .
               </li>
-              <li>
-                Add the NyxID MCP server configuration below.
-              </li>
+              <li>Add the NyxID MCP server configuration below.</li>
               <li>Restart Claude Code.</li>
               <li>Authenticate when prompted.</li>
               <li>All tools from your connected services will be available.</li>
             </ol>
-            <CodeBlock label=".claude/settings.json">{claudeCodeExample}</CodeBlock>
+            <CodeBlock label=".claude/settings.json">
+              {claudeCodeExample}
+            </CodeBlock>
           </div>
 
           <Separator />
@@ -271,11 +295,12 @@ export function GuidePage() {
             <ol className="list-decimal list-inside space-y-1 text-sm text-muted-foreground leading-relaxed mb-3">
               <li>
                 Edit{" "}
-                <code className="rounded bg-muted px-1.5 py-0.5 text-xs">~/.codex/config.toml</code>.
+                <code className="rounded bg-muted px-1.5 py-0.5 text-xs">
+                  ~/.codex/config.toml
+                </code>
+                .
               </li>
-              <li>
-                Add the NyxID MCP server configuration below.
-              </li>
+              <li>Add the NyxID MCP server configuration below.</li>
               <li>Restart Codex.</li>
               <li>Authenticate when prompted.</li>
               <li>All tools from your connected services will be available.</li>
@@ -291,15 +316,17 @@ export function GuidePage() {
       >
         <ol className="list-decimal list-inside space-y-2 text-sm text-muted-foreground leading-relaxed">
           <li>
-            <strong className="text-foreground">Authentication</strong> --
-            NyxID authenticates the MCP client via an OAuth flow in the browser.
+            <strong className="text-foreground">Authentication</strong> -- NyxID
+            authenticates the MCP client via an OAuth flow in the browser.
           </li>
           <li>
-            <strong className="text-foreground">Tool Discovery</strong> --
-            The proxy aggregates API endpoints from all your connected services
-            into a single tool list. Tools are named{" "}
-            <code className="rounded bg-muted px-1.5 py-0.5 text-xs">service-slug__endpoint-name</code>.
-            Built-in meta-tools let you search tools, discover new services,
+            <strong className="text-foreground">Tool Discovery</strong> -- The
+            proxy aggregates API endpoints from all your connected services into
+            a single tool list. Tools are named{" "}
+            <code className="rounded bg-muted px-1.5 py-0.5 text-xs">
+              service-slug__endpoint-name
+            </code>
+            . Built-in meta-tools let you search tools, discover new services,
             and connect to them without leaving your MCP client.
           </li>
           <li>
@@ -308,23 +335,28 @@ export function GuidePage() {
             and injects it into the outgoing request to the downstream API.
           </li>
           <li>
-            <strong className="text-foreground">Proxying</strong> --
-            The request is forwarded to the downstream service and the response
-            is returned to the MCP client.
+            <strong className="text-foreground">Proxying</strong> -- The request
+            is forwarded to the downstream service and the response is returned
+            to the MCP client.
           </li>
         </ol>
         <div className="mt-2 space-y-2">
           <div className="flex items-start gap-2 rounded-lg border p-3">
-            <Badge variant="secondary" className="mt-0.5 shrink-0 text-xs">External</Badge>
+            <Badge variant="secondary" className="mt-0.5 shrink-0 text-xs">
+              External
+            </Badge>
             <p className="text-xs text-muted-foreground">
-              Uses the individual user's stored credential (API key, bearer token, or basic auth).
+              Uses the individual user's stored credential (API key, bearer
+              token, or basic auth).
             </p>
           </div>
           <div className="flex items-start gap-2 rounded-lg border p-3">
-            <Badge variant="secondary" className="mt-0.5 shrink-0 text-xs">Internal</Badge>
+            <Badge variant="secondary" className="mt-0.5 shrink-0 text-xs">
+              Internal
+            </Badge>
             <p className="text-xs text-muted-foreground">
-              Uses the admin-configured shared credential. Users do not need
-              to manage or even know the underlying credentials.
+              Uses the admin-configured shared credential. Users do not need to
+              manage or even know the underlying credentials.
             </p>
           </div>
         </div>

@@ -37,7 +37,10 @@ interface ProviderCardProps {
   readonly llmStatus: LlmProviderStatus | undefined;
   readonly gatewayUrl: string;
   readonly hasUserCredentials: boolean;
-  readonly onConnect: (provider: ProviderConfig, hasUserCredentials: boolean) => void;
+  readonly onConnect: (
+    provider: ProviderConfig,
+    hasUserCredentials: boolean,
+  ) => void;
   readonly onDisconnect: (providerId: string) => void;
   readonly onRefresh: (providerId: string) => void;
   readonly onSetupCredentials: (provider: ProviderConfig) => void;
@@ -117,7 +120,9 @@ export function ProviderCard({
             )}
           </div>
           <div className="min-w-0 flex-1">
-            <CardTitle className="truncate text-base">{provider.name}</CardTitle>
+            <CardTitle className="truncate text-base">
+              {provider.name}
+            </CardTitle>
             {provider.description && (
               <CardDescription className="truncate text-xs">
                 {provider.description}
@@ -173,6 +178,11 @@ export function ProviderCard({
                   {token.label}
                 </span>
               )}
+              {token.gateway_url && (
+                <span className="truncate text-xs text-muted-foreground/70">
+                  {token.gateway_url}
+                </span>
+              )}
               {token.expires_at && (
                 <span className="text-xs text-muted-foreground/70">
                   Expires {formatDate(token.expires_at)}
@@ -183,17 +193,17 @@ export function ProviderCard({
               {isExpired &&
                 (provider.provider_type === "oauth2" ||
                   provider.provider_type === "device_code") && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => onRefresh(provider.id)}
-                  disabled={isRefreshing}
-                  isLoading={isRefreshing}
-                >
-                  <RefreshCw className="mr-1.5 h-3 w-3" />
-                  Refresh
-                </Button>
-              )}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => onRefresh(provider.id)}
+                    disabled={isRefreshing}
+                    isLoading={isRefreshing}
+                  >
+                    <RefreshCw className="mr-1.5 h-3 w-3" />
+                    Refresh
+                  </Button>
+                )}
               <Button
                 variant="outline"
                 size="sm"

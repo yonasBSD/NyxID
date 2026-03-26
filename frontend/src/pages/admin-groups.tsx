@@ -134,10 +134,7 @@ export function AdminGroupsPage() {
       {isLoading ? (
         <div className="space-y-2">
           {Array.from({ length: 5 }).map((_, i) => (
-            <Skeleton
-              key={`group-skel-${String(i)}`}
-              className="h-12 w-full"
-            />
+            <Skeleton key={`group-skel-${String(i)}`} className="h-12 w-full" />
           ))}
         </div>
       ) : error ? (
@@ -250,8 +247,8 @@ export function AdminGroupsPage() {
           </DialogHeader>
           <Form {...createForm}>
             <form
-              onSubmit={createForm.handleSubmit((data) =>
-                void handleCreate(data),
+              onSubmit={createForm.handleSubmit(
+                (data) => void handleCreate(data),
               )}
               className="space-y-4"
             >

@@ -39,7 +39,9 @@ function getInitials(name: string | null, email: string): string {
 }
 
 /* ── VoidPortal Header ── */
-export function Header({ onMenuClick }: { readonly onMenuClick?: () => void } = {}) {
+export function Header({
+  onMenuClick,
+}: { readonly onMenuClick?: () => void } = {}) {
   const routerState = useRouterState();
   const navigate = useNavigate();
   const logoutMutation = useLogout();
@@ -64,7 +66,9 @@ export function Header({ onMenuClick }: { readonly onMenuClick?: () => void } = 
         >
           <Menu className="h-5 w-5 text-muted-foreground" />
         </button>
-        <h1 className="font-display text-lg font-normal md:text-[22px]">{title}</h1>
+        <h1 className="font-display text-lg font-normal md:text-[22px]">
+          {title}
+        </h1>
       </div>
 
       <DropdownMenu>
@@ -80,7 +84,9 @@ export function Header({ onMenuClick }: { readonly onMenuClick?: () => void } = 
                 {user?.name ?? user?.email ?? "User"}
               </span>
               {user?.name && (
-                <span className="text-[11px] text-text-tertiary">{user.email}</span>
+                <span className="text-[11px] text-text-tertiary">
+                  {user.email}
+                </span>
               )}
             </div>
             <Avatar className="h-10 w-10">

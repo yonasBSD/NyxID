@@ -91,6 +91,11 @@ pub struct ProviderConfig {
     #[serde(default)]
     pub client_id_param_name: Option<String>,
 
+    /// Whether users must provide their own gateway/instance URL when connecting
+    /// (e.g., self-hosted providers like OpenClaw).
+    #[serde(default)]
+    pub requires_gateway_url: bool,
+
     pub created_by: String,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
@@ -136,6 +141,7 @@ mod tests {
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            requires_gateway_url: false,
             created_by: "admin".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -146,6 +152,7 @@ mod tests {
         assert_eq!(config.provider_type, restored.provider_type);
         assert!(restored.supports_pkce);
         assert_eq!(restored.credential_mode, "admin");
+        assert!(!restored.requires_gateway_url);
     }
 
     #[test]
@@ -177,6 +184,7 @@ mod tests {
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            requires_gateway_url: false,
             created_by: "admin".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),

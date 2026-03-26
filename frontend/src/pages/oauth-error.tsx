@@ -20,7 +20,8 @@ export function OAuthErrorPage() {
   const search = new URLSearchParams(window.location.search);
   const code = search.get("code") ?? "unknown_error";
   const message =
-    search.get("message") ?? "An unexpected error occurred during authorization.";
+    search.get("message") ??
+    "An unexpected error occurred during authorization.";
 
   const title = ERROR_LABELS[code] ?? "Authorization Error";
 
@@ -54,15 +55,10 @@ export function OAuthErrorPage() {
               <p className="font-mono text-xs text-foreground">{code}</p>
             </div>
             <div className="flex gap-3 pt-2">
-              <Button
-                variant="outline"
-                onClick={() => window.history.back()}
-              >
+              <Button variant="outline" onClick={() => window.history.back()}>
                 Go Back
               </Button>
-              <Button onClick={() => void navigate({ to: "/" })}>
-                Home
-              </Button>
+              <Button onClick={() => void navigate({ to: "/" })}>Home</Button>
             </div>
           </CardContent>
         </Card>

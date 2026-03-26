@@ -64,7 +64,10 @@ pub async fn send_approval_notification(
                 &request.service_name,
                 &request.service_slug,
                 requester_label,
-                &request.operation_summary,
+                request
+                    .action_description
+                    .as_deref()
+                    .unwrap_or(&request.operation_summary),
                 channel.approval_timeout_secs,
             )
             .await

@@ -1,20 +1,23 @@
 use axum::{extract::DefaultBodyLimit, extract::Extension, middleware as axum_mw};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
+mod api_docs;
 mod config;
 mod crypto;
 mod db;
 mod errors;
 mod handlers;
+mod login_cli;
 mod models;
 mod mw;
 mod routes;
 mod services;
+mod ssh_cli;
 
 use std::sync::Arc;
 
@@ -29,6 +32,7 @@ use models::mcp_session::McpSessionStore;
 
 use services::node_ws_manager::NodeWsManager;
 use services::push_service::{ApnsAuth, FcmAuth};
+use services::ssh_service::SshSessionManager;
 
 /// Shared application state available to all handlers via Axum's State extractor.
 #[derive(Clone)]
@@ -51,6 +55,8 @@ pub struct AppState {
     pub encryption_keys: Arc<EncryptionKeys>,
     /// WebSocket connection manager for credential nodes
     pub node_ws_manager: Arc<NodeWsManager>,
+    /// Concurrent SSH tunnel session limiter
+    pub ssh_session_manager: Arc<SshSessionManager>,
 }
 
 /// NyxID authentication and SSO platform.
@@ -60,6 +66,16 @@ struct Cli {
     /// Promote an existing user to admin by email address, then exit.
     #[arg(long = "promote-admin", value_name = "EMAIL")]
     promote_admin: Option<String>,
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Authenticate with a NyxID server and print an access token.
+    Login(login_cli::LoginArgs),
+    /// SSH client helper commands for certificate issuance and ProxyCommand integration.
+    Ssh(ssh_cli::SshCli),
 }
 
 #[tokio::main]
@@ -78,8 +94,27 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer().with_target(true))
         .init();
 
+    match cli.command {
+        Some(Commands::Login(args)) => {
+            if let Err(error) = login_cli::run(args).await {
+                eprintln!("Login failed: {error}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        Some(Commands::Ssh(ssh_cli)) => {
+            if let Err(error) = ssh_cli::run(ssh_cli).await {
+                eprintln!("SSH helper failed: {error}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        None => {}
+    }
+
     // Load configuration
     let mut config = AppConfig::from_env();
+    config.validate_ssh_runtime_config();
 
     // Connect to database
     let db = db::create_connection(&config)
@@ -176,6 +211,11 @@ async fn main() {
         .await
         .expect("Failed to seed system roles");
 
+    // Run unified collection migration (idempotent, non-fatal)
+    if let Err(e) = db::migrate_to_unified_collections(&db).await {
+        tracing::warn!("Unified collection migration encountered errors: {e}");
+    }
+
     // --- Server startup ---
     tracing::info!("Starting NyxID authentication server");
     tracing::info!(port = config.port, issuer = %config.jwt_issuer, "Configuration loaded");
@@ -255,6 +295,7 @@ async fn main() {
         config.node_proxy_timeout_secs,
         config.node_max_ws_connections,
     ));
+    let ssh_session_manager = Arc::new(SshSessionManager::new(config.ssh_max_sessions_per_user));
 
     // Create shared state
     let state = AppState {
@@ -269,6 +310,7 @@ async fn main() {
         apns_auth: apns_auth.clone(),
         encryption_keys: encryption_keys.clone(),
         node_ws_manager,
+        ssh_session_manager,
     };
 
     // Create rate limiters
@@ -313,6 +355,11 @@ async fn main() {
     tokio::spawn(async move {
         let mut interval =
             tokio::time::interval(std::time::Duration::from_secs(expiry_interval_secs));
+        // Prevent rapid-fire catch-up sweeps when a tick is delayed (e.g. under
+        // database backpressure). Burst mode (the default) would fire consecutive
+        // sweeps immediately, widening the race window between find() and
+        // update_many() in expire_pending_requests.
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
             if let Err(e) = services::approval_service::expire_pending_requests(
@@ -347,6 +394,35 @@ async fn main() {
             Ok(()) => tracing::info!("Telegram webhook registered: {webhook_url}"),
             Err(e) => tracing::error!("Failed to register Telegram webhook: {e}"),
         }
+
+        // Periodically verify the webhook is healthy and re-register if needed.
+        // Telegram can silently drop webhooks after sustained delivery failures.
+        let wh_http = state.http_client.clone();
+        let wh_token = bot_token.clone();
+        let wh_url = webhook_url.clone();
+        let wh_secret = webhook_secret.clone();
+        tokio::spawn(async move {
+            // Check every 5 minutes
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+            // Skip the first tick (we just registered above)
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                if !services::telegram_service::is_webhook_healthy(&wh_http, &wh_token, &wh_url)
+                    .await
+                {
+                    tracing::warn!("Telegram webhook unhealthy, re-registering");
+                    match services::telegram_service::set_webhook(
+                        &wh_http, &wh_token, &wh_url, &wh_secret,
+                    )
+                    .await
+                    {
+                        Ok(()) => tracing::info!("Telegram webhook re-registered"),
+                        Err(e) => tracing::error!("Telegram webhook re-registration failed: {e}"),
+                    }
+                }
+            }
+        });
     } else if config.telegram_bot_token.is_some() {
         // Development fallback: poll getUpdates when no webhook URL is configured
         let polling_state = state.clone();

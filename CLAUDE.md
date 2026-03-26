@@ -1,6 +1,6 @@
 ## Project Overview
 
-NyxID is an Auth/SSO platform (similar to Supabase Auth) with a Rust backend and React frontend. It provides user authentication, OAuth/OIDC, MFA, credential brokering, admin management, and MCP proxy capabilities.
+NyxID is an Auth/SSO platform (similar to Supabase Auth) with a Rust backend, React frontend, and CLI tools. It provides user authentication, OAuth/OIDC, MFA, credential brokering, admin management, and MCP proxy capabilities. The `nyxid` CLI covers all user-facing operations (services, keys, catalog, nodes, approvals, SSH, MCP, notifications) and also includes the `nyxid node` subcommand for managing on-premise credential nodes.
 
 **Tech Stack:**
 - **Backend:** Rust, Axum 0.8, MongoDB 8.0 (`mongodb` 3.5, `bson` 2.15)
@@ -27,6 +27,7 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 - **handlers/** -- HTTP layer, converts `AuthUser.user_id` (Uuid) to string for services, uses dedicated response structs (never serialize model structs to API responses)
 - **crypto/jwt.rs** -- JWT functions take `&Uuid` (kept for signing)
 - **token_service** -- Parses `&str` to `Uuid` internally for JWT generation
+- **unified_key_service** -- Orchestration layer for the streamlined services architecture; auto-provisions UserEndpoint + UserApiKey + UserService from catalog or custom input in a single operation
 
 ### 3. Error Handling
 
@@ -42,7 +43,7 @@ Error variants map to HTTP status codes and numeric error codes (1000-3002, 7000
 
 - Validation with Zod schemas (`schemas/` directory, one per domain)
 - React Hook Form with `@hookform/resolvers` for form handling
-- TanStack Query hooks in `hooks/` (one per domain: `use-auth.ts`, `use-services.ts`, etc.)
+- TanStack Query hooks in `hooks/` (one per domain: `use-auth.ts`, `use-services.ts`, `use-keys.ts`, etc.)
 - Auth state in Zustand store (`stores/auth-store.ts`)
 - UI components via Radix UI + shadcn/ui pattern (`components/ui/`)
 - No `console.log` in production code
@@ -76,12 +77,63 @@ Error variants map to HTTP status codes and numeric error codes (1000-3002, 7000
 - WS writer channels are bounded (capacity: 256); `try_send` treats full buffers as node offline (H4)
 - Admin node endpoints (`handlers/admin_nodes.rs`) require admin role and have no ownership check
 
+### 7. OpenClaw Integration
+
+OpenClaw is a self-hosted AI gateway that NyxID integrates with at three levels:
+
+**Provider (Option 1):** OpenClaw is seeded as an `api_key` provider with `requires_gateway_url: true`. Users connect by providing their gateway URL + bearer token. The `UserProviderToken.gateway_url` field stores the per-user instance URL. `proxy_service::resolve_gateway_url_override()` resolves this URL at proxy time, overriding the service's default `base_url`.
+
+**Node Proxy (Option 2):** The node agent has an `openclaw` subcommand that stores credentials locally, registers the provider connection with NyxID, and creates the node service binding in one step. Proxy requests flow: NyxID -> node agent (WS) -> local OpenClaw instance. The node agent injects the bearer token via the credential store.
+
+**Channel Integration (Option 3):** `openclaw_channel_service` handles inbound webhook messages from OpenClaw channels (WhatsApp, Telegram, Discord, etc.). `openclaw_channel_mappings` collection maps channel users to NyxID users. Each mapping has its own per-user webhook secret (SHA-256 hash stored, raw secret returned once at creation). No server-level env var needed.
+
+Key files:
+- `services/openclaw_channel_service.rs` -- HMAC verification, user mapping, provider slug resolution
+- `handlers/openclaw_channel.rs` -- Webhook endpoint + mapping CRUD
+- `models/user_provider_token.rs` -- `gateway_url` field for per-user instance URLs
+- `models/provider_config.rs` -- `requires_gateway_url` flag for self-hosted providers
+- `node-agent/src/main.rs` -- `cmd_openclaw_connect/status/disconnect` commands
+
+### 8. Streamlined Services Architecture
+
+The services/connections/providers system was unified into 3 user-managed collections with a single orchestration layer. Old collections are kept for backward compatibility during migration.
+
+**New user collections:**
+- `user_endpoints` -- target URLs (custom or auto-provisioned from catalog)
+- `user_api_keys` -- external credentials (API keys, OAuth tokens, bearer tokens)
+- `user_services` -- proxy routing config (binds endpoint + key + auth method + optional node)
+
+**Orchestration:** `unified_key_service` auto-provisions all 3 records from a single `POST /api/v1/keys` request, using catalog defaults or user-provided values.
+
+**Proxy resolution:** New path checks `UserService` first (by slug + user_id), falls back to old `DownstreamService` + `UserProviderToken` path for unmigrated users.
+
+**ApiKey scope fields** (absorbed from deleted `AgentGroup` model): `allowed_service_ids`, `allowed_node_ids`, `allow_all_services`, `allow_all_nodes`. Enforced at proxy time via `key_service`.
+
+**Frontend:** Unified "AI Services" page at `/keys` with 2 tabs: External Services (UserEndpoint + UserApiKey + UserService) and NyxID API Keys (ApiKey with scope). Services/Connections/Providers removed from normal user sidebar (admin-only). Old `/api-keys` page deleted.
+
+**Old models kept for migration:** DownstreamService (now serves as read-only catalog), UserServiceConnection, UserProviderToken, UserProviderCredentials, NodeServiceBinding (node routing absorbed into `UserService.node_id`).
+
+Key files:
+- `services/unified_key_service.rs` -- orchestration: auto-provision endpoint + key + service
+- `services/catalog_service.rs` -- read-only catalog from DownstreamService
+- `handlers/keys.rs` -- `/api/v1/keys` CRUD
+- `handlers/catalog.rs` -- `/api/v1/catalog` read-only
+- `models/user_endpoint.rs`, `models/user_api_key.rs`, `models/user_service.rs` -- new user collections
+
 ## File Structure
 
 ```
+cli/src/
+|-- main.rs              # CLI entry point
+|-- cli.rs               # Clap subcommand definitions (24 top-level commands)
+|-- commands/            # Command implementations (one file per command group)
+|-- api_client.rs        # HTTP client for NyxID API calls
+|-- auth.rs              # Token storage and retrieval (file-based session)
+|-- output.rs            # Table/JSON output formatting
+
 node-agent/src/
-|-- main.rs              # CLI entry point, command dispatch (register, start, status, credentials, version)
-|-- cli.rs               # Clap subcommand definitions
+|-- main.rs              # Deprecation wrapper (prints warning, delegates to nyxid node subcommand)
+|-- cli.rs               # Clap subcommand definitions (deprecated, use nyxid node instead)
 |-- config.rs            # TOML config (server url, node id, encrypted auth token, signing secret, credentials)
 |-- ws_client.rs         # WebSocket connection loop, exponential backoff reconnection, graceful shutdown
 |-- proxy_executor.rs    # HTTP request execution, credential injection, SSE streaming detection
@@ -98,21 +150,21 @@ backend/src/
 |-- db.rs                # MongoDB connection + ensure_indexes()
 |-- routes.rs            # All route definitions
 |-- main.rs              # Server startup
-|-- models/              # MongoDB document structs (31 models, 29 collections, incl. node, node_service_binding, mcp_session)
-|-- services/            # Business logic (37 services, incl. node_service, node_routing_service, node_ws_manager, node_metrics_service)
-|-- handlers/            # HTTP handlers (37 handler modules, incl. node_admin, admin_nodes, node_ws, developer_apps)
+|-- models/              # MongoDB document structs (35 models, 33 collections, incl. node, node_service_binding, mcp_session, openclaw_channel_mapping, user_endpoint, user_api_key, user_service)
+|-- services/            # Business logic (44 services, incl. node_service, node_routing_service, node_ws_manager, node_metrics_service, openclaw_channel_service, unified_key_service, catalog_service, user_endpoint_service, user_api_key_service, user_service_service, action_description)
+|-- handlers/            # HTTP handlers (45 handler modules, incl. node_admin, admin_nodes, node_ws, developer_apps, ssh_exec, llms_txt, openclaw_channel, keys, catalog, user_endpoints, user_api_keys_external, user_services_handler)
 |-- crypto/              # JWT, AES, password hashing, token generation, KeyProvider trait, KMS providers, JWKS
 |-- errors/              # AppError enum, ErrorResponse, AppResult
 |-- mw/                  # Middleware: auth, rate_limit, security_headers
 
 frontend/src/
-|-- pages/               # Route pages (38 pages, incl. nodes, node-detail, admin-nodes, service-detail, providers)
-|-- components/          # UI components (auth/, dashboard/, layout/, shared/, ui/)
-|-- hooks/               # TanStack Query hooks (15 hooks, incl. use-nodes, use-admin-nodes, use-providers, use-developer-apps)
+|-- pages/               # Route pages (40 pages, incl. nodes, node-detail, admin-nodes, service-detail, providers, ai-setup, keys, key-detail)
+|-- components/          # UI components (auth/, dashboard/, layout/, shared/, ui/; incl. add-key-dialog for unified key creation)
+|-- hooks/               # TanStack Query hooks (16 hooks, incl. use-nodes, use-admin-nodes, use-providers, use-developer-apps, use-keys)
 |-- schemas/             # Zod validation schemas (8 schema files + tests, incl. nodes.ts)
 |-- stores/              # Zustand stores (auth-store)
 |-- lib/                 # API client, constants, utils
-|-- types/               # TypeScript type definitions (6 files, incl. AdminNodeInfo, NodeMetricsInfo, approvals)
+|-- types/               # TypeScript type definitions (7 files, incl. AdminNodeInfo, NodeMetricsInfo, approvals, keys)
 |-- router.tsx           # TanStack Router config
 
 mobile/src/              # React Native + Expo mobile app (Expo 53, RN 0.79, TypeScript)
@@ -134,7 +186,7 @@ All API routes under `/api/v1`:
 - `/auth` -- register, login, logout, refresh, verify-email, forgot/reset-password
 - `/users` -- get/update current user
 - `/mfa` -- setup, verify-setup
-- `/api-keys` -- CRUD + rotate
+- `/api-keys` -- CRUD + rotate. `ApiKey` model has scope fields: `allowed_service_ids`, `allowed_node_ids`, `allow_all_services`, `allow_all_nodes` (absorbed from deleted AgentGroup model)
 - `/services` -- CRUD + OIDC credentials + endpoints + requirements
 - `/sessions` -- list sessions
 - `/connections` -- connect/disconnect services
@@ -146,17 +198,28 @@ All API routes under `/api/v1`:
 - `/llm` -- LLM gateway (provider proxy, OpenAI-compatible gateway, status)
 - `/delegation/refresh` -- refresh delegated access tokens
 - `/notifications` -- notification settings CRUD, Telegram link/disconnect, device token management (register/list/remove)
-- `/approvals` -- approval request history, grants, decide, status polling, per-service approval configs
+- `/approvals` -- approval request history, grants, decide, status polling, per-service approval configs (with `approval_mode`: `per_request` default or `grant` opt-in)
 - `/webhooks/telegram` -- Telegram webhook (unauthenticated, secret-verified)
 - `/nodes` -- node management (register-token, list, get, delete, rotate-token, bindings CRUD + priority update)
 - `/nodes/ws` -- WebSocket upgrade for node agent connections (auth via WS protocol, not middleware)
 - `/admin/nodes` -- admin node management (list all, get, disconnect, delete -- no ownership check)
+- `/integrations/openclaw/channel` -- OpenClaw channel webhook (unauthenticated, HMAC-verified)
+- `/integrations/openclaw/mappings` -- OpenClaw channel-to-user mapping CRUD (authenticated)
+- `/keys` -- unified key management: auto-provisions UserEndpoint + UserApiKey + UserService from catalog or custom input (CRUD + OAuth flows)
+- `/endpoints` -- user-managed target URLs (list, update, delete)
+- `/api-keys/external` -- user's external API keys / credentials (list, update, delete)
+- `/user-services` -- user's proxy routing config (list, update, delete)
+- `/catalog` -- read-only service catalog for users (list templates, get template by slug)
+- `/ssh/{service_id}/certificate` -- issue short-lived SSH user certificate (POST)
+- `/ssh/{service_id}` -- SSH-over-WebSocket tunnel (GET, upgrade)
+- `/ssh/{service_id}/terminal` -- SSH web terminal (GET, upgrade)
+- `/ssh/{service_id}/exec` -- remote command execution (POST)
 
 - `/admin/service-accounts` -- service account CRUD, secret rotation, token revocation, provider management (connect via API key/OAuth redirect/device-code, list, disconnect providers on behalf of SAs)
 
 - `/oauth/token` -- also supports `grant_type=client_credentials` (service accounts), `grant_type=urn:ietf:params:oauth:grant-type:token-exchange` (RFC 8693 delegated access and social token exchange via `subject_token_type=id_token` for native mobile Google/GitHub login)
 
-Top-level: `/health`, `/.well-known/openid-configuration`, `/oauth/*`, `/mcp`
+Top-level: `/health`, `/.well-known/openid-configuration`, `/oauth/*`, `/mcp`, `/llms.txt`, `/llms-full.txt`
 
 ## Environment Variables
 
@@ -223,8 +286,13 @@ SMTP_HOST / SMTP_PORT / SMTP_USERNAME / SMTP_PASSWORD / SMTP_FROM_ADDRESS
 ## Available Commands
 
 ```bash
-# Backend (from project root)
+# CLI (from project root)
 source "$HOME/.cargo/env" 2>/dev/null  # Ensure cargo is available
+cargo build -p nyxid-cli                # Build CLI binary
+cargo install --path cli                # Install CLI as `nyxid`
+nyxid --help                            # Verify installation
+
+# Backend (from project root)
 cargo build                             # Build backend (local provider only)
 cargo build --features aws-kms          # Build with AWS KMS support
 cargo build --features gcp-kms          # Build with GCP Cloud KMS support
@@ -233,13 +301,16 @@ cargo test                              # Run backend tests
 cargo test --all-features               # Run all tests including KMS provider tests
 cargo run                               # Start backend (port 3001)
 
-# Node Agent (from project root)
-cargo build -p nyxid-node               # Build node agent binary
-cargo test -p nyxid-node                # Run node agent tests
-cargo run -p nyxid-node -- register --token nyx_nreg_... --url ws://localhost:3001/api/v1/nodes/ws
-cargo run -p nyxid-node -- start        # Start node agent
-cargo run -p nyxid-node -- status       # Show node status
-cargo run -p nyxid-node -- credentials list  # List configured credentials
+# Node Agent (from project root, via nyxid CLI)
+cargo build -p nyxid-cli                # Build CLI binary (includes node subcommand)
+cargo test -p nyxid-cli                 # Run CLI tests (includes node agent tests)
+nyxid node register --token nyx_nreg_... --url ws://localhost:3001/api/v1/nodes/ws
+nyxid node start                        # Start node agent
+nyxid node status                       # Show node status
+nyxid node credentials list             # List configured credentials
+nyxid node openclaw connect --url http://localhost:18789  # Connect OpenClaw (use --credential-env for non-interactive)
+nyxid node openclaw status              # Show OpenClaw connection status
+nyxid node openclaw disconnect          # Remove OpenClaw credentials
 
 # Frontend (from frontend/)
 npm run dev                             # Dev server (port 3000)

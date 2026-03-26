@@ -7,6 +7,8 @@ import {
   API_KEY_SCOPES,
 } from "@/schemas/api-keys";
 import { useCreateApiKey } from "@/hooks/use-api-keys";
+import { useKeys } from "@/hooks/use-keys";
+import { useNodes } from "@/hooks/use-nodes";
 import { copyToClipboard } from "@/lib/utils";
 import { ApiError } from "@/lib/api-client";
 import {
@@ -29,14 +31,27 @@ import {
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Label } from "@/components/ui/label";
 import { Plus, Copy, Check } from "lucide-react";
 import { toast } from "sonner";
+
+function toggleInArray(
+  items: readonly string[],
+  item: string,
+): readonly string[] {
+  return items.includes(item)
+    ? items.filter((i) => i !== item)
+    : [...items, item];
+}
 
 export function ApiKeyCreateDialog() {
   const [open, setOpen] = useState(false);
   const [createdKey, setCreatedKey] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const createMutation = useCreateApiKey();
+  const { data: externalServices } = useKeys();
+  const { data: nodes } = useNodes();
 
   const form = useForm<CreateApiKeyFormData>({
     resolver: zodResolver(createApiKeySchema),
@@ -44,8 +59,16 @@ export function ApiKeyCreateDialog() {
       name: "",
       scopes: [],
       expires_at: null,
+      description: null,
+      allow_all_services: true,
+      allow_all_nodes: true,
+      allowed_service_ids: [],
+      allowed_node_ids: [],
     },
   });
+
+  const watchAllServices = form.watch("allow_all_services") ?? true;
+  const watchAllNodes = form.watch("allow_all_nodes") ?? true;
 
   async function onSubmit(data: CreateApiKeyFormData) {
     try {
@@ -75,18 +98,6 @@ export function ApiKeyCreateDialog() {
     form.reset();
   }
 
-  function toggleScope(
-    currentScopes: readonly string[],
-    scope: string,
-    onChange: (value: readonly string[]) => void,
-  ) {
-    if (currentScopes.includes(scope)) {
-      onChange(currentScopes.filter((s) => s !== scope));
-    } else {
-      onChange([...currentScopes, scope]);
-    }
-  }
-
   return (
     <Dialog
       open={open}
@@ -98,7 +109,7 @@ export function ApiKeyCreateDialog() {
           Create API Key
         </Button>
       </DialogTrigger>
-      <DialogContent>
+      <DialogContent className="max-h-[85vh] overflow-y-auto">
         {createdKey ? (
           <>
             <DialogHeader>
@@ -178,12 +189,11 @@ export function ApiKeyCreateDialog() {
                               variant={isSelected ? "default" : "outline"}
                               className="cursor-pointer"
                               onClick={() =>
-                                toggleScope(
-                                  field.value as readonly string[],
-                                  scope,
-                                  field.onChange as (
-                                    value: readonly string[],
-                                  ) => void,
+                                field.onChange(
+                                  toggleInArray(
+                                    field.value as readonly string[],
+                                    scope,
+                                  ),
                                 )
                               }
                             >
@@ -222,6 +232,172 @@ export function ApiKeyCreateDialog() {
                     </FormItem>
                   )}
                 />
+
+                {/* Service scope */}
+                <FormField
+                  control={form.control}
+                  name="allow_all_services"
+                  render={({ field }) => (
+                    <FormItem>
+                      <div className="flex items-center gap-2">
+                        <Checkbox
+                          id="allow-all-services"
+                          checked={field.value}
+                          onCheckedChange={(checked) =>
+                            field.onChange(checked === true)
+                          }
+                        />
+                        <Label
+                          htmlFor="allow-all-services"
+                          className="text-sm font-medium"
+                        >
+                          Allow all external services
+                        </Label>
+                      </div>
+                    </FormItem>
+                  )}
+                />
+
+                {!watchAllServices && (
+                  <FormField
+                    control={form.control}
+                    name="allowed_service_ids"
+                    render={({ field }) => (
+                      <FormItem>
+                        <div className="space-y-2 rounded-lg border border-border p-3">
+                          <p className="text-xs text-muted-foreground">
+                            Restrict to specific services:
+                          </p>
+                          {externalServices && externalServices.length > 0 ? (
+                            externalServices.map((svc) => (
+                              <div
+                                key={svc.id}
+                                className="flex items-center gap-2"
+                              >
+                                <Checkbox
+                                  id={`create-svc-${svc.id}`}
+                                  checked={(
+                                    field.value as readonly string[]
+                                  ).includes(svc.id)}
+                                  onCheckedChange={() =>
+                                    field.onChange(
+                                      toggleInArray(
+                                        field.value as readonly string[],
+                                        svc.id,
+                                      ),
+                                    )
+                                  }
+                                />
+                                <Label
+                                  htmlFor={`create-svc-${svc.id}`}
+                                  className="text-xs"
+                                >
+                                  {svc.label}
+                                  {svc.catalog_service_name && (
+                                    <span className="text-muted-foreground">
+                                      {" "}
+                                      ({svc.catalog_service_name})
+                                    </span>
+                                  )}
+                                </Label>
+                              </div>
+                            ))
+                          ) : (
+                            <p className="text-xs text-muted-foreground">
+                              No external services configured yet.
+                            </p>
+                          )}
+                        </div>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                )}
+
+                {/* Node scope */}
+                <FormField
+                  control={form.control}
+                  name="allow_all_nodes"
+                  render={({ field }) => (
+                    <FormItem>
+                      <div className="flex items-center gap-2">
+                        <Checkbox
+                          id="allow-all-nodes"
+                          checked={field.value}
+                          onCheckedChange={(checked) =>
+                            field.onChange(checked === true)
+                          }
+                        />
+                        <Label
+                          htmlFor="allow-all-nodes"
+                          className="text-sm font-medium"
+                        >
+                          Allow all nodes
+                        </Label>
+                      </div>
+                    </FormItem>
+                  )}
+                />
+
+                {!watchAllNodes && (
+                  <FormField
+                    control={form.control}
+                    name="allowed_node_ids"
+                    render={({ field }) => (
+                      <FormItem>
+                        <div className="space-y-2 rounded-lg border border-border p-3">
+                          <p className="text-xs text-muted-foreground">
+                            Restrict to specific nodes:
+                          </p>
+                          {nodes && nodes.length > 0 ? (
+                            nodes.map((n) => (
+                              <div
+                                key={n.id}
+                                className="flex items-center gap-2"
+                              >
+                                <Checkbox
+                                  id={`create-node-${n.id}`}
+                                  checked={(
+                                    field.value as readonly string[]
+                                  ).includes(n.id)}
+                                  onCheckedChange={() =>
+                                    field.onChange(
+                                      toggleInArray(
+                                        field.value as readonly string[],
+                                        n.id,
+                                      ),
+                                    )
+                                  }
+                                />
+                                <Label
+                                  htmlFor={`create-node-${n.id}`}
+                                  className="text-xs"
+                                >
+                                  {n.name}
+                                  <Badge
+                                    variant={
+                                      n.status === "Online"
+                                        ? "default"
+                                        : "secondary"
+                                    }
+                                    className="ml-1 text-[10px]"
+                                  >
+                                    {n.status}
+                                  </Badge>
+                                </Label>
+                              </div>
+                            ))
+                          ) : (
+                            <p className="text-xs text-muted-foreground">
+                              No nodes registered yet.
+                            </p>
+                          )}
+                        </div>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                )}
 
                 <DialogFooter>
                   <Button type="button" variant="outline" onClick={handleClose}>

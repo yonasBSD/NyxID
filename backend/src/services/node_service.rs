@@ -1,6 +1,7 @@
 use chrono::{DateTime, Duration, Utc};
 use futures::TryStreamExt;
 use mongodb::bson::doc;
+use zeroize::Zeroizing;
 
 use crate::crypto::aes::EncryptionKeys;
 use crate::crypto::token::hash_token;
@@ -12,6 +13,7 @@ use crate::models::node_registration_token::{
 use crate::models::node_service_binding::{
     COLLECTION_NAME as NODE_SERVICE_BINDINGS, NodeServiceBinding,
 };
+use crate::models::user_service::COLLECTION_NAME as USER_SERVICES;
 
 /// Create a one-time registration token for a new node.
 /// Returns (token_id, raw_token, expires_at). The raw token is shown once and never stored.
@@ -170,6 +172,38 @@ pub async fn get_node_by_id(db: &mongodb::Database, node_id: &str) -> AppResult<
         .find_one(doc! { "_id": node_id, "is_active": true })
         .await?;
     Ok(node)
+}
+
+/// Decrypt and decode a node's HMAC signing secret.
+pub async fn get_node_signing_secret(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    node_id: &str,
+) -> AppResult<Zeroizing<Vec<u8>>> {
+    let Some(node) = get_node_by_id(db, node_id).await? else {
+        return Err(AppError::NodeNotFound(format!(
+            "Node {node_id} not found during request signing"
+        )));
+    };
+
+    let Some(encrypted_secret) = node.signing_secret_encrypted.as_deref() else {
+        return Err(AppError::NodeOffline(format!(
+            "Node {node_id} is missing its signing secret"
+        )));
+    };
+
+    let decrypted_secret = Zeroizing::new(
+        encryption_keys
+            .decrypt(encrypted_secret)
+            .await
+            .map_err(|e| {
+                AppError::Internal(format!(
+                    "Failed to decrypt node signing secret for {node_id}: {e}"
+                ))
+            })?,
+    );
+
+    decode_node_signing_secret(&decrypted_secret, node_id)
 }
 
 /// Get a single node by ID, verifying ownership.
@@ -465,9 +499,181 @@ pub async fn validate_auth_token(db: &mongodb::Database, raw_token: &str) -> App
         .ok_or_else(|| AppError::Unauthorized("Invalid node auth token".to_string()))
 }
 
+fn decode_node_signing_secret(
+    secret_hex_bytes: &[u8],
+    node_id: &str,
+) -> AppResult<Zeroizing<Vec<u8>>> {
+    let secret_hex = std::str::from_utf8(secret_hex_bytes).map_err(|e| {
+        AppError::Internal(format!(
+            "Node signing secret for {node_id} is not valid UTF-8: {e}"
+        ))
+    })?;
+
+    let secret = hex::decode(secret_hex).map_err(|e| {
+        AppError::Internal(format!(
+            "Node signing secret for {node_id} is not valid hex: {e}"
+        ))
+    })?;
+
+    Ok(Zeroizing::new(secret))
+}
+
 // --- Binding operations ---
 
 /// Create a service binding for a node.
+/// Auto-sync `NodeServiceBinding` when `UserService.node_id` changes.
+///
+/// Call this after creating or updating a `UserService` with a node routing change.
+/// Creates a binding when `node_id` is set, deactivates the old one when it changes.
+pub async fn sync_node_binding_for_user_service(
+    db: &mongodb::Database,
+    user_id: &str,
+    catalog_service_id: Option<&str>,
+    new_node_id: Option<&str>,
+    old_node_id: Option<&str>,
+) -> AppResult<()> {
+    let Some(service_id) = catalog_service_id else {
+        return Ok(());
+    };
+
+    // Validate the new node before mutating bindings so an invalid update does not
+    // tear down the previous route.
+    if let Some(new_nid) = new_node_id.filter(|nid| !nid.is_empty()) {
+        get_node(db, user_id, new_nid).await?;
+    }
+
+    // Deactivate old binding if the node changed or was cleared.
+    if let Some(old_nid) = old_node_id {
+        let changed = match new_node_id {
+            Some(new_nid) if !new_nid.is_empty() => new_nid != old_nid,
+            _ => true, // cleared
+        };
+        if changed && !has_active_user_service_for_node(db, user_id, service_id, old_nid).await? {
+            deactivate_binding_by_node_and_service(db, user_id, old_nid, service_id).await?;
+        }
+    }
+
+    // Create binding if new node_id is set.
+    if let Some(new_nid) = new_node_id.filter(|nid| !nid.is_empty()) {
+        ensure_binding_exists(db, user_id, new_nid, service_id).await?;
+    }
+
+    Ok(())
+}
+
+async fn has_active_user_service_for_node(
+    db: &mongodb::Database,
+    user_id: &str,
+    service_id: &str,
+    node_id: &str,
+) -> AppResult<bool> {
+    let count = db
+        .collection::<mongodb::bson::Document>(USER_SERVICES)
+        .count_documents(doc! {
+            "user_id": user_id,
+            "catalog_service_id": service_id,
+            "node_id": node_id,
+            "is_active": true,
+        })
+        .await?;
+
+    Ok(count > 0)
+}
+
+/// Create a `NodeServiceBinding` if one does not already exist for this node + service.
+/// Uses insert-first with duplicate-key handling to avoid race conditions.
+async fn ensure_binding_exists(
+    db: &mongodb::Database,
+    user_id: &str,
+    node_id: &str,
+    service_id: &str,
+) -> AppResult<()> {
+    let existing = db
+        .collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
+        .find_one(doc! {
+            "node_id": node_id,
+            "service_id": service_id,
+            "user_id": user_id,
+            "is_active": true,
+        })
+        .await?;
+
+    if existing.is_some() {
+        return Ok(());
+    }
+
+    let now = Utc::now();
+    let binding = NodeServiceBinding {
+        id: uuid::Uuid::new_v4().to_string(),
+        node_id: node_id.to_string(),
+        user_id: user_id.to_string(),
+        service_id: service_id.to_string(),
+        is_active: true,
+        priority: 0,
+        created_at: now,
+        updated_at: now,
+    };
+
+    match db
+        .collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
+        .insert_one(&binding)
+        .await
+    {
+        Ok(_) => {
+            tracing::info!(
+                binding_id = %binding.id,
+                node_id = %node_id,
+                service_id = %service_id,
+                "Auto-created node service binding from UserService.node_id"
+            );
+        }
+        Err(e) => {
+            // Duplicate key error (E11000) means a concurrent request already created the
+            // binding -- treat as success (idempotent).
+            let is_dup = e.kind.as_ref().to_string().contains("E11000");
+            if !is_dup {
+                return Err(e.into());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Deactivate a binding by node + service (not by binding ID).
+async fn deactivate_binding_by_node_and_service(
+    db: &mongodb::Database,
+    user_id: &str,
+    node_id: &str,
+    service_id: &str,
+) -> AppResult<()> {
+    let now = bson::DateTime::from_chrono(Utc::now());
+
+    let result = db
+        .collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
+        .update_many(
+            doc! {
+                "node_id": node_id,
+                "service_id": service_id,
+                "user_id": user_id,
+                "is_active": true,
+            },
+            doc! { "$set": { "is_active": false, "updated_at": &now } },
+        )
+        .await?;
+
+    if result.modified_count > 0 {
+        tracing::info!(
+            node_id = %node_id,
+            service_id = %service_id,
+            count = result.modified_count,
+            "Auto-deactivated node service binding(s) from UserService.node_id change"
+        );
+    }
+
+    Ok(())
+}
+
 pub async fn create_binding(
     db: &mongodb::Database,
     user_id: &str,
@@ -558,4 +764,27 @@ pub async fn delete_binding(
 
     tracing::info!(binding_id = %binding_id, "Node service binding deleted");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_node_signing_secret;
+
+    #[test]
+    fn decodes_node_signing_secret_hex() {
+        let secret = decode_node_signing_secret(b"616263", "node-1").expect("valid secret");
+        assert_eq!(secret.as_slice(), b"abc");
+    }
+
+    #[test]
+    fn rejects_node_signing_secret_invalid_utf8() {
+        let error = decode_node_signing_secret(&[0xff], "node-1").expect_err("invalid utf8");
+        assert!(error.to_string().contains("not valid UTF-8"));
+    }
+
+    #[test]
+    fn rejects_node_signing_secret_invalid_hex() {
+        let error = decode_node_signing_secret(b"not-hex", "node-1").expect_err("invalid hex");
+        assert!(error.to_string().contains("not valid hex"));
+    }
 }

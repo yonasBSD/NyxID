@@ -29,6 +29,12 @@ export const connectApiKeySchema = z.object({
     .min(1, "API key is required")
     .max(8192, "API key must be at most 8192 characters"),
   label: z.string().max(200, "Label must be at most 200 characters").optional(),
+  gateway_url: z
+    .string()
+    .url("Must be a valid URL")
+    .max(2048, "URL must be at most 2048 characters")
+    .optional()
+    .or(z.literal("")),
 });
 
 export type ConnectApiKeyFormData = z.infer<typeof connectApiKeySchema>;

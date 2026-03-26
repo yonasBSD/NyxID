@@ -234,6 +234,72 @@ pub async fn get_user_roles(db: &mongodb::Database, user_id: &str) -> AppResult<
     Ok(roles)
 }
 
+/// Result of a bulk role assignment operation.
+pub struct BulkAssignResult {
+    /// Number of users who had the role added (did not already have it).
+    pub assigned_count: u64,
+    /// Number of users who already had the role (skipped).
+    pub already_assigned_count: u64,
+}
+
+/// Assign a role to multiple users in bulk.
+///
+/// If `user_ids` is `Some`, assigns only to those users. If `None`, assigns to
+/// all users who don't already have the role.
+pub async fn bulk_assign_role(
+    db: &mongodb::Database,
+    role_id: &str,
+    user_ids: Option<&[String]>,
+) -> AppResult<BulkAssignResult> {
+    // Verify role exists
+    let _role = get_role(db, role_id).await?;
+
+    let users_coll = db.collection::<User>(USERS);
+
+    // Count users who already have this role (for reporting)
+    let already_filter = match user_ids {
+        Some(ids) => doc! { "_id": { "$in": ids }, "role_ids": role_id },
+        None => doc! { "role_ids": role_id },
+    };
+    let already_assigned_count = users_coll.count_documents(already_filter).await?;
+
+    // Add role to users who don't have it yet
+    let update_filter = match user_ids {
+        Some(ids) => doc! { "_id": { "$in": ids }, "role_ids": { "$ne": role_id } },
+        None => doc! { "role_ids": { "$ne": role_id } },
+    };
+
+    let now = bson::DateTime::from_chrono(Utc::now());
+    let result = users_coll
+        .update_many(
+            update_filter,
+            doc! {
+                "$addToSet": { "role_ids": role_id },
+                "$set": { "updated_at": now },
+            },
+        )
+        .await?;
+
+    Ok(BulkAssignResult {
+        assigned_count: result.modified_count,
+        already_assigned_count,
+    })
+}
+
+/// Get IDs of all roles marked as `is_default: true`.
+///
+/// Used during user registration to auto-assign default roles.
+pub async fn get_default_role_ids(db: &mongodb::Database) -> AppResult<Vec<String>> {
+    let roles: Vec<Role> = db
+        .collection::<Role>(ROLES)
+        .find(doc! { "is_default": true })
+        .await?
+        .try_collect()
+        .await?;
+
+    Ok(roles.into_iter().map(|r| r.id).collect())
+}
+
 /// Seed system roles ("admin", "user") if they don't exist.
 pub async fn seed_system_roles(db: &mongodb::Database) -> AppResult<()> {
     let now = Utc::now();

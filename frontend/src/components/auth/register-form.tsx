@@ -85,11 +85,16 @@ export function RegisterForm({ returnTo }: RegisterFormProps) {
         <h1 className="font-display text-[28px] font-normal tracking-tight">
           Create your account
         </h1>
-        <p className="text-sm text-muted-foreground">Start securing your digital identity</p>
+        <p className="text-sm text-muted-foreground">
+          Start securing your digital identity
+        </p>
       </div>
 
       <Form {...form}>
-        <form onSubmit={form.handleSubmit(onSubmit)} className="flex flex-col gap-4">
+        <form
+          onSubmit={form.handleSubmit(onSubmit)}
+          className="flex flex-col gap-4"
+        >
           {form.formState.errors.root && (
             <div
               role="alert"
@@ -218,7 +223,9 @@ export function RegisterForm({ returnTo }: RegisterFormProps) {
       <SocialLoginButtons returnTo={returnTo} />
 
       <div className="flex items-center justify-center gap-1.5">
-        <span className="text-xs text-text-tertiary">Already have an account?</span>
+        <span className="text-xs text-text-tertiary">
+          Already have an account?
+        </span>
         <Link
           to="/login"
           search={returnTo ? { return_to: returnTo } : {}}

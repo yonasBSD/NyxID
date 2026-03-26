@@ -1,16 +1,24 @@
 import { lazy } from "react";
 
+export const AiSetupPage = lazy(() =>
+  import("@/pages/ai-setup").then((m) => ({ default: m.AiSetupPage })),
+);
 export const LoginPage = lazy(() =>
   import("@/pages/login").then((m) => ({ default: m.LoginPage })),
 );
 export const RegisterPage = lazy(() =>
   import("@/pages/register").then((m) => ({ default: m.RegisterPage })),
 );
+export const CliAuthPage = lazy(() =>
+  import("@/pages/cli-auth").then((m) => ({ default: m.CliAuthPage })),
+);
 export const DashboardPage = lazy(() =>
   import("@/pages/dashboard").then((m) => ({ default: m.DashboardPage })),
 );
-export const ApiKeysPage = lazy(() =>
-  import("@/pages/api-keys").then((m) => ({ default: m.ApiKeysPage })),
+export const ApiKeyDetailPage = lazy(() =>
+  import("@/pages/api-key-detail").then((m) => ({
+    default: m.ApiKeyDetailPage,
+  })),
 );
 export const ServicesPage = lazy(() =>
   import("@/pages/services").then((m) => ({ default: m.ServicesPage })),
@@ -27,9 +35,6 @@ export const ServiceEditPage = lazy(() =>
   import("@/pages/service-edit").then((m) => ({
     default: m.ServiceEditPage,
   })),
-);
-export const ConnectionsPage = lazy(() =>
-  import("@/pages/connections").then((m) => ({ default: m.ConnectionsPage })),
 );
 export const SettingsPage = lazy(() =>
   import("@/pages/settings").then((m) => ({ default: m.SettingsPage })),
@@ -155,4 +160,15 @@ export const AdminNodesPage = lazy(() =>
   import("@/pages/admin-nodes").then((m) => ({
     default: m.AdminNodesPage,
   })),
+);
+export const SshTerminalPage = lazy(() =>
+  import("@/pages/ssh-terminal").then((m) => ({
+    default: m.SshTerminalPage,
+  })),
+);
+export const KeysPage = lazy(() =>
+  import("@/pages/keys").then((m) => ({ default: m.KeysPage })),
+);
+export const KeyDetailPage = lazy(() =>
+  import("@/pages/key-detail").then((m) => ({ default: m.KeyDetailPage })),
 );

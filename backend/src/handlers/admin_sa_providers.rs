@@ -150,6 +150,7 @@ pub async fn connect_api_key_for_sa(
         &provider_id,
         &body.api_key,
         body.label.as_deref(),
+        None, // service accounts don't use gateway URLs
     )
     .await?;
 

@@ -112,8 +112,8 @@ export function IdentityPropagationConfig({
             maxLength={500}
           />
           <p className="text-xs text-muted-foreground">
-            Custom audience claim for the identity JWT. Defaults to the
-            service base URL if left empty.
+            Custom audience claim for the identity JWT. Defaults to the service
+            base URL if left empty.
           </p>
         </div>
       )}

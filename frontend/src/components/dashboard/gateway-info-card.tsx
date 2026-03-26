@@ -40,13 +40,17 @@ export function GatewayInfoCard({ llmStatus }: GatewayInfoCardProps) {
             <div className="min-w-0">
               <CardTitle className="text-base">LLM Gateway</CardTitle>
               <CardDescription className="text-xs">
-                Route LLM requests through NyxID with your connected provider credentials.
+                Route LLM requests through NyxID with your connected provider
+                credentials.
               </CardDescription>
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
             {readyProviders.length > 0 && (
-              <Badge variant="success" className="hidden whitespace-nowrap sm:inline-flex">
+              <Badge
+                variant="success"
+                className="hidden whitespace-nowrap sm:inline-flex"
+              >
                 {String(readyProviders.length)} provider
                 {readyProviders.length === 1 ? "" : "s"} ready
               </Badge>

@@ -53,6 +53,11 @@ pub struct UserProviderToken {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<HashMap<String, String>>,
 
+    /// Per-user gateway URL for self-hosted providers (e.g., OpenClaw).
+    /// Stored unencrypted since it is a URL, not a secret.
+    #[serde(default)]
+    pub gateway_url: Option<String>,
+
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -87,6 +92,7 @@ mod tests {
             error_message: None,
             label: Some("My Google Token".to_string()),
             metadata: None,
+            gateway_url: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -118,6 +124,7 @@ mod tests {
             error_message: None,
             label: None,
             metadata: None,
+            gateway_url: Some("http://localhost:18789".to_string()),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -125,6 +132,10 @@ mod tests {
         let restored: UserProviderToken = bson::from_document(doc).expect("deserialize");
         assert_eq!(restored.token_type, "api_key");
         assert!(restored.api_key_encrypted.is_some());
+        assert_eq!(
+            restored.gateway_url.as_deref(),
+            Some("http://localhost:18789")
+        );
     }
 
     #[test]

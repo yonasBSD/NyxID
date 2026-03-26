@@ -38,16 +38,21 @@ interface SaConnectedProvidersProps {
 }
 
 export function SaConnectedProviders({ saId }: SaConnectedProvidersProps) {
-  const { data: saProviders, isLoading: providersLoading } = useSaProviders(saId);
+  const { data: saProviders, isLoading: providersLoading } =
+    useSaProviders(saId);
   const { data: allProviders } = useProviders();
   const connectApiKeyMutation = useConnectApiKeyForSa();
   const disconnectMutation = useDisconnectSaProvider();
   const initiateOAuthMutation = useInitiateOAuthForSa();
 
-  const [connectDialogProvider, setConnectDialogProvider] = useState<ProviderConfig | null>(null);
-  const [deviceCodeDialogProvider, setDeviceCodeDialogProvider] = useState<ProviderConfig | null>(null);
+  const [connectDialogProvider, setConnectDialogProvider] =
+    useState<ProviderConfig | null>(null);
+  const [deviceCodeDialogProvider, setDeviceCodeDialogProvider] =
+    useState<ProviderConfig | null>(null);
 
-  const connectedProviderIds = new Set(saProviders?.map((t) => t.provider_id) ?? []);
+  const connectedProviderIds = new Set(
+    saProviders?.map((t) => t.provider_id) ?? [],
+  );
   const availableProviders = (allProviders ?? []).filter(
     (p) =>
       p.is_active &&
@@ -135,14 +140,20 @@ export function SaConnectedProviders({ saId }: SaConnectedProvidersProps) {
               <TableBody>
                 {saProviders.map((token) => (
                   <TableRow key={token.provider_id}>
-                    <TableCell className="font-medium">{token.provider_name}</TableCell>
+                    <TableCell className="font-medium">
+                      {token.provider_name}
+                    </TableCell>
                     <TableCell>
                       <Badge variant="outline">
                         {providerTypeLabel(token.provider_type)}
                       </Badge>
                     </TableCell>
                     <TableCell>
-                      <Badge variant={token.status === "active" ? "success" : "secondary"}>
+                      <Badge
+                        variant={
+                          token.status === "active" ? "success" : "secondary"
+                        }
+                      >
                         {token.status}
                       </Badge>
                     </TableCell>
@@ -156,7 +167,9 @@ export function SaConnectedProviders({ saId }: SaConnectedProvidersProps) {
                       <Button
                         variant="ghost"
                         size="sm"
-                        onClick={() => void handleDisconnectSaProvider(token.provider_id)}
+                        onClick={() =>
+                          void handleDisconnectSaProvider(token.provider_id)
+                        }
                         disabled={disconnectMutation.isPending}
                       >
                         <Unlink className="mr-1 h-3 w-3" />
@@ -233,7 +246,7 @@ function ConnectProviderDropdown({
           Connect Provider
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent>
+      <DropdownMenuContent style={{ maxHeight: "16rem", overflowY: "auto" }}>
         {providers.map((p) => (
           <DropdownMenuItem key={p.id} onClick={() => onSelect(p)}>
             <ProviderTypeIcon type={p.provider_type} />
