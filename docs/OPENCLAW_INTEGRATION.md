@@ -81,7 +81,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
 
 # 1. Install the NyxID CLI
-cargo install --git https://github.com/ChronoAIProject/NyxID --bin nyxid
+cargo install --git https://github.com/ChronoAIProject/NyxID nyxid-cli
 
 # 2. Log in via browser SSO (saves URL; only needed once)
 nyxid login --base-url https://nyx-api.chrono-ai.fun
@@ -183,7 +183,7 @@ The `nyxid` CLI is the recommended way for AI agents to interact with NyxID. Ins
 
 ```bash
 # Install CLI and log in (one-time; saves URL for all future commands)
-cargo install --git https://github.com/ChronoAIProject/NyxID --bin nyxid
+cargo install --git https://github.com/ChronoAIProject/NyxID nyxid-cli
 nyxid login --base-url https://nyx-api.chrono-ai.fun
 
 # Add services non-interactively (credential from env var)
@@ -206,7 +206,7 @@ nyxid node show my-server --output json                 # node commands accept n
 - Node commands accept names (e.g., `nyxid node show test-server`)
 - Service `add` auto-fetches label from catalog -- no `--label` needed for catalog services
 - NyxID injects credentials server-side -- the agent never handles raw tokens
-- If a response has `error_code: 7000`, the user needs to approve the request
+- If a response has `error_code: 7000`, the user needs to approve the request. The error includes an `action_description` (e.g., "POST /v1/chat/completions (model: gpt-4, 3 messages)") and a `request_id`. Default mode is per-request -- every call needs fresh approval.
 - Use `nyxid approval list` to check pending approvals
 
 ## Flow Summary
@@ -217,7 +217,7 @@ nyxid node show my-server --output json                 # node commands accept n
 2. `nyxid proxy discover` lists available services (or `nyxid service list`)
 3. `nyxid proxy request <slug> <path>` calls any service
 4. NyxID injects the user's credentials and forwards the request
-5. If approval required, `nyxid approval list` shows pending requests
+5. If approval required (per-request by default), each call returns 7000 with an `action_description`; approve via `nyxid approval approve <ID>`
 
 ### API key flow (for OpenClaw skill)
 
@@ -236,7 +236,7 @@ nyxid node show my-server --output json                 # node commands accept n
 
 - RFC 8693 token exchange requires a confidential NyxID OAuth client
 - Delegated tokens cannot call `GET /api/v1/proxy/services`; use base token or API key for discovery
-- Approval-gated proxy calls block until approved or timeout
+- Approval-gated proxy calls block until approved or timeout. Default mode is per-request (every call needs fresh approval). Use `approval_mode: "grant"` for time-based grants if per-request approval is too granular for your workflow.
 
 ## NyxID Backend Integration (NyxID-to-OpenClaw)
 
@@ -313,7 +313,7 @@ Each mapping has its own webhook secret (generated at creation, only shown once)
 
 ```bash
 # Install the nyxid CLI (includes node agent subcommand, --keychain recommended)
-cargo install --git https://github.com/ChronoAIProject/NyxID --bin nyxid
+cargo install --git https://github.com/ChronoAIProject/NyxID nyxid-cli
 nyxid node register \
   --token "nyx_nreg_..." \
   --url "wss://<server>/api/v1/nodes/ws" \
@@ -344,7 +344,7 @@ nyxid node openclaw disconnect
 |---------|-------|-----|
 | `1001 unauthorized` | Token/key invalid or expired | Run `nyxid login` or create a new API key with `nyxid api-key create` |
 | `1002 forbidden` | Missing scope or service not connected | Ensure key has `proxy` scope; add service with `nyxid service add` |
-| `7000 approval_required` | Approval gating enabled | Check `nyxid approval list`; approve via mobile app or Telegram |
+| `7000 approval_required` | Approval gating enabled (per-request by default) | Check `nyxid approval list`; approve via mobile app or Telegram. Each request includes an `action_description`. Use `--approval-mode grant` for time-based grants instead. |
 | `8003 node_proxy_error` | Node-backed proxy failed | Check node agent with `nyxid node list`; ensure `nyxid node start` is running |
 | Empty services list | No services configured | Browse catalog: `nyxid catalog list`; add: `nyxid service add <slug>` |
 | Skill not loading in OpenClaw | Skill not in a recognized directory | Copy to `~/.openclaw/skills/nyxid` or add `extraDirs` |

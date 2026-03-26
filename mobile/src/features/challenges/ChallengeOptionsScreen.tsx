@@ -14,6 +14,7 @@ import { mobileTheme } from "../../theme/mobileTheme";
 import { flowStyles } from "../../theme/flowStyles";
 import { typeScale } from "../../theme/designTokens";
 import {
+  formatGrantDuration,
   getChallengeActionState,
   getChallengeQueryErrorMessage,
   getDecisionErrorMessage,
@@ -29,6 +30,10 @@ export function ChallengeOptionsScreen({ navigation, route }: Props) {
   const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ["challenge", challengeId],
     queryFn: () => mobileApi.getChallengeById(challengeId),
+  });
+  const { data: notificationSettings } = useQuery({
+    queryKey: ["notifications", "settings"],
+    queryFn: mobileApi.getNotificationSettings,
   });
 
   const [toast, setToast] = useState<ToastState | null>(null);
@@ -95,6 +100,8 @@ export function ChallengeOptionsScreen({ navigation, route }: Props) {
 
   const actionState = getChallengeActionState(data);
   const actionDisabled = approveMutation.isPending || !actionState.canDecide;
+  const grantDurationLabel = formatGrantDuration(notificationSettings?.grant_expiry_days);
+  const isGrantMode = data.approval_mode === "grant";
 
   return (
     <ScreenContainer>
@@ -106,7 +113,11 @@ export function ChallengeOptionsScreen({ navigation, route }: Props) {
       >
         <SectionBadge label="OPTIONS" tone="info" />
         <Text style={flowStyles.title}>Approval Options</Text>
-        <Text style={flowStyles.subtitle}>Review and approve this request.</Text>
+        <Text style={flowStyles.subtitle}>
+          {isGrantMode
+            ? `Approving will create reusable access for ${grantDurationLabel}.`
+            : "Approving authorizes only this request."}
+        </Text>
 
         <View style={flowStyles.card}>
           <Text style={flowStyles.cardTitle}>Preview</Text>
@@ -114,9 +125,17 @@ export function ChallengeOptionsScreen({ navigation, route }: Props) {
             <Text style={flowStyles.rowLabel}>Action</Text>
             <Text style={flowStyles.rowValue}>{data.action}</Text>
           </View>
-          <View style={flowStyles.rowLast}>
+          <View style={flowStyles.row}>
             <Text style={flowStyles.rowLabel}>Status</Text>
             <Text style={flowStyles.rowValue}>{actionState.statusLabel}</Text>
+          </View>
+          <View style={flowStyles.rowLast}>
+            <Text style={flowStyles.rowLabel}>
+              {isGrantMode ? "Grant Duration" : "Approval Type"}
+            </Text>
+            <Text style={flowStyles.rowValue}>
+              {isGrantMode ? grantDurationLabel : "One-time approval"}
+            </Text>
           </View>
         </View>
         {actionState.reason ? (

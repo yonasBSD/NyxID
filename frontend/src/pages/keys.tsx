@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Plus, Globe, KeyRound, Server, Router } from "lucide-react";
+import { Plus, Globe, KeyRound, Server, Router, Terminal } from "lucide-react";
 import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
 import { ApiKeyTable } from "@/components/dashboard/api-key-table";
 import { ApiKeyCreateDialog } from "@/components/dashboard/api-key-create-dialog";
@@ -32,8 +32,11 @@ function statusVariant(
 }
 
 function KeyCard({ keyInfo }: { readonly keyInfo: KeyInfo }) {
-  const truncatedUrl =
-    keyInfo.endpoint_url.length > 50
+  const isSsh = keyInfo.service_type === "ssh";
+  const hasSshCertificateAuth = isSsh && keyInfo.ssh_ca_public_key !== null;
+  const displayUrl = isSsh
+    ? `${keyInfo.ssh_host ?? "unknown"}:${keyInfo.ssh_port ?? 22}`
+    : keyInfo.endpoint_url.length > 50
       ? `${keyInfo.endpoint_url.slice(0, 50)}...`
       : keyInfo.endpoint_url;
 
@@ -53,6 +56,7 @@ function KeyCard({ keyInfo }: { readonly keyInfo: KeyInfo }) {
               )}
             </div>
             <div className="flex shrink-0 items-center gap-2">
+              {isSsh && <Badge variant="outline">SSH</Badge>}
               <Badge variant={statusVariant(keyInfo.status)}>
                 {keyInfo.status}
               </Badge>
@@ -62,16 +66,28 @@ function KeyCard({ keyInfo }: { readonly keyInfo: KeyInfo }) {
 
           <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs text-muted-foreground">
             <div className="flex items-center gap-1.5">
-              <Globe className="h-3 w-3 shrink-0" />
-              <span className="truncate">{truncatedUrl}</span>
+              {isSsh ? (
+                <Terminal className="h-3 w-3 shrink-0" />
+              ) : (
+                <Globe className="h-3 w-3 shrink-0" />
+              )}
+              <span className="truncate">{displayUrl}</span>
             </div>
             <div className="flex items-center gap-1.5">
               <KeyRound className="h-3 w-3 shrink-0" />
-              <span>{keyInfo.credential_type}</span>
+              <span>
+                {isSsh
+                  ? hasSshCertificateAuth
+                    ? "certificate"
+                    : "ssh tunnel"
+                  : keyInfo.credential_type}
+              </span>
             </div>
             <div className="flex items-center gap-1.5">
               <Server className="h-3 w-3 shrink-0" />
-              <span className="font-mono">/proxy/s/{keyInfo.slug}</span>
+              <span className="font-mono">
+                {isSsh ? keyInfo.slug : `/proxy/s/${keyInfo.slug}`}
+              </span>
             </div>
             <div className="flex items-center gap-1.5">
               <Router className="h-3 w-3 shrink-0" />

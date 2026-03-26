@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::bson_datetime;
+use crate::models::service_approval_config::{ApprovalMode, legacy_approval_mode_default};
 
 pub const COLLECTION_NAME: &str = "approval_requests";
 
@@ -35,11 +36,24 @@ pub struct ApprovalRequest {
     /// What operation is being performed (e.g. "proxy:GET /v1/chat/completions")
     pub operation_summary: String,
 
+    /// Rich human-readable description of what the API request does.
+    /// e.g., "POST /v1/chat/completions (model: gpt-4, max_tokens: 1000)"
+    /// Falls back to operation_summary if not generated.
+    #[serde(default)]
+    pub action_description: Option<String>,
+
+    /// Approval semantics captured at request creation time.
+    /// Legacy requests created before this field existed default to grant mode
+    /// so their original behavior is preserved when decided later.
+    #[serde(default = "legacy_approval_mode_default")]
+    pub approval_mode: ApprovalMode,
+
     /// "pending" | "approved" | "rejected" | "expired"
     pub status: String,
 
-    /// SHA-256 of (user_id + service_id + requester_id + requester_type).
-    /// Prevents duplicate pending requests for the same context.
+    /// Pending request dedupe key.
+    /// Grant mode uses a stable hash for `(user, service, requester)`;
+    /// per-request mode uses a unique value per incoming API call.
     pub idempotency_key: String,
 
     /// Which notification channel delivered this request (e.g. "telegram")
@@ -96,6 +110,10 @@ mod tests {
             requester_id: uuid::Uuid::new_v4().to_string(),
             requester_label: Some("CI Pipeline".to_string()),
             operation_summary: "proxy:POST /v1/chat/completions".to_string(),
+            action_description: Some(
+                "POST /v1/chat/completions (model: gpt-4, 3 messages)".to_string(),
+            ),
+            approval_mode: ApprovalMode::PerRequest,
             status: "pending".to_string(),
             idempotency_key: "abc123".to_string(),
             notification_channel: Some("telegram".to_string()),
@@ -132,6 +150,35 @@ mod tests {
     }
 
     #[test]
+    fn missing_action_description_defaults_to_none() {
+        let req = make_approval_request();
+        let mut doc = bson::to_document(&req).expect("serialize");
+        doc.remove("action_description");
+        let restored: ApprovalRequest = bson::from_document(doc).expect("deserialize");
+        assert!(restored.action_description.is_none());
+    }
+
+    #[test]
+    fn action_description_roundtrips() {
+        let req = make_approval_request();
+        let doc = bson::to_document(&req).expect("serialize");
+        let restored: ApprovalRequest = bson::from_document(doc).expect("deserialize");
+        assert_eq!(
+            restored.action_description.as_deref(),
+            Some("POST /v1/chat/completions (model: gpt-4, 3 messages)")
+        );
+    }
+
+    #[test]
+    fn missing_approval_mode_defaults_to_grant_for_legacy_requests() {
+        let req = make_approval_request();
+        let mut doc = bson::to_document(&req).expect("serialize");
+        doc.remove("approval_mode");
+        let restored: ApprovalRequest = bson::from_document(doc).expect("deserialize");
+        assert_eq!(restored.approval_mode, ApprovalMode::Grant);
+    }
+
+    #[test]
     fn bson_all_fields_serialized() {
         let req = make_approval_request();
         let doc = bson::to_document(&req).expect("serialize");
@@ -144,6 +191,7 @@ mod tests {
         assert!(keys.contains(&"requester_type"));
         assert!(keys.contains(&"requester_id"));
         assert!(keys.contains(&"operation_summary"));
+        assert!(keys.contains(&"approval_mode"));
         assert!(keys.contains(&"status"));
         assert!(keys.contains(&"idempotency_key"));
         assert!(keys.contains(&"expires_at"));

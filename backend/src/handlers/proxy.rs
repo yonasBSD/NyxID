@@ -23,8 +23,9 @@ use crate::models::user_service_connection::{
 use crate::mw::auth::AuthUser;
 use crate::services::node_ws_manager::{NodeProxyRequest, ProxyResponseType, StreamChunk};
 use crate::services::{
-    approval_service, audit_service, chatgpt_translator, delegation_service, identity_service,
-    node_metrics_service, node_routing_service, node_service, notification_service, proxy_service,
+    action_description, approval_service, audit_service, chatgpt_translator, delegation_service,
+    identity_service, node_metrics_service, node_routing_service, node_service,
+    notification_service, proxy_service,
 };
 
 /// Response headers that are safe to forward back to the client.
@@ -334,65 +335,9 @@ async fn execute_proxy_inner(
             resolve_via_downstream_service(state, &user_id_str, service_id).await?
         };
 
-    // Check approval if user has it enabled for this service.
-    // Only direct browser sessions bypass approval; API keys, delegated tokens,
-    // and service accounts all require approval since they represent programmatic access.
-    let requires_approval = approval_service::requires_approval_for_service(
-        &state.db,
-        &approval_owner_user_id,
-        service_id,
-    )
-    .await?;
-
-    if should_enforce_runtime_approval(requires_approval, &auth_user.auth_method) {
-        let requester_type = auth_user.approval_requester_type().ok_or_else(|| {
-            AppError::Forbidden("Session auth does not require approval".to_string())
-        })?;
-        let requester_id = auth_user.approval_requester_id();
-
-        let has_grant = approval_service::check_approval(
-            &state.db,
-            &approval_owner_user_id,
-            service_id,
-            requester_type,
-            &requester_id,
-        )
-        .await?;
-
-        if !has_grant {
-            let channel =
-                notification_service::get_or_create_channel(&state.db, &approval_owner_user_id)
-                    .await?;
-
-            let request_method = request.method().as_str().to_string();
-            let timeout_secs = channel.approval_timeout_secs;
-            let approval_request = approval_service::create_approval_request(
-                &state.db,
-                &state.config,
-                &state.http_client,
-                state.fcm_auth.as_deref(),
-                state.apns_auth.as_deref(),
-                &approval_owner_user_id,
-                service_id,
-                &target.service.name,
-                &target.service.slug,
-                requester_type,
-                &requester_id,
-                None,
-                &format!("proxy:{} {}", request_method, path),
-                timeout_secs,
-            )
-            .await?;
-
-            // Block until the user approves/rejects or timeout expires
-            approval_service::wait_for_decision(&state.db, &approval_request.id, timeout_secs)
-                .await?;
-        }
-    }
-
     // === Request Decomposition ===
-    // Extract method, query, headers, and body before branching between
-    // node proxy and standard proxy paths, since both need them.
+    // Extract method, query, headers, and body BEFORE approval check so we can
+    // build a rich action description for the approval notification.
     let method = request.method().clone();
     let method_str = method.as_str().to_string();
     let query = request.uri().query().map(String::from);
@@ -417,6 +362,84 @@ async fn execute_proxy_inner(
     let body_bytes = axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024)
         .await
         .map_err(|e| AppError::BadRequest(format!("Failed to read body: {e}")))?;
+
+    // Check approval if user has it enabled for this service.
+    // Only direct browser sessions bypass approval; API keys, delegated tokens,
+    // and service accounts all require approval since they represent programmatic access.
+    let requires_approval = approval_service::requires_approval_for_service(
+        &state.db,
+        &approval_owner_user_id,
+        service_id,
+    )
+    .await?;
+
+    if should_enforce_runtime_approval(requires_approval, &auth_user.auth_method) {
+        let requester_type = auth_user.approval_requester_type().ok_or_else(|| {
+            AppError::Forbidden("Session auth does not require approval".to_string())
+        })?;
+        let requester_id = auth_user.approval_requester_id();
+
+        let approval_mode =
+            approval_service::resolve_approval_mode(&state.db, &approval_owner_user_id, service_id)
+                .await?;
+
+        // In grant mode, check for existing grant first.
+        // In per_request mode, skip grant check -- every request needs fresh approval.
+        let has_grant =
+            if approval_mode == crate::models::service_approval_config::ApprovalMode::Grant {
+                approval_service::check_approval(
+                    &state.db,
+                    &approval_owner_user_id,
+                    service_id,
+                    requester_type,
+                    &requester_id,
+                )
+                .await?
+            } else {
+                false
+            };
+
+        if !has_grant {
+            let channel =
+                notification_service::get_or_create_channel(&state.db, &approval_owner_user_id)
+                    .await?;
+
+            let action_desc = action_description::build_action_description(
+                &method_str,
+                path,
+                if body_bytes.is_empty() {
+                    None
+                } else {
+                    Some(&body_bytes)
+                },
+            );
+
+            let timeout_secs = channel.approval_timeout_secs;
+            let approval_request = approval_service::create_approval_request(
+                &state.db,
+                &state.config,
+                &state.http_client,
+                state.fcm_auth.as_deref(),
+                state.apns_auth.as_deref(),
+                &approval_owner_user_id,
+                service_id,
+                &target.service.name,
+                &target.service.slug,
+                requester_type,
+                &requester_id,
+                None,
+                &format!("proxy:{} {}", method_str, path),
+                Some(&action_desc),
+                approval_mode.clone(),
+                timeout_secs,
+            )
+            .await?;
+
+            // Block until the user approves/rejects or timeout expires
+            approval_service::wait_for_decision(&state.db, &approval_request.id, timeout_secs)
+                .await?;
+        }
+    }
 
     let body = if body_bytes.is_empty() {
         None

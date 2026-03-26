@@ -14,7 +14,7 @@ import { mobileTheme } from "../../theme/mobileTheme";
 import { flowStyles } from "../../theme/flowStyles";
 import { typeScale } from "../../theme/designTokens";
 import {
-  formatGrantExpiryFromCreatedAt,
+  formatGrantDuration,
   getChallengeActionState,
   getChallengeQueryErrorMessage,
   getDecisionErrorMessage,
@@ -118,10 +118,8 @@ export function ChallengeMinimalScreen({ navigation, route }: Props) {
   const actionState = getChallengeActionState(data);
   const actionsDisabled =
     approveMutation.isPending || denyMutation.isPending || !actionState.canDecide;
-  const grantExpiryDisplay = formatGrantExpiryFromCreatedAt(
-    data.created_at,
-    notificationSettings?.grant_expiry_days
-  );
+  const grantDurationLabel = formatGrantDuration(notificationSettings?.grant_expiry_days);
+  const isGrantMode = data.approval_mode === "grant";
 
   return (
     <ScreenContainer>
@@ -134,7 +132,9 @@ export function ChallengeMinimalScreen({ navigation, route }: Props) {
         <SectionBadge label="CHALLENGE" tone="warning" />
         <Text style={flowStyles.title}>Approve This Request?</Text>
         <Text style={flowStyles.subtitle}>
-          Grant access for this request. Expiry follows your account preference.
+          {isGrantMode
+            ? `Approval creates reusable access for ${grantDurationLabel}.`
+            : "This approval applies only to the current request."}
         </Text>
 
         <View style={flowStyles.card}>
@@ -152,8 +152,12 @@ export function ChallengeMinimalScreen({ navigation, route }: Props) {
             <Text style={flowStyles.rowValue}>{actionState.statusLabel}</Text>
           </View>
           <View style={flowStyles.rowLast}>
-            <Text style={flowStyles.rowLabel}>Grant Expires</Text>
-            <Text style={flowStyles.rowValue}>{grantExpiryDisplay}</Text>
+            <Text style={flowStyles.rowLabel}>
+              {isGrantMode ? "Grant Duration" : "Approval Type"}
+            </Text>
+            <Text style={flowStyles.rowValue}>
+              {isGrantMode ? grantDurationLabel : "One-time approval"}
+            </Text>
           </View>
         </View>
         {actionState.reason ? (

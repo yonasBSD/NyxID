@@ -92,6 +92,9 @@ export function NotificationSettingsPage() {
   const [selectedServiceId, setSelectedServiceId] = useState("");
   const [selectedApprovalRequired, setSelectedApprovalRequired] =
     useState(true);
+  const [selectedApprovalMode, setSelectedApprovalMode] = useState<
+    "per_request" | "grant"
+  >("per_request");
 
   const linkData = telegramLinkMutation.data;
 
@@ -180,11 +183,13 @@ export function NotificationSettingsPage() {
       await setConfigMutation.mutateAsync({
         serviceId: selectedServiceId,
         approvalRequired: selectedApprovalRequired,
+        approvalMode: selectedApprovalMode,
       });
       toast.success("Per-service approval override added");
       setAddServiceDialogOpen(false);
       setSelectedServiceId("");
       setSelectedApprovalRequired(true);
+      setSelectedApprovalMode("per_request");
     } catch (err) {
       toast.error(
         err instanceof ApiError ? err.message : "Failed to add service config",
@@ -197,15 +202,39 @@ export function NotificationSettingsPage() {
     approvalRequired: boolean,
   ) {
     try {
+      const existingConfig = serviceConfigs?.configs.find(
+        (c) => c.service_id === serviceId,
+      );
       await setConfigMutation.mutateAsync({
         serviceId,
         approvalRequired,
+        approvalMode: existingConfig?.approval_mode,
       });
     } catch (err) {
       toast.error(
         err instanceof ApiError
           ? err.message
           : "Failed to update service config",
+      );
+    }
+  }
+
+  async function handleChangeApprovalMode(
+    serviceId: string,
+    approvalRequired: boolean,
+    approvalMode: "per_request" | "grant",
+  ) {
+    try {
+      await setConfigMutation.mutateAsync({
+        serviceId,
+        approvalRequired,
+        approvalMode,
+      });
+    } catch (err) {
+      toast.error(
+        err instanceof ApiError
+          ? err.message
+          : "Failed to update approval mode",
       );
     }
   }
@@ -376,7 +405,9 @@ export function NotificationSettingsPage() {
                 Approval Preferences
               </CardTitle>
               <CardDescription>
-                Configure whether approval is required and how long grants last.
+                Configure approval settings. When enabled, every request
+                requires approval by default (per-request mode). You can
+                opt specific services into time-based grants below.
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -404,10 +435,11 @@ export function NotificationSettingsPage() {
                             Require Approval (Global Default)
                           </FormLabel>
                           <FormDescription>
-                            When enabled, proxy and LLM gateway requests using
-                            your credentials require explicit approval.
-                            Per-service overrides below can exempt or add
-                            specific services.
+                            When enabled, every proxy and LLM gateway request
+                            requires a fresh approval (per-request mode by
+                            default). Use per-service overrides below to switch
+                            individual services to time-based grants or to
+                            exempt them entirely.
                           </FormDescription>
                         </div>
                         <FormControl>
@@ -520,7 +552,8 @@ export function NotificationSettingsPage() {
                         </FormControl>
                         <FormDescription>
                           How many days an approval grant lasts before
-                          re-prompting (1-365 days).
+                          re-prompting (1-365 days). Only applies to services
+                          configured with time-based grant mode.
                         </FormDescription>
                         <FormMessage />
                       </FormItem>
@@ -546,7 +579,9 @@ export function NotificationSettingsPage() {
                   </CardTitle>
                   <CardDescription>
                     Override the global approval setting for specific services.
-                    Services without an override use the global default above.
+                    Services without an override use per-request approval by
+                    default. Use overrides to switch services to time-based
+                    grants or to exempt them from approval.
                   </CardDescription>
                 </div>
                 <Button
@@ -583,39 +618,75 @@ export function NotificationSettingsPage() {
                   {serviceConfigs?.configs.map((config) => (
                     <div
                       key={config.service_id}
-                      className="flex items-center justify-between rounded-lg border border-border p-4"
+                      className="rounded-lg border border-border p-4"
                     >
-                      <div className="space-y-0.5">
-                        <p className="text-sm font-medium">
-                          {config.service_name}
-                        </p>
-                        <p className="text-xs text-muted-foreground">
-                          {config.approval_required
-                            ? "Approval required"
-                            : "Approval not required"}
-                        </p>
+                      <div className="flex items-center justify-between">
+                        <div className="space-y-0.5">
+                          <p className="text-sm font-medium">
+                            {config.service_name}
+                          </p>
+                          <p className="text-xs text-muted-foreground">
+                            {config.approval_required
+                              ? "Approval required"
+                              : "Approval not required"}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <Switch
+                            checked={config.approval_required}
+                            onCheckedChange={(checked) =>
+                              void handleToggleServiceConfig(
+                                config.service_id,
+                                checked,
+                              )
+                            }
+                          />
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() =>
+                              void handleDeleteServiceConfig(config.service_id)
+                            }
+                            title="Remove override (use global default)"
+                          >
+                            <RotateCcw className="h-4 w-4 text-muted-foreground" />
+                          </Button>
+                        </div>
                       </div>
-                      <div className="flex items-center gap-3">
-                        <Switch
-                          checked={config.approval_required}
-                          onCheckedChange={(checked) =>
-                            void handleToggleServiceConfig(
-                              config.service_id,
-                              checked,
-                            )
-                          }
-                        />
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() =>
-                            void handleDeleteServiceConfig(config.service_id)
-                          }
-                          title="Remove override (use global default)"
-                        >
-                          <RotateCcw className="h-4 w-4 text-muted-foreground" />
-                        </Button>
-                      </div>
+                      {config.approval_required && (
+                        <div className="mt-3 flex items-center gap-2 border-t border-border pt-3">
+                          <span className="text-xs text-muted-foreground">
+                            Mode:
+                          </span>
+                          <Select
+                            value={config.approval_mode}
+                            onValueChange={(value) =>
+                              void handleChangeApprovalMode(
+                                config.service_id,
+                                config.approval_required,
+                                value as "per_request" | "grant",
+                              )
+                            }
+                          >
+                            <SelectTrigger className="h-7 w-[180px] text-xs">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="per_request">
+                                Per request
+                              </SelectItem>
+                              <SelectItem value="grant">
+                                Time-based grant
+                              </SelectItem>
+                            </SelectContent>
+                          </Select>
+                          <span className="text-xs text-muted-foreground">
+                            {config.approval_mode === "grant"
+                              ? "Approval creates a reusable grant"
+                              : "Every request needs fresh approval"}
+                          </span>
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -768,6 +839,35 @@ export function NotificationSettingsPage() {
                 onCheckedChange={setSelectedApprovalRequired}
               />
             </div>
+            {selectedApprovalRequired && (
+              <div className="space-y-2">
+                <label
+                  className="text-sm font-medium"
+                  htmlFor="approval-mode-select"
+                >
+                  Approval Mode
+                </label>
+                <Select
+                  value={selectedApprovalMode}
+                  onValueChange={(v) =>
+                    setSelectedApprovalMode(v as "per_request" | "grant")
+                  }
+                >
+                  <SelectTrigger id="approval-mode-select">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="per_request">Per request</SelectItem>
+                    <SelectItem value="grant">Time-based grant</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  {selectedApprovalMode === "grant"
+                    ? "Approval creates a reusable grant lasting the configured number of days. Subsequent requests skip approval until the grant expires."
+                    : "Every API request requires a fresh approval. No grant is created."}
+                </p>
+              </div>
+            )}
           </div>
           <DialogFooter>
             <Button

@@ -84,7 +84,7 @@ The `nyxid` CLI manages services, API keys, catalog browsing, MCP setup, and mor
 
 ```bash
 # Install from git
-cargo install --git https://github.com/ChronoAIProject/NyxID --bin nyxid
+cargo install --git https://github.com/ChronoAIProject/NyxID nyxid-cli
 
 # Or clone and build locally
 git clone https://github.com/ChronoAIProject/NyxID && cd NyxID
@@ -126,7 +126,7 @@ The `nyxid node` subcommand manages on-premise credential storage and proxying. 
 
 ```bash
 # Install from git (requires Rust toolchain) -- nyxid node is included
-cargo install --git https://github.com/ChronoAIProject/NyxID --bin nyxid
+cargo install --git https://github.com/ChronoAIProject/NyxID nyxid-cli
 
 # Or clone and build locally
 git clone https://github.com/ChronoAIProject/NyxID && cd NyxID
@@ -1639,32 +1639,54 @@ Token TTL defaults to 1 hour.
 
 **Goal:** Require approval before users can access sensitive services. Approvals can be delivered via Telegram or mobile push notifications.
 
+### Approval modes
+
+NyxID supports two approval modes:
+
+| Mode | Behavior | Default? |
+|------|----------|----------|
+| `per_request` | Every proxy call requires fresh approval. No grants are created. | Yes (default) |
+| `grant` | Approval creates a time-based grant. Subsequent requests within the grant period pass automatically. | No (opt-in) |
+
+When a service has approval enabled, the default mode is **per-request**: every proxy call triggers a new approval notification with a human-readable `action_description` (e.g., "POST /v1/chat/completions (model: gpt-4, 3 messages)"). The approver sees exactly what the request will do before approving.
+
+To use grant-based approvals instead (legacy behavior), set `approval_mode` to `"grant"`.
+
 ### Configure a service to require approval
 
 ```bash
-# CLI
+# CLI -- per-request mode (default)
 nyxid approval set-config $SERVICE_ID --require-approval true
 
-# API
+# CLI -- grant mode (approval creates a time-based grant)
+nyxid approval set-config $SERVICE_ID --require-approval true --approval-mode grant
+
+# API -- per-request mode (default)
 curl -X PUT http://localhost:3001/api/v1/approvals/service-configs/$SERVICE_ID \
   -H "Authorization: Bearer $ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"enabled": true}'
+  -d '{"approval_required": true}'
+
+# API -- grant mode
+curl -X PUT http://localhost:3001/api/v1/approvals/service-configs/$SERVICE_ID \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"approval_required": true, "approval_mode": "grant"}'
 ```
 
-When a user tries to proxy a request to this service, they get a 403 with `error_code: 7000` and a `request_id`.
+When a user tries to proxy a request to this service, they get a 403 with `error_code: 7000`, a `request_id`, and an `action_description` describing the request.
 
 ### View and manage approval requests
 
 ```bash
 # CLI
-nyxid approval list                           # List all approval requests
-nyxid approval show $REQUEST_ID               # Show request details (includes status)
+nyxid approval list                           # List all approval requests (includes action_description)
+nyxid approval show $REQUEST_ID               # Show request details (includes status + action_description)
 
 # API
 curl http://localhost:3001/api/v1/approvals/requests/$REQUEST_ID/status \
   -H "Authorization: Bearer $ACCESS_TOKEN"
-# Returns: { "status": "pending" | "approved" | "denied", "expires_at": "..." }
+# Returns: { "status": "pending" | "approved" | "denied", "expires_at": "...", "action_description": "..." }
 ```
 
 ### Approve or deny (admin / approver)
@@ -1683,6 +1705,8 @@ curl -X POST http://localhost:3001/api/v1/approvals/requests/$REQUEST_ID/decide 
 
 ### View approval grants
 
+Grants are only created in `grant` mode. Services using `per_request` mode do not create grants.
+
 ```bash
 # CLI
 nyxid approval grants                         # List active grants
@@ -1697,7 +1721,7 @@ DELETE /api/v1/approvals/grants/{grant_id}
 
 ```bash
 # CLI
-nyxid approval service-configs                # List all per-service configs
+nyxid approval service-configs                # List all per-service configs (includes approval_mode)
 ```
 
 ### Set up Telegram notifications
@@ -1728,7 +1752,7 @@ nyxid notification update \
 ### Via Dashboard
 
 - Approval history: http://localhost:3000/approvals/history
-- Active grants: http://localhost:3000/approvals/grants
+- Active grants: http://localhost:3000/approvals/grants (grant mode only)
 - Notification settings: http://localhost:3000/approvals/settings
 
 ---
@@ -2153,7 +2177,7 @@ Base URL: `http://localhost:3001`
 | GET | `/api/v1/approvals/grants` | List active grants |
 | DELETE | `/api/v1/approvals/grants/{id}` | Revoke grant |
 | GET | `/api/v1/approvals/service-configs` | List service approval configs |
-| PUT | `/api/v1/approvals/service-configs/{service_id}` | Configure approval requirement |
+| PUT | `/api/v1/approvals/service-configs/{service_id}` | Configure approval requirement and mode (`per_request` or `grant`) |
 | DELETE | `/api/v1/approvals/service-configs/{service_id}` | Remove approval requirement |
 
 ### Notifications
@@ -2239,7 +2263,7 @@ All errors return JSON: `{ "error": "...", "error_code": N, "message": "..." }`
 | 6000 | social_auth_failed | 400 | Social login provider error |
 | 6001 | social_auth_conflict | 409 | Social account already linked to another user |
 | 6004 | external_token_invalid | 401 | External provider token is invalid or expired |
-| 7000 | approval_required | 403 | Service requires approval (includes `request_id`) |
+| 7000 | approval_required | 403 | Service requires approval (includes `request_id` and `action_description`) |
 | 8000 | node_not_found | 404 | Node does not exist |
 | 8001 | node_offline | 502 | Node is not connected |
 | 8002 | node_proxy_timeout | 504 | Node did not respond in time |
@@ -2301,7 +2325,9 @@ curl -X POST http://localhost:3001/oauth/token \
 
 ### Service proxy returns 403 with "approval_required"
 
-- The service requires approval before access
+- The service requires approval before access. The error response includes a `request_id` and an `action_description` (e.g., "POST /v1/chat/completions (model: gpt-4, 3 messages)").
+- By default, approval mode is `per_request`: every proxy call needs fresh approval. There are no reusable grants.
+- To use grant-based approvals instead, configure the service with `--approval-mode grant`.
 - Use the `request_id` from the error to poll: `GET /api/v1/approvals/requests/{request_id}/status`
 - Admin can approve via: `POST /api/v1/approvals/requests/{request_id}/decide {"approved": true}`
 
@@ -2629,9 +2655,10 @@ nyxid approval deny <ID>               # Deny a request
 nyxid approval grants                  # List approval grants
 nyxid approval revoke-grant <ID>       # Revoke an approval grant
   [--yes]
-nyxid approval service-configs         # List per-service approval configurations
+nyxid approval service-configs         # List per-service approval configurations (includes approval_mode)
 nyxid approval set-config <ID>         # Set approval configuration for a service
   [--require-approval <BOOL>]
+  [--approval-mode <MODE>]             #   "per_request" (default) or "grant"
 ```
 
 #### Endpoints (Low-Level)
@@ -2701,7 +2728,7 @@ nyxid proxy request llm-anthropic v1/messages \
   -m POST -d '{"model":"claude-sonnet-4-20250514","max_tokens":100,"messages":[{"role":"user","content":"Hello"}]}'
 ```
 
-**Set up approval workflow:**
+**Set up approval workflow (per-request, default):**
 
 ```bash
 nyxid approval set-config <SERVICE_ID> --require-approval true

@@ -85,6 +85,10 @@ export function ApprovalGrantsPage() {
           <p className="text-sm text-muted-foreground">
             No active approval grants.
           </p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Services using per-request approval do not create grants. Only
+            services set to time-based grant mode will appear here.
+          </p>
         </div>
       ) : (
         <>
