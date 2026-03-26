@@ -144,6 +144,19 @@ the downstream service directly. To figure out what to send:
 3. Use the provider's docs to determine the correct path, method, headers, and body format
 4. Use `-H "Content-Type: ..."` if the service expects something other than JSON
 
+### Important: paths are relative to the service's base URL
+
+Each service in NyxID has a configured `endpoint_url` (base URL) that may already include
+a version prefix. For example, `api-twitter` uses `https://api.x.com/2` as its base URL.
+When making a proxy request, the path you provide is appended to that base URL:
+
+- Service base URL: `https://api.x.com/2`
+- Your path: `/tweets`
+- Actual request: `https://api.x.com/2/tweets`
+
+So do NOT duplicate the version prefix in your path. Check `nyxid service show <id> --output json`
+to see the `endpoint_url` if you're unsure.
+
 ### Making the request
 
 ```bash
@@ -164,21 +177,24 @@ echo '{"prompt":"hello"}' | nyxid proxy request <slug> <path> -m POST -d -
 
 ### Common service examples
 
+Paths below are relative to each service's base URL. Check `nyxid service show <id> --output json`
+for the `endpoint_url` if unsure.
+
 ```bash
-# OpenAI -- POST /v1/chat/completions
-nyxid proxy request llm-openai /v1/chat/completions -m POST \
+# OpenAI (base: https://api.openai.com/v1) -- POST /chat/completions
+nyxid proxy request llm-openai /chat/completions -m POST \
   -d '{"model":"gpt-4","messages":[{"role":"user","content":"Hello"}]}'
 
-# Anthropic -- POST /v1/messages
-nyxid proxy request llm-anthropic /v1/messages -m POST \
+# Anthropic (base: https://api.anthropic.com/v1) -- POST /messages
+nyxid proxy request llm-anthropic /messages -m POST \
   -H "anthropic-version: 2023-06-01" \
   -d '{"model":"claude-sonnet-4-20250514","max_tokens":1024,"messages":[{"role":"user","content":"Hello"}]}'
 
-# GitHub API -- GET /user/repos
+# GitHub API (base: https://api.github.com) -- GET /user/repos
 nyxid proxy request api-github /user/repos -m GET
 
-# Twitter API v2 -- POST /2/tweets
-nyxid proxy request api-twitter /2/tweets -m POST \
+# Twitter / X (base: https://api.x.com/2) -- POST /tweets (not /2/tweets!)
+nyxid proxy request api-twitter /tweets -m POST \
   -d '{"text":"Hello from NyxID"}'
 
 # Discover all available proxy services
