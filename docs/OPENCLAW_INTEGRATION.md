@@ -30,7 +30,7 @@ https://nyx.chrono-ai.fun
 
 ```bash
 mkdir -p ~/.openclaw/skills
-cp -r integrations/openclaw/skills/nyxid ~/.openclaw/skills/nyxid
+cp -r skills/nyxid ~/.openclaw/skills/nyxid
 ```
 
 This makes the skill available to all OpenClaw agents on your machine.
@@ -38,7 +38,7 @@ This makes the skill available to all OpenClaw agents on your machine.
 **Option B -- Copy to a workspace (project-scoped):**
 
 ```bash
-cp -r integrations/openclaw/skills/nyxid /path/to/workspace/skills/nyxid
+cp -r skills/nyxid /path/to/workspace/skills/nyxid
 ```
 
 Workspace skills take highest precedence in OpenClaw's skill loading order.

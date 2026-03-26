@@ -9,7 +9,7 @@ use crate::cli::{AiSetupCommands, AiToolTarget};
 const GITHUB_RAW: &str = "https://raw.githubusercontent.com/ChronoAIProject/NyxID/main";
 
 /// Path within the repo to the canonical skill files.
-const SKILL_DIR: &str = "integrations/openclaw/skills/nyxid";
+const SKILL_DIR: &str = "skills/nyxid";
 
 /// The default hosted NyxID URL used in the repo's SKILL.md.
 /// Replaced with the user's actual server URL at install time.
