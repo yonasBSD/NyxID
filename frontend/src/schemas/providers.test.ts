@@ -313,6 +313,16 @@ describe("createProviderSchema", () => {
     expect(result.success).toBe(true);
   });
 
+  it("accepts valid telegram_widget provider with a leading @ in the bot username", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "telegram_widget",
+      client_id_param_name: "@NyxIdBot",
+      client_secret: "123456:ABC-DEF1234567890",
+    });
+    expect(result.success).toBe(true);
+  });
+
   it("rejects telegram_widget provider without bot username", () => {
     const result = createProviderSchema.safeParse({
       ...baseValid,
@@ -336,6 +346,16 @@ describe("createProviderSchema", () => {
       ...baseValid,
       provider_type: "telegram_widget",
       client_id_param_name: "   ",
+      client_secret: "123456:ABC-DEF1234567890",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects telegram_widget provider with an invalid bot username format", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "telegram_widget",
+      client_id_param_name: "not-a-bot",
       client_secret: "123456:ABC-DEF1234567890",
     });
     expect(result.success).toBe(false);
@@ -455,6 +475,15 @@ describe("updateProviderSchema", () => {
       ...baseValid,
       provider_type: "telegram_widget",
       client_id_param_name: "   ",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects telegram_widget update with an invalid bot username format", () => {
+    const result = updateProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "telegram_widget",
+      client_id_param_name: "abc",
     });
     expect(result.success).toBe(false);
   });

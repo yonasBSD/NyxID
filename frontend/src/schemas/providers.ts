@@ -34,6 +34,9 @@ export const connectApiKeySchema = z.object({
 export type ConnectApiKeyFormData = z.infer<typeof connectApiKeySchema>;
 
 const optionalTelegramString = z.string().trim().min(1);
+const TELEGRAM_BOT_USERNAME_PATTERN = /^@?[a-z][a-z0-9_]{1,28}bot$/i;
+const TELEGRAM_BOT_USERNAME_MESSAGE =
+  "Bot username must be 5-32 characters, start with a letter, use only letters, digits, or underscores, and end in 'bot'";
 
 export const telegramLoginDataSchema = z.object({
   id: z.coerce.number().int().positive(),
@@ -252,6 +255,14 @@ export const createProviderSchema = z
           message: "Bot username is required for Telegram widget providers",
           path: ["client_id_param_name"],
         });
+      } else if (
+        !TELEGRAM_BOT_USERNAME_PATTERN.test(data.client_id_param_name.trim())
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: TELEGRAM_BOT_USERNAME_MESSAGE,
+          path: ["client_id_param_name"],
+        });
       }
       if (!data.client_secret?.trim()) {
         ctx.addIssue({
@@ -324,6 +335,16 @@ export const updateProviderSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: "Bot username must not be blank",
+        path: ["client_id_param_name"],
+      });
+    } else if (
+      data.provider_type === "telegram_widget" &&
+      data.client_id_param_name &&
+      !TELEGRAM_BOT_USERNAME_PATTERN.test(data.client_id_param_name.trim())
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: TELEGRAM_BOT_USERNAME_MESSAGE,
         path: ["client_id_param_name"],
       });
     }

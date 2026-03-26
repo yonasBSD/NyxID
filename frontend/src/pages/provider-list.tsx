@@ -638,8 +638,8 @@ export function ProviderListPage() {
                             <Input placeholder="NyxIdBot" {...field} />
                           </FormControl>
                           <p className="text-xs text-muted-foreground">
-                            Enter the BotFather username without the leading
-                            <span className="font-mono"> @</span>.
+                            Enter the BotFather username. A leading
+                            <span className="font-mono"> @</span> is optional.
                           </p>
                           <FormMessage />
                         </FormItem>

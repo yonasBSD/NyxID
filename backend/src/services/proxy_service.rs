@@ -89,6 +89,15 @@ fn contains_dot_segment(value: &str) -> bool {
         .any(|segment| segment == "." || segment == "..")
 }
 
+fn contains_raw_path_breaker(value: &str) -> bool {
+    value.contains('\\')
+        || value.contains('\0')
+        || value.contains('?')
+        || value.contains('#')
+        || value.contains("//")
+        || contains_dot_segment(value)
+}
+
 fn contains_percent_encoded_path_breaker(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
     lower.contains("%2f")
@@ -102,15 +111,39 @@ fn contains_percent_encoded_path_breaker(value: &str) -> bool {
         })
 }
 
+fn contains_nested_percent_encoded_path_breaker(value: &str) -> bool {
+    let mut current = value.to_string();
+
+    // Axum decodes one layer before handlers see the wildcard path. Some
+    // downstream routers and proxies decode additional layers, so walk a few
+    // more rounds and reject anything that would later collapse into a path
+    // separator, fragment/query delimiter, null byte, or dot-segment.
+    for _ in 0..8 {
+        if contains_percent_encoded_path_breaker(&current) {
+            return true;
+        }
+
+        let decoded = match urlencoding::decode(&current) {
+            Ok(decoded) => decoded.into_owned(),
+            Err(_) => break,
+        };
+
+        if decoded == current {
+            break;
+        }
+
+        if contains_raw_path_breaker(&decoded) {
+            return true;
+        }
+
+        current = decoded;
+    }
+
+    false
+}
+
 pub(crate) fn validate_requested_proxy_path(path: &str) -> AppResult<()> {
-    if path.contains('\\')
-        || path.contains('\0')
-        || path.contains('?')
-        || path.contains('#')
-        || path.contains("//")
-        || contains_dot_segment(path)
-        || contains_percent_encoded_path_breaker(path)
-    {
+    if contains_raw_path_breaker(path) || contains_nested_percent_encoded_path_breaker(path) {
         return Err(AppError::BadRequest("Invalid proxy path".to_string()));
     }
 
@@ -755,10 +788,18 @@ mod tests {
             "sendMessage#fragment",
             "folder%2FsendMessage",
             "folder%2fsendMessage",
+            "folder%252FsendMessage",
+            "folder%25252FsendMessage",
             "folder%3Fchat_id=1",
             "folder%3fchat_id=1",
+            "folder%253Fchat_id=1",
+            "folder%25253Fchat_id=1",
             "folder%23fragment",
+            "folder%2523fragment",
+            "folder%252523fragment",
             "%2e%2e",
+            "%252e%252e",
+            "%25252e%25252e",
             "%2e.",
             ".%2e",
             "%2E%2E",
@@ -766,7 +807,11 @@ mod tests {
             ".%2E",
             "folder%5CsendMessage",
             "folder%5csendMessage",
+            "folder%255CsendMessage",
+            "folder%25255CsendMessage",
             "%00",
+            "%2500",
+            "%252500",
         ] {
             let err = forward_request(
                 &Client::new(),

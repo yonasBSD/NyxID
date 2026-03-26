@@ -1875,7 +1875,7 @@ pub async fn update_provider(
     Ok(updated)
 }
 
-fn normalize_telegram_bot_username(raw: &str) -> AppResult<String> {
+pub(crate) fn normalize_telegram_bot_username(raw: &str) -> AppResult<String> {
     let normalized = raw.trim().trim_start_matches('@');
     if normalized.is_empty() {
         return Err(AppError::ValidationError(
@@ -1885,6 +1885,27 @@ fn normalize_telegram_bot_username(raw: &str) -> AppResult<String> {
     if normalized.chars().any(char::is_whitespace) {
         return Err(AppError::ValidationError(
             "Telegram bot username must not contain whitespace".to_string(),
+        ));
+    }
+    if !(5..=32).contains(&normalized.len()) {
+        return Err(AppError::ValidationError(
+            "Telegram bot username must be 5-32 characters, start with a letter, use only letters, digits, or underscores, and end in 'bot'".to_string(),
+        ));
+    }
+
+    let mut chars = normalized.chars();
+    let Some(first) = chars.next() else {
+        return Err(AppError::ValidationError(
+            "Telegram bot username must not be empty".to_string(),
+        ));
+    };
+
+    if !first.is_ascii_alphabetic()
+        || !chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        || !normalized.to_ascii_lowercase().ends_with("bot")
+    {
+        return Err(AppError::ValidationError(
+            "Telegram bot username must be 5-32 characters, start with a letter, use only letters, digits, or underscores, and end in 'bot'".to_string(),
         ));
     }
 
@@ -1968,6 +1989,21 @@ mod tests {
             AppError::ValidationError(message)
                 if message == "Telegram bot username must not contain whitespace"
         ));
+    }
+
+    #[test]
+    fn normalize_telegram_bot_username_rejects_invalid_format() {
+        let too_long = format!("{}bot", "a".repeat(30));
+        for username in ["abc", "123bot", "not-a-bot", "bot", too_long.as_str()] {
+            let err = normalize_telegram_bot_username(username)
+                .expect_err("invalid bot username should be rejected");
+
+            assert!(matches!(
+                err,
+                AppError::ValidationError(message)
+                    if message == "Telegram bot username must be 5-32 characters, start with a letter, use only letters, digits, or underscores, and end in 'bot'"
+            ));
+        }
     }
 
     #[test]

@@ -259,9 +259,15 @@ pub async fn get_telegram_connect_bot_username(
 ) -> AppResult<String> {
     let provider = get_active_telegram_widget_provider(db, provider_id).await?;
 
-    let bot_username = provider.client_id_param_name.ok_or_else(|| {
-        AppError::BadRequest("Telegram bot username not configured for this provider".to_string())
-    })?;
+    let bot_username = provider
+        .client_id_param_name
+        .as_deref()
+        .ok_or_else(|| {
+            AppError::BadRequest(
+                "Telegram bot username not configured for this provider".to_string(),
+            )
+        })
+        .and_then(crate::services::provider_service::normalize_telegram_bot_username)?;
     if provider.client_secret_encrypted.is_none() {
         return Err(AppError::BadRequest(
             "Telegram bot token not configured for this provider".to_string(),

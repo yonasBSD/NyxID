@@ -52,9 +52,7 @@ function stripEmptyStrings<T extends Record<string, unknown>>(
   obj: T,
 ): Record<string, unknown> {
   return Object.fromEntries(
-    Object.entries(obj).filter(
-      ([, v]) => v !== "" && v !== undefined,
-    ),
+    Object.entries(obj).filter(([, v]) => v !== "" && v !== undefined),
   );
 }
 
@@ -104,8 +102,7 @@ export function ProviderEditPage() {
         authorization_url: "",
         token_url: "",
         revocation_url: "",
-        default_scopes:
-          provider.default_scopes?.join(", ") ?? "",
+        default_scopes: provider.default_scopes?.join(", ") ?? "",
         is_active: provider.is_active,
         client_id: "",
         client_secret: "",
@@ -169,9 +166,12 @@ export function ProviderEditPage() {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 font-display text-lg font-semibold">Provider not found</h3>
+        <h3 className="mb-2 font-display text-lg font-semibold">
+          Provider not found
+        </h3>
         <p className="mb-4 text-sm text-muted-foreground">
-          The provider you are trying to edit does not exist or has been deleted.
+          The provider you are trying to edit does not exist or has been
+          deleted.
         </p>
         <Button
           variant="outline"
@@ -204,10 +204,7 @@ export function ProviderEditPage() {
 
       <div className="max-w-2xl">
         <Form {...form}>
-          <form
-            onSubmit={form.handleSubmit(onSubmit)}
-            className="space-y-4"
-          >
+          <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
             {form.formState.errors.root && (
               <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
                 {form.formState.errors.root.message}
@@ -304,15 +301,9 @@ export function ProviderEditPage() {
                         </SelectTrigger>
                       </FormControl>
                       <SelectContent>
-                        <SelectItem value="admin">
-                          Admin Only
-                        </SelectItem>
-                        <SelectItem value="user">
-                          User Provided
-                        </SelectItem>
-                        <SelectItem value="both">
-                          Admin or User
-                        </SelectItem>
+                        <SelectItem value="admin">Admin Only</SelectItem>
+                        <SelectItem value="user">User Provided</SelectItem>
+                        <SelectItem value="both">Admin or User</SelectItem>
                       </SelectContent>
                     </Select>
                     <p className="text-xs text-muted-foreground">
@@ -349,10 +340,7 @@ export function ProviderEditPage() {
                 <FormItem>
                   <FormLabel>Documentation URL</FormLabel>
                   <FormControl>
-                    <Input
-                      placeholder="https://docs.example.com"
-                      {...field}
-                    />
+                    <Input placeholder="https://docs.example.com" {...field} />
                   </FormControl>
                   <FormMessage />
                 </FormItem>
@@ -659,14 +647,11 @@ export function ProviderEditPage() {
                     <FormItem>
                       <FormLabel>Bot Username</FormLabel>
                       <FormControl>
-                        <Input
-                          placeholder="NyxIdBot"
-                          {...field}
-                        />
+                        <Input placeholder="NyxIdBot" {...field} />
                       </FormControl>
                       <p className="text-xs text-muted-foreground">
-                        Enter the BotFather username without the leading
-                        <span className="font-mono"> @</span>.
+                        Enter the BotFather username. A leading
+                        <span className="font-mono"> @</span> is optional.
                       </p>
                       <FormMessage />
                     </FormItem>
@@ -699,9 +684,7 @@ export function ProviderEditPage() {
             {isApiKey && (
               <>
                 <Separator className="my-2" />
-                <h3 className="text-sm font-semibold">
-                  API Key Configuration
-                </h3>
+                <h3 className="text-sm font-semibold">API Key Configuration</h3>
 
                 <FormField
                   control={form.control}

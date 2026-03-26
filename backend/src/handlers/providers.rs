@@ -201,7 +201,10 @@ fn provider_to_response(p: crate::models::provider_config::ProviderConfig) -> Pr
 /// - Telegram widget providers: true when the bot username and bot token are set.
 fn provider_has_oauth_config(p: &crate::models::provider_config::ProviderConfig) -> bool {
     if p.provider_type == "telegram_widget" {
-        return p.client_id_param_name.is_some() && p.client_secret_encrypted.is_some();
+        return p.client_secret_encrypted.is_some()
+            && p.client_id_param_name.as_deref().is_some_and(|username| {
+                provider_service::normalize_telegram_bot_username(username).is_ok()
+            });
     }
 
     let has_urls = match p.provider_type.as_str() {
@@ -706,5 +709,13 @@ mod tests {
         provider.client_id_param_name = Some("NyxIdBot".to_string());
 
         assert!(provider_has_oauth_config(&provider));
+    }
+
+    #[test]
+    fn telegram_widget_with_invalid_bot_username_is_not_connectable() {
+        let mut provider = make_provider("telegram_widget");
+        provider.client_id_param_name = Some("not-a-bot".to_string());
+
+        assert!(!provider_has_oauth_config(&provider));
     }
 }
