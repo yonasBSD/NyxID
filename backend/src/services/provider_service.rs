@@ -1131,7 +1131,7 @@ pub async fn seed_default_providers(
             device_verification_url: None,
             hosted_callback_url: None,
             api_key_instructions: Some(
-                "Create a bot via @BotFather on Telegram and copy the bot token (format: 123456:ABC-DEF...)"
+                "Create a bot via @BotFather on Telegram, then copy the bot token (e.g. 123456789:ABCdefGHI_jklMNOpqrSTUvwx)."
                     .to_string(),
             ),
             api_key_url: Some("https://t.me/BotFather".to_string()),

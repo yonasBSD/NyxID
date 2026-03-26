@@ -48,9 +48,10 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 };
                 let method = match auth_method {
                     Some(m) => m,
-                    None => {
-                        prompt_line_default("Auth method [bearer/header/query/basic]: ", "bearer")?
-                    }
+                    None => prompt_line_default(
+                        "Auth method [bearer/header/query/path/basic]: ",
+                        "bearer",
+                    )?,
                 };
                 let key_name = match auth_key_name {
                     Some(k) => k,
