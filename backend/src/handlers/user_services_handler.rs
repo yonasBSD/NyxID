@@ -28,7 +28,8 @@ pub struct UserServiceResponse {
     pub id: String,
     pub slug: String,
     pub endpoint_id: String,
-    pub api_key_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key_id: Option<String>,
     pub auth_method: String,
     pub auth_key_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]

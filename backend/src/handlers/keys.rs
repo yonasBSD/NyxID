@@ -74,7 +74,8 @@ pub struct KeyResponse {
     pub slug: String,
     pub endpoint_url: String,
     pub endpoint_id: String,
-    pub api_key_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key_id: Option<String>,
     pub credential_type: String,
     pub auth_method: String,
     pub auth_key_name: String,
@@ -88,6 +89,7 @@ pub struct KeyResponse {
     pub node_priority: i32,
     pub service_type: String,
     pub is_active: bool,
+    pub auto_connected: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -189,14 +191,20 @@ pub async fn create_key(
     .await?;
 
     // Fire-and-forget: push credential to node if routed AND we have a credential to push
-    let has_pushable_credential = result.api_key.credential_encrypted.is_some()
-        || result.api_key.access_token_encrypted.is_some();
+    let has_pushable_credential = result.api_key.as_ref().is_some_and(|api_key| {
+        api_key.credential_encrypted.is_some() || api_key.access_token_encrypted.is_some()
+    });
     if result.service.node_id.is_some() && has_pushable_credential {
         let db = state.db.clone();
         let enc = state.encryption_keys.clone();
         let ws = state.node_ws_manager.clone();
         let uid = user_id_str.clone();
-        let key_id = result.api_key.id.clone();
+        let key_id = result
+            .api_key
+            .as_ref()
+            .expect("pushable credential requires api key")
+            .id
+            .clone();
         tokio::spawn(async move {
             credential_push_service::push_credential_to_node_if_routed(
                 &db, &enc, &ws, &uid, &key_id,
@@ -223,6 +231,10 @@ pub async fn list_keys(
     auth_user: AuthUser,
 ) -> AppResult<Json<KeyListResponse>> {
     let user_id_str = auth_user.user_id.to_string();
+
+    // Lazily auto-provision no-auth catalog services for the user
+    unified_key_service::auto_provision_no_auth_services(&state.db, &user_id_str).await?;
+
     let views = unified_key_service::list_keys(&state.db, &user_id_str).await?;
     let keys = views.into_iter().map(key_response_from_view).collect();
     Ok(Json(KeyListResponse { keys }))
@@ -279,17 +291,34 @@ pub async fn update_key(
     // Load current state to find sub-resource IDs
     let view = unified_key_service::get_key(&state.db, &user_id_str, &key_id).await?;
 
-    // Update label on UserApiKey if provided
+    if view.auto_connected {
+        return Err(crate::errors::AppError::BadRequest(
+            "Auto-connected services cannot be modified".to_string(),
+        ));
+    }
+
+    // Update label on UserApiKey if provided (skip for auto-connected no-auth services)
     if let Some(ref label) = body.label {
-        user_api_key_service::update_api_key(
-            &state.db,
-            &state.encryption_keys,
-            &user_id_str,
-            &view.api_key_id,
-            Some(label.as_str()),
-            None,
-        )
-        .await?;
+        if let Some(ref ak_id) = view.api_key_id {
+            user_api_key_service::update_api_key(
+                &state.db,
+                &state.encryption_keys,
+                &user_id_str,
+                ak_id,
+                Some(label.as_str()),
+                None,
+            )
+            .await?;
+        } else {
+            user_endpoint_service::update_endpoint(
+                &state.db,
+                &user_id_str,
+                &view.endpoint_id,
+                None,
+                Some(label.as_str()),
+            )
+            .await?;
+        }
     }
 
     // Update endpoint URL if provided
@@ -369,6 +398,14 @@ pub async fn delete_key(
     Path(key_id): Path<String>,
 ) -> AppResult<Json<DeleteKeyResponse>> {
     let user_id_str = auth_user.user_id.to_string();
+
+    let view = unified_key_service::get_key(&state.db, &user_id_str, &key_id).await?;
+    if view.auto_connected {
+        return Err(crate::errors::AppError::BadRequest(
+            "Auto-connected services cannot be deleted".to_string(),
+        ));
+    }
+
     unified_key_service::revoke_key(&state.db, &user_id_str, &key_id).await?;
     Ok(Json(DeleteKeyResponse {
         message: "Key revoked successfully".to_string(),
@@ -378,22 +415,37 @@ pub async fn delete_key(
 fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> KeyResponse {
     KeyResponse {
         id: result.service.id.clone(),
-        label: result.api_key.label.clone(),
+        label: result.api_key.as_ref().map_or_else(
+            || result.endpoint.label.clone(),
+            |api_key| api_key.label.clone(),
+        ),
         slug: result.service.slug.clone(),
         endpoint_url: result.endpoint.url.clone(),
         endpoint_id: result.endpoint.id.clone(),
-        api_key_id: result.api_key.id.clone(),
-        credential_type: result.api_key.credential_type.clone(),
+        api_key_id: result.api_key.as_ref().map(|api_key| api_key.id.clone()),
+        credential_type: result
+            .api_key
+            .as_ref()
+            .map(|api_key| api_key.credential_type.clone())
+            .unwrap_or_else(|| "none".to_string()),
         auth_method: result.service.auth_method.clone(),
         auth_key_name: result.service.auth_key_name.clone(),
-        status: result.api_key.status.clone(),
+        status: result
+            .api_key
+            .as_ref()
+            .map(|api_key| api_key.status.clone())
+            .unwrap_or_else(|| "active".to_string()),
         catalog_service_id: result.service.catalog_service_id.clone(),
         catalog_service_name: None,
         node_id: result.service.node_id.clone(),
         node_priority: result.service.node_priority,
         service_type: result.service.service_type.clone(),
         is_active: result.service.is_active,
-        expires_at: result.api_key.expires_at.map(|dt| dt.to_rfc3339()),
+        auto_connected: false,
+        expires_at: result
+            .api_key
+            .as_ref()
+            .and_then(|api_key| api_key.expires_at.map(|dt| dt.to_rfc3339())),
         last_used_at: None,
         error_message: None,
         created_at: result.service.created_at.to_rfc3339(),
@@ -423,6 +475,7 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         node_priority: view.node_priority,
         service_type: view.service_type,
         is_active: view.is_active,
+        auto_connected: view.auto_connected,
         expires_at: view.expires_at,
         last_used_at: view.last_used_at,
         error_message: view.error_message,

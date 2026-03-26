@@ -73,6 +73,8 @@ pub struct CatalogEntryResponse {
     pub oauth_client_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_id_param_name: Option<String>,
+    /// Whether this catalog entry needs credential setup before it can be used
+    pub requires_credential: bool,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -163,5 +165,6 @@ fn catalog_entry_response(entry: catalog_service::CatalogEntry) -> CatalogEntryR
         extra_auth_params: entry.extra_auth_params,
         oauth_client_id: entry.oauth_client_id,
         client_id_param_name: entry.client_id_param_name,
+        requires_credential: entry.requires_credential,
     }
 }
