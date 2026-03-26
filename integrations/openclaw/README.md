@@ -12,7 +12,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
 
 # Install NyxID CLI
-cargo install --git https://github.com/ChronoAIProject/NyxID -p nyxid-cli
+cargo install --git https://github.com/ChronoAIProject/NyxID nyxid-cli
 
 # Log in (opens browser, saves URL for all future commands)
 nyxid login --base-url https://nyx-api.chrono-ai.fun
@@ -93,7 +93,7 @@ The `nyxid` CLI works with any terminal-based AI assistant.
 
 ```bash
 # Install and log in (one-time; saves URL for all future commands)
-cargo install --git https://github.com/ChronoAIProject/NyxID -p nyxid-cli
+cargo install --git https://github.com/ChronoAIProject/NyxID nyxid-cli
 nyxid login --base-url https://nyx-api.chrono-ai.fun
 
 # Add services non-interactively (credential from env var)
