@@ -1126,6 +1126,24 @@ pub async fn introspect(
         .flatten()
         .map(|u| u.email);
 
+    // Always resolve RBAC from database rather than relying on JWT claims.
+    // This ensures introspection returns correct roles/permissions even when
+    // the access token was issued without them (e.g., after token refresh
+    // with a scope that didn't include "roles").
+    let (roles, groups, permissions) = match crate::services::rbac_helpers::resolve_user_rbac(
+        &state.db,
+        &claims.sub,
+    )
+    .await
+    {
+        Ok(rbac) => (
+            Some(rbac.role_slugs),
+            Some(rbac.group_slugs),
+            Some(rbac.permissions),
+        ),
+        Err(_) => (claims.roles, claims.groups, claims.permissions),
+    };
+
     Json(IntrospectResponse {
         active: true,
         scope: Some(claims.scope),
@@ -1137,9 +1155,9 @@ pub async fn introspect(
         sub: Some(claims.sub),
         iss: Some(claims.iss),
         jti: Some(claims.jti),
-        roles: claims.roles,
-        groups: claims.groups,
-        permissions: claims.permissions,
+        roles,
+        groups,
+        permissions,
     })
 }
 
