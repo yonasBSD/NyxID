@@ -95,17 +95,17 @@ The response includes `auth_type` which tells you what the service needs. Use th
   nyxid service add llm-openai --device-code
   ```
 
-- **API key** (`--credential-env`): The user needs to create an API key at the provider's website and set it as an environment variable. Guide them step by step:
+- **API key** (`--credential-env`): The user needs to get an API key from the provider's website. Guide them:
   1. Check the common portals table below for the provider's developer portal URL
   2. If the provider is not listed, search the web for "<provider name> API key" to find the right page, then tell the user exactly where to go
   3. Walk them through creating a key on the provider's site
-  4. Help them set the environment variable:
+  4. Ask the user to paste the key, then run the command yourself:
      ```bash
-     # macOS / Linux
-     export OPENAI_KEY="sk-..."
-     # Then add the service
-     nyxid service add llm-openai --credential-env OPENAI_KEY
+     export NYXID_CRED="<key the user gave you>"
+     nyxid service add llm-openai --credential-env NYXID_CRED
+     unset NYXID_CRED
      ```
+  The user just pastes the key -- you handle the rest. Never log or echo the key back.
 
 ### Step 3: Common provider portals
 
