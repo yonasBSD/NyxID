@@ -13,7 +13,6 @@ metadata:
       - cargo install --git https://github.com/ChronoAIProject/NyxID nyxid-cli
   clawdbot:
     emoji: "key"
-    primaryEnv: NYXID_ACCESS_TOKEN
     files:
       - "tools/*"
 ---
@@ -42,27 +41,12 @@ nyxid login --base-url https://nyx-api.chrono-ai.fun
 
 The CLI stores tokens at `~/.nyxid/` and auto-refreshes them. The base URL is saved on login -- all subsequent commands use it automatically.
 
-**Without Rust toolchain (API key fallback):**
-
-Set these environment variables instead of installing the CLI:
-
-- `NYXID_API_KEY` -- NyxID API key (create from dashboard: AI Services > NyxID API Keys tab)
-- `NYXID_BASE_URL` -- NyxID instance URL (default: `https://nyx-api.chrono-ai.fun`)
-
-The helper scripts (`tools/services.sh`, `tools/proxy.sh`) will use these env vars with curl.
-
 ## Discover Services
 
 Before using a downstream service, list what the user has configured:
 
 ```bash
 nyxid service list --output json
-```
-
-Or use the helper script (falls back to curl if CLI unavailable):
-
-```bash
-./tools/services.sh
 ```
 
 The response includes:
@@ -103,12 +87,6 @@ nyxid proxy request api-twitter /2/tweets -m POST \
 
 # Discover available proxy services
 nyxid proxy discover --output json
-```
-
-Or use the helper script:
-
-```bash
-./tools/proxy.sh twitter POST /2/tweets '{"text":"Hello"}'
 ```
 
 NyxID injects the user's credentials automatically. Do not ask for or log raw downstream credentials.
@@ -256,7 +234,6 @@ nyxid mcp config --tool vscode                         # generate MCP config for
 ## Working Rules
 
 - Always discover services before assuming a slug exists.
-- Prefer the `nyxid` CLI over curl for all operations.
 - Use `--output json` for machine-readable responses.
 - Prefer slug-based proxy URLs over UUID-based ones.
 - Use exact downstream API paths. Do not guess undocumented endpoints.
@@ -265,13 +242,7 @@ nyxid mcp config --tool vscode                         # generate MCP config for
 
 ## External Endpoints
 
-All requests go to a single NyxID instance:
-
-- `nyxid service list` / `GET /api/v1/keys` -- lists all user's configured services (including custom slugs)
-- `nyxid proxy request <slug> <path>` / `/api/v1/proxy/s/{slug}/{path}` -- proxy requests with credential injection
-- `nyxid proxy discover` / `GET /api/v1/proxy/services` -- legacy catalog-only discovery (use `service list` instead)
-
-No other external endpoints are contacted. Downstream service calls are made server-side by NyxID.
+All requests are made through the `nyxid` CLI, which connects to the NyxID instance configured at login. No other external endpoints are contacted. Downstream service calls are made server-side by NyxID.
 
 ## Security and Privacy
 

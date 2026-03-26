@@ -4,8 +4,8 @@ This repository ships an OpenClaw integration at [`integrations/openclaw`](../in
 
 ## Included Assets
 
-- `openclaw-plugin-nyxid`: TypeScript auth plugin for OpenClaw
-- `skills/nyxid`: Skill bundle with helper shell scripts (works standalone or via ClawHub)
+- `openclaw-plugin-nyxid`: TypeScript auth plugin for OpenClaw (optional, for OAuth flows)
+- `skills/nyxid`: Skill bundle that uses the `nyxid` CLI (works standalone or via ClawHub)
 - `openclaw.plugin.json`: OpenClaw auth-plugin manifest with bundled skill reference
 
 ## Default Hosted Instance
@@ -101,37 +101,19 @@ nyxid service list --output json
 nyxid proxy discover --output json
 ```
 
-### Without the CLI (API key only)
-
-If you can't install the Rust toolchain, create an API key from the NyxID dashboard (AI Services > NyxID API Keys tab) and set it as an environment variable:
-
-```bash
-export NYXID_API_KEY="nyxid_your_key_here"
-export NYXID_BASE_URL="https://nyx-api.chrono-ai.fun"
-```
-
-The OpenClaw skill and helper scripts will use these env vars automatically.
-
 ### OpenClaw skill configuration
 
-Configure the NyxID skill in OpenClaw using the API key from step 3 (or from the dashboard):
+The skill requires the `nyxid` CLI on PATH. No environment variables are needed -- the CLI manages auth and base URL internally after `nyxid login`.
 
-```json
-{
-  "skills": {
-    "entries": {
-      "nyxid": {
-        "enabled": true,
-        "env": {
-          "NYXID_API_KEY": "nyxid_your_key_here"
-        }
-      }
-    }
-  }
-}
+Verify the skill is eligible:
+
+```bash
+openclaw skills check
 ```
 
-Reload OpenClaw:
+You should see `NyxID` marked as ready. If it shows as blocked, ensure `nyxid` is on PATH.
+
+Reload OpenClaw after installing the skill:
 - **Start a new chat session** -- simplest option
 - **Restart the gateway** -- `openclaw gateway restart`
 - Verify with `openclaw gateway status`
@@ -163,17 +145,13 @@ For interactive OAuth login with token refresh and delegation:
 
 ## Auth Modes
 
-### API key mode
+### CLI mode (recommended)
 
-Set `NYXID_API_KEY` (env var or config). The skill sends requests with `X-API-Key` header. No OAuth flow, no browser redirect, no client registration needed. Best for most users.
+Run `nyxid login --base-url <URL>` once. The CLI stores tokens at `~/.nyxid/` and auto-refreshes them. The base URL is saved on login. No environment variables needed.
 
-### OAuth mode
+### OAuth plugin mode (optional)
 
-Provide `clientId` with `baseUrl`. Add `clientSecret` for RFC 8693 token exchange. Requires registering a developer app in NyxID.
-
-### Bearer token mode
-
-Set `NYXID_ACCESS_TOKEN` if you already have a NyxID JWT from another source.
+Provide `clientId` with `baseUrl` in the plugin config. Add `clientSecret` for RFC 8693 token exchange. Requires registering a developer app in NyxID. See "Full plugin config" above.
 
 ## Using with AI Assistants
 
@@ -211,22 +189,15 @@ nyxid node show my-server --output json                 # node commands accept n
 
 ## Flow Summary
 
-### CLI flow (recommended)
+### CLI flow (skill)
 
-1. User runs `nyxid login` (browser SSO) or sets `NYXID_API_KEY`
-2. `nyxid proxy discover` lists available services (or `nyxid service list`)
+1. User runs `nyxid login` (browser SSO, one-time)
+2. `nyxid service list --output json` lists available services
 3. `nyxid proxy request <slug> <path>` calls any service
 4. NyxID injects the user's credentials and forwards the request
 5. If approval required (per-request by default), each call returns 7000 with an `action_description`; approve via `nyxid approval approve <ID>`
 
-### API key flow (for OpenClaw skill)
-
-1. OpenClaw loads `NYXID_API_KEY` from env or config
-2. Skill calls `GET /api/v1/proxy/services` with `X-API-Key` header
-3. Skill calls the slug-based proxy endpoint with the same key
-4. NyxID injects credentials and forwards the request
-
-### OAuth flow (for OpenClaw plugin)
+### OAuth flow (plugin, optional)
 
 1. OpenClaw authenticates via OAuth 2.0 Authorization Code + PKCE
 2. Plugin stores tokens in the OpenClaw auth profile
@@ -235,7 +206,7 @@ nyxid node show my-server --output json                 # node commands accept n
 ## Constraints
 
 - RFC 8693 token exchange requires a confidential NyxID OAuth client
-- Delegated tokens cannot call `GET /api/v1/proxy/services`; use base token or API key for discovery
+- Delegated tokens cannot call `GET /api/v1/proxy/services`; use the CLI or base token for discovery
 - Approval-gated proxy calls block until approved or timeout. Default mode is per-request (every call needs fresh approval). Use `approval_mode: "grant"` for time-based grants if per-request approval is too granular for your workflow.
 
 ## NyxID Backend Integration (NyxID-to-OpenClaw)

@@ -18,15 +18,15 @@ cargo install --git https://github.com/ChronoAIProject/NyxID nyxid-cli
 nyxid login --base-url https://nyx-api.chrono-ai.fun
 ```
 
-### Step 2: Create an API key for OpenClaw
+### Step 2: Optional API key for plugin / env-based auth
 
 ```bash
 nyxid api-key create --name "openclaw-agent" --scopes "proxy read"
 ```
 
-Copy the generated key (starts with `nyxid_`).
+Copy the generated key (starts with `nyxid_`) only if you plan to use the OAuth/plugin path or environment-based auth.
 
-> **Without CLI:** Create the API key from the NyxID dashboard (AI Services > NyxID API Keys tab) and set `NYXID_API_KEY` as an environment variable instead.
+> The bundled OpenClaw skill uses the `nyxid` CLI directly after `nyxid login`. It does not need `NYXID_API_KEY` for normal CLI-based operation.
 
 ### Step 3: Add some AI services
 
@@ -60,24 +60,13 @@ cp -r integrations/openclaw/skills/nyxid /path/to/your/workspace/skills/nyxid
 clawhub install nyxid
 ```
 
-### Step 5: Configure the API key
+### Step 5: Verify the CLI is available to OpenClaw
 
-Add to `~/.openclaw/openclaw.json`:
-
-```json
-{
-  "skills": {
-    "entries": {
-      "nyxid": {
-        "enabled": true,
-        "env": {
-          "NYXID_API_KEY": "nyxid_your_key_here"
-        }
-      }
-    }
-  }
-}
+```bash
+openclaw skills check
 ```
+
+You should see `NyxID` marked as ready. If it is blocked, ensure `nyxid` is on `PATH` for the OpenClaw process.
 
 ### Step 6: Test it
 
@@ -122,9 +111,9 @@ The agent only needs to know:
 - The CLI auto-refreshes tokens -- no manual re-authentication needed
 - Node and SSH commands accept names or slugs (not just UUIDs)
 
-### Fallback: curl (when CLI is unavailable)
+### CLI requirement
 
-The helper scripts (`tools/services.sh` and `tools/proxy.sh`) fall back to curl when the `nyxid` CLI is not installed. Set these environment variables:
+The helper scripts (`tools/services.sh` and `tools/proxy.sh`) require the `nyxid` CLI on `PATH`. For non-CLI auth flows, use the plugin or environment-backed API key flow instead:
 
 ```bash
 export NYXID_API_KEY="nyxid_your_key_here"
@@ -159,7 +148,7 @@ This enables OAuth 2.0 + PKCE login, automatic token refresh, and RFC 8693 deleg
 | Mode | Setup | Best for |
 |------|-------|----------|
 | **CLI login** | `nyxid login` | Interactive use, auto token refresh |
-| **API key** | Set `NYXID_API_KEY` | OpenClaw skill, headless agents |
+| **API key** | Set `NYXID_API_KEY` | Plugin / env-based auth, headless agents |
 | **OAuth plugin** | Configure `clientId` | Multi-user, delegated access |
 | **Bearer token** | Set `NYXID_ACCESS_TOKEN` | Existing JWT from another source |
 
