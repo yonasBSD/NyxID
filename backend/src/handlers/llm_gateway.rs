@@ -13,8 +13,8 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::AuthUser;
 use crate::services::{
-    approval_service, audit_service, chatgpt_translator, delegation_service, llm_gateway_service,
-    notification_service, proxy_service,
+    action_description, approval_service, audit_service, chatgpt_translator, delegation_service,
+    llm_gateway_service, notification_service, proxy_service,
 };
 
 /// Maximum size for upstream response bodies (50 MB).
@@ -82,8 +82,18 @@ pub async fn llm_proxy_request(
     )
     .await?;
 
-    // Check approval if user has it enabled
+    // Read request parts before approval check so we can build action descriptions
     let request_method_str = request.method().as_str().to_string();
+    let method = request.method().clone();
+    let query = request.uri().query().map(String::from);
+    let headers = request.headers().clone();
+
+    // Read the request body (10MB limit)
+    let body_bytes = axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("Failed to read request body: {e}")))?;
+
+    // Check approval if user has it enabled
     check_llm_approval(
         &state,
         &auth_user,
@@ -91,6 +101,11 @@ pub async fn llm_proxy_request(
         &service,
         &path,
         &request_method_str,
+        if body_bytes.is_empty() {
+            None
+        } else {
+            Some(&body_bytes)
+        },
     )
     .await?;
 
@@ -107,15 +122,6 @@ pub async fn llm_proxy_request(
             "Provider credentials not available: {e}. Please connect the provider first."
         ))
     })?;
-
-    let method = request.method().clone();
-    let query = request.uri().query().map(String::from);
-    let headers = request.headers().clone();
-
-    // Read the request body (10MB limit)
-    let body_bytes = axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024)
-        .await
-        .map_err(|e| AppError::BadRequest(format!("Failed to read request body: {e}")))?;
 
     // OpenAI Codex: use the specialized HTTP SSE transport with Responses API
     // translation and Codex-specific headers.
@@ -258,7 +264,20 @@ pub async fn gateway_request(
     .await?;
 
     // Check approval if user has it enabled
-    check_llm_approval(&state, &auth_user, &service_id, &service, &path, "POST").await?;
+    check_llm_approval(
+        &state,
+        &auth_user,
+        &service_id,
+        &service,
+        &path,
+        "POST",
+        if body_bytes.is_empty() {
+            None
+        } else {
+            Some(&body_bytes)
+        },
+    )
+    .await?;
 
     // Resolve delegated credentials
     let delegated = delegation_service::resolve_delegated_credentials(
@@ -731,6 +750,7 @@ async fn check_llm_approval(
     service: &crate::models::downstream_service::DownstreamService,
     path: &str,
     method_str: &str,
+    body: Option<&[u8]>,
 ) -> AppResult<()> {
     let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
     let requires_approval = approval_service::requires_approval_for_service(
@@ -749,14 +769,25 @@ async fn check_llm_approval(
         .ok_or_else(|| AppError::Forbidden("Session auth does not require approval".to_string()))?;
     let requester_id = auth_user.approval_requester_id();
 
-    let has_grant = approval_service::check_approval(
-        &state.db,
-        &approval_owner_user_id,
-        service_id,
-        requester_type,
-        &requester_id,
-    )
-    .await?;
+    let approval_mode =
+        approval_service::resolve_approval_mode(&state.db, &approval_owner_user_id, service_id)
+            .await?;
+
+    // In grant mode, check for existing grant first.
+    // In per_request mode, skip grant check -- every request needs fresh approval.
+    let has_grant = if approval_mode == crate::models::service_approval_config::ApprovalMode::Grant
+    {
+        approval_service::check_approval(
+            &state.db,
+            &approval_owner_user_id,
+            service_id,
+            requester_type,
+            &requester_id,
+        )
+        .await?
+    } else {
+        false
+    };
 
     if has_grant {
         return Ok(());
@@ -764,6 +795,8 @@ async fn check_llm_approval(
 
     let channel =
         notification_service::get_or_create_channel(&state.db, &approval_owner_user_id).await?;
+
+    let action_desc = action_description::build_action_description(method_str, path, body);
 
     let timeout_secs = channel.approval_timeout_secs;
     let approval_request = approval_service::create_approval_request(
@@ -780,6 +813,8 @@ async fn check_llm_approval(
         &requester_id,
         None,
         &format!("llm:{} {}", method_str, path),
+        Some(&action_desc),
+        approval_mode.clone(),
         timeout_secs,
     )
     .await?;

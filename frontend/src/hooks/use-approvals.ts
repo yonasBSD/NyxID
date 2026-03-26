@@ -14,6 +14,7 @@ import type {
   DeleteServiceApprovalConfigResponse,
   PushDevicesResponse,
   RemoveDeviceResponse,
+  ApprovalMode,
 } from "@/types/approvals";
 
 // --- Notification Settings ---
@@ -208,13 +209,20 @@ export function useSetServiceApprovalConfig() {
     mutationFn: async ({
       serviceId,
       approvalRequired,
+      approvalMode,
     }: {
       readonly serviceId: string;
-      readonly approvalRequired: boolean;
+      readonly approvalRequired?: boolean;
+      readonly approvalMode?: ApprovalMode;
     }): Promise<SetServiceApprovalConfigResponse> => {
       return api.put<SetServiceApprovalConfigResponse>(
         `/approvals/service-configs/${serviceId}`,
-        { approval_required: approvalRequired },
+        {
+          ...(approvalRequired !== undefined
+            ? { approval_required: approvalRequired }
+            : {}),
+          ...(approvalMode !== undefined ? { approval_mode: approvalMode } : {}),
+        },
       );
     },
     onSuccess: () => {

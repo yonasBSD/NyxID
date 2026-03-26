@@ -770,14 +770,26 @@ pub(crate) async fn authorize_ssh_access(
         let requester_type = auth_user.approval_requester_type().ok_or_else(|| {
             AppError::Forbidden("Session auth does not require approval".to_string())
         })?;
-        let has_grant = approval_service::check_approval(
-            &state.db,
-            &approval_owner_user_id,
-            service_id,
-            requester_type,
-            &auth_user.approval_requester_id(),
-        )
-        .await?;
+
+        let approval_mode =
+            approval_service::resolve_approval_mode(&state.db, &approval_owner_user_id, service_id)
+                .await?;
+
+        // In grant mode, check for existing grant first.
+        // In per_request mode, skip grant check -- every request needs fresh approval.
+        let has_grant =
+            if approval_mode == crate::models::service_approval_config::ApprovalMode::Grant {
+                approval_service::check_approval(
+                    &state.db,
+                    &approval_owner_user_id,
+                    service_id,
+                    requester_type,
+                    &auth_user.approval_requester_id(),
+                )
+                .await?
+            } else {
+                false
+            };
 
         if !has_grant {
             let channel =
@@ -798,6 +810,8 @@ pub(crate) async fn authorize_ssh_access(
                 &auth_user.approval_requester_id(),
                 None,
                 "ssh:tunnel",
+                None,
+                approval_mode.clone(),
                 timeout_secs,
             )
             .await?;

@@ -13,7 +13,7 @@ import { mobileApi } from "../../lib/api/mobileApi";
 import { mobileTheme } from "../../theme/mobileTheme";
 import { flowStyles } from "../../theme/flowStyles";
 import { radius, spacing, typeScale } from "../../theme/designTokens";
-import { formatGrantExpiryFromCreatedAt } from "./challengeUiState";
+import { formatGrantDuration } from "./challengeUiState";
 
 type Props = NativeStackScreenProps<RootStackParamList, "Inbox">;
 
@@ -47,6 +47,7 @@ export function ChallengesInboxScreen({ navigation }: Props) {
     queryKey: ["notifications", "settings"],
     queryFn: mobileApi.getNotificationSettings,
   });
+  const grantDurationLabel = formatGrantDuration(notificationSettings?.grant_expiry_days);
   const items = Array.isArray(data?.items) ? data.items : [];
   const showErrorState = isError && items.length === 0;
 
@@ -125,11 +126,9 @@ export function ChallengesInboxScreen({ navigation }: Props) {
                   </View>
                   <Text style={styles.challengeResource}>{item.resource}</Text>
                   <Text style={styles.challengeExpire}>
-                    Grant expires:{" "}
-                    {formatGrantExpiryFromCreatedAt(
-                      item.created_at,
-                      notificationSettings?.grant_expiry_days
-                    )}
+                    {item.approval_mode === "grant"
+                      ? `If approved, grant lasts ${grantDurationLabel}.`
+                      : "One-time approval for this request."}
                   </Text>
                 </Pressable>
               ))}

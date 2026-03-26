@@ -1047,6 +1047,9 @@ pub enum ApprovalCommands {
         /// Require approval for this service
         #[arg(long)]
         require_approval: Option<bool>,
+        /// Approval mode: "per_request" (every call needs approval) or "grant" (approval creates a time-based grant)
+        #[arg(long)]
+        approval_mode: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },

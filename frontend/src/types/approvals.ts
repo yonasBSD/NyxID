@@ -52,6 +52,8 @@ export interface ApprovalRequestItem {
   readonly requester_type: string;
   readonly requester_label: string | null;
   readonly operation_summary: string;
+  readonly action_description: string | null;
+  readonly approval_mode: ApprovalMode;
   readonly status: "pending" | "approved" | "rejected" | "expired";
   readonly created_at: string;
   readonly decided_at: string | null;
@@ -97,10 +99,13 @@ export interface RevokeGrantResponse {
   readonly message: string;
 }
 
+export type ApprovalMode = "per_request" | "grant";
+
 export interface ServiceApprovalConfigItem {
   readonly service_id: string;
   readonly service_name: string;
   readonly approval_required: boolean;
+  readonly approval_mode: ApprovalMode;
   readonly created_at: string;
   readonly updated_at: string;
 }
@@ -110,13 +115,15 @@ export interface ServiceApprovalConfigsResponse {
 }
 
 export interface SetServiceApprovalConfigRequest {
-  readonly approval_required: boolean;
+  readonly approval_required?: boolean;
+  readonly approval_mode?: ApprovalMode;
 }
 
 export interface SetServiceApprovalConfigResponse {
   readonly service_id: string;
   readonly service_name: string;
   readonly approval_required: boolean;
+  readonly approval_mode: ApprovalMode;
   readonly created_at: string;
   readonly updated_at: string;
 }

@@ -201,9 +201,11 @@ It provides a complete identity layer: user registration, session management, Op
 - Push-based approval for service access via Telegram and mobile push notifications (FCM + APNs)
 - **Blocking flow:** Proxy and LLM gateway requests hold the HTTP connection open until the user approves/rejects or the timeout expires, then return the downstream response or a 403 error -- no retry needed
 - Triggered for **all non-session auth methods** (API keys, delegated tokens, service accounts, access tokens) when the resource owner has approval enabled
+- **Per-request approval (default):** Every proxy/LLM/SSH request requires a fresh approval -- no grant is created. This is the secure default for all services.
+- **Grant-based approval (opt-in):** Users can configure specific services to use time-based grants via `approval_mode: "grant"` on `ServiceApprovalConfig`. Once approved, access is granted for a configurable period (1--365 days) without re-prompting.
 - **Per-service approval configuration:** Override the global approval toggle on a per-service basis (e.g., require approval for OpenAI but auto-approve internal services). 3-tier resolution: per-service config -> global setting -> default (no approval)
-- Configurable approval timeout (10--300 seconds) and grant expiry (1--365 days)
-- Approval grants: once approved, access is granted for a configurable period without re-prompting
+- **Action descriptions:** Approval notifications include a rich, human-readable summary of what the API request does (e.g., `POST /v1/chat/completions (model: gpt-4, 3 messages)`). Extracted from HTTP method, path, and well-known JSON body parameters. Sensitive data (message content, tokens, keys) is never included.
+- Configurable approval timeout (10--300 seconds) and grant expiry (1--365 days, only applies in grant mode)
 - Web UI and Telegram approval: approve or reject from the NyxID dashboard or directly in Telegram
 - **Dual Telegram delivery:** Webhook mode for production (public HTTPS URL required) or automatic long polling fallback for development (no ngrok needed)
 - Approval history and grant management pages in the frontend
@@ -771,9 +773,9 @@ NyxID uses 33 MongoDB collections:
 | `consents`                 | User OAuth consent records per client                 |
 | `service_accounts`         | Non-human (machine) identity definitions             |
 | `service_account_tokens`   | Issued service account JWT records for revocation    |
-| `approval_requests`        | Pending/resolved approval requests for proxy access  |
-| `approval_grants`          | Cached approval grants (time-limited, revocable)     |
-| `service_approval_configs` | Per-service approval overrides (per user)            |
+| `approval_requests`        | Pending/resolved approval requests for proxy access (includes `action_description`) |
+| `approval_grants`          | Cached approval grants (time-limited, revocable; only created in grant mode) |
+| `service_approval_configs` | Per-service approval overrides with `approval_mode` (`per_request` or `grant`) |
 | `notification_channels`    | Per-user notification preferences, Telegram links, and push device tokens |
 | `nodes`                    | Registered credential nodes (per user, with auth token hash and status) |
 | `node_service_bindings`    | Service-to-node routing bindings (legacy, node routing absorbed into user_services) |
@@ -1072,7 +1074,8 @@ NyxID/
 |       |   |-- consent_service.rs  Consent creation, listing, revocation
 |       |   |-- service_account_service.rs Service account CRUD, client credentials auth, token revocation
 |       |   |-- rbac_helpers.rs     Resolve effective roles/groups/permissions for a user
-|       |   |-- approval_service.rs  Approval check, create, process, list, revoke grants
+|       |   |-- approval_service.rs  Approval check, create, process, list, revoke grants, resolve approval mode
+|       |   |-- action_description.rs Build human-readable action descriptions for approval notifications
 |       |   |-- notification_service.rs Multi-channel notification delivery (Telegram + FCM + APNs)
 |       |   |-- push_service.rs      FCM HTTP v1 + APNs HTTP/2 push notification clients
 |       |   |-- telegram_service.rs Telegram Bot API client (send, edit, answer, webhook)

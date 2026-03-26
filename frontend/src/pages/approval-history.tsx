@@ -89,6 +89,7 @@ export function ApprovalHistoryPage() {
   const [decideTarget, setDecideTarget] = useState<{
     readonly id: string;
     readonly service: string;
+    readonly approvalMode: "per_request" | "grant";
     readonly action: "approve" | "reject";
   } | null>(null);
 
@@ -183,7 +184,7 @@ export function ApprovalHistoryPage() {
                 <TableRow>
                   <TableHead>Service</TableHead>
                   <TableHead>Requester</TableHead>
-                  <TableHead>Operation</TableHead>
+                  <TableHead>Action</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Requested</TableHead>
                   <TableHead>Decided</TableHead>
@@ -214,9 +215,17 @@ export function ApprovalHistoryPage() {
                       </div>
                     </TableCell>
                     <TableCell>
-                      <span className="font-mono text-xs">
-                        {request.operation_summary}
-                      </span>
+                      <div className="flex flex-col gap-0.5">
+                        <span className="text-sm">
+                          {request.action_description ??
+                            request.operation_summary}
+                        </span>
+                        {request.action_description && (
+                          <span className="text-xs text-muted-foreground">
+                            {request.operation_summary}
+                          </span>
+                        )}
+                      </div>
                     </TableCell>
                     <TableCell>{getStatusBadge(request.status)}</TableCell>
                     <TableCell className="text-muted-foreground">
@@ -238,6 +247,7 @@ export function ApprovalHistoryPage() {
                               setDecideTarget({
                                 id: request.id,
                                 service: request.service_name,
+                                approvalMode: request.approval_mode,
                                 action: "approve",
                               })
                             }
@@ -253,6 +263,7 @@ export function ApprovalHistoryPage() {
                               setDecideTarget({
                                 id: request.id,
                                 service: request.service_name,
+                                approvalMode: request.approval_mode,
                                 action: "reject",
                               })
                             }
@@ -318,7 +329,9 @@ export function ApprovalHistoryPage() {
             </DialogTitle>
             <DialogDescription>
               {decideTarget?.action === "approve"
-                ? `Are you sure you want to approve access to "${decideTarget?.service ?? ""}"? An approval grant will be created.`
+                ? decideTarget.approvalMode === "grant"
+                  ? `Are you sure you want to approve access to "${decideTarget?.service ?? ""}"? A reusable approval grant will be created using your configured expiry.`
+                  : `Are you sure you want to approve access to "${decideTarget?.service ?? ""}"? This approval applies only to the current request.`
                 : `Are you sure you want to reject access to "${decideTarget?.service ?? ""}"?`}
             </DialogDescription>
           </DialogHeader>

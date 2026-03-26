@@ -12,10 +12,24 @@ use crate::models::approval_grant::{ApprovalGrant, COLLECTION_NAME as GRANTS};
 use crate::models::approval_request::{ApprovalRequest, COLLECTION_NAME as REQUESTS};
 use crate::models::notification_channel::{COLLECTION_NAME as CHANNELS, NotificationChannel};
 use crate::models::service_approval_config::{
-    COLLECTION_NAME as SERVICE_APPROVAL_CONFIGS, ServiceApprovalConfig,
+    ApprovalMode, COLLECTION_NAME as SERVICE_APPROVAL_CONFIGS, ServiceApprovalConfig,
 };
 use crate::services::notification_service;
 use crate::services::push_service::{ApnsAuth, FcmAuth};
+
+/// Resolve the approval mode for a (user, service) pair.
+pub async fn resolve_approval_mode(
+    db: &Database,
+    user_id: &str,
+    service_id: &str,
+) -> AppResult<ApprovalMode> {
+    let per_service = db
+        .collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
+        .find_one(doc! { "user_id": user_id, "service_id": service_id })
+        .await?;
+
+    Ok(per_service.map(|c| c.approval_mode).unwrap_or_default())
+}
 
 /// Check whether a user has the global approval system enabled.
 pub async fn user_requires_approval(db: &Database, user_id: &str) -> AppResult<bool> {
@@ -85,9 +99,12 @@ pub async fn check_approval(
     Ok(grant.is_some())
 }
 
-/// Create an approval request (idempotent via idempotency_key).
-/// If a pending request with the same key exists, returns it.
-/// Sends notification via the configured channel.
+/// Create an approval request.
+///
+/// Grant mode keeps the legacy dedupe behavior for a pending
+/// `(user, service, requester)` tuple.
+/// Per-request mode always creates a distinct pending request so concurrent
+/// calls cannot piggyback on a single approval.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_approval_request(
     db: &Database,
@@ -103,11 +120,18 @@ pub async fn create_approval_request(
     requester_id: &str,
     requester_label: Option<&str>,
     operation_summary: &str,
+    action_description: Option<&str>,
+    approval_mode: ApprovalMode,
     timeout_secs: u32,
 ) -> AppResult<ApprovalRequest> {
     let collection = db.collection::<ApprovalRequest>(REQUESTS);
-    let idempotency_key =
-        compute_idempotency_key(user_id, service_id, requester_type, requester_id);
+    let idempotency_key = compute_pending_request_idempotency_key(
+        &approval_mode,
+        user_id,
+        service_id,
+        requester_type,
+        requester_id,
+    );
     let mut inserted_request: Option<ApprovalRequest> = None;
     for _attempt in 0..2 {
         // Check for existing pending request with the same idempotency key.
@@ -135,6 +159,8 @@ pub async fn create_approval_request(
             requester_id: requester_id.to_string(),
             requester_label: requester_label.map(String::from),
             operation_summary: operation_summary.to_string(),
+            action_description: action_description.map(String::from),
+            approval_mode: approval_mode.clone(),
             status: "pending".to_string(),
             idempotency_key: idempotency_key.clone(),
             notification_channel: None,
@@ -269,8 +295,9 @@ pub async fn process_decision(
         }
     };
 
-    // On approval: create a grant
-    if approved {
+    // On approval: create a grant ONLY in grant mode.
+    // In per_request mode, the approved ApprovalRequest is the only record.
+    if approved && updated.approval_mode == ApprovalMode::Grant {
         let channel = notification_service::get_or_create_channel(db, &updated.user_id).await?;
         let grant_expiry = resolve_grant_expiry(now, duration_sec, channel.grant_expiry_days);
 
@@ -618,11 +645,15 @@ pub async fn set_service_approval_config(
     user_id: &str,
     service_id: &str,
     service_name: &str,
-    approval_required: bool,
+    approval_required: Option<bool>,
+    approval_mode: Option<&ApprovalMode>,
 ) -> AppResult<ServiceApprovalConfig> {
     let now = bson::DateTime::from_chrono(Utc::now());
     let collection = db.collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS);
     let filter = doc! { "user_id": user_id, "service_id": service_id };
+    let existing = collection.find_one(filter.clone()).await?;
+    let (approval_required, approval_mode) =
+        resolve_service_config_update(existing.as_ref(), approval_required, approval_mode)?;
 
     for _attempt in 0..2 {
         let config = collection
@@ -631,6 +662,7 @@ pub async fn set_service_approval_config(
                 doc! {
                     "$set": {
                         "approval_required": approval_required,
+                        "approval_mode": approval_mode.as_str(),
                         "service_name": service_name,
                         "updated_at": now,
                     },
@@ -711,6 +743,43 @@ fn compute_idempotency_key(
     hex::encode(hasher.finalize())
 }
 
+fn compute_pending_request_idempotency_key(
+    approval_mode: &ApprovalMode,
+    user_id: &str,
+    service_id: &str,
+    requester_type: &str,
+    requester_id: &str,
+) -> String {
+    match approval_mode {
+        ApprovalMode::Grant => {
+            compute_idempotency_key(user_id, service_id, requester_type, requester_id)
+        }
+        ApprovalMode::PerRequest => uuid::Uuid::new_v4().to_string(),
+    }
+}
+
+fn resolve_service_config_update(
+    existing: Option<&ServiceApprovalConfig>,
+    approval_required: Option<bool>,
+    approval_mode: Option<&ApprovalMode>,
+) -> AppResult<(bool, ApprovalMode)> {
+    let resolved_required = approval_required
+        .or_else(|| existing.map(|config| config.approval_required))
+        .ok_or_else(|| {
+            AppError::ValidationError(
+                "approval_required is required when creating a new per-service approval config"
+                    .to_string(),
+            )
+        })?;
+
+    let resolved_mode = approval_mode
+        .cloned()
+        .or_else(|| existing.map(|config| config.approval_mode.clone()))
+        .unwrap_or_default();
+
+    Ok((resolved_required, resolved_mode))
+}
+
 fn is_duplicate_key_error(e: &mongodb::error::Error) -> bool {
     if let mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(we)) =
         e.kind.as_ref()
@@ -746,24 +815,70 @@ mod tests {
     }
 
     #[test]
-    fn idempotency_key_deterministic() {
-        let key1 = compute_idempotency_key("user1", "svc1", "sa", "req1");
-        let key2 = compute_idempotency_key("user1", "svc1", "sa", "req1");
+    fn grant_mode_idempotency_key_deterministic() {
+        let key1 = compute_pending_request_idempotency_key(
+            &ApprovalMode::Grant,
+            "user1",
+            "svc1",
+            "sa",
+            "req1",
+        );
+        let key2 = compute_pending_request_idempotency_key(
+            &ApprovalMode::Grant,
+            "user1",
+            "svc1",
+            "sa",
+            "req1",
+        );
         assert_eq!(key1, key2);
     }
 
     #[test]
-    fn idempotency_key_differs_for_different_inputs() {
-        let key1 = compute_idempotency_key("user1", "svc1", "sa", "req1");
-        let key2 = compute_idempotency_key("user2", "svc1", "sa", "req1");
+    fn grant_mode_idempotency_key_differs_for_different_inputs() {
+        let key1 = compute_pending_request_idempotency_key(
+            &ApprovalMode::Grant,
+            "user1",
+            "svc1",
+            "sa",
+            "req1",
+        );
+        let key2 = compute_pending_request_idempotency_key(
+            &ApprovalMode::Grant,
+            "user2",
+            "svc1",
+            "sa",
+            "req1",
+        );
         assert_ne!(key1, key2);
     }
 
     #[test]
-    fn idempotency_key_is_hex_sha256() {
-        let key = compute_idempotency_key("u", "s", "t", "r");
+    fn grant_mode_idempotency_key_is_hex_sha256() {
+        let key = compute_pending_request_idempotency_key(&ApprovalMode::Grant, "u", "s", "t", "r");
         assert_eq!(key.len(), 64);
         assert!(key.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn per_request_idempotency_key_is_unique_uuid() {
+        let key1 = compute_pending_request_idempotency_key(
+            &ApprovalMode::PerRequest,
+            "user1",
+            "svc1",
+            "sa",
+            "req1",
+        );
+        let key2 = compute_pending_request_idempotency_key(
+            &ApprovalMode::PerRequest,
+            "user1",
+            "svc1",
+            "sa",
+            "req1",
+        );
+
+        assert_ne!(key1, key2);
+        assert!(uuid::Uuid::parse_str(&key1).is_ok());
+        assert!(uuid::Uuid::parse_str(&key2).is_ok());
     }
 
     #[test]
@@ -799,5 +914,31 @@ mod tests {
         let now = Utc::now();
         let expiry = resolve_grant_expiry(now, None, 30);
         assert_eq!(expiry, now + Duration::days(30));
+    }
+
+    #[test]
+    fn resolve_service_config_update_preserves_existing_mode_when_omitted() {
+        let existing = ServiceApprovalConfig {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: "user1".to_string(),
+            service_id: "svc1".to_string(),
+            service_name: "OpenAI".to_string(),
+            approval_required: true,
+            approval_mode: ApprovalMode::Grant,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let (approval_required, approval_mode) =
+            resolve_service_config_update(Some(&existing), Some(false), None).expect("ok");
+
+        assert!(!approval_required);
+        assert_eq!(approval_mode, ApprovalMode::Grant);
+    }
+
+    #[test]
+    fn resolve_service_config_update_requires_approval_required_for_new_config() {
+        let result = resolve_service_config_update(None, None, Some(&ApprovalMode::Grant));
+        assert!(matches!(result, Err(AppError::ValidationError(_))));
     }
 }
