@@ -13,7 +13,7 @@ use crate::errors::{AppError, AppResult};
 const MAX_AUTH_AGE_SECS: i64 = 300; // 5 minutes
 
 /// Data received from the Telegram Login Widget callback.
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
 pub struct TelegramLoginData {
     pub id: i64,
     pub first_name: String,
@@ -25,6 +25,20 @@ pub struct TelegramLoginData {
     pub photo_url: Option<String>,
     pub auth_date: i64,
     pub hash: String,
+}
+
+impl std::fmt::Debug for TelegramLoginData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TelegramLoginData")
+            .field("id", &self.id)
+            .field("first_name", &self.first_name)
+            .field("last_name", &self.last_name)
+            .field("username", &self.username)
+            .field("photo_url", &self.photo_url)
+            .field("auth_date", &self.auth_date)
+            .field("hash", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Verify Telegram Login Widget data using HMAC-SHA256.

@@ -95,6 +95,33 @@ describe("ProviderCard", () => {
     expect(screen.getByText("Nyx")).toBeInTheDocument();
   });
 
+  it("does not render photo for non-https photo_url", () => {
+    const token = makeTelegramToken({
+      username: "nyx_user",
+      first_name: "Nyx",
+      photo_url: "javascript:alert(1)",
+    });
+
+    const { container } = renderCard(token);
+
+    const avatar = container.querySelector("img.rounded-full");
+    expect(avatar).toBeNull();
+    expect(screen.getByText("@nyx_user")).toBeInTheDocument();
+  });
+
+  it("does not render photo for data: URI photo_url", () => {
+    const token = makeTelegramToken({
+      username: "nyx_user",
+      first_name: "Nyx",
+      photo_url: "data:text/html,<script>alert(1)</script>",
+    });
+
+    const { container } = renderCard(token);
+
+    const avatar = container.querySelector("img.rounded-full");
+    expect(avatar).toBeNull();
+  });
+
   it("disables connect for unconfigured telegram providers", () => {
     const provider: ProviderConfig = {
       ...telegramProvider,

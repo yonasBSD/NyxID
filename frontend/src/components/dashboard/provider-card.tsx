@@ -12,7 +12,7 @@ import {
 import { ProviderStatusBadge } from "./provider-status-badge";
 import { LlmReadyBadge } from "./llm-ready-badge";
 import { getProviderBrand, hasKnownBrand } from "@/lib/provider-branding";
-import { formatDate } from "@/lib/utils";
+import { formatDate, sanitizeAvatarUrl } from "@/lib/utils";
 import {
   Card,
   CardContent,
@@ -151,9 +151,9 @@ export function ProviderCard({
             <div className="flex flex-col gap-0.5">
               {provider.provider_type === "telegram_widget" && token.metadata && (
                 <div className="flex items-center gap-2">
-                  {token.metadata.photo_url && (
+                  {sanitizeAvatarUrl(token.metadata.photo_url) && (
                     <img
-                      src={token.metadata.photo_url}
+                      src={sanitizeAvatarUrl(token.metadata.photo_url)!}
                       alt=""
                       className="h-5 w-5 rounded-full"
                     />
