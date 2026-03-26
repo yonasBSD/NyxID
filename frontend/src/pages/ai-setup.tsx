@@ -81,12 +81,12 @@ function EmptyState() {
 }
 
 
-function buildPrompt(baseUrl: string): string {
-  return `Read ${baseUrl}/llms.txt to understand what NyxID can do, then help me with whatever I need. The NyxID server is at ${baseUrl} and the dashboard is at ${baseUrl.replace('/api', '').replace(':3001', ':3000')}. Use the nyxid CLI for all operations -- if it's not installed, help me install it first (requires Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh). For secrets, always use --credential-env to read from environment variables. Use --output json for machine-readable output.`;
+function buildPrompt(baseUrl: string, dashboardUrl: string): string {
+  return `Read ${baseUrl}/llms.txt to understand what NyxID can do, then help me with whatever I need. The NyxID server is at ${baseUrl} and the dashboard is at ${dashboardUrl}. Use the nyxid CLI for all operations -- if it's not installed, help me install it first (requires Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh). For secrets, always use --credential-env to read from environment variables. Use --output json for machine-readable output.`;
 }
 
-function AiPromptCard({ baseUrl }: { readonly baseUrl: string }) {
-  const prompt = useMemo(() => buildPrompt(baseUrl), [baseUrl]);
+function AiPromptCard({ baseUrl, dashboardUrl }: { readonly baseUrl: string; readonly dashboardUrl: string }) {
+  const prompt = useMemo(() => buildPrompt(baseUrl, dashboardUrl), [baseUrl, dashboardUrl]);
 
   const handleCopy = useCallback(async (text: string) => {
     try {
@@ -202,7 +202,7 @@ export function AiSetupPage() {
         </p>
       </div>
 
-      <AiPromptCard baseUrl={baseUrl} />
+      <AiPromptCard baseUrl={baseUrl} dashboardUrl={window.location.origin} />
 
       <Separator />
 

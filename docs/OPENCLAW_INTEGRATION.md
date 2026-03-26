@@ -81,7 +81,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
 
 # 1. Install the NyxID CLI
-cargo install --git https://github.com/ChronoAIProject/NyxID --bin nyxid
+cargo install --git https://github.com/ChronoAIProject/NyxID nyxid-cli
 
 # 2. Log in via browser SSO (saves URL; only needed once)
 nyxid login --base-url https://nyx-api.chrono-ai.fun
@@ -183,7 +183,7 @@ The `nyxid` CLI is the recommended way for AI agents to interact with NyxID. Ins
 
 ```bash
 # Install CLI and log in (one-time; saves URL for all future commands)
-cargo install --git https://github.com/ChronoAIProject/NyxID --bin nyxid
+cargo install --git https://github.com/ChronoAIProject/NyxID nyxid-cli
 nyxid login --base-url https://nyx-api.chrono-ai.fun
 
 # Add services non-interactively (credential from env var)
@@ -313,7 +313,7 @@ Each mapping has its own webhook secret (generated at creation, only shown once)
 
 ```bash
 # Install the nyxid CLI (includes node agent subcommand, --keychain recommended)
-cargo install --git https://github.com/ChronoAIProject/NyxID --bin nyxid
+cargo install --git https://github.com/ChronoAIProject/NyxID nyxid-cli
 nyxid node register \
   --token "nyx_nreg_..." \
   --url "wss://<server>/api/v1/nodes/ws" \

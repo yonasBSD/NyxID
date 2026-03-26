@@ -84,7 +84,7 @@ The `nyxid` CLI manages services, API keys, catalog browsing, MCP setup, and mor
 
 ```bash
 # Install from git
-cargo install --git https://github.com/ChronoAIProject/NyxID --bin nyxid
+cargo install --git https://github.com/ChronoAIProject/NyxID nyxid-cli
 
 # Or clone and build locally
 git clone https://github.com/ChronoAIProject/NyxID && cd NyxID
@@ -126,7 +126,7 @@ The `nyxid node` subcommand manages on-premise credential storage and proxying. 
 
 ```bash
 # Install from git (requires Rust toolchain) -- nyxid node is included
-cargo install --git https://github.com/ChronoAIProject/NyxID --bin nyxid
+cargo install --git https://github.com/ChronoAIProject/NyxID nyxid-cli
 
 # Or clone and build locally
 git clone https://github.com/ChronoAIProject/NyxID && cd NyxID
