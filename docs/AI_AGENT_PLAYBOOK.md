@@ -2411,9 +2411,9 @@ Every command that accepts a secret (API keys, credentials, tokens, passwords) s
 
 | Mode | Flag Example | Best For |
 |------|-------------|----------|
-| **Env var** | `--credential-env MY_API_KEY` | AI agents, CI/CD pipelines |
+| **Interactive prompt** | *(default)* | Recommended -- secure `rpassword` prompt, input never echoed |
+| **Env var** | `--credential-env MY_API_KEY` | Automation, CI/CD pipelines, scripting |
 | **Direct value** | `--credential <VALUE>` | Scripts (hidden from shell history on supported shells) |
-| **Interactive prompt** | *(default)* | Humans -- secure `rpassword` prompt, never echoed |
 
 Specific env-var flags by context:
 
@@ -2425,7 +2425,7 @@ Specific env-var flags by context:
 | `--client-id-env <VAR>` | `service credentials` |
 | `--client-secret-env <VAR>` | `service credentials` |
 
-> **AI agents must always use `--credential-env` (or equivalent) flags** so that secrets are never exposed in command output or chat history.
+> **Prefer the interactive prompt (no flags)** for credential entry -- the CLI securely prompts with hidden input. Never ask the user to paste secrets into chat. Use `--credential-env` only for automation/scripting where no human is present.
 
 ### Complete Command Reference
 

@@ -65,11 +65,12 @@ nyxid catalog list --output json                          # browse available ser
 nyxid catalog show <slug> --output json                   # show auth requirements for a service
 nyxid service add <slug> --oauth                          # OAuth flow (opens browser -- easiest)
 nyxid service add <slug> --device-code                    # device code flow (enter code on website)
-nyxid service add <slug> --credential-env <VAR>           # API key from environment variable
-nyxid service add --custom --credential-env MY_KEY        # add custom endpoint
+nyxid service add <slug>                                  # API key (CLI prompts securely)
+nyxid service add --custom                                # add custom endpoint (CLI prompts for details)
 ```
 
-> Use `--credential-env <VAR>` to read secrets from environment variables. Never pass raw secrets as command arguments or ask the user to paste them into chat.
+> For API key services, just run `nyxid service add <slug>` without flags. The CLI securely prompts for the key (input hidden). Never ask the user to paste secrets into chat or set environment variables manually.
+> For automation/scripting only: `--credential-env <VAR>` reads from an environment variable.
 
 ## Helping Users Add Services and Credentials
 
@@ -207,9 +208,11 @@ NyxID injects the user's credentials automatically. Do not ask for or log raw do
 
 ```bash
 nyxid catalog list                                             # browse catalog
-nyxid service add <slug> --credential-env <VAR>                # add from catalog (auto-fetches label)
-nyxid service add <slug> --via-node <name> --credential-env <VAR>  # add via node
-nyxid service add --custom --credential-env <VAR>              # add custom endpoint
+nyxid service add <slug>                                       # add from catalog (CLI prompts for credential)
+nyxid service add <slug> --oauth                               # add with OAuth (opens browser)
+nyxid service add <slug> --device-code                         # add with device code flow
+nyxid service add <slug> --via-node <name>                     # add via node (CLI prompts for credential)
+nyxid service add --custom                                     # add custom endpoint (CLI prompts for details)
 nyxid service list --output json                               # list services (includes IDs)
 nyxid service show <id>                                        # show service details
 nyxid service update <id> --label "My Custom Name"             # rename service
@@ -314,7 +317,7 @@ nyxid notification telegram-link                       # link telegram account
 ## OpenClaw Integration
 
 ```bash
-nyxid openclaw setup --url http://localhost:18789 --credential-env OPENCLAW_TOKEN
+nyxid openclaw setup --url http://localhost:18789   # CLI prompts for token securely
 ```
 
 ## Account Management
