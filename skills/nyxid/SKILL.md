@@ -129,24 +129,59 @@ For services not listed here, check `nyxid catalog show <slug> --output json` fo
 
 ## Make Proxy Requests
 
-Use the CLI:
+NyxID proxies requests to downstream services -- it handles authentication, but you need to
+know the correct API paths, methods, and body formats for each service.
+
+### How to find the right API paths
+
+NyxID is just a proxy. The paths, methods, and request bodies are the same as calling
+the downstream service directly. To figure out what to send:
+
+1. Check the catalog for documentation: `nyxid catalog show <slug> --output json`
+   - Look for `documentation_url` -- this links to the provider's API docs
+2. If no documentation URL is available, **search the web** for "<service name> API documentation"
+   (e.g., "OpenAI API documentation", "Twitter API v2 documentation")
+3. Use the provider's docs to determine the correct path, method, headers, and body format
+4. Use `-H "Content-Type: ..."` if the service expects something other than JSON
+
+### Making the request
 
 ```bash
-nyxid proxy request <slug> <path> -m <METHOD> -d '<json-body>'
+nyxid proxy request <slug> <path> -m <METHOD> -d '<body>'
+
+# Custom content type (default is application/json)
+nyxid proxy request <slug> <path> -m POST -H "Content-Type: application/xml" -d '<xml>...</xml>'
+
+# Stream SSE responses (for LLM completions, etc.)
+nyxid proxy request <slug> <path> -m POST --stream -d '<body>'
+
+# Read body from file
+nyxid proxy request <slug> <path> -m POST -d @request.json
+
+# Read body from stdin
+echo '{"prompt":"hello"}' | nyxid proxy request <slug> <path> -m POST -d -
 ```
 
-Examples:
+### Common service examples
 
 ```bash
-# Call OpenAI through NyxID
-nyxid proxy request llm-openai /chat/completions -m POST \
+# OpenAI -- POST /v1/chat/completions
+nyxid proxy request llm-openai /v1/chat/completions -m POST \
   -d '{"model":"gpt-4","messages":[{"role":"user","content":"Hello"}]}'
 
-# Post a tweet through NyxID
-nyxid proxy request api-twitter /2/tweets -m POST \
-  -d '{"text":"Hello from OpenClaw via NyxID"}'
+# Anthropic -- POST /v1/messages
+nyxid proxy request llm-anthropic /v1/messages -m POST \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{"model":"claude-sonnet-4-20250514","max_tokens":1024,"messages":[{"role":"user","content":"Hello"}]}'
 
-# Discover available proxy services
+# GitHub API -- GET /user/repos
+nyxid proxy request api-github /user/repos -m GET
+
+# Twitter API v2 -- POST /2/tweets
+nyxid proxy request api-twitter /2/tweets -m POST \
+  -d '{"text":"Hello from NyxID"}'
+
+# Discover all available proxy services
 nyxid proxy discover --output json
 ```
 
