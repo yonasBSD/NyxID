@@ -36,9 +36,7 @@
         "description": "Optional NyxID API key for installs that do not use OAuth."
       }
     },
-    "required": [
-      "baseUrl"
-    ]
+    "required": []
   },
   "providerAuthEnvVars": {
     "nyxid": "NYXID_ACCESS_TOKEN",

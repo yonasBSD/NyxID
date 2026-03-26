@@ -36,6 +36,7 @@ This document is a reference for AI agents (Claude, Codex, ChatGPT, Gemini, etc.
 21. [Troubleshooting](#21-troubleshooting)
 22. [Common Pitfalls](#22-common-pitfalls)
 23. [NyxID CLI](#23-nyxid-cli)
+24. [Using NyxID in OpenClaw](#24-using-nyxid-in-openclaw)
 
 ---
 
@@ -2681,14 +2682,7 @@ nyxid external-key delete <ID>         # Delete an external credential
 
 ### Using with AI Agents
 
-AI agents should check if `nyxid` is available before falling back to curl:
-
-```bash
-# Check if CLI is available
-command -v nyxid >/dev/null 2>&1 && echo "CLI available" || echo "Use API"
-```
-
-After `nyxid login --base-url <URL>`, the URL is saved to `~/.nyxid/base_url`. No need to set `$NYXID_URL` or pass `--base-url` on every command. The CLI also reads access tokens from `$NYXID_ACCESS_TOKEN` by default (configurable via `--access-token-env`).
+AI agents use the `nyxid` CLI for all NyxID operations. After `nyxid login --base-url <URL>`, the URL is saved to `~/.nyxid/base_url`. No need to set environment variables or pass `--base-url` on every command.
 
 **Fully non-interactive AI agent workflow:**
 
@@ -2742,3 +2736,123 @@ nyxid notification telegram-link
 nyxid ssh exec <SERVICE_OR_SLUG> --principal ubuntu -- uptime
 nyxid ssh terminal <SERVICE_OR_SLUG>                    # auto-resolves principal
 ```
+
+---
+
+## 24. Using NyxID in OpenClaw
+
+NyxID ships an OpenClaw skill at `integrations/openclaw/skills/nyxid` that lets OpenClaw agents discover and call external services through NyxID's credential proxy. The skill uses the `nyxid` CLI exclusively -- no environment variables or HTTP fallback.
+
+For the full integration guide (plugin setup, channel integration, node agent support), see [`docs/OPENCLAW_INTEGRATION.md`](OPENCLAW_INTEGRATION.md).
+
+### Prerequisites
+
+Install the `nyxid` CLI on the OpenClaw machine and log in once:
+
+```bash
+# Install Rust (if needed)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+
+# Install the NyxID CLI
+cargo install --git https://github.com/ChronoAIProject/NyxID nyxid-cli
+
+# Log in (opens browser, saves URL for all future commands)
+nyxid login --base-url https://nyx-api.chrono-ai.fun
+```
+
+After login, the CLI stores tokens at `~/.nyxid/` and auto-refreshes them. No further configuration needed.
+
+> **Important:** `nyxid login --base-url https://nyx-api.chrono-ai.fun` must be run before the skill can work. If the agent encounters `1001 unauthorized` errors, the token has expired and the user must re-run `nyxid login` to re-authenticate.
+
+### Install the Skill
+
+Copy the skill to OpenClaw's managed skills directory:
+
+```bash
+mkdir -p ~/.openclaw/skills
+cp -r integrations/openclaw/skills/nyxid ~/.openclaw/skills/nyxid
+```
+
+Verify the skill passes the eligibility check:
+
+```bash
+openclaw skills check
+```
+
+The skill requires `nyxid` on PATH. No environment variables are needed.
+
+### How It Works
+
+Once installed, the OpenClaw agent can:
+
+1. **Discover services** -- `nyxid service list --output json` returns all user-configured services with slugs, status, and endpoint URLs.
+2. **Make proxy requests** -- `nyxid proxy request <slug> <path> -m <METHOD> -d '<body>'` calls any connected service through NyxID. Credentials are injected server-side.
+3. **Add services** -- `nyxid catalog list` browses available services; `nyxid service add <slug> --credential-env <VAR>` adds from catalog.
+
+The agent never handles raw downstream credentials. NyxID injects them at proxy time.
+
+### Example Agent Interaction
+
+```
+User: "Send a message to OpenAI using my connected account"
+
+Agent runs: nyxid service list --output json
+Agent sees: llm-openai (active, slug: llm-openai)
+Agent runs: nyxid proxy request llm-openai /chat/completions -m POST \
+  -d '{"model":"gpt-4","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+### Approval Integration
+
+If a service has approval gating enabled (per-request by default), proxy calls return error code `7000` with an `action_description` and `request_id`. The agent should:
+
+1. Inform the user that approval is needed
+2. Show the `action_description` (e.g., "POST /v1/chat/completions (model: gpt-4, 3 messages)")
+3. Wait for the user to approve via mobile app, Telegram, or `nyxid approval approve <ID>`
+
+### Skill Tools
+
+The skill includes two helper scripts in `tools/`:
+
+- `services.sh` -- Runs `nyxid service list --output json`
+- `proxy.sh <service> <method> <path> [body]` -- Runs `nyxid proxy request` with the given arguments
+
+Both are thin wrappers around the CLI.
+
+### Optional: OAuth Plugin
+
+For advanced use cases (RFC 8693 delegation, programmatic token exchange), install the TypeScript auth plugin:
+
+```bash
+cd integrations/openclaw && npm install && npm run build
+```
+
+Configure in `~/.openclaw/openclaw.json`:
+
+```json
+{
+  "plugins": {
+    "nyxid": {
+      "enabled": true,
+      "baseUrl": "https://nyx-api.chrono-ai.fun",
+      "clientId": "your-client-id",
+      "clientSecret": "your-client-secret"
+    }
+  }
+}
+```
+
+Most users only need the skill (CLI mode). The plugin is for server-side OAuth flows.
+
+### Troubleshooting
+
+| Symptom | Fix |
+|---------|-----|
+| Skill blocked in `openclaw skills check` | Ensure `nyxid` is on PATH: `which nyxid` |
+| `1001 unauthorized` from CLI | Token expired. Re-authenticate: `nyxid login --base-url https://nyx-api.chrono-ai.fun` |
+| `No base URL configured` or connection refused | Login was never run. Run `nyxid login --base-url https://nyx-api.chrono-ai.fun` first |
+| Empty service list | Add services: `nyxid catalog list` then `nyxid service add <slug>` |
+| `7000 approval_required` | User must approve: `nyxid approval list` |
+
+See [`docs/OPENCLAW_INTEGRATION.md`](OPENCLAW_INTEGRATION.md) for the full integration guide including plugin setup, channel integration, and node agent support.
