@@ -30,7 +30,14 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
 
                         let mut table = Table::new();
                         table.load_preset(UTF8_FULL_CONDENSED);
-                        table.set_header(["ID", "Service", "Status", "Requester", "Created"]);
+                        table.set_header([
+                            "ID",
+                            "Service",
+                            "Status",
+                            "Action",
+                            "Requester",
+                            "Created",
+                        ]);
 
                         for req in items {
                             let id = req["id"].as_str().or(req["_id"].as_str()).unwrap_or("-");
@@ -40,12 +47,16 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
                                 .or(req["service_slug"].as_str())
                                 .unwrap_or("-");
                             let status = req["status"].as_str().unwrap_or("-");
+                            let action = req["action_description"]
+                                .as_str()
+                                .or(req["operation_summary"].as_str())
+                                .unwrap_or("-");
                             let requester = req["requester_label"]
                                 .as_str()
                                 .or(req["requester_type"].as_str())
                                 .unwrap_or("-");
                             let created = req["created_at"].as_str().unwrap_or("-");
-                            table.add_row([short_id, service, status, requester, created]);
+                            table.add_row([short_id, service, status, action, requester, created]);
                         }
                         eprintln!("{table}");
                     }
@@ -75,15 +86,17 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
                         .unwrap_or("-");
                     let created = req["created_at"].as_str().unwrap_or("-");
                     let summary = req["operation_summary"].as_str().unwrap_or("-");
+                    let description = req["action_description"].as_str().unwrap_or(summary);
 
                     eprintln!("Approval Request");
                     eprintln!();
-                    eprintln!("ID:        {req_id}");
-                    eprintln!("Service:   {service}");
-                    eprintln!("Status:    {status}");
-                    eprintln!("Requester: {requester}");
-                    eprintln!("Operation: {summary}");
-                    eprintln!("Created:   {created}");
+                    eprintln!("ID:          {req_id}");
+                    eprintln!("Service:     {service}");
+                    eprintln!("Status:      {status}");
+                    eprintln!("Requester:   {requester}");
+                    eprintln!("Operation:   {summary}");
+                    eprintln!("Description: {description}");
+                    eprintln!("Created:     {created}");
                 }
             }
             Ok(())
@@ -212,7 +225,7 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
 
                         let mut table = Table::new();
                         table.load_preset(UTF8_FULL_CONDENSED);
-                        table.set_header(["Service ID", "Service", "Approval Required"]);
+                        table.set_header(["Service ID", "Service", "Approval Required", "Mode"]);
 
                         for cfg in items {
                             let cid = cfg["service_id"].as_str().unwrap_or("-");
@@ -222,7 +235,8 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
                                 .as_bool()
                                 .map(|b| b.to_string())
                                 .unwrap_or_else(|| "-".to_string());
-                            table.add_row([short_id, service, &require]);
+                            let mode = cfg["approval_mode"].as_str().unwrap_or("per_request");
+                            table.add_row([short_id, service, &require, mode]);
                         }
                         eprintln!("{table}");
                     }
@@ -234,6 +248,7 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
         ApprovalCommands::SetConfig {
             id,
             require_approval,
+            approval_mode,
             auth,
         } => {
             let mut api = ApiClient::from_auth(&auth)?;
@@ -243,8 +258,17 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
                 body.insert("approval_required".into(), Value::Bool(v));
             }
 
+            if let Some(ref mode) = approval_mode {
+                if mode != "per_request" && mode != "grant" {
+                    anyhow::bail!(
+                        "Invalid approval mode: {mode}. Must be 'per_request' or 'grant'."
+                    );
+                }
+                body.insert("approval_mode".into(), Value::String(mode.clone()));
+            }
+
             if body.is_empty() {
-                eprintln!("No updates specified. Use --require-approval true/false.");
+                eprintln!("No updates specified. Use --require-approval and/or --approval-mode.");
                 return Ok(());
             }
 

@@ -10,6 +10,7 @@ use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
+use crate::models::service_approval_config::ApprovalMode;
 use crate::mw::auth::AuthUser;
 use crate::services::{approval_service, audit_service};
 
@@ -23,6 +24,8 @@ pub struct ApprovalRequestItem {
     pub requester_type: String,
     pub requester_label: Option<String>,
     pub operation_summary: String,
+    pub action_description: Option<String>,
+    pub approval_mode: ApprovalMode,
     pub status: String,
     pub created_at: String,
     pub decided_at: Option<String>,
@@ -85,6 +88,8 @@ fn to_approval_request_item(
         requester_type: request.requester_type,
         requester_label: request.requester_label,
         operation_summary: request.operation_summary,
+        action_description: request.action_description,
+        approval_mode: request.approval_mode,
         status: request.status,
         created_at: request.created_at.to_rfc3339(),
         decided_at: request.decided_at.map(|d| d.to_rfc3339()),
@@ -348,6 +353,7 @@ pub struct ServiceApprovalConfigItem {
     pub service_id: String,
     pub service_name: String,
     pub approval_required: bool,
+    pub approval_mode: ApprovalMode,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -359,7 +365,8 @@ pub struct ServiceApprovalConfigsResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct SetServiceApprovalConfigRequest {
-    pub approval_required: bool,
+    pub approval_required: Option<bool>,
+    pub approval_mode: Option<ApprovalMode>,
 }
 
 // --- Per-service approval config handlers ---
@@ -381,6 +388,7 @@ pub async fn list_service_configs(
             service_id: c.service_id,
             service_name: c.service_name,
             approval_required: c.approval_required,
+            approval_mode: c.approval_mode,
             created_at: c.created_at.to_rfc3339(),
             updated_at: c.updated_at.to_rfc3339(),
         })
@@ -400,6 +408,12 @@ pub async fn set_service_config(
 ) -> AppResult<Json<ServiceApprovalConfigItem>> {
     let user_id = auth_user.user_id.to_string();
 
+    if body.approval_required.is_none() && body.approval_mode.is_none() {
+        return Err(AppError::ValidationError(
+            "At least one of approval_required or approval_mode must be provided".to_string(),
+        ));
+    }
+
     // Verify the service exists
     let service = state
         .db
@@ -414,6 +428,7 @@ pub async fn set_service_config(
         &service_id,
         &service.name,
         body.approval_required,
+        body.approval_mode.as_ref(),
     )
     .await?;
 
@@ -424,7 +439,8 @@ pub async fn set_service_config(
         Some(serde_json::json!({
             "service_id": service_id,
             "service_name": service.name,
-            "approval_required": body.approval_required,
+            "approval_required": config.approval_required,
+            "approval_mode": config.approval_mode.as_str(),
         })),
         None,
         None,
@@ -434,6 +450,7 @@ pub async fn set_service_config(
         service_id: config.service_id,
         service_name: config.service_name,
         approval_required: config.approval_required,
+        approval_mode: config.approval_mode,
         created_at: config.created_at.to_rfc3339(),
         updated_at: config.updated_at.to_rfc3339(),
     }))
@@ -482,6 +499,8 @@ mod tests {
             requester_id: "sa_123".to_string(),
             requester_label: Some("CI bot".to_string()),
             operation_summary: "proxy:POST /v1/chat/completions".to_string(),
+            action_description: Some("POST /v1/chat/completions (model: gpt-4)".to_string()),
+            approval_mode: ApprovalMode::PerRequest,
             status: "pending".to_string(),
             idempotency_key: "idem_123".to_string(),
             notification_channel: Some("fcm".to_string()),

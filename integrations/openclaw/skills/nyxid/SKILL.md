@@ -204,14 +204,17 @@ nyxid service list --output json | jq '.keys[] | select(.service_type == "ssh")'
 
 ## Approvals and Notifications
 
+Approvals default to **per-request** mode: every proxy call needs fresh approval. The approval notification includes a human-readable `action_description` (e.g., "POST /v1/chat/completions (model: gpt-4, 3 messages)"). Grant-based approval is opt-in via `--approval-mode grant`.
+
 ```bash
-nyxid approval list --output json                      # list pending approvals
-nyxid approval show <ID>                               # show approval details
+nyxid approval list --output json                      # list pending approvals (includes action_description)
+nyxid approval show <ID>                               # show approval details + action_description
 nyxid approval approve <ID>                            # approve a request
 nyxid approval deny <ID>                               # deny a request
-nyxid approval grants --output json                    # list active grants
-nyxid approval service-configs --output json           # list per-service approval configs
-nyxid approval set-config <SERVICE_ID> --require-approval true
+nyxid approval grants --output json                    # list active grants (grant mode only)
+nyxid approval service-configs --output json           # list per-service approval configs (includes approval_mode)
+nyxid approval set-config <SERVICE_ID> --require-approval true                    # per-request (default)
+nyxid approval set-config <SERVICE_ID> --require-approval true --approval-mode grant  # grant mode
 
 nyxid notification settings                            # show notification settings
 nyxid notification update --approval-telegram true     # enable telegram notifications
@@ -245,7 +248,7 @@ nyxid mcp config --tool vscode                         # generate MCP config for
 
 ## Approval and Errors
 
-- `7000 approval_required` -- user must approve the request (check `nyxid approval list`)
+- `7000 approval_required` -- user must approve the request; includes `action_description` and `request_id` (check `nyxid approval list`). Default mode is per-request (every call needs approval).
 - `1001 unauthorized` -- token/key invalid or expired (run `nyxid login` to re-authenticate)
 - `1002 forbidden` -- missing scope or service not configured
 - `8003 node_proxy_error` -- node agent proxy failed (check `nyxid node list`)

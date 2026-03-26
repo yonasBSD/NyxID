@@ -33,25 +33,14 @@ export function getDecisionErrorMessage(error: unknown): string {
 }
 
 const DEFAULT_GRANT_EXPIRY_DAYS = 30;
-const DAY_MS = 24 * 60 * 60 * 1000;
 
-function formatDateTime(date: Date): string {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  const hours = String(date.getHours()).padStart(2, "0");
-  const minutes = String(date.getMinutes()).padStart(2, "0");
-  return `${year}-${month}-${day} ${hours}:${minutes}`;
-}
-
-export function formatGrantExpiryFromCreatedAt(createdAt: string, grantExpiryDays?: number): string {
+export function formatGrantDuration(grantExpiryDays?: number): string {
   const normalizedDays =
     typeof grantExpiryDays === "number" && Number.isFinite(grantExpiryDays) && grantExpiryDays > 0
       ? Math.floor(grantExpiryDays)
       : DEFAULT_GRANT_EXPIRY_DAYS;
-  const createdAtMs = Date.parse(createdAt);
-  const baseMs = Number.isFinite(createdAtMs) ? createdAtMs : Date.now();
-  return formatDateTime(new Date(baseMs + normalizedDays * DAY_MS));
+  const label = normalizedDays === 1 ? "day" : "days";
+  return `${normalizedDays} ${label}`;
 }
 
 export function getChallengeActionState(

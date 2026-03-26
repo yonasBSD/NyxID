@@ -124,6 +124,7 @@ sequenceDiagram
     participant User as User / AI Agent
     participant CLI as nyxid CLI
     participant API as NyxID API
+    participant Approval as Approval Check
     participant US as UserService
     participant UE as UserEndpoint
     participant UAK as UserApiKey
@@ -135,6 +136,20 @@ sequenceDiagram
 
     API->>US: Find UserService by slug + user_id
     US-->>API: endpoint_id, api_key_id, auth_method, node_id
+
+    API->>Approval: Check approval requirement + mode
+    alt Approval required (per_request mode, default)
+        Approval-->>API: Build action_description, create request, notify user
+        API-->>CLI: 403 approval_required (request_id, action_description)
+        Note over User: User approves via mobile/Telegram
+        User->>CLI: (retry after approval)
+        CLI->>API: (retry request)
+    else Approval required (grant mode)
+        Approval-->>API: Check for existing grant
+        Note over Approval: If no grant, create request + notify
+    else No approval required
+        Note over Approval: Pass through
+    end
 
     alt Direct Routing (no node_id)
         API->>UE: Get endpoint URL

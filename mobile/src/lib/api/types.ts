@@ -1,10 +1,12 @@
 export type ChallengeStatus = "PENDING" | "APPROVED" | "DENIED" | "EXPIRED";
+export type ApprovalMode = "per_request" | "grant";
 
 export type ChallengeItem = {
   id: string;
   title: string;
   action: string;
   resource: string;
+  approval_mode: ApprovalMode;
   risk_level: "low" | "medium" | "high";
   status: ChallengeStatus;
   created_at: string;

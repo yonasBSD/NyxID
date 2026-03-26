@@ -151,7 +151,7 @@ backend/src/
 |-- routes.rs            # All route definitions
 |-- main.rs              # Server startup
 |-- models/              # MongoDB document structs (35 models, 33 collections, incl. node, node_service_binding, mcp_session, openclaw_channel_mapping, user_endpoint, user_api_key, user_service)
-|-- services/            # Business logic (43 services, incl. node_service, node_routing_service, node_ws_manager, node_metrics_service, openclaw_channel_service, unified_key_service, catalog_service, user_endpoint_service, user_api_key_service, user_service_service)
+|-- services/            # Business logic (44 services, incl. node_service, node_routing_service, node_ws_manager, node_metrics_service, openclaw_channel_service, unified_key_service, catalog_service, user_endpoint_service, user_api_key_service, user_service_service, action_description)
 |-- handlers/            # HTTP handlers (45 handler modules, incl. node_admin, admin_nodes, node_ws, developer_apps, ssh_exec, llms_txt, openclaw_channel, keys, catalog, user_endpoints, user_api_keys_external, user_services_handler)
 |-- crypto/              # JWT, AES, password hashing, token generation, KeyProvider trait, KMS providers, JWKS
 |-- errors/              # AppError enum, ErrorResponse, AppResult
@@ -198,7 +198,7 @@ All API routes under `/api/v1`:
 - `/llm` -- LLM gateway (provider proxy, OpenAI-compatible gateway, status)
 - `/delegation/refresh` -- refresh delegated access tokens
 - `/notifications` -- notification settings CRUD, Telegram link/disconnect, device token management (register/list/remove)
-- `/approvals` -- approval request history, grants, decide, status polling, per-service approval configs
+- `/approvals` -- approval request history, grants, decide, status polling, per-service approval configs (with `approval_mode`: `per_request` default or `grant` opt-in)
 - `/webhooks/telegram` -- Telegram webhook (unauthenticated, secret-verified)
 - `/nodes` -- node management (register-token, list, get, delete, rotate-token, bindings CRUD + priority update)
 - `/nodes/ws` -- WebSocket upgrade for node agent connections (auth via WS protocol, not middleware)
