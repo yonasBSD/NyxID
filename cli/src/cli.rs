@@ -355,7 +355,7 @@ pub enum ServiceCommands {
         /// Label for this service
         #[arg(long)]
         label: Option<String>,
-        /// Auth method (bearer, header, query, basic)
+        /// Auth method (bearer, header, query, path, basic)
         #[arg(long)]
         auth_method: Option<String>,
         /// Auth key name (e.g., Authorization, X-API-Key)

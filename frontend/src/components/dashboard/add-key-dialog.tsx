@@ -75,6 +75,7 @@ const AUTH_METHOD_DEFAULTS: Record<string, string> = {
   bearer: "Authorization",
   header: "X-API-Key",
   query: "key",
+  path: "bot",
   basic: "Authorization",
   oidc: "Authorization",
   oauth2: "Authorization",
@@ -510,6 +511,7 @@ function KeyForm({
                   <SelectItem value="bearer">Bearer</SelectItem>
                   <SelectItem value="header">Header</SelectItem>
                   <SelectItem value="query">Query Parameter</SelectItem>
+                  <SelectItem value="path">Path Prefix</SelectItem>
                   <SelectItem value="basic">Basic Auth</SelectItem>
                   <SelectItem value="oauth2">OAuth 2.0</SelectItem>
                   <SelectItem value="oidc">OIDC</SelectItem>
@@ -724,6 +726,7 @@ function NodeSetupStep({
                     <SelectItem value="bearer">Bearer</SelectItem>
                     <SelectItem value="header">Header</SelectItem>
                     <SelectItem value="query">Query Parameter</SelectItem>
+                    <SelectItem value="path">Path Prefix</SelectItem>
                     <SelectItem value="basic">Basic Auth</SelectItem>
                     <SelectItem value="oauth2">OAuth 2.0</SelectItem>
                     <SelectItem value="oidc">OIDC</SelectItem>

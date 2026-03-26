@@ -148,12 +148,11 @@ pub async fn list_catalog(
     let services: Vec<DownstreamService> = db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
         .find(doc! {
-            "service_type": { "$in": ["http", "ssh"] },
+            "service_type": "http",
             "is_active": true,
             "$or": [
                 { "requires_user_credential": true },
                 { "provider_config_id": { "$ne": null } },
-                { "service_type": "ssh" },
                 { "auth_method": "none", "requires_user_credential": false },
             ],
             "service_category": { "$in": ["connection", "internal"] },

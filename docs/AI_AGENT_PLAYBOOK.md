@@ -168,6 +168,7 @@ Users add services via a single action: `nyxid service add <slug>` (CLI) or `POS
 - `bearer` -- Inject credential as `Authorization: Bearer <credential>`
 - `header` -- Inject credential as a custom HTTP header (e.g., `X-API-Key: <credential>`)
 - `query` -- Inject credential as query parameter
+- `path` -- Inject credential as a URL path prefix (e.g., Telegram Bot API: `/bot<token>/method`)
 - `basic` -- Inject credential as HTTP Basic auth
 - `none` -- No credential injection
 
@@ -2498,7 +2499,7 @@ nyxid service add <SLUG>               # Add from catalog (auto-fetches label fr
   [--via-node <NODE_ID|NAME>]          #   Route traffic through a node (accepts name or ID)
   [--endpoint-url <URL>]               #   Endpoint URL override
   [--label <LABEL>]                    #   Display label (auto-fetched from catalog if omitted)
-  [--auth-method <METHOD>]             #   Auth method: bearer, header, query, basic
+  [--auth-method <METHOD>]             #   Auth method: bearer, header, query, path, basic
   [--auth-key-name <NAME>]             #   Auth key name (e.g., Authorization, X-API-Key)
 nyxid service add-ssh                  # Add an SSH service
   --label <LABEL>
