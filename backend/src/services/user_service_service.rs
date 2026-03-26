@@ -7,6 +7,7 @@ use crate::errors::{AppError, AppResult};
 use crate::models::user_api_key::COLLECTION_NAME as USER_API_KEYS;
 use crate::models::user_endpoint::COLLECTION_NAME as USER_ENDPOINTS;
 use crate::models::user_service::{COLLECTION_NAME, UserService};
+use crate::services::node_service;
 
 /// Valid auth methods for user services.
 const VALID_AUTH_METHODS: &[&str] = &["bearer", "header", "query", "basic", "none"];
@@ -117,6 +118,7 @@ pub async fn create_user_service(
 ) -> AppResult<UserService> {
     validate_slug(slug)?;
     validate_auth_method(auth_method)?;
+    let node_id = node_id.filter(|nid| !nid.is_empty());
 
     if auth_key_name.len() > 200 || auth_key_name.contains('\r') || auth_key_name.contains('\n') {
         return Err(AppError::ValidationError(
@@ -152,6 +154,10 @@ pub async fn create_user_service(
         return Err(AppError::Conflict(format!(
             "You already have an active service with slug '{slug}'"
         )));
+    }
+
+    if let Some(node_id) = node_id {
+        node_service::get_node(db, user_id, node_id).await?;
     }
 
     let now = Utc::now();
@@ -209,6 +215,7 @@ pub async fn update_user_service(
             // Empty string clears the node_id
             set_doc.insert("node_id", bson::Bson::Null);
         } else {
+            node_service::get_node(db, user_id, nid).await?;
             set_doc.insert("node_id", nid);
         }
     }

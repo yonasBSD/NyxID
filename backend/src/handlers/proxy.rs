@@ -272,6 +272,33 @@ async fn resolve_via_downstream_service(
     Ok((nr, t, has_cred, None))
 }
 
+async fn build_pre_resolved_node_route(
+    state: &AppState,
+    user_id: &str,
+    service_id: &str,
+    explicit_node_id: Option<&str>,
+) -> AppResult<Option<node_routing_service::NodeRoute>> {
+    let Some(explicit_node_id) = explicit_node_id else {
+        return Ok(None);
+    };
+
+    let fallback_node_ids = node_routing_service::list_viable_binding_node_ids(
+        &state.db,
+        user_id,
+        service_id,
+        state.node_ws_manager.as_ref(),
+    )
+    .await?
+    .into_iter()
+    .filter(|node_id| node_id != explicit_node_id)
+    .collect();
+
+    Ok(Some(node_routing_service::NodeRoute {
+        node_id: explicit_node_id.to_string(),
+        fallback_node_ids,
+    }))
+}
+
 /// Inner proxy execution with optional pre-resolved target from UserService path.
 ///
 /// When `pre_resolved` is `Some`, the target and node routing are already known
@@ -289,51 +316,55 @@ async fn execute_proxy_inner(
     let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
 
     // Resolve target and node routing
-    let (node_route, target, has_server_credential, _resolved_user_service_id) =
-        if let Some(pre) = pre_resolved {
-            // New UserService path: target already resolved
-            let node_route = pre
-                .node_id
-                .as_ref()
-                .map(|nid| node_routing_service::NodeRoute {
-                    node_id: nid.clone(),
-                    fallback_node_ids: vec![],
-                });
+    let (node_route, target, has_server_credential, _resolved_user_service_id) = if let Some(pre) =
+        pre_resolved
+    {
+        // New UserService path: target already resolved
+        let mut node_route =
+            build_pre_resolved_node_route(state, &user_id_str, service_id, pre.node_id.as_deref())
+                .await?;
 
-            // API key scope enforcement
-            if let Some(ref us_id) = pre.user_service_id
-                && !auth_user.allow_all_services
-                && !auth_user.allowed_service_ids.contains(us_id)
-            {
-                return Err(AppError::ApiKeyScopeForbidden(
-                    "API key does not have access to this service".to_string(),
-                ));
-            }
-            if let Some(ref nid) = pre.node_id
-                && !auth_user.allow_all_nodes
-                && !auth_user.allowed_node_ids.contains(nid)
-            {
-                return Err(AppError::ApiKeyScopeForbidden(
-                    "API key does not have access to this node".to_string(),
-                ));
-            }
+        // API key scope enforcement
+        if let Some(ref us_id) = pre.user_service_id
+            && !auth_user.allow_all_services
+            && !auth_user.allowed_service_ids.contains(us_id)
+        {
+            return Err(AppError::ApiKeyScopeForbidden(
+                "API key does not have access to this service".to_string(),
+            ));
+        }
+        if let Some(ref nid) = pre.node_id
+            && !auth_user.allow_all_nodes
+            && !auth_user.allowed_node_ids.contains(nid)
+        {
+            return Err(AppError::ApiKeyScopeForbidden(
+                "API key does not have access to this node".to_string(),
+            ));
+        }
+        if !auth_user.allow_all_nodes
+            && let Some(route) = node_route.as_mut()
+        {
+            route
+                .fallback_node_ids
+                .retain(|nid| auth_user.allowed_node_ids.contains(nid));
+        }
 
-            (
-                node_route,
-                pre.target,
-                pre.has_server_credential,
-                pre.user_service_id,
-            )
-        } else {
-            // Old DownstreamService path -- scoped keys must use configured services
-            if !auth_user.allow_all_services {
-                return Err(AppError::ApiKeyScopeForbidden(
-                    "Scoped API keys must use configured services".to_string(),
-                ));
-            }
+        (
+            node_route,
+            pre.target,
+            pre.has_server_credential,
+            pre.user_service_id,
+        )
+    } else {
+        // Old DownstreamService path -- scoped keys must use configured services
+        if !auth_user.allow_all_services {
+            return Err(AppError::ApiKeyScopeForbidden(
+                "Scoped API keys must use configured services".to_string(),
+            ));
+        }
 
-            resolve_via_downstream_service(state, &user_id_str, service_id).await?
-        };
+        resolve_via_downstream_service(state, &user_id_str, service_id).await?
+    };
 
     // === Request Decomposition ===
     // Extract method, query, headers, and body BEFORE approval check so we can

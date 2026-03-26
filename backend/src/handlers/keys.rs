@@ -9,8 +9,8 @@ use crate::AppState;
 use crate::errors::AppResult;
 use crate::mw::auth::AuthUser;
 use crate::services::{
-    credential_push_service, unified_key_service, user_api_key_service, user_endpoint_service,
-    user_service_service,
+    credential_push_service, node_service, unified_key_service, user_api_key_service,
+    user_endpoint_service, user_service_service,
 };
 
 #[derive(Deserialize, ToSchema)]
@@ -327,6 +327,18 @@ pub async fn update_key(
                 &state.db,
                 &user_id_str,
                 &key_id,
+            )
+            .await?;
+        }
+
+        // Auto-sync NodeServiceBinding when node_id changes.
+        if body.node_id.is_some() {
+            node_service::sync_node_binding_for_user_service(
+                &state.db,
+                &user_id_str,
+                view.catalog_service_id.as_deref(),
+                body.node_id.as_deref(),
+                view.node_id.as_deref(),
             )
             .await?;
         }
