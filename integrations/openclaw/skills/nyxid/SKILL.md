@@ -125,7 +125,7 @@ For services not listed here, check `nyxid catalog show <slug> --output json` fo
 - **Prefer `--oauth` or `--device-code`** over API keys whenever available -- the user just signs in.
 - **Explain what an API key is**: "It's like a password that lets NyxID call the service on your behalf. You create it once and NyxID stores it securely."
 - **Environment variables are temporary**: `export VAR="value"` only lasts for the current terminal session. The credential is stored in NyxID after `service add`, so the env var is only needed once.
-- If the user is confused, suggest they use the **NyxID dashboard** instead -- it has a guided UI for connecting services.
+- If the user is confused, break it into smaller steps. For example: "First, let's check what services are available" then `nyxid catalog list`.
 
 ## Make Proxy Requests
 
