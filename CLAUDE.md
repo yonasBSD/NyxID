@@ -69,7 +69,7 @@ Error variants map to HTTP status codes and numeric error codes (1000-3002, 7000
 - HMAC signing secrets are generated at registration; stored as SHA-256 hashes on server, encrypted locally on the node agent
 - WebSocket handler (`handlers/node_ws.rs`) authenticates in the first message, not via HTTP middleware
 - Proxy routing check (`node_routing_service::resolve_node_route`) runs before credential resolution in `execute_proxy()`; returns `NodeRoute` with `fallback_node_ids` for multi-node failover
-- Streaming proxy uses `proxy_response_start` / `proxy_response_chunk` / `proxy_response_end` messages; `PendingRequest` upgrades from `OneShot` to `Streaming` on first chunk
+- Streaming proxy uses `proxy_response_start` / chunk frames / `proxy_response_end`; preferred chunk transport is a WebSocket binary frame with a 36-byte request_id prefix, with legacy `proxy_response_chunk` JSON fallback for older servers
 - Node metrics (`node_metrics_service`) are recorded asynchronously (fire-and-forget) after each proxy request; stored as embedded `NodeMetrics` document on the Node model
 - Node-routed audit events include `"routed_via": "node"` and `"node_id"` in event data
 - Error codes 8000-8003 are reserved for node errors (`NodeNotFound`, `NodeOffline`, `NodeProxyTimeout`, `NodeRegistrationFailed`)

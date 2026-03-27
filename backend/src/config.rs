@@ -146,6 +146,13 @@ pub struct AppConfig {
     pub node_max_stream_duration_secs: u64,
     /// Enable HMAC request signing for node proxy requests (default: true)
     pub node_hmac_signing_enabled: bool,
+
+    // Proxy streaming
+    /// Maximum request body size for proxy routes in bytes (default: 100 MB)
+    pub proxy_max_body_size: usize,
+    /// Idle timeout for proxy streaming responses in seconds (default: 60).
+    /// Stream is terminated if no data chunk arrives within this duration.
+    pub proxy_stream_idle_timeout_secs: u64,
     /// Maximum concurrent SSH WebSocket tunnel sessions per user (default: 4)
     pub ssh_max_sessions_per_user: usize,
     /// Timeout for connecting to a downstream SSH target in seconds (default: 10)
@@ -269,6 +276,11 @@ impl std::fmt::Debug for AppConfig {
                 &self.node_max_stream_duration_secs,
             )
             .field("node_hmac_signing_enabled", &self.node_hmac_signing_enabled)
+            .field("proxy_max_body_size", &self.proxy_max_body_size)
+            .field(
+                "proxy_stream_idle_timeout_secs",
+                &self.proxy_stream_idle_timeout_secs,
+            )
             .field("ssh_max_sessions_per_user", &self.ssh_max_sessions_per_user)
             .field("ssh_connect_timeout_secs", &self.ssh_connect_timeout_secs)
             .field(
@@ -440,6 +452,14 @@ impl AppConfig {
                 .ok()
                 .map(|v| v != "false" && v != "0")
                 .unwrap_or(true),
+            proxy_max_body_size: env::var("PROXY_MAX_BODY_SIZE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(100 * 1024 * 1024),
+            proxy_stream_idle_timeout_secs: env::var("PROXY_STREAM_IDLE_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(60),
             ssh_max_sessions_per_user: env::var("SSH_MAX_SESSIONS_PER_USER")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -736,6 +756,8 @@ mod tests {
             node_max_ws_connections: 100,
             node_max_stream_duration_secs: 300,
             node_hmac_signing_enabled: true,
+            proxy_max_body_size: 100 * 1024 * 1024,
+            proxy_stream_idle_timeout_secs: 60,
             ssh_max_sessions_per_user: 4,
             ssh_connect_timeout_secs: 10,
             ssh_max_tunnel_duration_secs: 3600,

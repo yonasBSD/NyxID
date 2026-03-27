@@ -48,6 +48,14 @@ const SSH_SHUTDOWN_DRAIN_TIMEOUT_SECS: u64 = 5;
 const AGENT_SHUTDOWN_TIMEOUT_SECS: u64 = 30;
 const WS_WRITE_CHANNEL_SIZE: usize = 256;
 
+/// WebSocket message to send: either a JSON text frame or raw binary data.
+/// Text frames carry control messages (JSON, human-readable for debugging).
+/// Binary frames carry streaming data chunks (zero encoding overhead).
+pub enum NodeWsMessage {
+    Text(String),
+    Binary(Vec<u8>),
+}
+
 type SharedSigningSecret = Arc<Zeroizing<String>>;
 type ActiveSshTunnelMap = Arc<tokio::sync::Mutex<HashMap<String, ActiveSshTunnelEntry>>>;
 
@@ -358,9 +366,17 @@ async fn connect_and_serve(
     };
 
     let parsed: serde_json::Value = serde_json::from_str(&text)?;
-    match parsed["type"].as_str() {
+    let use_binary_proxy_chunks = match parsed["type"].as_str() {
         Some("auth_ok") => {
-            tracing::info!(node_id = %config.node.id, "Authenticated with NyxID server");
+            let enabled = parsed["capabilities"]["proxy_binary_chunks"]
+                .as_bool()
+                .unwrap_or(false);
+            tracing::info!(
+                node_id = %config.node.id,
+                proxy_binary_chunks = enabled,
+                "Authenticated with NyxID server"
+            );
+            enabled
         }
         Some("auth_error") => {
             let msg = parsed["message"].as_str().unwrap_or("unknown");
@@ -369,12 +385,12 @@ async fn connect_and_serve(
         _ => {
             return Err(Error::AuthFailed(format!("Unexpected response: {text}")));
         }
-    }
+    };
 
     let proxy_http_client = proxy_executor::build_http_client()?;
 
     // 4. Set up writer channel
-    let (tx, mut rx) = mpsc::channel::<String>(WS_WRITE_CHANNEL_SIZE);
+    let (tx, mut rx) = mpsc::channel::<NodeWsMessage>(WS_WRITE_CHANNEL_SIZE);
     let active_ssh_tunnels = Arc::new(tokio::sync::Mutex::new(HashMap::<
         String,
         ActiveSshTunnelEntry,
@@ -382,10 +398,15 @@ async fn connect_and_serve(
     let active_web_terminals: ActiveWebTerminalMap =
         Arc::new(tokio::sync::Mutex::new(HashMap::new()));
 
-    // Writer task: forwards messages from the channel to the WS sink
+    // Writer task: forwards messages from the channel to the WS sink.
+    // Text frames carry JSON control messages; binary frames carry raw data chunks.
     let writer_task = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
-            if ws_sink.send(Message::Text(msg.into())).await.is_err() {
+            let ws_msg = match msg {
+                NodeWsMessage::Text(text) => Message::Text(text.into()),
+                NodeWsMessage::Binary(data) => Message::Binary(data.into()),
+            };
+            if ws_sink.send(ws_msg).await.is_err() {
                 break;
             }
         }
@@ -451,6 +472,7 @@ async fn connect_and_serve(
                         &replay,
                         &metrics_clone,
                         &tx_clone,
+                        use_binary_proxy_chunks,
                         &http_client,
                     )
                     .await;
@@ -564,7 +586,7 @@ async fn connect_and_serve(
 async fn handle_ssh_tunnel_open(
     parsed: &serde_json::Value,
     ssh_config: &SshConfig,
-    tx: mpsc::Sender<String>,
+    tx: mpsc::Sender<NodeWsMessage>,
     active_tunnels: ActiveSshTunnelMap,
     signing_secret: Option<SharedSigningSecret>,
     replay_guard: Arc<tokio::sync::Mutex<ReplayGuard>>,
@@ -694,7 +716,7 @@ async fn verify_signed_ssh_tunnel_open(
 
 async fn handle_ssh_tunnel_data(
     parsed: &serde_json::Value,
-    tx: &mpsc::Sender<String>,
+    tx: &mpsc::Sender<NodeWsMessage>,
     active_tunnels: &ActiveSshTunnelMap,
 ) {
     let Some(session_id) = parsed["session_id"].as_str() else {
@@ -766,7 +788,7 @@ async fn run_ssh_tunnel_session(
     session_id: String,
     address: String,
     mut control_rx: mpsc::Receiver<SshTunnelControl>,
-    tx: mpsc::Sender<String>,
+    tx: mpsc::Sender<NodeWsMessage>,
     active_tunnels: ActiveSshTunnelMap,
     io_timeout: Duration,
 ) {
@@ -924,7 +946,7 @@ fn ssh_tunnel_timeout_error(operation: &str, io_timeout: Duration) -> std::io::E
 
 async fn abort_ssh_tunnel(
     active_tunnels: &ActiveSshTunnelMap,
-    tx: &mpsc::Sender<String>,
+    tx: &mpsc::Sender<NodeWsMessage>,
     session_id: &str,
     error: Option<&str>,
 ) {
@@ -983,7 +1005,7 @@ async fn close_active_ssh_tunnels(active_tunnels: &ActiveSshTunnelMap, timeout: 
 }
 
 async fn send_ssh_tunnel_closed(
-    tx: &mpsc::Sender<String>,
+    tx: &mpsc::Sender<NodeWsMessage>,
     session_id: &str,
     error: Option<&str>,
 ) -> bool {
@@ -1044,7 +1066,7 @@ fn normalize_target_host(host: &str) -> String {
 async fn handle_ssh_exec(
     parsed: &serde_json::Value,
     ssh_config: &SshConfig,
-    tx: mpsc::Sender<String>,
+    tx: mpsc::Sender<NodeWsMessage>,
     signing_secret: Option<SharedSigningSecret>,
     replay_guard: Arc<tokio::sync::Mutex<ReplayGuard>>,
 ) {
@@ -1421,7 +1443,7 @@ async fn verify_signed_ssh_exec(
 
 #[allow(clippy::too_many_arguments)]
 async fn send_ssh_exec_result(
-    tx: &mpsc::Sender<String>,
+    tx: &mpsc::Sender<NodeWsMessage>,
     request_id: &str,
     exit_code: i32,
     stdout: &[u8],
@@ -1457,7 +1479,7 @@ async fn send_ssh_exec_result(
 async fn handle_web_terminal_open(
     parsed: &serde_json::Value,
     ssh_config: &SshConfig,
-    tx: mpsc::Sender<String>,
+    tx: mpsc::Sender<NodeWsMessage>,
     active_terminals: ActiveWebTerminalMap,
     signing_secret: Option<SharedSigningSecret>,
     replay_guard: Arc<tokio::sync::Mutex<ReplayGuard>>,
@@ -1822,7 +1844,7 @@ async fn handle_web_terminal_resize(
 
 async fn handle_web_terminal_close(
     parsed: &serde_json::Value,
-    tx: &mpsc::Sender<String>,
+    tx: &mpsc::Sender<NodeWsMessage>,
     active_terminals: &ActiveWebTerminalMap,
 ) {
     let Some(session_id) = parsed["session_id"].as_str() else {
@@ -1859,7 +1881,7 @@ async fn drain_active_web_terminals(active_terminals: &ActiveWebTerminalMap) {
 }
 
 async fn send_web_terminal_closed(
-    tx: &mpsc::Sender<String>,
+    tx: &mpsc::Sender<NodeWsMessage>,
     session_id: &str,
     error: Option<&str>,
 ) -> bool {
@@ -2073,8 +2095,8 @@ fn build_credential_ack(service_slug: &str, status: &str, error: Option<&str>) -
     ack.to_string()
 }
 
-async fn send_ws_message(tx: &mpsc::Sender<String>, message: String) -> bool {
-    tx.send(message).await.is_ok()
+async fn send_ws_message(tx: &mpsc::Sender<NodeWsMessage>, message: String) -> bool {
+    tx.send(NodeWsMessage::Text(message)).await.is_ok()
 }
 
 fn shutdown_requested(shutdown: &watch::Receiver<bool>) -> bool {
@@ -2115,6 +2137,14 @@ mod tests {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
     use tokio::net::TcpListener;
+
+    /// Unwrap a NodeWsMessage::Text variant, panicking if it's Binary.
+    fn unwrap_text(msg: NodeWsMessage) -> String {
+        match msg {
+            NodeWsMessage::Text(s) => s,
+            NodeWsMessage::Binary(_) => panic!("expected Text message, got Binary"),
+        }
+    }
 
     fn ssh_config_with_allowed_target(host: &str, port: u16) -> SshConfig {
         SshConfig {
@@ -2223,7 +2253,8 @@ mod tests {
         .await;
 
         let opened: serde_json::Value =
-            serde_json::from_str(&rx.recv().await.expect("opened message")).expect("opened json");
+            serde_json::from_str(&unwrap_text(rx.recv().await.expect("opened message")))
+                .expect("opened json");
         assert_eq!(opened["type"], "ssh_tunnel_opened");
         assert_eq!(opened["session_id"], "sess-1");
 
@@ -2238,7 +2269,8 @@ mod tests {
         .await;
 
         let tunneled: serde_json::Value =
-            serde_json::from_str(&rx.recv().await.expect("data message")).expect("data json");
+            serde_json::from_str(&unwrap_text(rx.recv().await.expect("data message")))
+                .expect("data json");
         assert_eq!(tunneled["type"], "ssh_tunnel_data");
         assert_eq!(tunneled["session_id"], "sess-1");
         let payload = base64::engine::general_purpose::STANDARD
@@ -2253,7 +2285,8 @@ mod tests {
         .await;
 
         let closed: serde_json::Value =
-            serde_json::from_str(&rx.recv().await.expect("close message")).expect("close json");
+            serde_json::from_str(&unwrap_text(rx.recv().await.expect("close message")))
+                .expect("close json");
         assert_eq!(closed["type"], "ssh_tunnel_closed");
         assert_eq!(closed["session_id"], "sess-1");
 
@@ -2283,7 +2316,8 @@ mod tests {
         .await;
 
         let closed: serde_json::Value =
-            serde_json::from_str(&rx.recv().await.expect("close message")).expect("close json");
+            serde_json::from_str(&unwrap_text(rx.recv().await.expect("close message")))
+                .expect("close json");
         assert_eq!(closed["type"], "ssh_tunnel_closed");
         assert_eq!(closed["session_id"], "sess-meta");
         assert!(
@@ -2326,7 +2360,8 @@ mod tests {
         .await;
 
         let closed: serde_json::Value =
-            serde_json::from_str(&rx.recv().await.expect("close message")).expect("close json");
+            serde_json::from_str(&unwrap_text(rx.recv().await.expect("close message")))
+                .expect("close json");
         assert_eq!(closed["type"], "ssh_tunnel_closed");
         assert_eq!(closed["session_id"], "sess-deny");
         assert!(
@@ -2379,7 +2414,8 @@ mod tests {
         .await;
 
         let closed: serde_json::Value =
-            serde_json::from_str(&rx.recv().await.expect("close message")).expect("close json");
+            serde_json::from_str(&unwrap_text(rx.recv().await.expect("close message")))
+                .expect("close json");
         assert_eq!(closed["type"], "ssh_tunnel_closed");
         assert_eq!(closed["error"], "too_many_active_tunnels");
         assert_eq!(active_tunnels.lock().await.len(), 1);
@@ -2413,7 +2449,8 @@ mod tests {
         .await;
 
         let closed: serde_json::Value =
-            serde_json::from_str(&rx.recv().await.expect("close message")).expect("close json");
+            serde_json::from_str(&unwrap_text(rx.recv().await.expect("close message")))
+                .expect("close json");
         assert_eq!(closed["type"], "ssh_tunnel_closed");
         assert_eq!(closed["session_id"], "sess-bad-sig");
         assert_eq!(closed["error"], "invalid_hmac_signature");
@@ -2486,7 +2523,8 @@ mod tests {
         tokio::task::yield_now().await;
 
         let closed: serde_json::Value =
-            serde_json::from_str(&rx.recv().await.expect("close message")).expect("close json");
+            serde_json::from_str(&unwrap_text(rx.recv().await.expect("close message")))
+                .expect("close json");
         assert_eq!(closed["type"], "ssh_tunnel_closed");
         assert_eq!(closed["session_id"], "sess-4");
         assert_eq!(closed["error"], "control_buffer_full");

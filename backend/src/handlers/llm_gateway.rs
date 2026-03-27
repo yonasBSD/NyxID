@@ -171,7 +171,7 @@ pub async fn llm_proxy_request(
             &path,
             query.as_deref(),
             reqwest_headers,
-            body,
+            proxy_service::ProxyBody::Buffered(body),
             vec![], // no identity headers for LLM proxy
             delegated,
         )
@@ -386,7 +386,7 @@ pub async fn gateway_request(
             &final_path,
             query.as_deref(),
             reqwest_headers,
-            final_body_bytes,
+            proxy_service::ProxyBody::Buffered(final_body_bytes),
             vec![],
             delegated,
         )

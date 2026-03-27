@@ -8,7 +8,7 @@ repository.workspace = true
 [dependencies]
 axum = { workspace = true }
 tower = "0.5.3"
-tower-http = { version = "0.6.8", features = ["cors", "trace", "request-id"] }
+tower-http = { version = "0.6.8", features = ["cors", "trace", "request-id", "limit"] }
 tokio = { workspace = true }
 mongodb = { workspace = true }
 bson = { workspace = true }

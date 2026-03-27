@@ -168,7 +168,7 @@ This enables streaming LLM responses (e.g., OpenAI `stream=true`) through the no
 The streaming protocol uses three message types:
 
 1. `proxy_response_start` -- status code and headers
-2. `proxy_response_chunk` -- base64-encoded data chunks (max 64KB each)
+2. Streaming data chunk -- preferred as a WebSocket binary frame with a 36-byte `request_id` prefix; legacy fallback is `proxy_response_chunk` JSON with base64 data (max 64KB raw payload per chunk)
 3. `proxy_response_end` -- signals stream completion
 
 The `content-length` header is stripped from streaming responses since the total size is unknown. The maximum streaming duration is configurable via `NODE_MAX_STREAM_DURATION_SECS` (default: 300 seconds).

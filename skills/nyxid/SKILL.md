@@ -181,10 +181,10 @@ nyxid proxy request <slug> <path> -m <METHOD> -d '<body>'
 # Custom content type (default is application/json)
 nyxid proxy request <slug> <path> -m POST -H "Content-Type: application/xml" -d '<xml>...</xml>'
 
-# Stream SSE responses (for LLM completions, etc.)
+# Stream responses (SSE, video, audio, large files)
 nyxid proxy request <slug> <path> -m POST --stream -d '<body>'
 
-# Read body from file
+# Read body from file (uploads up to 100 MB supported on proxy routes)
 nyxid proxy request <slug> <path> -m POST -d @request.json
 
 # Read body from stdin

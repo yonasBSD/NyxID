@@ -829,7 +829,7 @@ pub enum ProxyCommands {
         /// Extra headers (repeatable, format: Key:Value)
         #[arg(long = "header", short = 'H')]
         headers: Vec<String>,
-        /// Stream the response (for SSE/chunked)
+        /// Stream the response (for SSE, video, audio, large files)
         #[arg(long)]
         stream: bool,
         /// Use service ID instead of slug

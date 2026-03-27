@@ -1,6 +1,6 @@
 # Node Proxy WebSocket Protocol
 
-This document describes the WebSocket protocol used for communication between NyxID and credential node agents. All messages are JSON with a `type` field discriminator.
+This document describes the WebSocket protocol used for communication between NyxID and credential node agents. Control messages are JSON with a `type` field discriminator. Streaming proxy data chunks may also be sent as raw WebSocket binary frames when negotiated during authentication.
 
 ---
 
@@ -109,9 +109,14 @@ NyxID validates the token hash and verifies it matches the provided `node_id`. O
 ```json
 {
   "type": "auth_ok",
-  "node_id": "<uuid>"
+  "node_id": "<uuid>",
+  "capabilities": {
+    "proxy_binary_chunks": true
+  }
 }
 ```
+
+If `capabilities.proxy_binary_chunks` is `true`, the node may send streaming proxy chunks as WebSocket binary frames instead of legacy JSON/base64 `proxy_response_chunk` messages. Nodes that do not see this capability must continue using the legacy JSON chunk format.
 
 ### Authentication Failure
 
@@ -251,7 +256,7 @@ If the node encounters an error executing the request:
 
 ## Streaming Responses
 
-For responses with `Content-Type: text/event-stream` (SSE), the node sends a streaming sequence instead of a single `proxy_response` message. This enables real-time streaming of LLM responses and other SSE-based APIs through the WebSocket tunnel.
+For responses that NyxID chooses to stream, the node sends a streaming sequence instead of a single `proxy_response` message. This includes SSE and other large or range-based responses.
 
 ### proxy_response_start
 
@@ -271,9 +276,15 @@ Sent by the node when the downstream service begins a streaming response:
 
 On the server side, NyxID upgrades the pending request from a oneshot channel to a streaming `mpsc` channel. The `content-length` header is stripped since the total size is unknown.
 
-### proxy_response_chunk
+### Streaming Data Chunks
 
-Sent for each chunk of streaming data:
+Preferred format when `auth_ok.capabilities.proxy_binary_chunks == true`:
+
+- WebSocket binary frame
+- First 36 bytes: ASCII `request_id` UUID
+- Remaining bytes: raw chunk payload
+
+Legacy fallback when the capability is absent or `false`:
 
 ```json
 {
@@ -283,7 +294,7 @@ Sent for each chunk of streaming data:
 }
 ```
 
-Each chunk is limited to 64KB after base64 decoding. Larger chunks from the downstream service are split into multiple `proxy_response_chunk` messages.
+Each chunk carries at most 64KB of raw payload. Larger downstream chunks are split into multiple frames/messages.
 
 NyxID converts these chunks into an `axum::body::Body::from_stream()` for real-time forwarding to the client.
 
@@ -316,7 +327,7 @@ If the downstream stream encounters an error mid-stream, the node sends a `proxy
 ```
 PendingRequest::OneShot  ──[proxy_response_start]──>  PendingRequest::Streaming
                                                           |
-                                                  [proxy_response_chunk]*
+                                         [binary chunk frame or proxy_response_chunk]*
                                                           |
                                                   [proxy_response_end]──> removed
 ```
@@ -469,7 +480,8 @@ Requests that fail replay checks are rejected with HTTP 403 and the error messag
 | `heartbeat_pong` | In response to `heartbeat_ping` | `timestamp` (optional) |
 | `proxy_response` | After executing a proxied request (non-streaming) | `request_id`, `status`, `headers`, `body` (base64) |
 | `proxy_response_start` | Beginning of a streaming response | `request_id`, `status`, `headers` |
-| `proxy_response_chunk` | Chunk of streaming data | `request_id`, `data` (base64, max 64KB decoded) |
+| Binary WS frame | Preferred chunk of streaming data | First 36 bytes = `request_id` UUID, remaining bytes = raw payload (max 64KB) |
+| `proxy_response_chunk` | Legacy JSON fallback for streaming data | `request_id`, `data` (base64, max 64KB decoded) |
 | `proxy_response_end` | End of streaming response | `request_id` |
 | `ssh_tunnel_opened` | SSH target TCP connection established | `session_id` |
 | `ssh_tunnel_data` | SSH payload bytes flowing back to NyxID | `session_id`, `data` (base64) |
@@ -484,7 +496,7 @@ Requests that fail replay checks are rejected with HTTP 403 and the error messag
 | Type | When | Fields |
 |------|------|--------|
 | `register_ok` | After successful registration | `node_id`, `auth_token`, `signing_secret` |
-| `auth_ok` | After successful authentication | `node_id` |
+| `auth_ok` | After successful authentication | `node_id`, `capabilities.proxy_binary_chunks` (optional boolean) |
 | `auth_error` | On authentication failure (connection closes) | `message` |
 | `heartbeat_ping` | Periodic keepalive | `timestamp` |
 | `proxy_request` | HTTP request to route through the node | `request_id`, `service_id`, `service_slug`, `method`, `path`, `query`, `headers`, `body` (base64), `timestamp`, `nonce`, `signature` (when HMAC enabled) |
