@@ -235,6 +235,12 @@ fn print_post_install(tool: AiToolTarget, content: &SkillContent) {
         }
     }
 
+    eprintln!();
+    eprintln!("To update the skill later: nyxid ai-setup update");
+    eprintln!(
+        "To update the CLI itself: cargo install --git https://github.com/ChronoAIProject/NyxID nyxid-cli"
+    );
+
     if !content.post_install.is_empty() {
         eprintln!();
         for line in content.post_install.lines() {

@@ -111,6 +111,16 @@ nyxid status
 
 > **Note:** After `nyxid login --base-url <URL>`, the URL is persisted at `~/.nyxid/base_url`. You do not need to pass `--base-url` on subsequent commands.
 
+**Updating the CLI:**
+
+To update the CLI to the latest version, reinstall it:
+
+```bash
+cargo install --git https://github.com/ChronoAIProject/NyxID nyxid-cli
+```
+
+If a command fails with an unrecognized flag or missing subcommand, the CLI is likely outdated. Reinstall it first.
+
 **Without the CLI (API key only):**
 
 If you can't install the CLI, set a NyxID API key as an environment variable and use curl:
@@ -2393,6 +2403,28 @@ cp target/release/nyxid /usr/local/bin/
 # Verify
 nyxid --help
 ```
+
+### Updating
+
+To update the CLI to the latest version, reinstall it:
+
+```bash
+# From git (recommended)
+cargo install --git https://github.com/ChronoAIProject/NyxID nyxid-cli
+
+# Or from local checkout
+git pull && cargo install --path cli
+```
+
+To update installed AI skills (fetches latest skill + playbook from server):
+
+```bash
+nyxid ai-setup update                        # update all installed tools
+nyxid ai-setup update --tool claude-code     # update a specific tool
+nyxid ai-setup status                        # check what's installed
+```
+
+If a command fails with an unrecognized flag or missing subcommand, the CLI is likely outdated. Reinstall it first.
 
 ### Global Options
 

@@ -43,6 +43,23 @@ nyxid login --base-url https://nyx-api.chrono-ai.fun
 
 The CLI stores tokens at `~/.nyxid/` and auto-refreshes them. The base URL is saved on login -- all subsequent commands use it automatically.
 
+## Updating
+
+To update the NyxID CLI to the latest version, reinstall it:
+
+```bash
+cargo install --git https://github.com/ChronoAIProject/NyxID nyxid-cli
+```
+
+To update the installed AI skill (fetches latest skill + playbook from server):
+
+```bash
+nyxid ai-setup update                        # update all installed tools
+nyxid ai-setup update --tool claude-code     # update a specific tool
+```
+
+If a command fails with an unrecognized flag or missing subcommand, the CLI is likely outdated. Reinstall it first.
+
 ## Discover Services
 
 Before using a downstream service, list what the user has configured:
