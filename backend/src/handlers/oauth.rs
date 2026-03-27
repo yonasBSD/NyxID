@@ -1130,19 +1130,15 @@ pub async fn introspect(
     // This ensures introspection returns correct roles/permissions even when
     // the access token was issued without them (e.g., after token refresh
     // with a scope that didn't include "roles").
-    let (roles, groups, permissions) = match crate::services::rbac_helpers::resolve_user_rbac(
-        &state.db,
-        &claims.sub,
-    )
-    .await
-    {
-        Ok(rbac) => (
-            Some(rbac.role_slugs),
-            Some(rbac.group_slugs),
-            Some(rbac.permissions),
-        ),
-        Err(_) => (claims.roles, claims.groups, claims.permissions),
-    };
+    let (roles, groups, permissions) =
+        match crate::services::rbac_helpers::resolve_user_rbac(&state.db, &claims.sub).await {
+            Ok(rbac) => (
+                Some(rbac.role_slugs),
+                Some(rbac.group_slugs),
+                Some(rbac.permissions),
+            ),
+            Err(_) => (claims.roles, claims.groups, claims.permissions),
+        };
 
     Json(IntrospectResponse {
         active: true,
