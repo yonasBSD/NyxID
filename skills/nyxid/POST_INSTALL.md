@@ -14,12 +14,17 @@ nyxid notification telegram-link
 Approval protection is enabled automatically when you link Telegram or register a
 device. You can also ask your AI agent: "Set up my NyxID notifications"
 
-## Important: Activating the skill
+## Activating the skill
 
-Start a new chat in OpenClaw to load the NyxID skill. Do **not** run
-`openclaw gateway restart` unless the gateway is installed as a system service
-(e.g. via systemd or launchd). Restarting a manually-started gateway will stop
-it and it will not come back up automatically.
+Start a new chat in OpenClaw to load the NyxID skill.
+
+If the gateway isn't installed as a background service yet, we recommend
+setting it up so it stays running and restarts automatically:
+```
+openclaw gateway install
+openclaw gateway start
+```
+You can check whether it's already running with `openclaw gateway status`.
 
 ## What you can do now
 

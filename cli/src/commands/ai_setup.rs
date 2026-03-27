@@ -338,11 +338,27 @@ fn print_post_install(tool: AiToolTarget, content: &SkillContent) {
         AiToolTarget::Openclaw => {
             eprintln!("To activate, start a new chat in OpenClaw.");
             eprintln!();
-            eprintln!("WARNING: Do NOT run `openclaw gateway restart` unless the gateway is");
-            eprintln!("installed as a system service (e.g. via systemd/launchd). Restarting a");
-            eprintln!("manually-started gateway will stop it and it will not come back up.");
-            eprintln!();
-            eprintln!("Verify: `openclaw skills check` (should show NyxID as ready).");
+
+            // Check if the gateway is installed as a service
+            let gateway_installed = std::process::Command::new("openclaw")
+                .args(["gateway", "status"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success());
+
+            if !gateway_installed {
+                eprintln!("Tip: Install the OpenClaw gateway as a background service so it");
+                eprintln!("stays running and restarts automatically:");
+                eprintln!();
+                eprintln!("  openclaw gateway install");
+                eprintln!("  openclaw gateway start");
+                eprintln!();
+                eprintln!("You can verify it's running with: openclaw gateway status");
+                eprintln!();
+            }
+
+            eprintln!("Verify skill: `openclaw skills check` (should show NyxID as ready).");
         }
     }
 
