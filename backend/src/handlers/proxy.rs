@@ -484,8 +484,16 @@ async fn execute_proxy_inner(
             .await?;
 
             // Block until the user approves/rejects or timeout expires
+            let req_id = approval_request.id.clone();
             approval_service::wait_for_decision(&state.db, &approval_request.id, timeout_secs)
-                .await?;
+                .await
+                .map_err(|error| {
+                    approval_service::map_wait_for_decision_error(
+                        error,
+                        &req_id,
+                        &state.config.frontend_url,
+                    )
+                })?;
         }
     }
 

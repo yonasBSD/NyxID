@@ -580,6 +580,24 @@ pub async fn wait_for_decision(
     }
 }
 
+/// Convert user-facing approval decision failures into a richer error while
+/// preserving unrelated backend errors so their original status/redaction
+/// behavior remains intact.
+pub fn map_wait_for_decision_error(
+    error: AppError,
+    request_id: &str,
+    frontend_url: &str,
+) -> AppError {
+    match error {
+        AppError::Forbidden(reason) => AppError::ApprovalFailed {
+            request_id: request_id.to_string(),
+            approve_url: format!("{}/approvals/history", frontend_url.trim_end_matches('/')),
+            reason,
+        },
+        other => other,
+    }
+}
+
 /// List approval requests for a user (for history page).
 pub async fn list_requests(
     db: &Database,
@@ -1129,5 +1147,36 @@ mod tests {
     fn resolve_service_config_update_requires_approval_required_for_new_config() {
         let result = resolve_service_config_update(None, None, Some(&ApprovalMode::Grant));
         assert!(matches!(result, Err(AppError::ValidationError(_))));
+    }
+
+    #[test]
+    fn map_wait_for_decision_error_wraps_user_decision_failures() {
+        let error = map_wait_for_decision_error(
+            AppError::Forbidden("Approval request timed out".to_string()),
+            "req-1",
+            "https://app.nyxid.dev/",
+        );
+
+        assert!(matches!(
+            error,
+            AppError::ApprovalFailed {
+                request_id,
+                approve_url,
+                reason,
+            } if request_id == "req-1"
+                && approve_url == "https://app.nyxid.dev/approvals/history"
+                && reason == "Approval request timed out"
+        ));
+    }
+
+    #[test]
+    fn map_wait_for_decision_error_preserves_internal_failures() {
+        let error = map_wait_for_decision_error(
+            AppError::DatabaseError(mongodb::error::Error::custom("db unavailable")),
+            "req-1",
+            "https://app.nyxid.dev",
+        );
+
+        assert!(matches!(error, AppError::DatabaseError(_)));
     }
 }

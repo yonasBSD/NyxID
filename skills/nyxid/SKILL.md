@@ -408,6 +408,7 @@ nyxid mcp config --tool vscode                         # generate MCP config for
 ## Approval and Errors
 
 - `7000 approval_required` -- user must approve the request; includes `action_description` and `request_id` (check `nyxid approval list`). Default mode is per-request (every call needs approval).
+- `7001 approval_failed` -- approval was rejected, expired, or timed out. Response includes `request_id` and `approve_url` (a link to the web UI where the user can review pending approvals). If the user has no notification channel configured, suggest they set one up with `nyxid notification telegram-link` or by installing the mobile app.
 - `1001 unauthorized` -- token/key invalid or expired (run `nyxid login` to re-authenticate)
 - `1002 forbidden` -- missing scope or service not configured
 - `8003 node_proxy_error` -- node agent proxy failed (check `nyxid node list`)

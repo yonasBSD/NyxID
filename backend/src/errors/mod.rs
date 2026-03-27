@@ -18,9 +18,12 @@ pub struct ErrorResponse {
     /// Browser URL to complete consent flow (consent_required only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub consent_url: Option<String>,
-    /// Approval request ID (approval_required only).
+    /// Approval request ID (approval_required / approval_failed only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+    /// URL where the user can review pending approvals (approval_failed only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approve_url: Option<String>,
 }
 
 /// Application-level error variants.
@@ -123,6 +126,13 @@ pub enum AppError {
     #[error("Approval required")]
     ApprovalRequired { request_id: String },
 
+    #[error("Approval failed: {reason}")]
+    ApprovalFailed {
+        request_id: String,
+        approve_url: String,
+        reason: String,
+    },
+
     #[error("External token verification failed: {0}")]
     ExternalTokenInvalid(String),
 
@@ -181,6 +191,7 @@ impl AppError {
             Self::ConsentRequired { .. } => StatusCode::FORBIDDEN,
             Self::UnsupportedGrantType(_) => StatusCode::BAD_REQUEST,
             Self::ApprovalRequired { .. } => StatusCode::FORBIDDEN,
+            Self::ApprovalFailed { .. } => StatusCode::FORBIDDEN,
             Self::ExternalTokenInvalid(_) | Self::ExternalProviderNotConfigured(_) => {
                 StatusCode::BAD_REQUEST
             }
@@ -229,6 +240,7 @@ impl AppError {
             Self::ConsentRequired { .. } => 3003,
             Self::UnsupportedGrantType(_) => 3004,
             Self::ApprovalRequired { .. } => 7000,
+            Self::ApprovalFailed { .. } => 7001,
             Self::ExternalTokenInvalid(_) => 6004,
             Self::ExternalProviderNotConfigured(_) => 6005,
             Self::NodeNotFound(_) => 8000,
@@ -306,6 +318,7 @@ impl AppError {
             Self::ConsentRequired { .. } => "consent_required",
             Self::UnsupportedGrantType(_) => "unsupported_grant_type",
             Self::ApprovalRequired { .. } => "approval_required",
+            Self::ApprovalFailed { .. } => "approval_failed",
             Self::ExternalTokenInvalid(_) => "external_token_invalid",
             Self::ExternalProviderNotConfigured(_) => "external_provider_not_configured",
             Self::NodeNotFound(_) => "node_not_found",
@@ -341,6 +354,11 @@ impl IntoResponse for AppError {
         };
         let approval_request_id = match &self {
             AppError::ApprovalRequired { request_id } => Some(request_id.clone()),
+            AppError::ApprovalFailed { request_id, .. } => Some(request_id.clone()),
+            _ => None,
+        };
+        let approve_url = match &self {
+            AppError::ApprovalFailed { approve_url, .. } => Some(approve_url.clone()),
             _ => None,
         };
 
@@ -360,11 +378,19 @@ impl IntoResponse for AppError {
                     "Approval required. A notification has been sent to the resource owner."
                         .to_string()
                 }
+                AppError::ApprovalFailed {
+                    reason,
+                    approve_url,
+                    ..
+                } => {
+                    format!("Approval failed: {reason}. Review pending approvals at {approve_url}")
+                }
                 other => other.to_string(),
             },
             session_token: mfa_session_token,
             consent_url,
             request_id: approval_request_id,
+            approve_url,
         };
 
         (status, axum::Json(body)).into_response()
@@ -507,6 +533,15 @@ mod tests {
             StatusCode::FORBIDDEN
         );
         assert_eq!(
+            AppError::ApprovalFailed {
+                request_id: "x".into(),
+                approve_url: "https://example.com/approvals".into(),
+                reason: "rejected".into(),
+            }
+            .status_code(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
             AppError::ExternalTokenInvalid("x".into()).status_code(),
             StatusCode::BAD_REQUEST
         );
@@ -581,6 +616,12 @@ mod tests {
             AppError::UnsupportedGrantType("".into()).error_code(),
             AppError::ApprovalRequired {
                 request_id: "".into(),
+            }
+            .error_code(),
+            AppError::ApprovalFailed {
+                request_id: "".into(),
+                approve_url: "".into(),
+                reason: "".into(),
             }
             .error_code(),
             AppError::ExternalTokenInvalid("".into()).error_code(),
@@ -704,6 +745,15 @@ mod tests {
             }
             .error_key(),
             "approval_required"
+        );
+        assert_eq!(
+            AppError::ApprovalFailed {
+                request_id: "".into(),
+                approve_url: "".into(),
+                reason: "".into(),
+            }
+            .error_key(),
+            "approval_failed"
         );
         assert_eq!(
             AppError::ExternalTokenInvalid("".into()).error_key(),
@@ -832,6 +882,7 @@ mod tests {
             session_token: None,
             consent_url: None,
             request_id: None,
+            approve_url: None,
         };
         let json = serde_json::to_value(&resp).expect("serialize");
         assert_eq!(json["error"], "bad_request");
@@ -850,6 +901,7 @@ mod tests {
             session_token: Some("mfa-session-tok".to_string()),
             consent_url: None,
             request_id: None,
+            approve_url: None,
         };
         let json = serde_json::to_value(&resp).expect("serialize");
         assert_eq!(json["session_token"], "mfa-session-tok");
