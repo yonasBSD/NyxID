@@ -413,11 +413,11 @@ pub async fn create_service(
         ));
     }
 
-    // Check slug uniqueness
+    // Check slug uniqueness among active services
     let existing = state
         .db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .find_one(doc! { "slug": &slug })
+        .find_one(doc! { "slug": &slug, "is_active": true })
         .await?;
 
     if existing.is_some() {
