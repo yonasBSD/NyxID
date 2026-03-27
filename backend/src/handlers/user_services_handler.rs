@@ -21,6 +21,14 @@ pub struct UpdateUserServiceRequest {
     pub node_id: Option<String>,
     pub node_priority: Option<i32>,
     pub is_active: Option<bool>,
+    /// Identity propagation mode: "none" | "headers" | "jwt" | "both"
+    pub identity_propagation_mode: Option<String>,
+    pub identity_include_user_id: Option<bool>,
+    pub identity_include_email: Option<bool>,
+    pub identity_include_name: Option<bool>,
+    pub identity_jwt_audience: Option<String>,
+    pub inject_delegation_token: Option<bool>,
+    pub delegation_token_scope: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -38,6 +46,14 @@ pub struct UserServiceResponse {
     pub node_id: Option<String>,
     pub node_priority: i32,
     pub is_active: bool,
+    pub identity_propagation_mode: String,
+    pub identity_include_user_id: bool,
+    pub identity_include_email: bool,
+    pub identity_include_name: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity_jwt_audience: Option<String>,
+    pub inject_delegation_token: bool,
+    pub delegation_token_scope: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -94,6 +110,43 @@ pub async fn update_user_service(
     let current =
         user_service_service::get_user_service(&state.db, &user_id_str, &service_id).await?;
 
+    let identity = if body.identity_propagation_mode.is_some()
+        || body.identity_include_user_id.is_some()
+        || body.identity_include_email.is_some()
+        || body.identity_include_name.is_some()
+        || body.identity_jwt_audience.is_some()
+        || body.inject_delegation_token.is_some()
+        || body.delegation_token_scope.is_some()
+    {
+        Some(user_service_service::IdentityConfig {
+            identity_propagation_mode: body
+                .identity_propagation_mode
+                .unwrap_or(current.identity_propagation_mode.clone()),
+            identity_include_user_id: body
+                .identity_include_user_id
+                .unwrap_or(current.identity_include_user_id),
+            identity_include_email: body
+                .identity_include_email
+                .unwrap_or(current.identity_include_email),
+            identity_include_name: body
+                .identity_include_name
+                .unwrap_or(current.identity_include_name),
+            identity_jwt_audience: if body.identity_jwt_audience.is_some() {
+                body.identity_jwt_audience
+            } else {
+                current.identity_jwt_audience.clone()
+            },
+            inject_delegation_token: body
+                .inject_delegation_token
+                .unwrap_or(current.inject_delegation_token),
+            delegation_token_scope: body
+                .delegation_token_scope
+                .unwrap_or(current.delegation_token_scope.clone()),
+        })
+    } else {
+        None
+    };
+
     user_service_service::update_user_service(
         &state.db,
         &user_id_str,
@@ -103,6 +156,7 @@ pub async fn update_user_service(
         body.node_id.as_deref(),
         body.node_priority,
         body.is_active,
+        identity.as_ref(),
     )
     .await?;
 
@@ -183,6 +237,13 @@ fn user_service_response(svc: UserService) -> UserServiceResponse {
         node_id: svc.node_id,
         node_priority: svc.node_priority,
         is_active: svc.is_active,
+        identity_propagation_mode: svc.identity_propagation_mode,
+        identity_include_user_id: svc.identity_include_user_id,
+        identity_include_email: svc.identity_include_email,
+        identity_include_name: svc.identity_include_name,
+        identity_jwt_audience: svc.identity_jwt_audience,
+        inject_delegation_token: svc.inject_delegation_token,
+        delegation_token_scope: svc.delegation_token_scope,
         created_at: svc.created_at.to_rfc3339(),
         updated_at: svc.updated_at.to_rfc3339(),
     }
