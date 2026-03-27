@@ -796,6 +796,10 @@ curl http://localhost:3001/api/v1/proxy/$SERVICE_ID/v1/chat/completions \
 
 NyxID automatically injects the user's stored credential (e.g., `Authorization: Bearer sk-proj-...`) into the outgoing request.
 
+### Streaming and large files
+
+The proxy streams video, audio, images, and large file responses directly to the client without buffering in memory. HTTP Range requests (byte-range seeking) are supported for services that return `Accept-Ranges` headers. Request body uploads up to 100 MB are supported on proxy routes (configurable via `PROXY_MAX_BODY_SIZE`). Use `--stream` in the CLI to consume streaming responses incrementally.
+
 ### List proxyable services
 
 ```bash
@@ -2616,7 +2620,7 @@ nyxid proxy request <SERVICE> [PATH]   # Send a request through the NyxID proxy
   [-m, --method <METHOD>]              #   HTTP method (default: GET)
   [-d, --data <BODY>]                  #   Request body (JSON, @file, or - for stdin)
   [-H, --header <K:V>]                 #   Extra headers (repeatable)
-  [--stream]                           #   Stream the response (SSE/chunked)
+  [--stream]                           #   Stream the response (SSE, video, audio, large files)
   [--by-id]                            #   Use service ID instead of slug
 ```
 
