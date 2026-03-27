@@ -1690,7 +1690,7 @@ curl -X PUT http://localhost:3001/api/v1/approvals/service-configs/$SERVICE_ID \
   -d '{"approval_required": true, "approval_mode": "grant"}'
 ```
 
-When a user tries to proxy a request to this service, they get a 403 with `error_code: 7000`, a `request_id`, and an `action_description` describing the request.
+When a user tries to proxy a request to this service, they get a 403 with `error_code: 7000`, a `request_id`, and an `action_description` describing the request. If the approval is rejected, expires, or times out, the error changes to `error_code: 7001` (`approval_failed`) and includes an `approve_url` linking to the web UI where the user can review pending approvals.
 
 ### View and manage approval requests
 
@@ -2280,6 +2280,7 @@ All errors return JSON: `{ "error": "...", "error_code": N, "message": "..." }`
 | 6001 | social_auth_conflict | 409 | Social account already linked to another user |
 | 6004 | external_token_invalid | 401 | External provider token is invalid or expired |
 | 7000 | approval_required | 403 | Service requires approval (includes `request_id` and `action_description`) |
+| 7001 | approval_failed | 403 | Approval was rejected, expired, or timed out (includes `request_id` and `approve_url`) |
 | 8000 | node_not_found | 404 | Node does not exist |
 | 8001 | node_offline | 502 | Node is not connected |
 | 8002 | node_proxy_timeout | 504 | Node did not respond in time |
@@ -2346,6 +2347,15 @@ curl -X POST http://localhost:3001/oauth/token \
 - To use grant-based approvals instead, configure the service with `--approval-mode grant`.
 - Use the `request_id` from the error to poll: `GET /api/v1/approvals/requests/{request_id}/status`
 - Admin can approve via: `POST /api/v1/approvals/requests/{request_id}/decide {"approved": true}`
+
+### Service proxy returns 403 with "approval_failed"
+
+- The approval request was rejected, expired, or timed out. The error response includes:
+  - `request_id`: the approval request ID
+  - `approve_url`: a link to the web UI where the user can review pending approvals
+  - `message`: the reason for failure (e.g., "Approval request timed out")
+- If the user has no notification channel configured (Telegram or mobile app), they may not have seen the approval request. Suggest they set up notifications: `nyxid notification telegram-link` or install the NyxID mobile app.
+- The user can always approve pending requests from the web UI at `/approvals/history`, even without notifications.
 
 ### MCP client can't find tools
 
@@ -2848,6 +2858,8 @@ If a service has approval gating enabled (per-request by default), proxy calls r
 2. Show the `action_description` (e.g., "POST /v1/chat/completions (model: gpt-4, 3 messages)")
 3. Wait for the user to approve via mobile app, Telegram, or `nyxid approval approve <ID>`
 
+If the approval is rejected, expires, or times out, the error changes to `7001 approval_failed` with an `approve_url`. The agent should show the user the `approve_url` and suggest setting up Telegram or the mobile app if they haven't already (`nyxid notification telegram-link`).
+
 ### Skill Tools
 
 The skill includes two helper scripts in `tools/`:
@@ -2891,5 +2903,6 @@ Most users only need the skill (CLI mode). The plugin is for server-side OAuth f
 | `No base URL configured` or connection refused | Login was never run. Run `nyxid login --base-url https://nyx-api.chrono-ai.fun` first |
 | Empty service list | Add services: `nyxid catalog list` then `nyxid service add <slug>` |
 | `7000 approval_required` | User must approve: `nyxid approval list` |
+| `7001 approval_failed` | Approval rejected/expired/timed out. Check `approve_url` in response, or set up notifications: `nyxid notification telegram-link` |
 
 See [`docs/OPENCLAW_INTEGRATION.md`](OPENCLAW_INTEGRATION.md) for the full integration guide including plugin setup, channel integration, and node agent support.

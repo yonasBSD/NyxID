@@ -65,6 +65,7 @@ import {
   Unlink,
 } from "lucide-react";
 import { toast } from "sonner";
+import { ApprovalSetupWizard } from "@/components/shared/approval-setup-wizard";
 
 export function NotificationSettingsPage() {
   const { data: settings, isLoading, error } = useNotificationSettings();
@@ -273,6 +274,19 @@ export function NotificationSettingsPage() {
         </div>
       ) : (
         <div className="space-y-6">
+          {/* Setup Wizard */}
+          <ApprovalSetupWizard
+            hasChannel={
+              Boolean(settings?.telegram_connected) ||
+              Boolean(pushDevices?.devices.length)
+            }
+            channelEnabled={
+              Boolean(settings?.telegram_enabled) ||
+              Boolean(settings?.push_enabled)
+            }
+            approvalEnabled={Boolean(settings?.approval_required)}
+          />
+
           {/* Telegram Connection Card */}
           <Card>
             <CardHeader>
@@ -889,3 +903,4 @@ export function NotificationSettingsPage() {
     </div>
   );
 }
+

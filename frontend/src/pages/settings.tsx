@@ -551,8 +551,8 @@ function SecurityTab() {
   );
 }
 
-function getDeviceIcon(userAgent: string) {
-  const ua = userAgent.toLowerCase();
+function getDeviceIcon(userAgent: string | null | undefined) {
+  const ua = (userAgent ?? "").toLowerCase();
   if (
     ua.includes("mobile") ||
     ua.includes("android") ||

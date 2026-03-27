@@ -239,6 +239,8 @@ export interface ApiErrorResponse {
   readonly error_code: number;
   readonly message: string;
   readonly consent_url?: string;
+  readonly request_id?: string;
+  readonly approve_url?: string;
 }
 
 export interface LoginCredentials {
