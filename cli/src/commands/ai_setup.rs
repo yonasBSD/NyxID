@@ -162,6 +162,7 @@ struct SkillContent {
     skill_md: String,
     playbook: String,
     post_install: String,
+    install_sh: String,
     services_sh: String,
     proxy_sh: String,
 }
@@ -180,6 +181,7 @@ async fn fetch_skill_content(base_url: &str) -> Result<SkillContent> {
     eprintln!("  Fetching playbook from {base_url}/llms.txt...");
     let playbook = fetch_playbook(base_url).await?;
 
+    let install_sh = fetch_github(&format!("{SKILL_DIR}/tools/install.sh")).await?;
     let services_sh = fetch_github(&format!("{SKILL_DIR}/tools/services.sh")).await?;
     let proxy_sh = fetch_github(&format!("{SKILL_DIR}/tools/proxy.sh")).await?;
 
@@ -187,9 +189,109 @@ async fn fetch_skill_content(base_url: &str) -> Result<SkillContent> {
         skill_md,
         playbook,
         post_install,
+        install_sh,
         services_sh,
         proxy_sh,
     })
+}
+
+// ---------------------------------------------------------------------------
+// PATH setup
+// ---------------------------------------------------------------------------
+
+/// Detect the user's shell RC file and ensure `~/.cargo/bin` is in PATH.
+/// This is critical for non-technical users whose shell does not source cargo
+/// env by default (e.g. after a fresh `cargo install`).
+fn ensure_cargo_in_path() {
+    let home = match home_dir() {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+
+    let cargo_bin = std::env::var("CARGO_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home.join(".cargo"))
+        .join("bin");
+
+    // If ~/.cargo/bin is already in PATH, nothing to do.
+    if let Ok(path_var) = std::env::var("PATH") {
+        let cargo_bin_str = cargo_bin.to_string_lossy();
+        if path_var.split(':').any(|p| p == cargo_bin_str.as_ref()) {
+            return;
+        }
+    }
+
+    // If the binary doesn't exist at all, skip PATH setup.
+    if !cargo_bin.join("nyxid").exists() {
+        return;
+    }
+
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+    let shell_name = PathBuf::from(&shell)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "sh".into());
+
+    let rc_file = match shell_name.as_str() {
+        "zsh" => home.join(".zshrc"),
+        "bash" => {
+            if cfg!(target_os = "macos") || home.join(".bash_profile").exists() {
+                home.join(".bash_profile")
+            } else if home.join(".bashrc").exists() {
+                home.join(".bashrc")
+            } else {
+                home.join(".profile")
+            }
+        }
+        "fish" => std::env::var("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| home.join(".config"))
+            .join("fish/config.fish"),
+        _ => home.join(".profile"),
+    };
+
+    // Check if .cargo is already referenced in the RC file.
+    if let Ok(contents) = std::fs::read_to_string(&rc_file)
+        && contents.contains(".cargo")
+    {
+        return;
+    }
+
+    // Append cargo env sourcing to the RC file.
+    let cargo_env = home.join(".cargo/env");
+    let line = if shell_name == "fish" {
+        "\n# Cargo (Rust package manager) -- added by NyxID installer\nfish_add_path $HOME/.cargo/bin\n".to_string()
+    } else if cargo_env.exists() {
+        "\n# Cargo (Rust package manager) -- added by NyxID installer\n. \"$HOME/.cargo/env\"\n"
+            .to_string()
+    } else {
+        "\n# Cargo (Rust package manager) -- added by NyxID installer\nexport PATH=\"$HOME/.cargo/bin:$PATH\"\n"
+            .to_string()
+    };
+
+    if let Some(parent) = rc_file.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&rc_file)
+    {
+        Ok(mut f) => {
+            use std::io::Write;
+            if f.write_all(line.as_bytes()).is_ok() {
+                eprintln!("  Added ~/.cargo/bin to PATH in {}", rc_file.display());
+                eprintln!("  Open a new terminal or run: source {}", rc_file.display());
+            }
+        }
+        Err(e) => {
+            eprintln!("  [warn] Could not update {}: {e}", rc_file.display());
+            eprintln!(
+                "  Add this to your shell config manually: export PATH=\"$HOME/.cargo/bin:$PATH\""
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -202,12 +304,18 @@ async fn install(tool: AiToolTarget, base_url: &Option<String>) -> Result<()> {
 
     let content = fetch_skill_content(&base).await?;
 
-    match tool {
+    let result = match tool {
         AiToolTarget::ClaudeCode => install_claude_code(&content).await,
         AiToolTarget::Cursor => install_cursor(&content),
         AiToolTarget::Codex => install_codex(&content),
         AiToolTarget::Openclaw => install_openclaw(&content),
-    }
+    };
+
+    // After installing the skill, ensure ~/.cargo/bin is in PATH
+    // so that `skills check` can find the nyxid binary.
+    ensure_cargo_in_path();
+
+    result
 }
 
 /// Print the post-install summary plus tool-specific notes.
@@ -288,11 +396,13 @@ fn install_openclaw(content: &SkillContent) -> Result<()> {
 
     write_file(&dir.join("SKILL.md"), &content.skill_md)?;
     write_file(&dir.join("references/playbook.md"), &content.playbook)?;
+    write_file(&dir.join("tools/install.sh"), &content.install_sh)?;
     write_file(&dir.join("tools/services.sh"), &content.services_sh)?;
     write_file(&dir.join("tools/proxy.sh"), &content.proxy_sh)?;
 
     #[cfg(unix)]
     {
+        make_executable(&dir.join("tools/install.sh"))?;
         make_executable(&dir.join("tools/services.sh"))?;
         make_executable(&dir.join("tools/proxy.sh"))?;
     }
