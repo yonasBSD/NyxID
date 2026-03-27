@@ -32,6 +32,24 @@ pub struct UserService {
     #[serde(default = "default_service_type")]
     pub service_type: String,
 
+    // --- Identity propagation config ---
+    /// "none" | "headers" | "jwt" | "both"
+    #[serde(default = "default_identity_propagation_mode")]
+    pub identity_propagation_mode: String,
+    #[serde(default)]
+    pub identity_include_user_id: bool,
+    #[serde(default)]
+    pub identity_include_email: bool,
+    #[serde(default)]
+    pub identity_include_name: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_jwt_audience: Option<String>,
+    /// Whether to inject a delegation token (X-NyxID-Delegation-Token)
+    #[serde(default)]
+    pub inject_delegation_token: bool,
+    #[serde(default = "default_delegation_token_scope")]
+    pub delegation_token_scope: String,
+
     pub is_active: bool,
 
     /// Source tracking for migration idempotency
@@ -48,6 +66,14 @@ pub struct UserService {
 
 fn default_service_type() -> String {
     "http".to_string()
+}
+
+fn default_identity_propagation_mode() -> String {
+    "none".to_string()
+}
+
+fn default_delegation_token_scope() -> String {
+    "llm:proxy".to_string()
 }
 
 #[cfg(test)]
@@ -73,6 +99,13 @@ mod tests {
             node_id: Some("node-1".to_string()),
             node_priority: 0,
             service_type: "http".to_string(),
+            identity_propagation_mode: "headers".to_string(),
+            identity_include_user_id: true,
+            identity_include_email: true,
+            identity_include_name: false,
+            identity_jwt_audience: None,
+            inject_delegation_token: true,
+            delegation_token_scope: "llm:proxy".to_string(),
             is_active: true,
             source: None,
             source_id: None,
@@ -85,6 +118,9 @@ mod tests {
         assert_eq!(svc.slug, restored.slug);
         assert_eq!(svc.node_priority, restored.node_priority);
         assert_eq!(restored.service_type, "http");
+        assert_eq!(restored.identity_propagation_mode, "headers");
+        assert!(restored.identity_include_user_id);
+        assert!(restored.inject_delegation_token);
         assert!(restored.is_active);
     }
 
@@ -102,6 +138,13 @@ mod tests {
             node_id: None,
             node_priority: 0,
             service_type: "http".to_string(),
+            identity_propagation_mode: "none".to_string(),
+            identity_include_user_id: false,
+            identity_include_email: false,
+            identity_include_name: false,
+            identity_jwt_audience: None,
+            inject_delegation_token: false,
+            delegation_token_scope: "llm:proxy".to_string(),
             is_active: true,
             source: None,
             source_id: None,
@@ -114,6 +157,52 @@ mod tests {
         let restored: UserService = bson::from_document(doc).expect("deserialize");
         assert_eq!(restored.node_priority, 0);
         assert_eq!(restored.service_type, "http");
+    }
+
+    #[test]
+    fn bson_identity_defaults() {
+        let svc = UserService {
+            id: "id".to_string(),
+            user_id: "uid".to_string(),
+            slug: "test".to_string(),
+            endpoint_id: "ep".to_string(),
+            api_key_id: None,
+            auth_method: "none".to_string(),
+            auth_key_name: String::new(),
+            catalog_service_id: None,
+            node_id: None,
+            node_priority: 0,
+            service_type: "http".to_string(),
+            identity_propagation_mode: "both".to_string(),
+            identity_include_user_id: true,
+            identity_include_email: true,
+            identity_include_name: true,
+            identity_jwt_audience: Some("https://example.com".to_string()),
+            inject_delegation_token: true,
+            delegation_token_scope: "custom:scope".to_string(),
+            is_active: true,
+            source: None,
+            source_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let mut doc = bson::to_document(&svc).expect("serialize");
+        // Remove all identity fields to simulate existing documents
+        doc.remove("identity_propagation_mode");
+        doc.remove("identity_include_user_id");
+        doc.remove("identity_include_email");
+        doc.remove("identity_include_name");
+        doc.remove("identity_jwt_audience");
+        doc.remove("inject_delegation_token");
+        doc.remove("delegation_token_scope");
+        let restored: UserService = bson::from_document(doc).expect("deserialize");
+        assert_eq!(restored.identity_propagation_mode, "none");
+        assert!(!restored.identity_include_user_id);
+        assert!(!restored.identity_include_email);
+        assert!(!restored.identity_include_name);
+        assert!(restored.identity_jwt_audience.is_none());
+        assert!(!restored.inject_delegation_token);
+        assert_eq!(restored.delegation_token_scope, "llm:proxy");
     }
 
     #[test]
@@ -130,6 +219,13 @@ mod tests {
             node_id: None,
             node_priority: 0,
             service_type: "http".to_string(),
+            identity_propagation_mode: "none".to_string(),
+            identity_include_user_id: false,
+            identity_include_email: false,
+            identity_include_name: false,
+            identity_jwt_audience: None,
+            inject_delegation_token: false,
+            delegation_token_scope: "llm:proxy".to_string(),
             is_active: true,
             source: None,
             source_id: None,

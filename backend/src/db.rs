@@ -827,6 +827,40 @@ pub async fn migrate_to_unified_collections(
     Ok(())
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct InheritedIdentityFields {
+    identity_propagation_mode: String,
+    identity_include_user_id: bool,
+    identity_include_email: bool,
+    identity_include_name: bool,
+    identity_jwt_audience: Option<String>,
+    inject_delegation_token: bool,
+    delegation_token_scope: String,
+}
+
+fn inherited_identity_fields(service: Option<&DownstreamService>) -> InheritedIdentityFields {
+    match service {
+        Some(service) => InheritedIdentityFields {
+            identity_propagation_mode: service.identity_propagation_mode.clone(),
+            identity_include_user_id: service.identity_include_user_id,
+            identity_include_email: service.identity_include_email,
+            identity_include_name: service.identity_include_name,
+            identity_jwt_audience: service.identity_jwt_audience.clone(),
+            inject_delegation_token: service.inject_delegation_token,
+            delegation_token_scope: service.delegation_token_scope.clone(),
+        },
+        None => InheritedIdentityFields {
+            identity_propagation_mode: "none".to_string(),
+            identity_include_user_id: false,
+            identity_include_email: false,
+            identity_include_name: false,
+            identity_jwt_audience: None,
+            inject_delegation_token: false,
+            delegation_token_scope: "llm:proxy".to_string(),
+        },
+    }
+}
+
 /// Migrate UserProviderTokens to the unified UserEndpoint + UserApiKey + UserService model.
 async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error::Error>> {
     let tokens: Vec<UserProviderToken> = db
@@ -969,6 +1003,7 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
         }
 
         // Create UserService -- clean up endpoint + api_key on failure
+        let inherited_identity = inherited_identity_fields(service.as_ref());
         let user_service = UserService {
             id: service_id,
             user_id: token.user_id.clone(),
@@ -985,6 +1020,13 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
             } else {
                 "http".to_string()
             },
+            identity_propagation_mode: inherited_identity.identity_propagation_mode,
+            identity_include_user_id: inherited_identity.identity_include_user_id,
+            identity_include_email: inherited_identity.identity_include_email,
+            identity_include_name: inherited_identity.identity_include_name,
+            identity_jwt_audience: inherited_identity.identity_jwt_audience,
+            inject_delegation_token: inherited_identity.inject_delegation_token,
+            delegation_token_scope: inherited_identity.delegation_token_scope,
             is_active: true,
             source: Some("migration_provider_token".to_string()),
             source_id: Some(token.id.clone()),
@@ -1135,6 +1177,7 @@ async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::e
         }
 
         // Create UserService -- clean up endpoint + api_key on failure
+        let inherited_identity = inherited_identity_fields(Some(&service));
         let user_service = UserService {
             id: service_id,
             user_id: conn.user_id.clone(),
@@ -1147,6 +1190,13 @@ async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::e
             node_id: None,
             node_priority: 0,
             service_type: service.service_type.clone(),
+            identity_propagation_mode: inherited_identity.identity_propagation_mode,
+            identity_include_user_id: inherited_identity.identity_include_user_id,
+            identity_include_email: inherited_identity.identity_include_email,
+            identity_include_name: inherited_identity.identity_include_name,
+            identity_jwt_audience: inherited_identity.identity_jwt_audience,
+            inject_delegation_token: inherited_identity.inject_delegation_token,
+            delegation_token_scope: inherited_identity.delegation_token_scope,
             is_active: true,
             source: Some("migration_connection".to_string()),
             source_id: Some(conn.id.clone()),
@@ -1332,6 +1382,7 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
         }
 
         // Create UserService with node routing
+        let inherited_identity = inherited_identity_fields(Some(&service));
         let user_service = UserService {
             id: service_id,
             user_id: binding.user_id.clone(),
@@ -1344,6 +1395,13 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
             node_id: Some(binding.node_id.clone()),
             node_priority: binding.priority,
             service_type: service.service_type.clone(),
+            identity_propagation_mode: inherited_identity.identity_propagation_mode,
+            identity_include_user_id: inherited_identity.identity_include_user_id,
+            identity_include_email: inherited_identity.identity_include_email,
+            identity_include_name: inherited_identity.identity_include_name,
+            identity_jwt_audience: inherited_identity.identity_jwt_audience,
+            inject_delegation_token: inherited_identity.inject_delegation_token,
+            delegation_token_scope: inherited_identity.delegation_token_scope,
             is_active: true,
             source: Some("migration_node_binding".to_string()),
             source_id: Some(binding.id.clone()),
@@ -1377,4 +1435,69 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_downstream_service() -> DownstreamService {
+        DownstreamService {
+            id: "svc-1".to_string(),
+            name: "Test".to_string(),
+            slug: "test".to_string(),
+            description: None,
+            base_url: "https://example.com".to_string(),
+            service_type: "http".to_string(),
+            visibility: "public".to_string(),
+            auth_method: "header".to_string(),
+            auth_key_name: "Authorization".to_string(),
+            credential_encrypted: vec![],
+            auth_type: None,
+            openapi_spec_url: None,
+            asyncapi_spec_url: None,
+            streaming_supported: false,
+            ssh_config: None,
+            oauth_client_id: None,
+            service_category: "connection".to_string(),
+            requires_user_credential: true,
+            is_active: true,
+            created_by: "system".to_string(),
+            identity_propagation_mode: "both".to_string(),
+            identity_include_user_id: true,
+            identity_include_email: true,
+            identity_include_name: false,
+            identity_jwt_audience: Some("https://aud.example.com".to_string()),
+            inject_delegation_token: true,
+            delegation_token_scope: "proxy:* llm:status".to_string(),
+            provider_config_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn inherited_identity_fields_default_when_catalog_service_missing() {
+        let fields = inherited_identity_fields(None);
+        assert_eq!(fields.identity_propagation_mode, "none");
+        assert!(!fields.identity_include_user_id);
+        assert!(!fields.inject_delegation_token);
+        assert_eq!(fields.delegation_token_scope, "llm:proxy");
+    }
+
+    #[test]
+    fn inherited_identity_fields_preserve_catalog_settings() {
+        let service = sample_downstream_service();
+
+        let fields = inherited_identity_fields(Some(&service));
+        assert_eq!(fields.identity_propagation_mode, "both");
+        assert!(fields.identity_include_user_id);
+        assert!(fields.identity_include_email);
+        assert_eq!(
+            fields.identity_jwt_audience.as_deref(),
+            Some("https://aud.example.com")
+        );
+        assert!(fields.inject_delegation_token);
+        assert_eq!(fields.delegation_token_scope, "proxy:* llm:status");
+    }
 }

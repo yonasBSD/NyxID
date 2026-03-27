@@ -12,6 +12,89 @@ use crate::services::node_service;
 /// Valid auth methods for user services.
 const VALID_AUTH_METHODS: &[&str] = &["bearer", "header", "query", "basic", "none"];
 
+/// Valid identity propagation modes.
+const VALID_IDENTITY_MODES: &[&str] = &["none", "headers", "jwt", "both"];
+const VALID_DELEGATION_SCOPES: &[&str] = &["llm:proxy", "proxy:*", "llm:status"];
+
+/// Identity propagation and delegation token configuration.
+#[derive(Clone, Debug)]
+pub struct IdentityConfig {
+    pub identity_propagation_mode: String,
+    pub identity_include_user_id: bool,
+    pub identity_include_email: bool,
+    pub identity_include_name: bool,
+    pub identity_jwt_audience: Option<String>,
+    pub inject_delegation_token: bool,
+    pub delegation_token_scope: String,
+}
+
+impl IdentityConfig {
+    pub fn none() -> Self {
+        Self {
+            identity_propagation_mode: "none".to_string(),
+            identity_include_user_id: false,
+            identity_include_email: false,
+            identity_include_name: false,
+            identity_jwt_audience: None,
+            inject_delegation_token: false,
+            delegation_token_scope: "llm:proxy".to_string(),
+        }
+    }
+}
+
+fn validate_identity_config(config: &IdentityConfig) -> AppResult<()> {
+    if !VALID_IDENTITY_MODES.contains(&config.identity_propagation_mode.as_str()) {
+        return Err(AppError::ValidationError(format!(
+            "Invalid identity_propagation_mode '{}'. Valid: {}",
+            config.identity_propagation_mode,
+            VALID_IDENTITY_MODES.join(", ")
+        )));
+    }
+
+    if let Some(audience) = config.identity_jwt_audience.as_deref()
+        && audience.len() > 2048
+    {
+        return Err(AppError::ValidationError(
+            "identity_jwt_audience must not exceed 2048 characters".to_string(),
+        ));
+    }
+
+    for scope in config.delegation_token_scope.split_whitespace() {
+        if !VALID_DELEGATION_SCOPES.contains(&scope) {
+            return Err(AppError::ValidationError(format!(
+                "Invalid delegation_token_scope '{}'. Must be one of: {}",
+                scope,
+                VALID_DELEGATION_SCOPES.join(", ")
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn normalize_identity_config(config: &IdentityConfig) -> AppResult<IdentityConfig> {
+    validate_identity_config(config)?;
+
+    let normalized_scope = {
+        let scopes: Vec<&str> = config.delegation_token_scope.split_whitespace().collect();
+        if scopes.is_empty() {
+            "llm:proxy".to_string()
+        } else {
+            scopes.join(" ")
+        }
+    };
+
+    Ok(IdentityConfig {
+        identity_propagation_mode: config.identity_propagation_mode.clone(),
+        identity_include_user_id: config.identity_include_user_id,
+        identity_include_email: config.identity_include_email,
+        identity_include_name: config.identity_include_name,
+        identity_jwt_audience: config.identity_jwt_audience.clone(),
+        inject_delegation_token: config.inject_delegation_token,
+        delegation_token_scope: normalized_scope,
+    })
+}
+
 /// Validate a slug: 1-64 chars, lowercase alphanumeric + hyphens.
 fn validate_slug(slug: &str) -> AppResult<()> {
     if slug.is_empty() || slug.len() > 64 {
@@ -117,9 +200,11 @@ pub async fn create_user_service(
     service_type: &str,
     source: Option<&str>,
     source_id: Option<&str>,
+    identity: &IdentityConfig,
 ) -> AppResult<UserService> {
     validate_slug(slug)?;
     validate_auth_method(auth_method)?;
+    let identity = normalize_identity_config(identity)?;
     let node_id = node_id.filter(|nid| !nid.is_empty());
 
     if source.is_some() != source_id.is_some() {
@@ -189,6 +274,13 @@ pub async fn create_user_service(
         node_id: node_id.map(|s| s.to_string()),
         node_priority,
         service_type: service_type.to_string(),
+        identity_propagation_mode: identity.identity_propagation_mode,
+        identity_include_user_id: identity.identity_include_user_id,
+        identity_include_email: identity.identity_include_email,
+        identity_include_name: identity.identity_include_name,
+        identity_jwt_audience: identity.identity_jwt_audience,
+        inject_delegation_token: identity.inject_delegation_token,
+        delegation_token_scope: identity.delegation_token_scope,
         is_active: true,
         source: source.map(str::to_string),
         source_id: source_id.map(str::to_string),
@@ -203,7 +295,7 @@ pub async fn create_user_service(
     Ok(service)
 }
 
-/// Update service config (auth method, node routing, etc.).
+/// Update service config (auth method, node routing, identity propagation, etc.).
 #[allow(clippy::too_many_arguments)]
 pub async fn update_user_service(
     db: &mongodb::Database,
@@ -214,6 +306,7 @@ pub async fn update_user_service(
     node_id: Option<&str>,
     node_priority: Option<i32>,
     is_active: Option<bool>,
+    identity: Option<&IdentityConfig>,
 ) -> AppResult<()> {
     let current = get_user_service(db, user_id, service_id).await?;
     let mut set_doc = doc! {
@@ -248,6 +341,29 @@ pub async fn update_user_service(
     if let Some(active) = is_active {
         set_doc.insert("is_active", active);
     }
+    if let Some(id_config) = identity {
+        let id_config = normalize_identity_config(id_config)?;
+        set_doc.insert(
+            "identity_propagation_mode",
+            &id_config.identity_propagation_mode,
+        );
+        set_doc.insert(
+            "identity_include_user_id",
+            id_config.identity_include_user_id,
+        );
+        set_doc.insert("identity_include_email", id_config.identity_include_email);
+        set_doc.insert("identity_include_name", id_config.identity_include_name);
+        match &id_config.identity_jwt_audience {
+            Some(aud) => {
+                set_doc.insert("identity_jwt_audience", aud);
+            }
+            None => {
+                set_doc.insert("identity_jwt_audience", bson::Bson::Null);
+            }
+        }
+        set_doc.insert("inject_delegation_token", id_config.inject_delegation_token);
+        set_doc.insert("delegation_token_scope", &id_config.delegation_token_scope);
+    }
 
     let result = db
         .collection::<UserService>(COLLECTION_NAME)
@@ -270,5 +386,78 @@ pub async fn deactivate_user_service(
     user_id: &str,
     service_id: &str,
 ) -> AppResult<()> {
-    update_user_service(db, user_id, service_id, None, None, None, None, Some(false)).await
+    update_user_service(
+        db,
+        user_id,
+        service_id,
+        None,
+        None,
+        None,
+        None,
+        Some(false),
+        None,
+    )
+    .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_identity_config() -> IdentityConfig {
+        IdentityConfig {
+            identity_propagation_mode: "headers".to_string(),
+            identity_include_user_id: true,
+            identity_include_email: true,
+            identity_include_name: false,
+            identity_jwt_audience: None,
+            inject_delegation_token: true,
+            delegation_token_scope: "llm:proxy".to_string(),
+        }
+    }
+
+    #[test]
+    fn normalize_identity_config_defaults_blank_scope() {
+        let mut config = sample_identity_config();
+        config.delegation_token_scope = "   ".to_string();
+
+        let normalized = normalize_identity_config(&config).expect("scope should normalize");
+        assert_eq!(normalized.delegation_token_scope, "llm:proxy");
+    }
+
+    #[test]
+    fn normalize_identity_config_rejects_invalid_scope() {
+        let mut config = sample_identity_config();
+        config.delegation_token_scope = "admin:full".to_string();
+
+        let error = normalize_identity_config(&config).expect_err("scope should be rejected");
+        assert!(matches!(
+            error,
+            AppError::ValidationError(message)
+                if message.contains("Invalid delegation_token_scope")
+        ));
+    }
+
+    #[test]
+    fn normalize_identity_config_rejects_overlong_audience() {
+        let mut config = sample_identity_config();
+        config.identity_jwt_audience = Some("a".repeat(2049));
+
+        let error =
+            normalize_identity_config(&config).expect_err("audience length should be enforced");
+        assert!(matches!(
+            error,
+            AppError::ValidationError(message)
+                if message.contains("identity_jwt_audience must not exceed 2048 characters")
+        ));
+    }
+
+    #[test]
+    fn normalize_identity_config_preserves_valid_multiple_scopes() {
+        let mut config = sample_identity_config();
+        config.delegation_token_scope = "proxy:*   llm:status".to_string();
+
+        let normalized = normalize_identity_config(&config).expect("scopes should validate");
+        assert_eq!(normalized.delegation_token_scope, "proxy:* llm:status");
+    }
 }

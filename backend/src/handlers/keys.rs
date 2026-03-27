@@ -42,6 +42,15 @@ pub struct CreateKeyRequest {
     pub ssh_principals: Option<String>,
     /// Certificate TTL in minutes (default: 30)
     pub ssh_certificate_ttl_minutes: Option<u32>,
+    /// Identity propagation mode: "none" | "headers" | "jwt" | "both"
+    pub identity_propagation_mode: Option<String>,
+    pub identity_include_user_id: Option<bool>,
+    pub identity_include_email: Option<bool>,
+    pub identity_include_name: Option<bool>,
+    pub identity_jwt_audience: Option<String>,
+    /// Inject X-NyxID-Delegation-Token for downstream user identification
+    pub inject_delegation_token: Option<bool>,
+    pub delegation_token_scope: Option<String>,
 }
 
 impl std::fmt::Debug for CreateKeyRequest {
@@ -63,6 +72,8 @@ impl std::fmt::Debug for CreateKeyRequest {
                 "ssh_certificate_ttl_minutes",
                 &self.ssh_certificate_ttl_minutes,
             )
+            .field("identity_propagation_mode", &self.identity_propagation_mode)
+            .field("inject_delegation_token", &self.inject_delegation_token)
             .finish()
     }
 }
@@ -89,6 +100,14 @@ pub struct KeyResponse {
     pub node_priority: i32,
     pub service_type: String,
     pub is_active: bool,
+    pub identity_propagation_mode: String,
+    pub identity_include_user_id: bool,
+    pub identity_include_email: bool,
+    pub identity_include_name: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity_jwt_audience: Option<String>,
+    pub inject_delegation_token: bool,
+    pub delegation_token_scope: String,
     pub auto_connected: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
@@ -129,6 +148,14 @@ pub struct UpdateKeyRequest {
     pub node_id: Option<String>,
     /// Activate or deactivate
     pub is_active: Option<bool>,
+    /// Identity propagation mode: "none" | "headers" | "jwt" | "both"
+    pub identity_propagation_mode: Option<String>,
+    pub identity_include_user_id: Option<bool>,
+    pub identity_include_email: Option<bool>,
+    pub identity_include_name: Option<bool>,
+    pub identity_jwt_audience: Option<String>,
+    pub inject_delegation_token: Option<bool>,
+    pub delegation_token_scope: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -174,6 +201,31 @@ pub async fn create_key(
         }
     });
 
+    let identity = if body.identity_propagation_mode.is_some()
+        || body.identity_include_user_id.is_some()
+        || body.identity_include_email.is_some()
+        || body.identity_include_name.is_some()
+        || body.identity_jwt_audience.is_some()
+        || body.inject_delegation_token.is_some()
+        || body.delegation_token_scope.is_some()
+    {
+        Some(user_service_service::IdentityConfig {
+            identity_propagation_mode: body
+                .identity_propagation_mode
+                .unwrap_or_else(|| "none".to_string()),
+            identity_include_user_id: body.identity_include_user_id.unwrap_or(false),
+            identity_include_email: body.identity_include_email.unwrap_or(false),
+            identity_include_name: body.identity_include_name.unwrap_or(false),
+            identity_jwt_audience: body.identity_jwt_audience,
+            inject_delegation_token: body.inject_delegation_token.unwrap_or(false),
+            delegation_token_scope: body
+                .delegation_token_scope
+                .unwrap_or_else(|| "llm:proxy".to_string()),
+        })
+    } else {
+        None
+    };
+
     let result = unified_key_service::create_key(
         &state.db,
         &state.encryption_keys,
@@ -187,6 +239,7 @@ pub async fn create_key(
         body.auth_key_name.as_deref(),
         body.node_id.as_deref(),
         ssh_params,
+        identity,
     )
     .await?;
 
@@ -333,12 +386,51 @@ pub async fn update_key(
         .await?;
     }
 
+    let has_identity_update = body.identity_propagation_mode.is_some()
+        || body.identity_include_user_id.is_some()
+        || body.identity_include_email.is_some()
+        || body.identity_include_name.is_some()
+        || body.identity_jwt_audience.is_some()
+        || body.inject_delegation_token.is_some()
+        || body.delegation_token_scope.is_some();
+
     // Update UserService fields if any are provided
     if body.auth_method.is_some()
         || body.auth_key_name.is_some()
         || body.node_id.is_some()
         || body.is_active.is_some()
+        || has_identity_update
     {
+        let identity = if has_identity_update {
+            Some(user_service_service::IdentityConfig {
+                identity_propagation_mode: body
+                    .identity_propagation_mode
+                    .unwrap_or(view.identity_propagation_mode.clone()),
+                identity_include_user_id: body
+                    .identity_include_user_id
+                    .unwrap_or(view.identity_include_user_id),
+                identity_include_email: body
+                    .identity_include_email
+                    .unwrap_or(view.identity_include_email),
+                identity_include_name: body
+                    .identity_include_name
+                    .unwrap_or(view.identity_include_name),
+                identity_jwt_audience: if body.identity_jwt_audience.is_some() {
+                    body.identity_jwt_audience
+                } else {
+                    view.identity_jwt_audience.clone()
+                },
+                inject_delegation_token: body
+                    .inject_delegation_token
+                    .unwrap_or(view.inject_delegation_token),
+                delegation_token_scope: body
+                    .delegation_token_scope
+                    .unwrap_or(view.delegation_token_scope.clone()),
+            })
+        } else {
+            None
+        };
+
         user_service_service::update_user_service(
             &state.db,
             &user_id_str,
@@ -348,6 +440,7 @@ pub async fn update_key(
             body.node_id.as_deref(),
             None,
             body.is_active,
+            identity.as_ref(),
         )
         .await?;
 
@@ -441,6 +534,13 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
         node_priority: result.service.node_priority,
         service_type: result.service.service_type.clone(),
         is_active: result.service.is_active,
+        identity_propagation_mode: result.service.identity_propagation_mode.clone(),
+        identity_include_user_id: result.service.identity_include_user_id,
+        identity_include_email: result.service.identity_include_email,
+        identity_include_name: result.service.identity_include_name,
+        identity_jwt_audience: result.service.identity_jwt_audience.clone(),
+        inject_delegation_token: result.service.inject_delegation_token,
+        delegation_token_scope: result.service.delegation_token_scope.clone(),
         auto_connected: false,
         expires_at: result
             .api_key
@@ -475,6 +575,13 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         node_priority: view.node_priority,
         service_type: view.service_type,
         is_active: view.is_active,
+        identity_propagation_mode: view.identity_propagation_mode,
+        identity_include_user_id: view.identity_include_user_id,
+        identity_include_email: view.identity_include_email,
+        identity_include_name: view.identity_include_name,
+        identity_jwt_audience: view.identity_jwt_audience,
+        inject_delegation_token: view.inject_delegation_token,
+        delegation_token_scope: view.delegation_token_scope,
         auto_connected: view.auto_connected,
         expires_at: view.expires_at,
         last_used_at: view.last_used_at,

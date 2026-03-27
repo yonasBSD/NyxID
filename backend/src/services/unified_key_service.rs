@@ -100,6 +100,20 @@ fn is_duplicate_key_error(error: &mongodb::error::Error) -> bool {
     false
 }
 
+fn identity_config_from_downstream_service(
+    service: &DownstreamService,
+) -> user_service_service::IdentityConfig {
+    user_service_service::IdentityConfig {
+        identity_propagation_mode: service.identity_propagation_mode.clone(),
+        identity_include_user_id: service.identity_include_user_id,
+        identity_include_email: service.identity_include_email,
+        identity_include_name: service.identity_include_name,
+        identity_jwt_audience: service.identity_jwt_audience.clone(),
+        inject_delegation_token: service.inject_delegation_token,
+        delegation_token_scope: service.delegation_token_scope.clone(),
+    }
+}
+
 /// SSH-specific parameters for custom SSH service creation.
 pub struct SshCreateParams<'a> {
     pub host: &'a str,
@@ -139,6 +153,13 @@ pub struct KeyView {
     pub node_priority: i32,
     pub service_type: String,
     pub is_active: bool,
+    pub identity_propagation_mode: String,
+    pub identity_include_user_id: bool,
+    pub identity_include_email: bool,
+    pub identity_include_name: bool,
+    pub identity_jwt_audience: Option<String>,
+    pub inject_delegation_token: bool,
+    pub delegation_token_scope: String,
     pub auto_connected: bool,
     pub expires_at: Option<String>,
     pub last_used_at: Option<String>,
@@ -220,6 +241,7 @@ pub async fn create_key(
     auth_key_name: Option<&str>,
     node_id: Option<&str>,
     ssh_params: Option<SshCreateParams<'_>>,
+    identity: Option<user_service_service::IdentityConfig>,
 ) -> AppResult<CreateKeyResult> {
     let node_id = node_id.filter(|nid| !nid.is_empty());
 
@@ -403,6 +425,9 @@ pub async fn create_key(
         // Auto-suffix slug if one already exists for this user (e.g. llm-openai -> llm-openai-2)
         let unique_slug = resolve_unique_slug(db, user_id, &svc.slug).await?;
 
+        let catalog_identity =
+            identity.unwrap_or_else(|| identity_config_from_downstream_service(&svc));
+
         let service = user_service_service::create_user_service(
             db,
             user_id,
@@ -417,6 +442,7 @@ pub async fn create_key(
             &svc.service_type,
             None,
             None,
+            &catalog_identity,
         )
         .await?;
 
@@ -566,6 +592,7 @@ pub async fn create_key(
             "ssh",
             None,
             None,
+            &user_service_service::IdentityConfig::none(),
         )
         .await?;
 
@@ -644,6 +671,7 @@ pub async fn create_key(
         };
 
         let unique_slug = resolve_unique_slug(db, user_id, &slug).await?;
+        let custom_identity = identity.unwrap_or_else(user_service_service::IdentityConfig::none);
         let service = user_service_service::create_user_service(
             db,
             user_id,
@@ -658,6 +686,7 @@ pub async fn create_key(
             "http",
             None,
             None,
+            &custom_identity,
         )
         .await?;
 
@@ -803,6 +832,7 @@ pub async fn auto_provision_no_auth_services(
         };
 
         let source_id = auto_provision_source_id(user_id, &svc.id);
+        let catalog_identity = identity_config_from_downstream_service(svc);
         match user_service_service::create_user_service(
             db,
             user_id,
@@ -817,6 +847,7 @@ pub async fn auto_provision_no_auth_services(
             "http",
             Some(AUTO_PROVISION_SOURCE),
             Some(&source_id),
+            &catalog_identity,
         )
         .await
         {
@@ -1084,6 +1115,13 @@ fn build_key_view(
         node_priority: svc.node_priority,
         service_type: svc.service_type.clone(),
         is_active: svc.is_active,
+        identity_propagation_mode: svc.identity_propagation_mode.clone(),
+        identity_include_user_id: svc.identity_include_user_id,
+        identity_include_email: svc.identity_include_email,
+        identity_include_name: svc.identity_include_name,
+        identity_jwt_audience: svc.identity_jwt_audience.clone(),
+        inject_delegation_token: svc.inject_delegation_token,
+        delegation_token_scope: svc.delegation_token_scope.clone(),
         auto_connected,
         expires_at: ak.and_then(|k| k.expires_at.map(|dt| dt.to_rfc3339())),
         last_used_at: ak.and_then(|k| k.last_used_at.map(|dt| dt.to_rfc3339())),
@@ -1106,7 +1144,9 @@ mod tests {
     use super::{
         AUTO_PROVISION_SOURCE, auto_provision_source_id, build_key_view,
         direct_credential_type_for_service, direct_credential_type_from_auth_method,
+        identity_config_from_downstream_service,
     };
+    use crate::models::downstream_service::DownstreamService;
     use crate::models::user_api_key::UserApiKey;
     use crate::models::user_endpoint::UserEndpoint;
     use crate::models::user_service::UserService;
@@ -1148,9 +1188,51 @@ mod tests {
             node_id: None,
             node_priority: 0,
             service_type: "http".to_string(),
+            identity_propagation_mode: "none".to_string(),
+            identity_include_user_id: false,
+            identity_include_email: false,
+            identity_include_name: false,
+            identity_jwt_audience: None,
+            inject_delegation_token: false,
+            delegation_token_scope: "llm:proxy".to_string(),
             is_active: true,
             source: None,
             source_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn sample_catalog_service() -> DownstreamService {
+        DownstreamService {
+            id: "cat-1".to_string(),
+            name: "Catalog".to_string(),
+            slug: "catalog".to_string(),
+            description: None,
+            base_url: "https://example.com".to_string(),
+            service_type: "http".to_string(),
+            visibility: "public".to_string(),
+            auth_method: "header".to_string(),
+            auth_key_name: "Authorization".to_string(),
+            credential_encrypted: vec![],
+            auth_type: None,
+            openapi_spec_url: None,
+            asyncapi_spec_url: None,
+            streaming_supported: false,
+            ssh_config: None,
+            oauth_client_id: None,
+            service_category: "connection".to_string(),
+            requires_user_credential: true,
+            is_active: true,
+            created_by: "system".to_string(),
+            identity_propagation_mode: "both".to_string(),
+            identity_include_user_id: true,
+            identity_include_email: true,
+            identity_include_name: false,
+            identity_jwt_audience: Some("https://aud.example.com".to_string()),
+            inject_delegation_token: true,
+            delegation_token_scope: "proxy:* llm:status".to_string(),
+            provider_config_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -1216,5 +1298,21 @@ mod tests {
             auto_provision_source_id("user-1", "svc-1"),
             auto_provision_source_id("user-2", "svc-1")
         );
+    }
+
+    #[test]
+    fn identity_config_from_downstream_service_preserves_catalog_settings() {
+        let service = sample_catalog_service();
+
+        let identity = identity_config_from_downstream_service(&service);
+        assert_eq!(identity.identity_propagation_mode, "both");
+        assert!(identity.identity_include_user_id);
+        assert!(identity.identity_include_email);
+        assert_eq!(
+            identity.identity_jwt_audience.as_deref(),
+            Some("https://aud.example.com")
+        );
+        assert!(identity.inject_delegation_token);
+        assert_eq!(identity.delegation_token_scope, "proxy:* llm:status");
     }
 }
