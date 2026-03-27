@@ -78,6 +78,8 @@ pub async fn get_mcp_config(
     State(state): State<AppState>,
     auth_user: AuthUser,
 ) -> AppResult<Json<McpConfigResponse>> {
+    auth_user.ensure_rest_proxy_access()?;
+
     let user_id = auth_user.user_id.to_string();
 
     // 1. Get user's active connections

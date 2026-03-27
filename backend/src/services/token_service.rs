@@ -33,6 +33,12 @@ const MAX_REPLACEMENT_CHAIN_DEPTH: usize = 5;
 /// Session lifetime for first-party sessions.
 pub const SESSION_TTL_SECS: i64 = 30 * 24 * 3600;
 
+/// Default bearer-token scopes for first-party NyxID clients.
+///
+/// Includes `proxy` so first-party token clients retain access to NyxID's
+/// proxy, LLM gateway, and MCP surfaces after route-level scope enforcement.
+pub const FIRST_PARTY_ACCESS_SCOPES: &str = "openid profile email proxy";
+
 /// Tokens issued after successful authentication.
 pub struct IssuedTokens {
     pub access_token: String,
@@ -196,7 +202,7 @@ pub async fn create_session_and_issue_tokens(
     let now = Utc::now();
 
     // Resolve RBAC data and inject into the access token based on scope
-    let scope = "openid profile email";
+    let scope = FIRST_PARTY_ACCESS_SCOPES;
     let rbac_data =
         crate::services::rbac_helpers::build_rbac_claim_data(db, user_id, scope).await?;
     let access_token =
@@ -391,7 +397,7 @@ pub async fn refresh_tokens(
     let now = Utc::now();
 
     // Resolve RBAC data and inject into the refreshed access token
-    let scope = "openid profile email";
+    let scope = FIRST_PARTY_ACCESS_SCOPES;
     let rbac_data =
         crate::services::rbac_helpers::build_rbac_claim_data(db, &user_id_str, scope).await?;
     let new_access =

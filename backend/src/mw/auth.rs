@@ -82,6 +82,40 @@ impl AuthUser {
             .clone()
             .unwrap_or_else(|| self.user_id.to_string())
     }
+
+    pub fn has_scope(&self, expected: &str) -> bool {
+        scope_contains(&self.scope, expected)
+    }
+
+    pub fn can_use_rest_proxy(&self) -> bool {
+        matches!(self.auth_method, AuthMethod::Session)
+            || self.has_scope(PROXY_SCOPE)
+            || self.has_scope(WIDE_PROXY_SCOPE)
+    }
+
+    pub fn can_use_llm_proxy(&self) -> bool {
+        matches!(self.auth_method, AuthMethod::Session) || scope_allows_llm_proxy(&self.scope)
+    }
+
+    pub fn ensure_rest_proxy_access(&self) -> Result<(), AppError> {
+        if self.can_use_rest_proxy() {
+            return Ok(());
+        }
+
+        Err(AppError::Forbidden(format!(
+            "Missing required scope for proxy access. Expected one of: {PROXY_SCOPE}, {WIDE_PROXY_SCOPE}"
+        )))
+    }
+
+    pub fn ensure_llm_proxy_access(&self) -> Result<(), AppError> {
+        if self.can_use_llm_proxy() {
+            return Ok(());
+        }
+
+        Err(AppError::Forbidden(format!(
+            "Missing required scope for LLM proxy access. Expected one of: {PROXY_SCOPE}, {WIDE_PROXY_SCOPE}, {LLM_PROXY_SCOPE}"
+        )))
+    }
 }
 
 /// Name of the session cookie.
@@ -89,6 +123,27 @@ pub const SESSION_COOKIE_NAME: &str = "nyx_session";
 
 /// Name of the access token cookie.
 pub const ACCESS_TOKEN_COOKIE_NAME: &str = "nyx_access_token";
+
+/// Scope that grants standard NyxID proxy access.
+pub const PROXY_SCOPE: &str = "proxy";
+
+/// Scope that grants broad delegated/service-account proxy access.
+pub const WIDE_PROXY_SCOPE: &str = "proxy:*";
+
+/// Scope that grants access to the LLM gateway.
+pub const LLM_PROXY_SCOPE: &str = "llm:proxy";
+
+fn scope_contains(scopes: &str, expected: &str) -> bool {
+    scopes.split_whitespace().any(|scope| scope == expected)
+}
+
+pub fn scope_allows_rest_proxy(scopes: &str) -> bool {
+    scope_contains(scopes, PROXY_SCOPE) || scope_contains(scopes, WIDE_PROXY_SCOPE)
+}
+
+pub fn scope_allows_llm_proxy(scopes: &str) -> bool {
+    scope_allows_rest_proxy(scopes) || scope_contains(scopes, LLM_PROXY_SCOPE)
+}
 
 impl FromRequestParts<AppState> for AuthUser {
     type Rejection = AppError;
@@ -571,6 +626,22 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::{Request, header};
+    use uuid::Uuid;
+
+    fn test_auth_user(auth_method: AuthMethod, scope: &str) -> AuthUser {
+        AuthUser {
+            user_id: Uuid::new_v4(),
+            session_id: None,
+            scope: scope.to_string(),
+            acting_client_id: None,
+            approval_owner_user_id: None,
+            auth_method,
+            allow_all_services: true,
+            allow_all_nodes: true,
+            allowed_service_ids: vec![],
+            allowed_node_ids: vec![],
+        }
+    }
 
     #[test]
     fn parse_cookie_single() {
@@ -621,6 +692,38 @@ mod tests {
     #[test]
     fn access_token_cookie_name_constant() {
         assert_eq!(ACCESS_TOKEN_COOKIE_NAME, "nyx_access_token");
+    }
+
+    #[test]
+    fn session_auth_can_use_proxy_without_scope() {
+        let auth_user = test_auth_user(AuthMethod::Session, "");
+
+        assert!(auth_user.can_use_rest_proxy());
+        assert!(auth_user.can_use_llm_proxy());
+    }
+
+    #[test]
+    fn access_tokens_require_proxy_scope_for_rest_proxy() {
+        let auth_user = test_auth_user(AuthMethod::AccessToken, "openid profile email");
+
+        assert!(!auth_user.can_use_rest_proxy());
+        assert!(auth_user.ensure_rest_proxy_access().is_err());
+    }
+
+    #[test]
+    fn delegated_llm_scope_does_not_grant_rest_proxy() {
+        let auth_user = test_auth_user(AuthMethod::Delegated, "llm:proxy");
+
+        assert!(!auth_user.can_use_rest_proxy());
+        assert!(auth_user.can_use_llm_proxy());
+    }
+
+    #[test]
+    fn api_key_proxy_scope_grants_proxy_and_llm_access() {
+        let auth_user = test_auth_user(AuthMethod::ApiKey, "read proxy");
+
+        assert!(auth_user.can_use_rest_proxy());
+        assert!(auth_user.can_use_llm_proxy());
     }
 
     // L1: Tests for delegated token detection (C1 fix)

@@ -43,6 +43,12 @@ const OIDC_SCOPES = [
   { id: "profile", label: "profile", required: false },
   { id: "email", label: "email", required: false },
   {
+    id: "proxy",
+    label: "proxy",
+    required: false,
+    hint: "Allows access to NyxID proxy, LLM gateway, and MCP tools",
+  },
+  {
     id: "roles",
     label: "roles",
     required: false,
@@ -233,7 +239,7 @@ export function DeveloperAppsPage() {
                   <label className="text-sm font-medium">Allowed Scopes</label>
                   <p className="text-xs text-muted-foreground">
                     OIDC scopes this app can request. Determines what user data
-                    is included in tokens.
+                    and NyxID capabilities are included in tokens.
                   </p>
                   <div className="space-y-2">
                     {OIDC_SCOPES.map((scope) => (

@@ -65,14 +65,11 @@ fn parse_origin(value: &str) -> Option<String> {
         .map(|url| url.origin().ascii_serialization())
 }
 
-fn allowed_origins(state: &AppState) -> BTreeSet<String> {
-    [
-        state.config.frontend_url.as_str(),
-        state.config.base_url.as_str(),
-    ]
-    .into_iter()
-    .filter_map(parse_origin)
-    .collect()
+fn allowed_origins(frontend_url: &str, base_url: &str) -> BTreeSet<String> {
+    [frontend_url, base_url]
+        .into_iter()
+        .filter_map(parse_origin)
+        .collect()
 }
 
 pub async fn browser_csrf_middleware(
@@ -84,10 +81,16 @@ pub async fn browser_csrf_middleware(
         return Ok(next.run(request).await);
     }
 
-    let browser_request =
-        looks_like_browser_request(request.headers()) || has_browser_auth_cookie(request.headers());
+    // CSRF only protects cookie-based authentication. Bearer tokens and API
+    // keys are not ambient credentials — the browser never auto-attaches them,
+    // so cross-origin requests that rely solely on explicit Authorization
+    // headers carry no CSRF risk. This allows third-party SPAs (e.g. OAuth
+    // clients on different domains) to call the proxy with Bearer tokens.
+    if !has_browser_auth_cookie(request.headers()) {
+        return Ok(next.run(request).await);
+    }
 
-    if !browser_request {
+    if !looks_like_browser_request(request.headers()) {
         return Ok(next.run(request).await);
     }
 
@@ -101,7 +104,7 @@ pub async fn browser_csrf_middleware(
         ));
     };
 
-    let allowed = allowed_origins(&state);
+    let allowed = allowed_origins(&state.config.frontend_url, &state.config.base_url);
     if allowed.contains(&request_origin) {
         return Ok(next.run(request).await);
     }
@@ -128,6 +131,15 @@ mod tests {
             parse_origin("https://app.example.com/path?x=1"),
             Some("https://app.example.com".to_string())
         );
+    }
+
+    #[test]
+    fn trusted_browser_origins_only_include_frontend_and_backend() {
+        let allowed = allowed_origins("https://app.example.com", "https://auth.example.com");
+
+        assert_eq!(allowed.len(), 2);
+        assert!(allowed.contains("https://app.example.com"));
+        assert!(allowed.contains("https://auth.example.com"));
     }
 
     #[test]
@@ -165,6 +177,22 @@ mod tests {
 
         assert!(!looks_like_browser_request(&headers));
         assert!(!has_browser_auth_cookie(&headers));
+    }
+
+    #[test]
+    fn cross_origin_bearer_without_cookies_bypasses_csrf() {
+        // A third-party SPA sends Origin + Authorization: Bearer but no cookies.
+        // This is safe because Bearer tokens are not ambient credentials.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ORIGIN,
+            "https://other-app.example.com".parse().unwrap(),
+        );
+        headers.insert(header::AUTHORIZATION, "Bearer oauth-token".parse().unwrap());
+
+        assert!(looks_like_browser_request(&headers));
+        assert!(!has_browser_auth_cookie(&headers));
+        // No auth cookies → CSRF middleware skips → request proceeds
     }
 
     #[test]

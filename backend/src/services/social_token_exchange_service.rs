@@ -184,7 +184,7 @@ async fn exchange_social_token_inner(
         refresh_token: tokens.refresh_token,
         id_token: Some(id_token),
         expires_in: tokens.access_expires_in,
-        scope: "openid profile email".to_string(),
+        scope: token_service::FIRST_PARTY_ACCESS_SCOPES.to_string(),
         user_id_for_audit: user.id,
     })
 }
