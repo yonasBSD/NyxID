@@ -14,6 +14,7 @@ use crate::crypto::jwt;
 use crate::models::mcp_session;
 use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
+use crate::mw::auth;
 use crate::services::{audit_service, mcp_service, ssh_service};
 
 // ---------------------------------------------------------------------------
@@ -159,6 +160,27 @@ fn mcp_401(base_url: &str) -> Response {
         .expect("failed to build 401 response")
 }
 
+fn mcp_403_insufficient_scope() -> Response {
+    let body = serde_json::json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "error": {
+            "code": -32003,
+            "message": format!(
+                "Missing required scope for MCP access. Expected one of: {}, {}",
+                auth::PROXY_SCOPE,
+                auth::WIDE_PROXY_SCOPE
+            ),
+        },
+        "id": null,
+    });
+
+    Response::builder()
+        .status(StatusCode::FORBIDDEN)
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(body.to_string()))
+        .expect("failed to build 403 response")
+}
+
 // ---------------------------------------------------------------------------
 // Auth helper (manual token validation, NOT AuthUser extractor)
 // ---------------------------------------------------------------------------
@@ -185,6 +207,10 @@ async fn authenticate_mcp(
     if let Some(token) = token {
         match jwt::verify_token(&state.jwt_keys, &state.config, token) {
             Ok(claims) if claims.token_type == "access" => {
+                if !auth::scope_allows_rest_proxy(&claims.scope) {
+                    return Err(mcp_403_insufficient_scope());
+                }
+
                 // Service account tokens have sa=true; verify against
                 // the service_accounts collection instead of users.
                 if claims.sa == Some(true) {
@@ -211,6 +237,9 @@ async fn authenticate_mcp(
     if let Some(sid) = session_id
         && let Some(user_id) = state.mcp_sessions.get_user_id(sid)
     {
+        if !state.mcp_sessions.allows_proxy_access(sid) {
+            return Err(mcp_403_insufficient_scope());
+        }
         return verify_user_active(state, user_id).await;
     }
 
@@ -444,7 +473,7 @@ pub async fn mcp_delete(State(state): State<AppState>, headers: HeaderMap) -> Re
 // ---------------------------------------------------------------------------
 
 fn handle_initialize(state: &AppState, user_id: &str, request: &JsonRpcRequest) -> Response {
-    let session_id = match state.mcp_sessions.create(user_id) {
+    let session_id = match state.mcp_sessions.create_with_proxy_access(user_id, true) {
         Some(id) => id,
         None => return rpc_error(request.id.clone(), -32000, "Too many active MCP sessions"),
     };

@@ -46,6 +46,8 @@ pub async fn llm_status(
     State(state): State<AppState>,
     auth_user: AuthUser,
 ) -> AppResult<Json<llm_gateway_service::LlmStatusResponse>> {
+    auth_user.ensure_llm_proxy_access()?;
+
     let user_id_str = auth_user.user_id.to_string();
 
     let status =
@@ -65,6 +67,8 @@ pub async fn llm_proxy_request(
     Path((provider_slug, path)): Path<(String, String)>,
     request: Request<Body>,
 ) -> AppResult<Response> {
+    auth_user.ensure_llm_proxy_access()?;
+
     let user_id_str = auth_user.user_id.to_string();
 
     // Resolve the downstream service for this provider slug
@@ -203,6 +207,8 @@ pub async fn gateway_request(
     Path(path): Path<String>,
     request: Request<Body>,
 ) -> AppResult<Response> {
+    auth_user.ensure_llm_proxy_access()?;
+
     let user_id_str = auth_user.user_id.to_string();
 
     let method = request.method().clone();

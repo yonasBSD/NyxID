@@ -9,10 +9,13 @@ use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient}
 
 /// Known OIDC scopes supported by NyxID. Used for validation of
 /// `allowed_scopes` on OAuth clients.
-pub const KNOWN_OIDC_SCOPES: &[&str] = &["openid", "profile", "email", "roles", "groups"];
+pub const KNOWN_OIDC_SCOPES: &[&str] = &["openid", "profile", "email", "roles", "groups", "proxy"];
 
 /// Default allowed scopes for new OAuth clients.
 pub const DEFAULT_ALLOWED_SCOPES: &str = "openid profile email";
+
+/// Default scopes for the built-in MCP OAuth client.
+pub const DEFAULT_MCP_ALLOWED_SCOPES: &str = "openid profile email proxy";
 
 /// Validate and canonicalize `allowed_scopes`.
 ///
@@ -64,11 +67,28 @@ const MCP_CLIENT_ID: &str = "nyx-mcp";
 pub async fn seed_default_clients(db: &mongodb::Database) -> AppResult<()> {
     let collection = db.collection::<OauthClient>(OAUTH_CLIENTS);
 
-    if collection
-        .find_one(doc! { "_id": MCP_CLIENT_ID })
-        .await?
-        .is_some()
-    {
+    if let Some(existing) = collection.find_one(doc! { "_id": MCP_CLIENT_ID }).await? {
+        if !existing
+            .allowed_scopes
+            .split_whitespace()
+            .any(|scope| scope == "proxy")
+        {
+            let updated_scopes =
+                validate_allowed_scopes(&format!("{} proxy", existing.allowed_scopes))?;
+
+            collection
+                .update_one(
+                    doc! { "_id": MCP_CLIENT_ID },
+                    doc! { "$set": {
+                        "allowed_scopes": updated_scopes,
+                        "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                    }},
+                )
+                .await?;
+
+            tracing::info!("Updated default MCP OAuth client to include proxy scope");
+        }
+
         return Ok(());
     }
 
@@ -78,7 +98,7 @@ pub async fn seed_default_clients(db: &mongodb::Database) -> AppResult<()> {
         client_name: "NyxID MCP Client".to_string(),
         client_secret_hash: "NONE".to_string(),
         redirect_uris: vec![],
-        allowed_scopes: DEFAULT_ALLOWED_SCOPES.to_string(),
+        allowed_scopes: DEFAULT_MCP_ALLOWED_SCOPES.to_string(),
         grant_types: "authorization_code".to_string(),
         client_type: "public".to_string(),
         is_active: true,
@@ -387,6 +407,12 @@ mod tests {
     fn deduplicates_scopes() {
         let result = validate_allowed_scopes("openid openid profile profile").unwrap();
         assert_eq!(result, "openid profile");
+    }
+
+    #[test]
+    fn valid_with_proxy_scope() {
+        let result = validate_allowed_scopes("openid profile email proxy").unwrap();
+        assert_eq!(result, "openid profile email proxy");
     }
 
     #[test]

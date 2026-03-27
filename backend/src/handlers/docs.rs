@@ -101,9 +101,11 @@ pub async fn asyncapi_json(
 )]
 pub async fn service_docs_ui(
     State(state): State<AppState>,
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     Path(service_id): Path<String>,
 ) -> AppResult<Response> {
+    auth_user.ensure_rest_proxy_access()?;
+
     let service = fetch_service(&state, &service_id).await?;
     let base = state.config.base_url.trim_end_matches('/');
 
@@ -137,9 +139,11 @@ pub async fn service_docs_ui(
 )]
 pub async fn service_openapi_json(
     State(state): State<AppState>,
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     Path(service_id): Path<String>,
 ) -> AppResult<Json<serde_json::Value>> {
+    auth_user.ensure_rest_proxy_access()?;
+
     let service = fetch_service(&state, &service_id).await?;
     let spec =
         api_docs_service::fetch_downstream_openapi_spec(&service, &state.config.base_url).await?;
@@ -161,9 +165,11 @@ pub async fn service_openapi_json(
 )]
 pub async fn service_asyncapi_json(
     State(state): State<AppState>,
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     Path(service_id): Path<String>,
 ) -> AppResult<Json<serde_json::Value>> {
+    auth_user.ensure_rest_proxy_access()?;
+
     let service = fetch_service(&state, &service_id).await?;
     let spec =
         api_docs_service::fetch_downstream_asyncapi_spec(&service, &state.config.base_url).await?;

@@ -92,6 +92,8 @@ pub async fn proxy_request(
     Path((service_id, path)): Path<(String, String)>,
     request: Request<Body>,
 ) -> AppResult<Response> {
+    auth_user.ensure_rest_proxy_access()?;
+
     let user_id_str = auth_user.user_id.to_string();
 
     // Try new UserService path first (lookup by catalog_service_id)
@@ -152,6 +154,8 @@ pub async fn proxy_request_by_slug(
     Path((slug, path)): Path<(String, String)>,
     request: Request<Body>,
 ) -> AppResult<Response> {
+    auth_user.ensure_rest_proxy_access()?;
+
     let user_id_str = auth_user.user_id.to_string();
 
     // Try new UserService path first (by slug)
@@ -1449,6 +1453,8 @@ pub async fn list_proxy_services(
     auth_user: AuthUser,
     Query(query): Query<ProxyServicesQuery>,
 ) -> AppResult<Json<ProxyServicesResponse>> {
+    auth_user.ensure_rest_proxy_access()?;
+
     let user_id_str = auth_user.user_id.to_string();
     let base = state.config.base_url.trim_end_matches('/');
 
