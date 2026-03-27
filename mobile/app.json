@@ -3,7 +3,7 @@
     "name": "NyxID Mobile",
     "slug": "nyxid-mobile",
     "scheme": "nyxid",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -17,14 +17,42 @@
     ],
     "ios": {
       "supportsTablet": false,
+      "buildNumber": "18",
       "bundleIdentifier": "fun.chrono-ai.nyxid",
+      "associatedDomains": [
+        "applinks:nyx-api.chrono-ai.fun",
+        "applinks:nyxid.onelink.me"
+      ],
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {
       "package": "fun.chronoai.nyxid",
-      "versionCode": 14,
+      "versionCode": 1,
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "autoVerify": true,
+          "data": [
+            {
+              "scheme": "https",
+              "host": "nyxid.onelink.me",
+              "pathPrefix": "/REzJ"
+            }
+          ],
+          "category": ["BROWSABLE", "DEFAULT"]
+        },
+        {
+          "action": "VIEW",
+          "data": [
+            {
+              "scheme": "nyxid"
+            }
+          ],
+          "category": ["BROWSABLE", "DEFAULT"]
+        }
+      ],
       "blockedPermissions": [
         "android.permission.READ_EXTERNAL_STORAGE",
         "android.permission.WRITE_EXTERNAL_STORAGE"
