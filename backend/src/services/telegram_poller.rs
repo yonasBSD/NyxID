@@ -220,13 +220,14 @@ async fn handle_link_message(state: &AppState, message: telegram_service::Telegr
         return;
     }
 
-    // Update the channel with the Telegram details
+    // Update the channel with the Telegram details and auto-enable approval
     let now = bson::DateTime::from_chrono(chrono::Utc::now());
     let update = doc! {
         "$set": {
             "telegram_chat_id": chat_id,
             "telegram_username": &username,
             "telegram_enabled": true,
+            "approval_required": true,
             "telegram_link_code": bson::Bson::Null,
             "telegram_link_code_expires_at": bson::Bson::Null,
             "updated_at": now,
@@ -242,7 +243,7 @@ async fn handle_link_message(state: &AppState, message: telegram_service::Telegr
                 &state.http_client,
                 bot_token,
                 chat_id,
-                "Your Telegram account has been linked to NyxID. You will now receive approval notifications here.",
+                "Your Telegram account has been linked to NyxID. Global approval protection has been enabled, and services without per-service overrides will now send approval requests here.",
             )
             .await;
 
@@ -253,6 +254,7 @@ async fn handle_link_message(state: &AppState, message: telegram_service::Telegr
                 Some(serde_json::json!({
                     "telegram_username": username,
                     "telegram_chat_id": chat_id,
+                    "approval_auto_enabled": true,
                 })),
                 None,
                 None,
