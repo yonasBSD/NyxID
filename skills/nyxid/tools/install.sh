@@ -10,8 +10,9 @@
 set -euo pipefail
 
 REPO="https://github.com/ChronoAIProject/NyxID"
-CARGO_BIN="${CARGO_HOME:-$HOME/.cargo}/bin"
-CARGO_ENV="${CARGO_HOME:-$HOME/.cargo}/env"
+CARGO_HOME_DIR="${CARGO_HOME:-$HOME/.cargo}"
+CARGO_BIN="$CARGO_HOME_DIR/bin"
+CARGO_ENV="$CARGO_HOME_DIR/env"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -21,7 +22,7 @@ info()  { printf '  %s\n' "$*" >&2; }
 warn()  { printf '  [warn] %s\n' "$*" >&2; }
 fail()  { printf '  [error] %s\n' "$*" >&2; exit 1; }
 
-# Detect the user's login shell RC file.
+# Detect the user's shell RC file.
 detect_shell_rc() {
   local shell_name
   shell_name="$(basename "${SHELL:-/bin/sh}")"
@@ -31,15 +32,12 @@ detect_shell_rc() {
       echo "$HOME/.zshrc"
       ;;
     bash)
-      # macOS uses .bash_profile for login shells; Linux uses .bashrc
+      # macOS bash sessions are commonly login shells; Linux terminals usually
+      # source .bashrc for new interactive sessions.
       if [ "$(uname)" = "Darwin" ]; then
         echo "$HOME/.bash_profile"
-      elif [ -f "$HOME/.bash_profile" ]; then
-        echo "$HOME/.bash_profile"
-      elif [ -f "$HOME/.bashrc" ]; then
-        echo "$HOME/.bashrc"
       else
-        echo "$HOME/.profile"
+        echo "$HOME/.bashrc"
       fi
       ;;
     fish)
@@ -51,10 +49,14 @@ detect_shell_rc() {
   esac
 }
 
-# Check if a file already references .cargo in PATH.
+# Check if a file already references cargo PATH setup.
 cargo_in_rc() {
   local rc_file="$1"
-  [ -f "$rc_file" ] && grep -q '\.cargo' "$rc_file" 2>/dev/null
+  [ -f "$rc_file" ] || return 1
+
+  grep -Fq "$CARGO_BIN" "$rc_file" 2>/dev/null && return 0
+  grep -Fq "$CARGO_ENV" "$rc_file" 2>/dev/null && return 0
+  grep -Eq '(\$HOME|\$\{HOME\}|~)/\.cargo/(bin|env)|\.cargo/(bin|env)|fish_add_path' "$rc_file" 2>/dev/null
 }
 
 # ---------------------------------------------------------------------------
@@ -92,7 +94,7 @@ cargo install --git "$REPO" nyxid-cli
 info "NyxID CLI installed at $CARGO_BIN/nyxid"
 
 # ---------------------------------------------------------------------------
-# Step 3: Ensure ~/.cargo/bin is in PATH for future shell sessions
+# Step 3: Ensure cargo bin is in PATH for future shell sessions
 # ---------------------------------------------------------------------------
 
 RC_FILE="$(detect_shell_rc)"
@@ -108,11 +110,11 @@ else
     echo ""
     echo "# Cargo (Rust package manager) -- added by NyxID installer"
     if [ "$SHELL_NAME" = "fish" ]; then
-      echo 'fish_add_path $HOME/.cargo/bin'
+      printf 'fish_add_path "%s"\n' "$CARGO_BIN"
     elif [ -f "$CARGO_ENV" ]; then
-      echo ". \"\$HOME/.cargo/env\""
+      printf '. "%s"\n' "$CARGO_ENV"
     else
-      echo "export PATH=\"\$HOME/.cargo/bin:\$PATH\""
+      printf 'export PATH="%s:$PATH"\n' "$CARGO_BIN"
     fi
   } >> "$RC_FILE"
 

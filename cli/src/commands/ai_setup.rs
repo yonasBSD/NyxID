@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
@@ -132,6 +132,86 @@ fn home_dir() -> Result<PathBuf> {
     dirs::home_dir().context("Could not determine home directory")
 }
 
+fn cargo_home_dir(home: &Path) -> PathBuf {
+    std::env::var("CARGO_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home.join(".cargo"))
+}
+
+fn current_shell_name() -> String {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+    PathBuf::from(shell)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "sh".into())
+}
+
+fn shell_rc_path(home: &Path, shell_name: &str) -> PathBuf {
+    match shell_name {
+        "zsh" => home.join(".zshrc"),
+        "bash" => {
+            if cfg!(target_os = "macos") {
+                home.join(".bash_profile")
+            } else {
+                home.join(".bashrc")
+            }
+        }
+        "fish" => std::env::var("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| home.join(".config"))
+            .join("fish/config.fish"),
+        _ => home.join(".profile"),
+    }
+}
+
+fn shell_escape_double_quoted(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+}
+
+fn cargo_path_is_configured(contents: &str, cargo_bin: &Path, cargo_env: &Path) -> bool {
+    let cargo_bin = cargo_bin.to_string_lossy();
+    let cargo_env = cargo_env.to_string_lossy();
+
+    [
+        cargo_bin.as_ref(),
+        cargo_env.as_ref(),
+        "$HOME/.cargo/bin",
+        "$HOME/.cargo/env",
+        "${HOME}/.cargo/bin",
+        "${HOME}/.cargo/env",
+        ".cargo/bin",
+        ".cargo/env",
+        "fish_add_path",
+    ]
+    .iter()
+    .any(|needle| contents.contains(needle))
+}
+
+fn cargo_setup_command(shell_name: &str, cargo_bin: &Path, cargo_env: &Path) -> String {
+    if shell_name == "fish" {
+        format!(
+            "fish_add_path \"{}\"",
+            shell_escape_double_quoted(cargo_bin)
+        )
+    } else if cargo_env.exists() {
+        format!(". \"{}\"", shell_escape_double_quoted(cargo_env))
+    } else {
+        format!(
+            "export PATH=\"{}:$PATH\"",
+            shell_escape_double_quoted(cargo_bin)
+        )
+    }
+}
+
+fn cargo_setup_rc_snippet(shell_name: &str, cargo_bin: &Path, cargo_env: &Path) -> String {
+    format!(
+        "\n# Cargo (Rust package manager) -- added by NyxID installer\n{}\n",
+        cargo_setup_command(shell_name, cargo_bin, cargo_env)
+    )
+}
+
 fn skill_paths(tool: AiToolTarget) -> Result<Vec<(String, PathBuf)>> {
     let home = home_dir()?;
     match tool {
@@ -199,26 +279,23 @@ async fn fetch_skill_content(base_url: &str) -> Result<SkillContent> {
 // PATH setup
 // ---------------------------------------------------------------------------
 
-/// Detect the user's shell RC file and ensure `~/.cargo/bin` is in PATH.
-/// This is critical for non-technical users whose shell does not source cargo
-/// env by default (e.g. after a fresh `cargo install`).
+/// Detect the user's shell RC file and ensure the active cargo bin directory is
+/// in PATH. This is critical for non-technical users whose shell does not
+/// source cargo env by default (e.g. after a fresh `cargo install`).
 fn ensure_cargo_in_path() {
     let home = match home_dir() {
         Ok(h) => h,
         Err(_) => return,
     };
 
-    let cargo_bin = std::env::var("CARGO_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| home.join(".cargo"))
-        .join("bin");
+    let cargo_home = cargo_home_dir(&home);
+    let cargo_bin = cargo_home.join("bin");
+    let cargo_env = cargo_home.join("env");
 
-    // If ~/.cargo/bin is already in PATH, nothing to do.
-    if let Ok(path_var) = std::env::var("PATH") {
-        let cargo_bin_str = cargo_bin.to_string_lossy();
-        if path_var.split(':').any(|p| p == cargo_bin_str.as_ref()) {
-            return;
-        }
+    if let Some(path_var) = std::env::var_os("PATH")
+        && std::env::split_paths(&path_var).any(|path| path == cargo_bin)
+    {
+        return;
     }
 
     // If the binary doesn't exist at all, skip PATH setup.
@@ -226,48 +303,16 @@ fn ensure_cargo_in_path() {
         return;
     }
 
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-    let shell_name = PathBuf::from(&shell)
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "sh".into());
+    let shell_name = current_shell_name();
+    let rc_file = shell_rc_path(&home, &shell_name);
 
-    let rc_file = match shell_name.as_str() {
-        "zsh" => home.join(".zshrc"),
-        "bash" => {
-            if cfg!(target_os = "macos") || home.join(".bash_profile").exists() {
-                home.join(".bash_profile")
-            } else if home.join(".bashrc").exists() {
-                home.join(".bashrc")
-            } else {
-                home.join(".profile")
-            }
-        }
-        "fish" => std::env::var("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| home.join(".config"))
-            .join("fish/config.fish"),
-        _ => home.join(".profile"),
-    };
-
-    // Check if .cargo is already referenced in the RC file.
     if let Ok(contents) = std::fs::read_to_string(&rc_file)
-        && contents.contains(".cargo")
+        && cargo_path_is_configured(&contents, &cargo_bin, &cargo_env)
     {
         return;
     }
 
-    // Append cargo env sourcing to the RC file.
-    let cargo_env = home.join(".cargo/env");
-    let line = if shell_name == "fish" {
-        "\n# Cargo (Rust package manager) -- added by NyxID installer\nfish_add_path $HOME/.cargo/bin\n".to_string()
-    } else if cargo_env.exists() {
-        "\n# Cargo (Rust package manager) -- added by NyxID installer\n. \"$HOME/.cargo/env\"\n"
-            .to_string()
-    } else {
-        "\n# Cargo (Rust package manager) -- added by NyxID installer\nexport PATH=\"$HOME/.cargo/bin:$PATH\"\n"
-            .to_string()
-    };
+    let line = cargo_setup_rc_snippet(&shell_name, &cargo_bin, &cargo_env);
 
     if let Some(parent) = rc_file.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -281,14 +326,19 @@ fn ensure_cargo_in_path() {
         Ok(mut f) => {
             use std::io::Write;
             if f.write_all(line.as_bytes()).is_ok() {
-                eprintln!("  Added ~/.cargo/bin to PATH in {}", rc_file.display());
+                eprintln!(
+                    "  Added {} to PATH in {}",
+                    cargo_bin.display(),
+                    rc_file.display()
+                );
                 eprintln!("  Open a new terminal or run: source {}", rc_file.display());
             }
         }
         Err(e) => {
             eprintln!("  [warn] Could not update {}: {e}", rc_file.display());
             eprintln!(
-                "  Add this to your shell config manually: export PATH=\"$HOME/.cargo/bin:$PATH\""
+                "  Add this to your shell config manually: {}",
+                cargo_setup_command(&shell_name, &cargo_bin, &cargo_env)
             );
         }
     }
@@ -311,9 +361,11 @@ async fn install(tool: AiToolTarget, base_url: &Option<String>) -> Result<()> {
         AiToolTarget::Openclaw => install_openclaw(&content),
     };
 
-    // After installing the skill, ensure ~/.cargo/bin is in PATH
-    // so that `skills check` can find the nyxid binary.
-    ensure_cargo_in_path();
+    if result.is_ok() {
+        // After installing the skill, ensure the active cargo bin directory is
+        // in PATH so that `skills check` can find the nyxid binary.
+        ensure_cargo_in_path();
+    }
 
     result
 }
@@ -537,4 +589,91 @@ fn status() -> Result<()> {
 
     eprintln!("{table}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        cargo_path_is_configured, cargo_setup_command, shell_escape_double_quoted, shell_rc_path,
+    };
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    #[test]
+    fn cargo_path_detection_matches_default_home_entries() {
+        let cargo_bin = Path::new("/tmp/example/.cargo/bin");
+        let cargo_env = Path::new("/tmp/example/.cargo/env");
+
+        assert!(cargo_path_is_configured(
+            ". \"$HOME/.cargo/env\"\n",
+            cargo_bin,
+            cargo_env
+        ));
+        assert!(cargo_path_is_configured(
+            "export PATH=\"$HOME/.cargo/bin:$PATH\"\n",
+            cargo_bin,
+            cargo_env
+        ));
+    }
+
+    #[test]
+    fn cargo_path_detection_matches_custom_cargo_home_entries() {
+        let cargo_bin = Path::new("/opt/nyx cargo/bin");
+        let cargo_env = Path::new("/opt/nyx cargo/env");
+
+        assert!(cargo_path_is_configured(
+            "export PATH=\"/opt/nyx cargo/bin:$PATH\"\n",
+            cargo_bin,
+            cargo_env
+        ));
+        assert!(cargo_path_is_configured(
+            ". \"/opt/nyx cargo/env\"\n",
+            cargo_bin,
+            cargo_env
+        ));
+    }
+
+    #[test]
+    fn bash_rc_path_matches_platform_convention() {
+        let home = Path::new("/tmp/home");
+        let expected = if cfg!(target_os = "macos") {
+            home.join(".bash_profile")
+        } else {
+            home.join(".bashrc")
+        };
+
+        assert_eq!(shell_rc_path(home, "bash"), expected);
+    }
+
+    #[test]
+    fn cargo_setup_command_uses_absolute_custom_cargo_home() {
+        let test_root = temp_test_dir();
+        let cargo_home = test_root.join("custom cargo home");
+        let cargo_bin = cargo_home.join("bin");
+        let cargo_env = cargo_home.join("env");
+
+        fs::create_dir_all(&cargo_bin).unwrap();
+        fs::write(&cargo_env, "").unwrap();
+
+        let command = cargo_setup_command("bash", &cargo_bin, &cargo_env);
+        let expected_env = shell_escape_double_quoted(&cargo_env);
+
+        assert_eq!(command, format!(". \"{expected_env}\""));
+
+        fs::remove_dir_all(test_root).unwrap();
+    }
+
+    fn temp_test_dir() -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "nyxid-ai-setup-tests-{}-{suffix}",
+            std::process::id()
+        ))
+    }
 }
