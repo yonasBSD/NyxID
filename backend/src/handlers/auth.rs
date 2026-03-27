@@ -737,7 +737,9 @@ pub async fn setup(
 /// session auth (used by the `/cli-auth` frontend page after browser login).
 pub async fn cli_token(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     auth_user: AuthUser,
+    headers: HeaderMap,
 ) -> AppResult<Json<CliTokenResponse>> {
     let user_id_str = auth_user.user_id.to_string();
     let tokens = token_service::create_session_and_issue_tokens(
@@ -745,8 +747,8 @@ pub async fn cli_token(
         &state.config,
         &state.jwt_keys,
         &user_id_str,
-        None,
-        None,
+        extract_ip(&headers, Some(peer)).as_deref(),
+        extract_user_agent(&headers).as_deref(),
     )
     .await?;
 
