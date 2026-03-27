@@ -7,6 +7,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Key, Server, Link2, ShieldCheck, ShieldOff, Sparkles, X } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { NotificationSetupCard } from "@/components/dashboard/notification-setup-card";
 
 const AI_SETUP_DISMISSED_KEY = "nyxid:ai-setup-dismissed";
 
@@ -109,6 +110,8 @@ export function DashboardPage() {
           </Button>
         </div>
       )}
+
+      <NotificationSetupCard />
 
       <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
         {stats.map((stat) => (

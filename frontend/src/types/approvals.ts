@@ -27,11 +27,11 @@ export interface RemoveDeviceResponse {
 }
 
 export interface UpdateNotificationSettingsRequest {
-  readonly telegram_enabled: boolean;
-  readonly push_enabled: boolean;
-  readonly approval_required: boolean;
-  readonly approval_timeout_secs: number;
-  readonly grant_expiry_days: number;
+  readonly telegram_enabled?: boolean;
+  readonly push_enabled?: boolean;
+  readonly approval_required?: boolean;
+  readonly approval_timeout_secs?: number;
+  readonly grant_expiry_days?: number;
 }
 
 export interface TelegramLinkResponse {

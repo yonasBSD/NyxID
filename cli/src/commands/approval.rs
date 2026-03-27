@@ -204,6 +204,55 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
             Ok(())
         }
 
+        ApprovalCommands::Enable { auth } => {
+            let mut api = ApiClient::from_auth(&auth)?;
+            let body = serde_json::json!({ "approval_required": true });
+            let result: Value = api.put("/notifications/settings", &body).await?;
+
+            match auth.output {
+                OutputFormat::Json => {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                }
+                OutputFormat::Table => {
+                    eprintln!(
+                        "Global approval protection enabled. Services without per-service overrides now require your approval."
+                    );
+                }
+            }
+            Ok(())
+        }
+
+        ApprovalCommands::Disable { yes, auth } => {
+            if !yes {
+                eprint!(
+                    "Disable global approval protection? Services without per-service overrides will stop requiring approval. [y/N] "
+                );
+                std::io::stderr().flush()?;
+                let mut answer = String::new();
+                std::io::stdin().read_line(&mut answer)?;
+                if !answer.trim().eq_ignore_ascii_case("y") {
+                    eprintln!("Cancelled.");
+                    return Ok(());
+                }
+            }
+
+            let mut api = ApiClient::from_auth(&auth)?;
+            let body = serde_json::json!({ "approval_required": false });
+            let result: Value = api.put("/notifications/settings", &body).await?;
+
+            match auth.output {
+                OutputFormat::Json => {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                }
+                OutputFormat::Table => {
+                    eprintln!(
+                        "Global approval protection disabled. Per-service overrides, if any, still take precedence."
+                    );
+                }
+            }
+            Ok(())
+        }
+
         ApprovalCommands::ServiceConfigs { auth } => {
             let mut api = ApiClient::from_auth(&auth)?;
             let configs: Value = api.get("/approvals/service-configs").await?;

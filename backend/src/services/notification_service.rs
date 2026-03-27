@@ -458,6 +458,27 @@ async fn remove_stale_device_tokens(db: &Database, channel_id: &str, device_ids:
                         },
                     )
                     .await;
+
+                let _ = db
+                    .collection::<NotificationChannel>(COLLECTION_NAME)
+                    .update_one(
+                        doc! {
+                            "_id": channel_id,
+                            "approval_required": true,
+                            "push_devices.0": { "$exists": false },
+                            "$or": [
+                                { "telegram_enabled": { "$ne": true } },
+                                { "telegram_chat_id": bson::Bson::Null },
+                            ],
+                        },
+                        doc! {
+                            "$set": {
+                                "approval_required": false,
+                                "updated_at": bson::DateTime::from_chrono(chrono::Utc::now()),
+                            }
+                        },
+                    )
+                    .await;
             }
         }
         Err(e) => tracing::warn!("Failed to remove stale device tokens: {e}"),

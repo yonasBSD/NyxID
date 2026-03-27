@@ -295,7 +295,45 @@ nyxid ssh proxy <SERVICE>                              # ProxyCommand for OpenSS
 nyxid service list --output json | jq '.keys[] | select(.service_type == "ssh")'
 ```
 
-## Approvals and Notifications
+## Set Up Notifications and Approvals
+
+NyxID can require your explicit approval before any AI agent accesses your services. To receive approval requests, set up at least one notification channel:
+
+### Step 1: Set up a notification channel
+
+**Option A: Link Telegram** (recommended for desktop users)
+
+```bash
+nyxid notification telegram-link
+# Follow the instructions: send the code to the NyxID bot on Telegram
+```
+
+**Option B: Download the NyxID mobile app** (recommended for on-the-go approvals)
+
+- **Download (iOS & Android):** https://nyxid.onelink.me/REzJ/dql9w8fx
+
+The link auto-detects your platform. The mobile app sends push notifications for approval requests. Log in with your NyxID account and your device is registered automatically.
+
+You can use both Telegram and the mobile app together for redundancy.
+
+### Step 2: Enable approval protection
+
+Approval protection is enabled automatically when you link Telegram or register a mobile device. You can also toggle it manually:
+
+```bash
+nyxid approval enable                                  # enable approval protection
+nyxid approval disable                                 # disable (auto-approve all requests)
+```
+
+### Step 3: Check your notification settings
+
+```bash
+nyxid notification settings                            # show current notification & approval status
+```
+
+If the user has not set up any notification channel yet, **proactively suggest** they do so before making proxy requests. Walk them through the steps above.
+
+### Approvals reference
 
 Approvals default to **per-request** mode: every proxy call needs fresh approval. The approval notification includes a human-readable `action_description` (e.g., "POST /v1/chat/completions (model: gpt-4, 3 messages)"). Grant-based approval is opt-in via `--approval-mode grant`.
 
@@ -304,6 +342,8 @@ nyxid approval list --output json                      # list pending approvals 
 nyxid approval show <ID>                               # show approval details + action_description
 nyxid approval approve <ID>                            # approve a request
 nyxid approval deny <ID>                               # deny a request
+nyxid approval enable                                  # enable global approval protection
+nyxid approval disable                                 # disable global approval protection
 nyxid approval grants --output json                    # list active grants (grant mode only)
 nyxid approval service-configs --output json           # list per-service approval configs (includes approval_mode)
 nyxid approval set-config <SERVICE_ID> --require-approval true                    # per-request (default)
@@ -311,6 +351,7 @@ nyxid approval set-config <SERVICE_ID> --require-approval true --approval-mode g
 
 nyxid notification settings                            # show notification settings
 nyxid notification update --approval-telegram true     # enable telegram notifications
+nyxid notification update --approval-push true         # enable push notifications
 nyxid notification telegram-link                       # link telegram account
 ```
 

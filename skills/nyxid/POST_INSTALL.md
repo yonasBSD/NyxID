@@ -1,7 +1,24 @@
+## Recommended: Set up approval notifications
+
+Before using NyxID with AI agents, set up a notification channel so you can approve
+or deny service access requests in real time:
+
+**Link Telegram** (fastest to set up):
+```
+nyxid notification telegram-link
+```
+
+**Download the NyxID mobile app** (approve from anywhere):
+- https://nyxid.onelink.me/REzJ/dql9w8fx (auto-detects iOS or Android)
+
+Approval protection is enabled automatically when you link Telegram or register a
+device. You can also ask your AI agent: "Set up my NyxID notifications"
+
 ## What you can do now
 
 Try asking your AI agent any of these:
 
+- "Set up my NyxID notifications" -- link Telegram or configure push notifications
 - "Connect my OpenAI account to NyxID" -- walks you through adding credentials
 - "What services do I have in NyxID?" -- lists your connected services
 - "Call the OpenAI API through NyxID" -- proxies requests with your stored credentials

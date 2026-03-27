@@ -1040,6 +1040,19 @@ pub enum ApprovalCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
+    /// Enable approval protection globally (requires notification channel)
+    Enable {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Disable approval protection globally
+    Disable {
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// List per-service approval configurations
     ServiceConfigs {
         #[command(flatten)]
