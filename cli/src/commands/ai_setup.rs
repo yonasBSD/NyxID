@@ -336,9 +336,12 @@ fn print_post_install(tool: AiToolTarget, content: &SkillContent) {
             eprintln!("Start a new Codex session to load the skill.");
         }
         AiToolTarget::Openclaw => {
-            eprintln!(
-                "Reload OpenClaw to activate: start a new chat or run `openclaw gateway restart`."
-            );
+            eprintln!("To activate, start a new chat in OpenClaw.");
+            eprintln!();
+            eprintln!("WARNING: Do NOT run `openclaw gateway restart` unless the gateway is");
+            eprintln!("installed as a system service (e.g. via systemd/launchd). Restarting a");
+            eprintln!("manually-started gateway will stop it and it will not come back up.");
+            eprintln!();
             eprintln!("Verify: `openclaw skills check` (should show NyxID as ready).");
         }
     }

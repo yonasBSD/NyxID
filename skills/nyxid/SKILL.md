@@ -390,6 +390,8 @@ nyxid notification telegram-link                       # link telegram account
 nyxid openclaw setup --url http://localhost:18789   # CLI prompts for token securely
 ```
 
+**Important for OpenClaw users:** After installing or updating this skill, start a new chat to activate it. Do **not** run `openclaw gateway restart` unless the gateway is installed as a system service (e.g. via systemd or launchd). Restarting a manually-started gateway will stop it and it will not come back up automatically.
+
 ## Account Management
 
 ```bash
