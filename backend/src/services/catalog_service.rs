@@ -153,7 +153,6 @@ pub async fn list_catalog(
             "$or": [
                 { "requires_user_credential": true },
                 { "provider_config_id": { "$ne": null } },
-                { "auth_method": "none", "requires_user_credential": false },
             ],
             "service_category": { "$in": ["connection", "internal"] },
         })
