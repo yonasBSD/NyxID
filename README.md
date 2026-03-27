@@ -731,6 +731,13 @@ For development, Mailpit is provided via Docker Compose (SMTP on `localhost:1025
 | `NODE_MAX_STREAM_DURATION_SECS` | `300` | Maximum duration for streaming proxy responses |
 | `NODE_HMAC_SIGNING_ENABLED` | `true` | Enable HMAC request signing for node proxy requests |
 
+### Proxy Streaming (Optional)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PROXY_MAX_BODY_SIZE` | `104857600` | Maximum request body size for proxy routes in bytes (100 MB) |
+| `PROXY_STREAM_IDLE_TIMEOUT_SECS` | `60` | Terminate a streamed proxy response if no chunk arrives within N seconds |
+
 ### SSH Tunneling (Optional)
 
 | Variable | Default | Description |

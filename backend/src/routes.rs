@@ -3,6 +3,7 @@ use axum::{
     routing::{delete, get, patch, post, put},
 };
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
+use tower_http::limit::RequestBodyLimitLayer;
 
 use crate::AppState;
 use crate::handlers;
@@ -31,7 +32,7 @@ fn oauth_public_cors() -> CorsLayer {
 /// The caller must attach separate CORS layers to each before merging.
 /// Public OAuth endpoints allow any origin (per RFC 9207) while private
 /// API endpoints restrict origin to FRONTEND_URL.
-pub fn build_router() -> (Router<AppState>, Router<AppState>) {
+pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<AppState>) {
     let mfa_routes = Router::new()
         .route("/setup", post(handlers::mfa::setup))
         .route("/confirm", post(handlers::mfa::confirm))
@@ -546,6 +547,22 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             post(handlers::developer_apps::rotate_my_oauth_client_secret),
         );
 
+    // Proxy pass-through routes allow larger request bodies than the rest of the API.
+    // Use RequestBodyLimitLayer so manual Request<Body> handlers are also protected.
+    let proxy_passthrough_routes = Router::new()
+        .route(
+            "/proxy/s/{slug}/{*path}",
+            axum::routing::any(handlers::proxy::proxy_request_by_slug),
+        )
+        .route(
+            "/proxy/{service_id}/{*path}",
+            axum::routing::any(handlers::proxy::proxy_request),
+        )
+        .layer(RequestBodyLimitLayer::new(proxy_max_body_size));
+
+    // LLM gateway routes get a moderate limit (10 MB for LLM payloads).
+    let llm_routes = llm_routes.layer(RequestBodyLimitLayer::new(10 * 1024 * 1024));
+
     // Routes that ALLOW delegated tokens (proxy, LLM gateway, delegation refresh)
     // Also accessible by service accounts.
     let api_v1_delegated = Router::new()
@@ -568,14 +585,7 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             get(handlers::docs::service_asyncapi_json),
         )
         .route("/proxy/services", get(handlers::proxy::list_proxy_services))
-        .route(
-            "/proxy/s/{slug}/{*path}",
-            axum::routing::any(handlers::proxy::proxy_request_by_slug),
-        )
-        .route(
-            "/proxy/{service_id}/{*path}",
-            axum::routing::any(handlers::proxy::proxy_request),
-        );
+        .merge(proxy_passthrough_routes);
 
     // Routes accessible by both users and service accounts (block delegated tokens)
     let api_v1_shared = Router::new()

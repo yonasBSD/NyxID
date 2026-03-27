@@ -140,6 +140,19 @@ fn handle_proxy_response_chunk(
     }
 }
 
+fn decode_binary_stream_frame(data: &[u8]) -> Result<(&str, &[u8]), &'static str> {
+    const REQUEST_ID_LEN: usize = 36;
+
+    if data.len() < REQUEST_ID_LEN {
+        return Err("binary frame too short for request_id prefix");
+    }
+
+    let request_id = std::str::from_utf8(&data[..REQUEST_ID_LEN])
+        .map_err(|_| "binary frame has invalid UTF-8 request_id prefix")?;
+
+    Ok((request_id, &data[REQUEST_ID_LEN..]))
+}
+
 /// GET /api/v1/nodes/ws
 ///
 /// WebSocket upgrade handler for node agent connections.
@@ -259,6 +272,9 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
                             let ok_msg = serde_json::json!({
                                 "type": "auth_ok",
                                 "node_id": &node.id,
+                                "capabilities": {
+                                    "proxy_binary_chunks": true
+                                }
                             });
                             let _ = ws_sink.send(Message::Text(ok_msg.to_string().into())).await;
                             return Some(node.id);
@@ -391,6 +407,20 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
     let ws_manager = state.node_ws_manager.clone();
 
     while let Some(msg) = ws_stream.next().await {
+        // Binary frames carry streaming proxy data chunks:
+        //   [36 bytes: request_id as ASCII UUID][remaining: raw data]
+        if let Ok(Message::Binary(data)) = &msg {
+            match decode_binary_stream_frame(data) {
+                Ok((request_id, chunk)) => {
+                    ws_manager.deliver_stream_chunk(&node_id_reader, request_id, chunk.to_vec());
+                }
+                Err(message) => {
+                    tracing::warn!(node_id = %node_id_reader, len = data.len(), "{message}");
+                }
+            }
+            continue;
+        }
+
         let text = match msg {
             Ok(Message::Text(t)) => t,
             Ok(Message::Close(_)) => break,
@@ -717,7 +747,7 @@ pub async fn node_ws_manager_heartbeat_sweep(
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_base64_payload, handle_proxy_response_chunk};
+    use super::{decode_base64_payload, decode_binary_stream_frame, handle_proxy_response_chunk};
     use base64::Engine;
     use serde_json::Value;
     use std::sync::Arc;
@@ -742,6 +772,26 @@ mod tests {
         assert_eq!(
             decode_base64_payload(Some("%%%not-base64%%%"), "proxy_response", "req-1"),
             None
+        );
+    }
+
+    #[test]
+    fn decode_binary_stream_frame_extracts_request_id_and_payload() {
+        let mut frame = b"123e4567-e89b-12d3-a456-426614174000".to_vec();
+        frame.extend_from_slice(b"hello");
+
+        let (request_id, payload) =
+            decode_binary_stream_frame(&frame).expect("valid binary stream frame");
+
+        assert_eq!(request_id, "123e4567-e89b-12d3-a456-426614174000");
+        assert_eq!(payload, b"hello");
+    }
+
+    #[test]
+    fn decode_binary_stream_frame_rejects_short_prefix() {
+        assert_eq!(
+            decode_binary_stream_frame(b"short").unwrap_err(),
+            "binary frame too short for request_id prefix"
         );
     }
 

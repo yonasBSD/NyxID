@@ -8,7 +8,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::errors::{AppError, AppResult};
 
-const STREAM_BUFFER_CAPACITY: usize = 256;
+const STREAM_BUFFER_CAPACITY: usize = 1024;
 const SSH_TUNNEL_BUFFER_CAPACITY: usize = 256;
 const WEB_TERMINAL_BUFFER_CAPACITY: usize = 256;
 

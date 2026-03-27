@@ -383,7 +383,7 @@ The agent supports streaming proxy responses for SSE (Server-Sent Events) endpoi
 ### Streaming Protocol
 
 1. The agent sends `proxy_response_start` with status and headers
-2. The agent sends `proxy_response_chunk` messages with base64-encoded data (max 64KB per chunk)
+2. The agent sends streaming data chunks, preferably as WebSocket binary frames with a 36-byte `request_id` prefix; when the server does not advertise `auth_ok.capabilities.proxy_binary_chunks`, it falls back to legacy `proxy_response_chunk` JSON messages with base64-encoded data
 3. The agent sends `proxy_response_end` when the stream completes
 
 NyxID reconstructs the streaming response and forwards it to the client as a standard SSE stream. This enables real-time streaming from LLM APIs (e.g., OpenAI chat completions with `stream=true`) through the node proxy.

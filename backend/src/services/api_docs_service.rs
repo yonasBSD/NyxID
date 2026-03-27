@@ -425,17 +425,19 @@ pub fn build_asyncapi_document(base_url: &str) -> serde_json::Value {
             }
         },
         "channels": {
-            "nodeAgent": {
-                "address": "/api/v1/nodes/ws",
-                "messages": {
-                    "register": { "$ref": "#/components/messages/Register" },
-                    "auth": { "$ref": "#/components/messages/Auth" },
-                    "proxyRequest": { "$ref": "#/components/messages/ProxyRequest" },
-                    "proxyResponseStart": { "$ref": "#/components/messages/ProxyResponseStart" },
-                    "proxyResponseChunk": { "$ref": "#/components/messages/ProxyResponseChunk" },
-                    "proxyResponseEnd": { "$ref": "#/components/messages/ProxyResponseEnd" }
-                }
-            },
+                "nodeAgent": {
+                    "address": "/api/v1/nodes/ws",
+                    "messages": {
+                        "register": { "$ref": "#/components/messages/Register" },
+                        "auth": { "$ref": "#/components/messages/Auth" },
+                        "authOk": { "$ref": "#/components/messages/AuthOk" },
+                        "proxyRequest": { "$ref": "#/components/messages/ProxyRequest" },
+                        "proxyResponseStart": { "$ref": "#/components/messages/ProxyResponseStart" },
+                        "proxyResponseChunk": { "$ref": "#/components/messages/ProxyResponseChunk" },
+                        "proxyBinaryChunkFrame": { "$ref": "#/components/messages/ProxyBinaryChunkFrame" },
+                        "proxyResponseEnd": { "$ref": "#/components/messages/ProxyResponseEnd" }
+                    }
+                },
             "sshTunnel": {
                 "address": "/api/v1/ssh/{service_id}",
                 "messages": {
@@ -518,6 +520,26 @@ pub fn build_asyncapi_document(base_url: &str) -> serde_json::Value {
                         }
                     }
                 },
+                "AuthOk": {
+                    "name": "auth_ok",
+                    "payload": {
+                        "type": "object",
+                        "required": ["type", "node_id"],
+                        "properties": {
+                            "type": { "type": "string", "const": "auth_ok" },
+                            "node_id": { "type": "string" },
+                            "capabilities": {
+                                "type": "object",
+                                "properties": {
+                                    "proxy_binary_chunks": {
+                                        "type": "boolean",
+                                        "description": "When true, the node may send streaming proxy chunks as WebSocket binary frames with a 36-byte ASCII request_id prefix."
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
                 "ProxyRequest": {
                     "name": "proxy_request",
                     "payload": {
@@ -552,8 +574,19 @@ pub fn build_asyncapi_document(base_url: &str) -> serde_json::Value {
                         "properties": {
                             "type": { "type": "string", "const": "proxy_response_chunk" },
                             "request_id": { "type": "string" },
-                            "data": { "type": "string", "description": "Base64-encoded chunk payload" }
+                            "data": {
+                                "type": "string",
+                                "description": "Legacy fallback: base64-encoded chunk payload used when `auth_ok.capabilities.proxy_binary_chunks` is absent or false."
+                            }
                         }
+                    }
+                },
+                "ProxyBinaryChunkFrame": {
+                    "name": "proxy_binary_chunk_frame",
+                    "payload": {
+                        "type": "string",
+                        "format": "binary",
+                        "description": "Preferred streaming proxy chunk transport. WebSocket binary frame where the first 36 bytes are the ASCII request_id UUID and the remaining bytes are raw chunk data."
                     }
                 },
                 "ProxyResponseEnd": {

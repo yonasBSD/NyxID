@@ -1376,7 +1376,7 @@ pub async fn execute_tool(
         &path,
         query.as_deref(),
         headers,
-        body,
+        proxy_service::ProxyBody::Buffered(body),
         identity_headers,
         delegated,
     )

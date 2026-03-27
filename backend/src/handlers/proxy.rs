@@ -44,6 +44,8 @@ const ALLOWED_RESPONSE_HEADERS: &[&str] = &[
     "last-modified",
     "x-request-id",
     "x-correlation-id",
+    "accept-ranges",
+    "content-range",
 ];
 
 /// Request headers safe to forward to node agents for proxy requests.
@@ -55,6 +57,11 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
     "user-agent",
     "x-request-id",
     "x-correlation-id",
+    "range",
+    "if-range",
+    "if-none-match",
+    "if-modified-since",
+    "content-length",
 ];
 
 /// Pre-resolved proxy target from the new UserService path.
@@ -371,12 +378,14 @@ async fn execute_proxy_inner(
     };
 
     // === Request Decomposition ===
-    // Extract method, query, headers, and body BEFORE approval check so we can
-    // build a rich action description for the approval notification.
+    // Extract method, query, headers BEFORE body consumption.
     let method = request.method().clone();
     let method_str = method.as_str().to_string();
     let query = request.uri().query().map(String::from);
     let all_headers = request.headers().clone();
+
+    // Reject multi-range requests with excessive ranges (DoS prevention)
+    validate_range_header(&all_headers)?;
 
     // Headers safe to forward to node agents
     let node_forward_headers: Vec<(String, String)> = all_headers
@@ -393,22 +402,26 @@ async fn execute_proxy_inner(
             }
         })
         .collect();
-    // Read the request body (10MB limit)
-    let body_bytes = axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024)
-        .await
-        .map_err(|e| AppError::BadRequest(format!("Failed to read body: {e}")))?;
 
-    // Check approval if user has it enabled for this service.
-    // Only direct browser sessions bypass approval; API keys, delegated tokens,
-    // and service accounts all require approval since they represent programmatic access.
+    // === Request body handling ===
+    // Check whether approval is needed (DB call, does not need the body).
     let requires_approval = approval_service::requires_approval_for_service(
         &state.db,
         &approval_owner_user_id,
         service_id,
     )
     .await?;
+    let enforce_approval =
+        should_enforce_runtime_approval(requires_approval, &auth_user.auth_method);
 
-    if should_enforce_runtime_approval(requires_approval, &auth_user.auth_method) {
+    // Always buffer proxy request bodies up to the configured limit.
+    //
+    // This preserves a hard cap for all proxy uploads, including raw
+    // Request<Body> handlers where DefaultBodyLimit alone would not apply.
+    let body_bytes = read_proxy_request_body(request, state.config.proxy_max_body_size).await?;
+
+    // Approval enforcement.
+    if enforce_approval {
         let requester_type = auth_user.approval_requester_type().ok_or_else(|| {
             AppError::Forbidden("Session auth does not require approval".to_string())
         })?;
@@ -445,7 +458,7 @@ async fn execute_proxy_inner(
                 if body_bytes.is_empty() {
                     None
                 } else {
-                    Some(&body_bytes)
+                    Some(body_bytes.as_ref())
                 },
             );
 
@@ -707,10 +720,18 @@ async fn execute_proxy_inner(
                                 })?
                         }
                         ProxyResponseType::Streaming(mut rx) => {
+                            let idle_timeout = std::time::Duration::from_secs(
+                                state.config.proxy_stream_idle_timeout_secs,
+                            );
+                            let idle_timeout_secs = state.config.proxy_stream_idle_timeout_secs;
+
                             // Wait for the Start chunk
-                            let first = rx.recv().await.ok_or_else(|| {
-                                AppError::NodeOffline("Stream closed before start".to_string())
-                            })?;
+                            let first = tokio::time::timeout(idle_timeout, rx.recv())
+                                .await
+                                .map_err(|_| AppError::NodeProxyTimeout)?
+                                .ok_or_else(|| {
+                                    AppError::NodeOffline("Stream closed before start".to_string())
+                                })?;
 
                             let (status, resp_headers) = match first {
                                 StreamChunk::Start { status, headers } => (status, headers),
@@ -728,10 +749,17 @@ async fn execute_proxy_inner(
                                 StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
                             let mut response_builder = Response::builder().status(http_status);
 
+                            // Detect SSE so we can skip content-length (length unknown).
+                            // For non-SSE streaming (video, audio, large files), keep
+                            // content-length for client download progress / seeking.
+                            let node_is_sse = resp_headers.iter().any(|(k, v)| {
+                                k.eq_ignore_ascii_case("content-type")
+                                    && v.contains("text/event-stream")
+                            });
+
                             for (name, value) in &resp_headers {
                                 let name_lower = name.to_lowercase();
-                                // Skip content-length for streaming responses
-                                if name_lower == "content-length" {
+                                if node_is_sse && name_lower == "content-length" {
                                     continue;
                                 }
                                 if ALLOWED_RESPONSE_HEADERS.contains(&name_lower.as_str())
@@ -746,20 +774,41 @@ async fn execute_proxy_inner(
                                 }
                             }
 
-                            // Convert the mpsc receiver into a streaming body
+                            let service_id_owned = service_id.to_string();
+                            let node_id_owned = node_id.to_string();
+
+                            // Convert the mpsc receiver into a streaming body.
                             let stream = async_stream::stream! {
-                                while let Some(chunk) = rx.recv().await {
-                                    match chunk {
-                                        StreamChunk::Data(bytes) => {
+                                loop {
+                                    match tokio::time::timeout(idle_timeout, rx.recv()).await {
+                                        Ok(Some(StreamChunk::Data(bytes))) => {
                                             yield Ok::<_, std::io::Error>(bytes::Bytes::from(bytes));
                                         }
-                                        StreamChunk::End => break,
-                                        StreamChunk::Error(e) => {
-                                            tracing::error!(error = %e, "Stream error from node");
+                                        Ok(Some(StreamChunk::End)) => break,
+                                        Ok(Some(StreamChunk::Error(e))) => {
+                                            tracing::error!(
+                                                service_id = %service_id_owned,
+                                                node_id = %node_id_owned,
+                                                error = %e,
+                                                "Stream error from node"
+                                            );
+                                            yield Err(std::io::Error::other(format!(
+                                                "node stream error: {e}"
+                                            )));
                                             break;
                                         }
-                                        StreamChunk::Start { .. } => {
+                                        Ok(Some(StreamChunk::Start { .. })) => {
                                             // Duplicate start, ignore
+                                        }
+                                        Ok(None) => break,
+                                        Err(_) => {
+                                            tracing::warn!(
+                                                service_id = %service_id_owned,
+                                                node_id = %node_id_owned,
+                                                idle_timeout_secs,
+                                                "Node proxy stream idle timeout reached"
+                                            );
+                                            break;
                                         }
                                     }
                                 }
@@ -918,7 +967,7 @@ async fn execute_proxy_inner(
         return Ok(response);
     }
 
-    // Reuse the shared reqwest::Client from AppState for connection pooling
+    // Reuse the shared reqwest::Client from AppState for connection pooling.
     let downstream_response = proxy_service::forward_request(
         &state.http_client,
         &target,
@@ -926,7 +975,7 @@ async fn execute_proxy_inner(
         path,
         query.as_deref(),
         reqwest_headers,
-        body,
+        proxy_service::ProxyBody::Buffered(body),
         identity_headers,
         delegated,
     )
@@ -936,21 +985,20 @@ async fn execute_proxy_inner(
     let status = StatusCode::from_u16(downstream_response.status().as_u16())
         .unwrap_or(StatusCode::BAD_GATEWAY);
 
-    let upstream_is_sse = downstream_response
+    let is_sse = downstream_response
         .headers()
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .is_some_and(|ct| ct.contains("text/event-stream"));
-    // `streaming_supported` is discovery metadata only; runtime passthrough
-    // follows the upstream response on each request.
-    let is_sse = upstream_is_sse;
+    let should_stream = should_stream_response(&downstream_response, status, is_sse);
 
     let mut response_builder = Response::builder().status(status);
 
-    // Forward only allowlisted response headers
+    // Forward only allowlisted response headers.
+    // Skip content-length for SSE (length unknown). Keep it for other
+    // streaming responses — clients need it for download progress / seeking.
     for (name, value) in downstream_response.headers().iter() {
         let name_lower = name.as_str().to_lowercase();
-        // Skip content-length for SSE — the body is streamed, length unknown
         if is_sse && name_lower == "content-length" {
             continue;
         }
@@ -963,33 +1011,54 @@ async fn execute_proxy_inner(
         }
     }
 
-    let response = if is_sse && status.is_success() {
-        // Stream SSE responses directly without buffering.
-        // Wrap the byte stream to log errors from the upstream so we can
-        // diagnose premature connection drops.
+    let response = if should_stream {
+        // Stream response directly without buffering.
         let service_id_owned = service_id.to_string();
-        let stream = downstream_response.bytes_stream().map(move |chunk| {
-            if let Err(e) = &chunk {
-                tracing::error!(
-                    service_id = %service_id_owned,
-                    error = %e,
-                    error_debug = ?e,
-                    "SSE stream error from upstream — connection dropped"
-                );
+        let idle_timeout =
+            std::time::Duration::from_secs(state.config.proxy_stream_idle_timeout_secs);
+        let idle_timeout_secs = state.config.proxy_stream_idle_timeout_secs;
+        let mut upstream_stream = downstream_response.bytes_stream();
+        let stream = async_stream::stream! {
+            loop {
+                match tokio::time::timeout(idle_timeout, upstream_stream.next()).await {
+                    Ok(Some(Ok(bytes))) => {
+                        yield Ok::<_, std::io::Error>(bytes);
+                    }
+                    Ok(Some(Err(e))) => {
+                        tracing::error!(
+                            service_id = %service_id_owned,
+                            error = %e,
+                            error_debug = ?e,
+                            "Proxy stream error from upstream — connection dropped"
+                        );
+                        yield Err(std::io::Error::other(format!(
+                            "upstream stream error: {e}"
+                        )));
+                        break;
+                    }
+                    Ok(None) => break,
+                    Err(_) => {
+                        tracing::warn!(
+                            service_id = %service_id_owned,
+                            idle_timeout_secs,
+                            "Proxy stream idle timeout reached"
+                        );
+                        break;
+                    }
+                }
             }
-            chunk
-        });
+        };
         let body = Body::from_stream(stream);
         response_builder
             .body(body)
             .map_err(|e| AppError::Internal(format!("Failed to build response: {e}")))?
     } else {
+        // Buffer small / error responses so we can log diagnostics.
         let response_body = downstream_response
             .bytes()
             .await
             .map_err(|e| AppError::Internal(format!("Failed to read downstream response: {e}")))?;
 
-        // Log non-2xx response bodies for diagnostics
         if !status.is_success() {
             let body_preview =
                 String::from_utf8_lossy(&response_body[..response_body.len().min(1024)]);
@@ -1025,6 +1094,15 @@ async fn execute_proxy_inner(
     Ok(response)
 }
 
+async fn read_proxy_request_body(
+    request: Request<Body>,
+    max_body_size: usize,
+) -> AppResult<bytes::Bytes> {
+    axum::body::to_bytes(request.into_body(), max_body_size)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("Failed to read body: {e}")))
+}
+
 fn is_codex_transport_path(path: &str) -> bool {
     let normalized = path.trim_matches('/');
     normalized == "responses"
@@ -1045,10 +1123,83 @@ fn should_enforce_runtime_approval(
     requires_approval && *auth_method != crate::mw::auth::AuthMethod::Session
 }
 
+/// Threshold below which non-error responses are buffered (so small API
+/// responses keep the existing diagnostic-logging path).
+const STREAM_SIZE_THRESHOLD: u64 = 256 * 1024;
+
+/// Content types that should always be streamed regardless of size.
+const STREAMING_CONTENT_TYPES: &[&str] = &[
+    "text/event-stream",
+    "video/",
+    "audio/",
+    "application/octet-stream",
+    "image/",
+    "application/pdf",
+];
+
+/// Decide whether a downstream response should be streamed to the client
+/// instead of buffered in memory.
+///
+/// Streams when ANY of these is true:
+/// - Content-Type is SSE, video, audio, octet-stream, image, or PDF
+/// - Content-Length is absent (unknown size) or exceeds [`STREAM_SIZE_THRESHOLD`]
+/// - HTTP status is 206 Partial Content (range response)
+///
+/// Buffers when the response is small and not a streaming content type,
+/// preserving the error-body diagnostic logging for typical API errors.
+fn should_stream_response(response: &reqwest::Response, status: StatusCode, is_sse: bool) -> bool {
+    // SSE always streams (existing behaviour)
+    if is_sse {
+        return true;
+    }
+
+    // 206 Partial Content always streams (range responses)
+    if status == StatusCode::PARTIAL_CONTENT {
+        return true;
+    }
+
+    // Check content type for media / binary types
+    if let Some(ct) = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+    {
+        let ct_lower = ct.to_lowercase();
+        if STREAMING_CONTENT_TYPES
+            .iter()
+            .any(|prefix| ct_lower.starts_with(prefix))
+        {
+            return true;
+        }
+    }
+
+    // Stream when content-length is absent (unknown size) or large
+    match response.content_length() {
+        None => true,
+        Some(len) => len > STREAM_SIZE_THRESHOLD,
+    }
+}
+
+/// Validate that a Range header doesn't contain too many ranges (DoS prevention).
+/// RFC 7233 recommends limiting multi-range requests.
+fn validate_range_header(headers: &axum::http::HeaderMap) -> AppResult<()> {
+    const MAX_RANGES: usize = 4;
+    if let Some(range) = headers.get("range").and_then(|v| v.to_str().ok()) {
+        let range_count = range.matches(',').count() + 1;
+        if range_count > MAX_RANGES {
+            return Err(AppError::BadRequest(format!(
+                "Too many byte ranges requested ({range_count}), maximum is {MAX_RANGES}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         is_chat_completions_proxy_path, is_codex_transport_path, should_enforce_runtime_approval,
+        validate_range_header,
     };
     use crate::mw::auth::AuthMethod;
     use crate::services::proxy_service::validate_requested_proxy_path;
@@ -1060,6 +1211,35 @@ mod tests {
         routing::get,
     };
     use tower::ServiceExt;
+
+    // ---- validate_range_header tests ----
+
+    #[test]
+    fn range_header_absent_is_ok() {
+        let headers = axum::http::HeaderMap::new();
+        assert!(validate_range_header(&headers).is_ok());
+    }
+
+    #[test]
+    fn range_header_single_range_is_ok() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("range", "bytes=0-1023".parse().unwrap());
+        assert!(validate_range_header(&headers).is_ok());
+    }
+
+    #[test]
+    fn range_header_four_ranges_is_ok() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("range", "bytes=0-1,2-3,4-5,6-7".parse().unwrap());
+        assert!(validate_range_header(&headers).is_ok());
+    }
+
+    #[test]
+    fn range_header_five_ranges_rejected() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("range", "bytes=0-1,2-3,4-5,6-7,8-9".parse().unwrap());
+        assert!(validate_range_header(&headers).is_err());
+    }
 
     #[test]
     fn session_auth_bypasses_even_when_required() {

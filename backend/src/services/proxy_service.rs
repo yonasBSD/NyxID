@@ -23,6 +23,12 @@ use crate::services::delegation_service::DelegatedCredential;
 use crate::services::node_ws_manager::NodeWsManager;
 use crate::services::{user_api_key_service, user_service_service, user_token_service};
 
+/// Request body for proxy forwarding.
+pub enum ProxyBody {
+    /// Body has been buffered in memory (approval path, node proxy, Codex path).
+    Buffered(Option<bytes::Bytes>),
+}
+
 /// Result of resolving a proxy target.
 pub struct ProxyTarget {
     pub base_url: String,
@@ -51,6 +57,10 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
     "user-agent",
     "x-request-id",
     "x-correlation-id",
+    "range",
+    "if-range",
+    "if-none-match",
+    "if-modified-since",
 ];
 
 fn validate_path_injection_prefix(value: &str) -> AppResult<()> {
@@ -777,7 +787,7 @@ pub async fn forward_request(
     path: &str,
     query: Option<&str>,
     headers: reqwest::header::HeaderMap,
-    body: Option<bytes::Bytes>,
+    body: ProxyBody,
     identity_headers: Vec<(String, String)>,
     delegated_credentials: Vec<DelegatedCredential>,
 ) -> AppResult<reqwest::Response> {
@@ -858,12 +868,11 @@ pub async fn forward_request(
         request = request.header(name, value);
     }
 
-    if let Some(ref body_bytes) = body {
+    if let ProxyBody::Buffered(Some(ref body_bytes)) = body {
         // Log request body for LLM proxy calls to diagnose truncation issues
         if url.contains("/responses") {
             let body_str = String::from_utf8_lossy(body_bytes);
             let preview = if body_str.len() > 2048 {
-                // Find a safe char boundary at or before 2048 bytes
                 let mut end = 2048;
                 while end > 0 && !body_str.is_char_boundary(end) {
                     end -= 1;
@@ -885,8 +894,11 @@ pub async fn forward_request(
         }
     }
 
-    if let Some(body_bytes) = body {
-        request = request.body(body_bytes);
+    match body {
+        ProxyBody::Buffered(Some(body_bytes)) => {
+            request = request.body(body_bytes);
+        }
+        ProxyBody::Buffered(None) => {}
     }
 
     let response = request.send().await.map_err(|e| {
@@ -1006,7 +1018,7 @@ mod tests {
             "upload",
             None,
             headers,
-            Some(bytes::Bytes::from_static(b"PK\x03\x04")),
+            ProxyBody::Buffered(Some(bytes::Bytes::from_static(b"PK\x03\x04"))),
             vec![],
             vec![],
         )
@@ -1045,7 +1057,7 @@ mod tests {
             "sendMessage",
             None,
             reqwest::header::HeaderMap::new(),
-            None,
+            ProxyBody::Buffered(None),
             vec![],
             vec![DelegatedCredential {
                 provider_slug: "telegram-bot".to_string(),
@@ -1117,7 +1129,7 @@ mod tests {
             "folder\\sendMessage",
             None,
             reqwest::header::HeaderMap::new(),
-            None,
+            ProxyBody::Buffered(None),
             vec![],
             vec![],
         )
@@ -1169,7 +1181,7 @@ mod tests {
                 path,
                 None,
                 reqwest::header::HeaderMap::new(),
-                None,
+                ProxyBody::Buffered(None),
                 vec![],
                 vec![],
             )
@@ -1205,7 +1217,7 @@ mod tests {
             "v1/foo..bar/foo%2ebar",
             None,
             reqwest::header::HeaderMap::new(),
-            None,
+            ProxyBody::Buffered(None),
             vec![],
             vec![],
         )
@@ -1229,7 +1241,7 @@ mod tests {
             "sendMessage",
             None,
             reqwest::header::HeaderMap::new(),
-            None,
+            ProxyBody::Buffered(None),
             vec![],
             vec![DelegatedCredential {
                 provider_slug: "telegram-bot".to_string(),
@@ -1257,7 +1269,7 @@ mod tests {
                 "sendMessage",
                 None,
                 reqwest::header::HeaderMap::new(),
-                None,
+                ProxyBody::Buffered(None),
                 vec![],
                 vec![DelegatedCredential {
                     provider_slug: "telegram-bot".to_string(),
@@ -1285,7 +1297,7 @@ mod tests {
             "sendMessage",
             None,
             reqwest::header::HeaderMap::new(),
-            None,
+            ProxyBody::Buffered(None),
             vec![],
             vec![DelegatedCredential {
                 provider_slug: "telegram-bot".to_string(),
@@ -1313,7 +1325,7 @@ mod tests {
                 "sendMessage",
                 None,
                 reqwest::header::HeaderMap::new(),
-                None,
+                ProxyBody::Buffered(None),
                 vec![],
                 vec![DelegatedCredential {
                     provider_slug: "telegram-bot".to_string(),
@@ -1341,7 +1353,7 @@ mod tests {
             "sendMessage",
             None,
             reqwest::header::HeaderMap::new(),
-            None,
+            ProxyBody::Buffered(None),
             vec![],
             vec![DelegatedCredential {
                 provider_slug: "telegram-bot".to_string(),
@@ -1394,7 +1406,7 @@ mod tests {
             "sendMessage",
             None,
             reqwest::header::HeaderMap::new(),
-            None,
+            ProxyBody::Buffered(None),
             vec![],
             vec![DelegatedCredential {
                 provider_slug: "telegram-bot".to_string(),
