@@ -194,9 +194,9 @@ function AiSkillSetupCard({
           <code className="rounded bg-muted px-1 py-0.5 text-[10px]">
             nyxid ai-setup status
           </code>
-          . Update the CLI:{" "}
+          . Update the CLI by re-running the installer:{" "}
           <code className="rounded bg-muted px-1 py-0.5 text-[10px]">
-            cargo install --git https://github.com/ChronoAIProject/NyxID nyxid-cli
+            bash -c &quot;$(curl -fsSL ...install.sh)&quot;
           </code>
         </p>
       </CardContent>

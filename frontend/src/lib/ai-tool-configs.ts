@@ -119,7 +119,7 @@ function openclawConfig(params: AiToolConfigParams): string {
     ``,
     `## Setup`,
     ``,
-    `1. Install the CLI: \`cargo install --git https://github.com/ChronoAIProject/NyxID nyxid-cli\``,
+    `1. Install the CLI: \`bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/tools/install.sh)"\``,
     `2. Log in: \`nyxid login --base-url ${params.baseUrl}\``,
     `3. Run: \`nyxid openclaw setup --url <OPENCLAW_GATEWAY_URL>\``,
     ``,
@@ -161,9 +161,11 @@ function toolSetupPrompt(
   tool: AiTool,
   p: SetupPromptParams,
 ): string {
+  const installSh = `bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/tools/install.sh)"`;
   const cliInstall = [
-    `1. Install the NyxID CLI:`,
-    `   cargo install --git https://github.com/ChronoAIProject/NyxID nyxid-cli`,
+    `1. Install the NyxID CLI (handles Rust, build, and PATH automatically):`,
+    `   ${installSh}`,
+    `   Then open a new terminal and log in:`,
     `   nyxid login --base-url ${p.baseUrl}`,
   ];
 
@@ -172,8 +174,8 @@ function toolSetupPrompt(
       `Read ${p.baseUrl}/llms.txt to understand what NyxID can do, then help me with whatever I need.`,
       `The NyxID server is at ${p.baseUrl} and the dashboard is at ${p.dashboardUrl}.`,
       `Use the nyxid CLI for all operations -- if it's not installed or needs updating, run:`,
-      `cargo install --git https://github.com/ChronoAIProject/NyxID nyxid-cli`,
-      `(requires Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh).`,
+      `bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/tools/install.sh)"`,
+      `(installs Rust if missing, builds the CLI, and configures PATH).`,
       `For secrets, always use --credential-env to read from environment variables.`,
       `Use --output json for machine-readable output.`,
     ].join(" ");
@@ -228,7 +230,8 @@ function toolSetupPrompt(
   lines.push(
     ``,
     `To update the skill: nyxid ai-setup update --tool ${toolFlag}`,
-    `To update the CLI itself: cargo install --git https://github.com/ChronoAIProject/NyxID nyxid-cli`,
+    `To update the CLI itself, re-run the installer:`,
+    `  ${installSh}`,
   );
 
   return lines.join("\n");
@@ -254,19 +257,19 @@ export type AiToolSkillType = "auto-refresh" | "manual-refresh" | "provider-leve
 export const AI_TOOL_SKILL_INFO: Record<AiTool, { type: AiToolSkillType; note: string }> = {
   "claude-code": {
     type: "manual-refresh",
-    note: "Same SKILL.md from GitHub + playbook from server. Update skill: nyxid ai-setup update. Update CLI: cargo install --git ... nyxid-cli",
+    note: "Same SKILL.md from GitHub + playbook from server. Update skill: nyxid ai-setup update. Update CLI: re-run install.sh",
   },
   cursor: {
     type: "manual-refresh",
-    note: "Concise skill as Cursor rule (project-level). Update skill: nyxid ai-setup update --tool cursor. Update CLI: cargo install --git ... nyxid-cli",
+    note: "Concise skill as Cursor rule (project-level). Update skill: nyxid ai-setup update --tool cursor. Update CLI: re-run install.sh",
   },
   codex: {
     type: "manual-refresh",
-    note: "Same SKILL.md from GitHub + playbook from server. Update skill: nyxid ai-setup update. Update CLI: cargo install --git ... nyxid-cli",
+    note: "Same SKILL.md from GitHub + playbook from server. Update skill: nyxid ai-setup update. Update CLI: re-run install.sh",
   },
   openclaw: {
     type: "manual-refresh",
-    note: "Full skill bundle with tool scripts. Update skill: nyxid ai-setup update --tool openclaw. Update CLI: cargo install --git ... nyxid-cli",
+    note: "Full skill bundle with tool scripts. Update skill: nyxid ai-setup update --tool openclaw. Update CLI: re-run install.sh",
   },
   chatgpt: {
     type: "paste-prompt",
