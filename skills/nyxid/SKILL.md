@@ -10,7 +10,7 @@ metadata:
       bins:
         - nyxid
     setup:
-      - cargo install --git https://github.com/ChronoAIProject/NyxID nyxid-cli
+      - bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/tools/install.sh)"
   clawdbot:
     emoji: "key"
     files:
@@ -27,17 +27,15 @@ For the full API reference, error codes, and advanced topics (SSH, MCP, OAuth cl
 
 ## Setup
 
-Install the Rust toolchain and NyxID CLI (one-time):
+Install the NyxID CLI (one-time):
 
 ```bash
-# Install Rust (macOS / Linux)
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source "$HOME/.cargo/env"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/tools/install.sh)"
+```
 
-# Install NyxID CLI
-cargo install --git https://github.com/ChronoAIProject/NyxID nyxid-cli
+The installer handles everything: installs Rust if missing, builds the CLI, and configures your shell PATH. Open a new terminal afterwards, then log in:
 
-# Log in (opens browser, saves URL for all future commands)
+```bash
 nyxid login --base-url https://nyx-api.chrono-ai.fun
 ```
 
@@ -45,10 +43,10 @@ The CLI stores tokens at `~/.nyxid/` and auto-refreshes them. The base URL is sa
 
 ## Updating
 
-To update the NyxID CLI to the latest version, reinstall it:
+To update the NyxID CLI to the latest version, re-run the installer:
 
 ```bash
-cargo install --git https://github.com/ChronoAIProject/NyxID nyxid-cli
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/tools/install.sh)"
 ```
 
 To update the installed AI skill (fetches latest skill + playbook from server):
@@ -261,7 +259,7 @@ nyxid api-key update <ID> --allow-all-services true    # unrestrict
 nyxid node register-token
 
 # Step 2: Install nyxid CLI on the target machine
-cargo install --git https://github.com/ChronoAIProject/NyxID nyxid-cli
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/tools/install.sh)"
 
 # Step 3: Register the node (--keychain recommended for secure storage)
 nyxid node register \
@@ -377,6 +375,16 @@ nyxid notification telegram-link                       # link telegram account
 ```bash
 nyxid openclaw setup --url http://localhost:18789   # CLI prompts for token securely
 ```
+
+**For OpenClaw users:** After installing or updating this skill, start a new chat to activate it. If the gateway isn't installed as a background service yet, set it up so it stays running and restarts automatically:
+
+```bash
+openclaw gateway status    # check if already running as a service
+openclaw gateway install   # install as system service (systemd on Linux, launchd on macOS)
+openclaw gateway start     # start the service
+```
+
+Without this, restarting the gateway (`openclaw gateway restart`) will shut it down and it won't come back up on its own.
 
 ## Account Management
 

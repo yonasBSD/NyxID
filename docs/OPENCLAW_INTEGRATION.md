@@ -115,8 +115,12 @@ You should see `NyxID` marked as ready. If it shows as blocked, ensure `nyxid` i
 
 Reload OpenClaw after installing the skill:
 - **Start a new chat session** -- simplest option
-- **Restart the gateway** -- `openclaw gateway restart`
-- Verify with `openclaw gateway status`
+- **Optional:** install the gateway as a background service so it stays running:
+  ```bash
+  openclaw gateway install
+  openclaw gateway start
+  openclaw gateway status
+  ```
 
 Ask: "What services do I have connected in NyxID?"
 

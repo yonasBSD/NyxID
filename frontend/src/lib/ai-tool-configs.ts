@@ -218,7 +218,8 @@ function toolSetupPrompt(
       `  ~/.openclaw/skills/nyxid/references/playbook.md (full reference)`,
       `  ~/.openclaw/skills/nyxid/tools/                 (shell tool wrappers)`,
       ``,
-      `After install: start a new OpenClaw chat or run openclaw gateway restart.`,
+      `After install: start a new OpenClaw chat.`,
+      `Optional: install the gateway as a background service with openclaw gateway install, then openclaw gateway start.`,
       `Verify: openclaw skills check (should show NyxID as ready).`,
     ],
   };
