@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
+use crate::api::{CLI_USER_AGENT, build_cli_http_client};
 use crate::cli::{AuthArgs, LoginArgs};
 
 const TOKEN_DIR_NAME: &str = ".nyxid";
@@ -154,10 +155,7 @@ pub async fn run_logout(base_url: &str) -> Result<()> {
 
     // Best-effort server-side logout
     if let Some(token) = read_saved_token() {
-        let client = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .build()
-            .context("Failed to build HTTP client")?;
+        let client = build_cli_http_client()?;
 
         let _ = client
             .post(format!("{base_url}/api/v1/auth/logout"))
@@ -183,7 +181,7 @@ async fn run_browser_login(base_url: &str) -> Result<()> {
     let port = listener.local_addr()?.port();
 
     let state = generate_state();
-    let auth_url = format!("{frontend_url}/cli-auth?port={port}&state={state}");
+    let auth_url = build_cli_auth_url(&frontend_url, port, &state)?;
 
     eprintln!("Opening browser to log in...");
     eprintln!();
@@ -305,6 +303,18 @@ fn callback_success_html() -> &'static str {
 </html>"#
 }
 
+fn build_cli_auth_url(frontend_url: &str, port: u16, state: &str) -> Result<String> {
+    let mut url = url::Url::parse(&format!("{}/cli-auth", frontend_url.trim_end_matches('/')))
+        .context("Invalid frontend URL")?;
+    {
+        let mut query = url.query_pairs_mut();
+        query.append_pair("port", &port.to_string());
+        query.append_pair("state", state);
+        query.append_pair("client_ua", CLI_USER_AGENT);
+    }
+    Ok(url.into())
+}
+
 #[derive(Deserialize)]
 struct PublicConfig {
     frontend_url: String,
@@ -312,10 +322,7 @@ struct PublicConfig {
 
 pub async fn fetch_frontend_url(base_url: &str) -> Result<String> {
     let config_url = format!("{base_url}/api/v1/public/config");
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .build()
-        .context("Failed to build HTTP client")?;
+    let client = build_cli_http_client()?;
 
     let config: PublicConfig = client
         .get(&config_url)
@@ -363,10 +370,7 @@ async fn run_password_login(base_url: &str, email: Option<&str>) -> Result<()> {
     let base_url = base_url.trim_end_matches('/');
     let login_url = format!("{base_url}/api/v1/auth/login");
 
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .build()
-        .context("Failed to build HTTP client")?;
+    let client = build_cli_http_client()?;
 
     let response = client
         .post(&login_url)
@@ -402,8 +406,10 @@ async fn run_password_login(base_url: &str, email: Option<&str>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        callback_success_html, parse_callback_request, refresh_token_file_path, token_file_path,
+        build_cli_auth_url, callback_success_html, parse_callback_request, refresh_token_file_path,
+        token_file_path,
     };
+    use crate::api::CLI_USER_AGENT;
 
     #[test]
     fn token_path_is_under_home() {
@@ -452,5 +458,23 @@ mod tests {
     #[test]
     fn success_html_is_not_empty() {
         assert!(callback_success_html().contains("Login successful"));
+    }
+
+    #[test]
+    fn build_cli_auth_url_includes_cli_user_agent() {
+        let auth_url = build_cli_auth_url("https://app.example.com/", 43123, "deadbeef")
+            .expect("should build");
+        let parsed = url::Url::parse(&auth_url).expect("valid URL");
+        let params = parsed
+            .query_pairs()
+            .collect::<std::collections::HashMap<_, _>>();
+
+        assert_eq!(parsed.path(), "/cli-auth");
+        assert_eq!(params.get("port").map(|v| v.as_ref()), Some("43123"));
+        assert_eq!(params.get("state").map(|v| v.as_ref()), Some("deadbeef"));
+        assert_eq!(
+            params.get("client_ua").map(|v| v.as_ref()),
+            Some(CLI_USER_AGENT)
+        );
     }
 }

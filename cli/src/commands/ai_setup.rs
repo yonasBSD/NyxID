@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 
+use crate::api::CLI_USER_AGENT;
 use crate::cli::{AiSetupCommands, AiToolTarget};
 
 /// GitHub raw base URL for the NyxID repository.
@@ -54,6 +55,7 @@ const MAX_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
 
 fn http_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
+        .user_agent(CLI_USER_AGENT)
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(30))
         .build()

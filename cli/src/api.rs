@@ -3,6 +3,17 @@ use reqwest::Client;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+/// User-Agent string sent on all CLI HTTP requests.
+pub const CLI_USER_AGENT: &str = concat!("nyxid-cli/", env!("CARGO_PKG_VERSION"));
+
+pub fn build_cli_http_client() -> Result<Client> {
+    Client::builder()
+        .user_agent(CLI_USER_AGENT)
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()
+        .context("Failed to build HTTP client")
+}
+
 pub struct ApiClient {
     client: Client,
     base_url: String,
@@ -17,10 +28,7 @@ struct RefreshResponse {
 
 impl ApiClient {
     pub fn new(base_url: &str, access_token: String) -> Result<Self> {
-        let client = Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .build()
-            .context("Failed to build HTTP client")?;
+        let client = build_cli_http_client()?;
 
         Ok(Self {
             client,
@@ -340,10 +348,7 @@ pub async fn anonymous_post(
 ) -> Result<serde_json::Value> {
     let base = format!("{}/api/v1", base_url.trim_end_matches('/'));
     let url = format!("{base}{path}");
-    let client = Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .build()
-        .context("Failed to build HTTP client")?;
+    let client = build_cli_http_client()?;
 
     let resp = client
         .post(&url)
@@ -367,10 +372,7 @@ pub async fn anonymous_post(
 pub async fn anonymous_post_empty(base_url: &str, path: &str, body: &impl Serialize) -> Result<()> {
     let base = format!("{}/api/v1", base_url.trim_end_matches('/'));
     let url = format!("{base}{path}");
-    let client = Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .build()
-        .context("Failed to build HTTP client")?;
+    let client = build_cli_http_client()?;
 
     let resp = client
         .post(&url)
