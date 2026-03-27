@@ -27,40 +27,26 @@ For the full API reference, error codes, and advanced topics (SSH, MCP, OAuth cl
 
 ## Setup
 
-Install the Rust toolchain and NyxID CLI (one-time):
+Install the NyxID CLI (one-time):
 
 ```bash
-# One-line install (installs Rust if missing, installs CLI, configures PATH)
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/tools/install.sh)"
-
-# Open a new terminal (or source your shell RC), then log in
-nyxid login --base-url https://nyx-api.chrono-ai.fun
 ```
 
-The installer automatically:
-1. Installs the Rust toolchain via rustup (if not already present)
-2. Installs the NyxID CLI binary to `~/.cargo/bin/`
-3. Detects your shell (zsh, bash, fish) and adds `~/.cargo/bin` to PATH in the appropriate RC file
-
-If you already have Rust installed, you can also install manually:
+The installer handles everything: installs Rust if missing, builds the CLI, and configures your shell PATH. Open a new terminal afterwards, then log in:
 
 ```bash
-source "$HOME/.cargo/env"
-cargo install --git https://github.com/ChronoAIProject/NyxID nyxid-cli
+nyxid login --base-url https://nyx-api.chrono-ai.fun
 ```
 
 The CLI stores tokens at `~/.nyxid/` and auto-refreshes them. The base URL is saved on login -- all subsequent commands use it automatically.
 
 ## Updating
 
-To update the NyxID CLI to the latest version, reinstall it:
+To update the NyxID CLI to the latest version, re-run the installer:
 
 ```bash
-# Full installer (also fixes PATH if needed)
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/tools/install.sh)"
-
-# Or if cargo is already in PATH:
-cargo install --git https://github.com/ChronoAIProject/NyxID nyxid-cli
 ```
 
 To update the installed AI skill (fetches latest skill + playbook from server):
