@@ -8,7 +8,7 @@ use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 
-use crate::api::ApiClient;
+use crate::api::{ApiClient, build_cli_http_client};
 use crate::cli::SshCli;
 
 /// Resolve service_id to DownstreamService ID.
@@ -349,10 +349,7 @@ async fn issue_certificate(
     };
 
     let endpoint = build_issue_cert_url(base_url, service_id)?;
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .build()
-        .context("Failed to build SSH certificate HTTP client")?;
+    let client = build_cli_http_client().context("Failed to build SSH certificate HTTP client")?;
 
     let response = client
         .post(endpoint)

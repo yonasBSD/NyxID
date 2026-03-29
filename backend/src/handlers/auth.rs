@@ -2,11 +2,12 @@ use std::net::SocketAddr;
 
 use axum::{
     Json,
+    body::Bytes,
     extract::{ConnectInfo, State},
     http::{HeaderMap, header},
 };
 use serde::{Deserialize, Serialize};
-use validator::Validate;
+use validator::{Validate, ValidationError};
 
 use mongodb::bson::doc;
 
@@ -118,6 +119,38 @@ pub(crate) fn extract_user_agent(headers: &HeaderMap) -> Option<String> {
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
         .map(String::from)
+}
+
+fn resolve_cli_session_user_agent(
+    client_ua: Option<String>,
+    headers: &HeaderMap,
+) -> Option<String> {
+    client_ua
+        .map(|ua| ua.trim().to_string())
+        .filter(|ua| !ua.is_empty())
+        .or_else(|| extract_user_agent(headers))
+}
+
+fn validate_cli_user_agent(client_ua: &str) -> Result<(), ValidationError> {
+    if client_ua.chars().any(|ch| ch.is_ascii_control()) {
+        return Err(ValidationError::new("cli_user_agent_control_chars"));
+    }
+
+    Ok(())
+}
+
+fn parse_cli_token_request_body(body: Bytes) -> AppResult<Option<CliTokenRequest>> {
+    if body.is_empty() {
+        return Ok(None);
+    }
+
+    let request: CliTokenRequest = serde_json::from_slice(&body)
+        .map_err(|_| AppError::BadRequest("Invalid CLI token request body".to_string()))?;
+    request
+        .validate()
+        .map_err(|e| AppError::ValidationError(e.to_string()))?;
+
+    Ok(Some(request))
 }
 
 /// Build a Set-Cookie header value for an HttpOnly cookie with explicit SameSite policy.
@@ -735,18 +768,29 @@ pub async fn setup(
 ///
 /// Issue an access token and refresh token for the CLI. Requires cookie-based
 /// session auth (used by the `/cli-auth` frontend page after browser login).
+///
+/// The `client_ua` field in the request body carries the CLI's own User-Agent
+/// string through the browser round-trip so the session is recorded as a CLI
+/// session rather than a browser session.
 pub async fn cli_token(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     auth_user: AuthUser,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> AppResult<Json<CliTokenResponse>> {
+    let client_ua = parse_cli_token_request_body(body)?.and_then(|body| body.client_ua);
+
     let user_id_str = auth_user.user_id.to_string();
+    let user_agent = resolve_cli_session_user_agent(client_ua, &headers);
+
     let tokens = token_service::create_session_and_issue_tokens(
         &state.db,
         &state.config,
         &state.jwt_keys,
         &user_id_str,
-        None,
-        None,
+        extract_ip(&headers, Some(peer)).as_deref(),
+        user_agent.as_deref(),
     )
     .await?;
 
@@ -754,6 +798,14 @@ pub async fn cli_token(
         access_token: tokens.access_token,
         refresh_token: tokens.refresh_token,
     }))
+}
+
+#[derive(Debug, Deserialize, Validate)]
+pub struct CliTokenRequest {
+    /// The CLI's User-Agent string, passed through the browser round-trip.
+    #[validate(length(max = 512, message = "CLI user-agent too long"))]
+    #[validate(custom(function = "validate_cli_user_agent"))]
+    pub client_ua: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -765,6 +817,7 @@ pub struct CliTokenResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Bytes;
 
     #[test]
     fn explicit_mobile_client_uses_token_mode() {
@@ -804,5 +857,73 @@ mod tests {
             resolve_auth_client_mode(&headers, Some("token")),
             AuthClientMode::TokenClient
         );
+    }
+
+    #[test]
+    fn cli_session_prefers_client_user_agent_over_browser_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::USER_AGENT, "Mozilla/5.0".parse().unwrap());
+
+        assert_eq!(
+            resolve_cli_session_user_agent(Some("nyxid-cli/0.1.0".to_string()), &headers),
+            Some("nyxid-cli/0.1.0".to_string())
+        );
+    }
+
+    #[test]
+    fn cli_session_falls_back_to_browser_header_when_client_user_agent_is_blank() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::USER_AGENT, "Mozilla/5.0".parse().unwrap());
+
+        assert_eq!(
+            resolve_cli_session_user_agent(Some("   ".to_string()), &headers),
+            Some("Mozilla/5.0".to_string())
+        );
+    }
+
+    #[test]
+    fn cli_session_falls_back_to_browser_header_when_client_user_agent_is_missing() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::USER_AGENT, "Mozilla/5.0".parse().unwrap());
+
+        assert_eq!(
+            resolve_cli_session_user_agent(None, &headers),
+            Some("Mozilla/5.0".to_string())
+        );
+    }
+
+    #[test]
+    fn cli_token_request_rejects_overlong_client_user_agent() {
+        let body = CliTokenRequest {
+            client_ua: Some("x".repeat(513)),
+        };
+
+        assert!(body.validate().is_err());
+    }
+
+    #[test]
+    fn cli_token_request_rejects_control_characters() {
+        let body = CliTokenRequest {
+            client_ua: Some("nyxid-cli/0.1.0\nspoof".to_string()),
+        };
+
+        assert!(body.validate().is_err());
+    }
+
+    #[test]
+    fn parse_cli_token_request_body_accepts_empty_body() {
+        assert!(
+            parse_cli_token_request_body(Bytes::new())
+                .expect("empty body should be accepted")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn parse_cli_token_request_body_rejects_invalid_json() {
+        let error = parse_cli_token_request_body(Bytes::from_static(b"{"))
+            .expect_err("invalid JSON should be rejected");
+
+        assert!(matches!(error, AppError::BadRequest(_)));
     }
 }

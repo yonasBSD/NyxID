@@ -5,11 +5,7 @@ import { api } from "@/lib/api-client";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { AlertCircle, Terminal } from "lucide-react";
-
-interface CliAuthSearch {
-  readonly port?: string;
-  readonly state?: string;
-}
+import { buildCliAuthReturnPath, type CliAuthSearch } from "./cli-auth.helpers";
 
 interface TokenResponse {
   readonly access_token: string;
@@ -18,7 +14,9 @@ interface TokenResponse {
 
 export function CliAuthPage() {
   const navigate = useNavigate();
-  const { port, state } = useSearch({ strict: false }) as CliAuthSearch;
+  const { port, state, client_ua } = useSearch({
+    strict: false,
+  }) as CliAuthSearch;
   const { isAuthenticated, isLoading } = useAuthStore();
   const callbackSent = useRef(false);
 
@@ -30,10 +28,7 @@ export function CliAuthPage() {
     // return_to lands in the real URL search params where the login
     // page reads it via window.location.search.
     if (!isAuthenticated) {
-      const returnPath = `/cli-auth?${new URLSearchParams({
-        ...(port ? { port } : {}),
-        ...(state ? { state } : {}),
-      }).toString()}`;
+      const returnPath = buildCliAuthReturnPath({ port, state, client_ua });
       const returnTo = `${window.location.origin}${returnPath}`;
       window.location.assign(
         `/login?return_to=${encodeURIComponent(returnTo)}`,
@@ -44,9 +39,9 @@ export function CliAuthPage() {
     // Authenticated and we have a CLI callback port -- send the token
     if (port && !callbackSent.current) {
       callbackSent.current = true;
-      void sendTokenToCliCallback(port, state);
+      void sendTokenToCliCallback(port, state, client_ua);
     }
-  }, [isAuthenticated, isLoading, port, state, navigate]);
+  }, [isAuthenticated, isLoading, port, state, client_ua, navigate]);
 
   if (isLoading) {
     return (
@@ -98,10 +93,17 @@ export function CliAuthPage() {
   );
 }
 
-async function sendTokenToCliCallback(port: string, state?: string) {
+async function sendTokenToCliCallback(
+  port: string,
+  state?: string,
+  clientUa?: string,
+) {
   try {
-    // Request a fresh access token for the CLI (uses cookie session)
-    const response = await api.post<TokenResponse>("/auth/cli-token");
+    // Request a fresh access token for the CLI (uses cookie session).
+    // Pass through the CLI's user-agent so the session is identifiable.
+    const response = await api.post<TokenResponse>("/auth/cli-token", {
+      client_ua: clientUa,
+    });
     const callbackUrl = new URL(`http://127.0.0.1:${port}/callback`);
     callbackUrl.searchParams.set("access_token", response.access_token);
     callbackUrl.searchParams.set("refresh_token", response.refresh_token);
