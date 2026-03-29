@@ -252,6 +252,8 @@ nyxid api-key update <ID> --allow-all-services true    # unrestrict
 
 ## Node Management
 
+Nodes are for users who do not want their credentials stored on the NyxID server. Instead, credentials stay encrypted on the user's own machine (the node). When a proxy request comes in, NyxID passes it through to the node agent via WebSocket, the node injects the credential locally and forwards the request to the downstream service. The credential never leaves the node.
+
 ### Setting up a new node
 
 Registration must happen before installing the daemon. Credentials can be added before or after starting -- the agent reloads them automatically within 5 seconds.
@@ -451,7 +453,7 @@ All requests are made through the `nyxid` CLI, which connects to the NyxID insta
 
 ## Security and Privacy
 
-- **Credentials never leave NyxID.** Requests go to the NyxID proxy, which injects stored credentials server-side.
+- **Credentials are protected.** For server-stored credentials, NyxID injects them server-side. For node-routed services, credentials never leave the user's node -- NyxID passes the request through and the node injects credentials locally.
 - **Authentication tokens auto-refresh.** The CLI handles token refresh automatically.
 - **No data is sent to third parties.** All traffic flows between the agent and the user's NyxID instance.
 - **Audit logging.** All proxy requests are logged in NyxID for user review.
