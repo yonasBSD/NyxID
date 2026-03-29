@@ -5,7 +5,7 @@ use comfy_table::{Table, presets::UTF8_FULL_CONDENSED};
 use serde_json::Value;
 
 use crate::api::ApiClient;
-use crate::cli::{NodeCommands, OutputFormat};
+use crate::cli::{NodeCommands, NodeDaemonCommands, OutputFormat};
 
 pub async fn run(command: NodeCommands) -> Result<()> {
     match command {
@@ -252,6 +252,36 @@ pub async fn run(command: NodeCommands) -> Result<()> {
             crate::node::agent::cmd_version();
             Ok(())
         }
+
+        NodeCommands::Daemon { command } => match command {
+            NodeDaemonCommands::Install {
+                args,
+                log_level,
+                force,
+            } => crate::node::daemon::install(args.config.as_deref(), log_level.as_deref(), force)
+                .map_err(anyhow::Error::from),
+            NodeDaemonCommands::Uninstall { args } => {
+                crate::node::daemon::uninstall(args.config.as_deref()).map_err(anyhow::Error::from)
+            }
+            NodeDaemonCommands::Start { args } => {
+                crate::node::daemon::start(args.config.as_deref()).map_err(anyhow::Error::from)
+            }
+            NodeDaemonCommands::Stop { args } => {
+                crate::node::daemon::stop(args.config.as_deref()).map_err(anyhow::Error::from)
+            }
+            NodeDaemonCommands::Restart { args } => {
+                crate::node::daemon::restart(args.config.as_deref()).map_err(anyhow::Error::from)
+            }
+            NodeDaemonCommands::Status { args } => {
+                crate::node::daemon::status(args.config.as_deref()).map_err(anyhow::Error::from)
+            }
+            NodeDaemonCommands::Logs {
+                args,
+                follow,
+                lines,
+            } => crate::node::daemon::logs(args.config.as_deref(), follow, lines)
+                .map_err(anyhow::Error::from),
+        },
     }
 }
 

@@ -36,6 +36,7 @@ Try asking your AI agent any of these:
 - "Call the OpenAI API through NyxID" -- proxies requests with your stored credentials
 - "Add my Anthropic API key" -- guided setup with link to the provider portal
 - "Set up a new credential node" -- deploy an on-premise credential agent
+- "Install the node agent as a background service" -- set up auto-start on login
 - "Show my NyxID account status" -- overview of services, keys, and nodes
 - "Create an API key for my app" -- programmatic access to NyxID
 - "Set up MCP for Cursor" -- generate MCP config for any AI tool

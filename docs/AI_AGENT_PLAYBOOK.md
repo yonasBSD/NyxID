@@ -1149,6 +1149,8 @@ nyxid node register \
 
 ### Step 4: Add credentials
 
+Credentials can be added before or after starting the agent. The agent watches the config file and reloads credentials automatically within 5 seconds (no restart needed). You can also update or remove credentials while the agent is running.
+
 Add credentials for each service the node will handle:
 
 ```bash
@@ -1240,29 +1242,44 @@ nyxid node credentials add-oauth --service "github" --provider-slug "github"
 # Opens browser for OAuth authorization, stores tokens locally
 ```
 
-### Step 6: Start the agent
+### Step 6: Install and start as a background service
+
+**Prerequisite:** The node must be registered (steps 2-3) before installing the daemon. Credentials (step 4) can be added before or after starting -- the agent picks them up automatically.
+
+The recommended way to run the node agent in production is as a background service. The CLI handles platform-specific service installation automatically (launchd on macOS, systemd on Linux):
 
 ```bash
-nyxid node start
+# Install as a background service (auto-starts on login, restarts on crash)
+nyxid node daemon install
+
+# Start the service
+nyxid node daemon start
 ```
 
-The agent connects via WebSocket and automatically reconnects with exponential backoff (100ms to 60s) if the connection drops. Run it as a systemd service or supervisor process for production.
+The agent connects via WebSocket and automatically reconnects with exponential backoff (100ms to 60s) if the connection drops.
 
-**Example systemd unit:**
+**Managing the service:**
 
-```ini
-[Unit]
-Description=NyxID Node Agent
-After=network.target
+```bash
+nyxid node daemon status                               # check if installed and running
+nyxid node daemon restart                              # restart (picks up config changes)
+nyxid node daemon stop                                 # stop the service
+nyxid node daemon logs                                 # show recent logs
+nyxid node daemon logs --follow                        # tail logs in real time
+nyxid node daemon uninstall                            # remove background service
+```
 
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/nyxid node start
-Restart=always
-RestartSec=5
+**Service files:**
+- macOS: `~/Library/LaunchAgents/dev.nyxid.node.plist`
+- Linux: `~/.config/systemd/user/nyxid-node.service`
 
-[Install]
-WantedBy=multi-user.target
+On Linux, the installer enables user lingering (`loginctl enable-linger`) so the service keeps running after logout.
+
+**Foreground mode** (for debugging):
+
+```bash
+nyxid node start                                       # runs in foreground, Ctrl+C to stop
+nyxid node start --log-level debug                     # verbose logging
 ```
 
 ### Configuration file reference
@@ -1326,20 +1343,36 @@ nyxid node migrate --to file       # OS keychain -> file
 ### All CLI commands
 
 ```bash
+# Registration and foreground operation
 nyxid node register       --token <TOKEN> [--url <WS_URL>] [--config <PATH>] [--keychain]
-nyxid node start          [--config <PATH>] [--log-level <LEVEL>]
-nyxid node status         [--config <PATH>]
+nyxid node start          [--config <PATH>] [--log-level <LEVEL>]   # foreground mode
+nyxid node agent-status   [--config <PATH>]                         # read-only local config check
 nyxid node rekey          --auth-token <TOKEN> --signing-secret <HEX> [--config <PATH>]
+
+# Background service lifecycle (launchd on macOS, systemd on Linux)
+nyxid node daemon install    [--config <PATH>] [--log-level <LEVEL>] [--force]
+nyxid node daemon uninstall  [--config <PATH>]
+nyxid node daemon start      [--config <PATH>]
+nyxid node daemon stop       [--config <PATH>]
+nyxid node daemon restart    [--config <PATH>]
+nyxid node daemon status     [--config <PATH>]
+nyxid node daemon logs       [--config <PATH>] [--follow] [--lines <N>]
+
+# Credential management
 nyxid node credentials setup     --service <SLUG> [--api-url <URL>]  # Auto-detect and setup (recommended)
 nyxid node credentials add       --service <SLUG> [--header <NAME> | --query-param <NAME>] [--secret-format Raw|Bearer|Basic] [--target-url <URL>]
 nyxid node credentials add-oauth --service <SLUG> --from-catalog [--api-url <URL>]  # OAuth flow from node
 nyxid node credentials list      [--config <PATH>]
 nyxid node credentials remove    --service <SLUG> [--config <PATH>]
+
+# OpenClaw integration
 nyxid node openclaw connect      --url <GATEWAY_URL> [--token <TOKEN>] [--access-token <JWT>] [--api-url <URL>]
 nyxid node openclaw status       [--config <PATH>]
 nyxid node openclaw disconnect   [--config <PATH>]
+
+# Secret storage migration
 nyxid node migrate        --to <file|keychain> [--config <PATH>]
-nyxid node version
+nyxid node agent-version
 ```
 
 The node agent also supports live credential updates via WebSocket `credential_update` messages from the server, enabling remote credential rotation without restarting the agent.

@@ -45,7 +45,8 @@ directories = "5"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 thiserror = "2"
 pty-process = { version = "0.5.3", features = ["async"] }
-nix = { version = "0.29", features = ["term"] }
+libc = "0.2"
+nix = { version = "0.29", features = ["term", "process", "signal"] }
 tempfile = "3"
 
 [dev-dependencies]

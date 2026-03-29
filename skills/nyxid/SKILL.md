@@ -252,7 +252,11 @@ nyxid api-key update <ID> --allow-all-services true    # unrestrict
 
 ## Node Management
 
+Nodes are for users who do not want their credentials stored on the NyxID server. Instead, credentials stay encrypted on the user's own machine (the node). When a proxy request comes in, NyxID passes it through to the node agent via WebSocket, the node injects the credential locally and forwards the request to the downstream service. The credential never leaves the node.
+
 ### Setting up a new node
+
+Registration must happen before installing the daemon. Credentials can be added before or after starting -- the agent reloads them automatically within 5 seconds.
 
 ```bash
 # Step 1: Generate a registration token (on any machine with nyxid CLI)
@@ -267,11 +271,32 @@ nyxid node register \
   --url "wss://<server>/api/v1/nodes/ws" \
   --keychain
 
-# Step 4: Add credentials (auto-detects requirements from catalog)
-nyxid node credentials setup --service llm-openai
+# Step 4: Install and start as a background service (recommended)
+nyxid node daemon install                              # install as system service
+nyxid node daemon start                                # start the service
 
-# Step 5: Start the node agent
+# Step 5: Add credentials (can be done before or after starting)
+nyxid node credentials setup --service llm-openai      # agent picks up new credentials automatically
+
+# Or run in foreground (for debugging)
 nyxid node start
+```
+
+> Credentials can be added, updated, or removed while the agent is running. The agent watches the config file and reloads credentials automatically (no restart needed).
+
+### Managing the node service
+
+```bash
+# Background service lifecycle (launchd on macOS, systemd on Linux)
+nyxid node daemon install                              # install as system service (auto-starts on login)
+nyxid node daemon install --force                      # reinstall / update service config
+nyxid node daemon start                                # start the service
+nyxid node daemon stop                                 # stop the service
+nyxid node daemon restart                              # restart (picks up config changes)
+nyxid node daemon status                               # check if installed and running
+nyxid node daemon logs                                 # show recent logs (last 50 lines)
+nyxid node daemon logs --follow                        # tail logs in real time
+nyxid node daemon uninstall                             # remove service (stops first)
 ```
 
 ### Managing nodes
@@ -428,7 +453,7 @@ All requests are made through the `nyxid` CLI, which connects to the NyxID insta
 
 ## Security and Privacy
 
-- **Credentials never leave NyxID.** Requests go to the NyxID proxy, which injects stored credentials server-side.
+- **Credentials are protected.** For server-stored credentials, NyxID injects them server-side. For node-routed services, credentials never leave the user's node -- NyxID passes the request through and the node injects credentials locally.
 - **Authentication tokens auto-refresh.** The CLI handles token refresh automatically.
 - **No data is sent to third parties.** All traffic flows between the agent and the user's NyxID instance.
 - **Audit logging.** All proxy requests are logged in NyxID for user review.
