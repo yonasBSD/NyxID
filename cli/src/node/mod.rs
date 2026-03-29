@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod config;
 pub mod credential_store;
+pub mod daemon;
 pub mod encryption;
 pub mod error;
 pub mod keychain;

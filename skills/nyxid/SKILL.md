@@ -270,8 +270,27 @@ nyxid node register \
 # Step 4: Add credentials (auto-detects requirements from catalog)
 nyxid node credentials setup --service llm-openai
 
-# Step 5: Start the node agent
+# Step 5: Install and start as a background service (recommended)
+nyxid node daemon install                              # install as system service
+nyxid node daemon start                                # start the service
+
+# Or run in foreground (for debugging)
 nyxid node start
+```
+
+### Managing the node service
+
+```bash
+# Background service lifecycle (launchd on macOS, systemd on Linux)
+nyxid node daemon install                              # install as system service (auto-starts on login)
+nyxid node daemon install --force                      # reinstall / update service config
+nyxid node daemon start                                # start the service
+nyxid node daemon stop                                 # stop the service
+nyxid node daemon restart                              # restart (picks up config changes)
+nyxid node daemon status                               # check if installed and running
+nyxid node daemon logs                                 # show recent logs (last 50 lines)
+nyxid node daemon logs --follow                        # tail logs in real time
+nyxid node daemon uninstall                             # remove service (stops first)
 ```
 
 ### Managing nodes

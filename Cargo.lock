@@ -3409,6 +3409,7 @@ dependencies = [
  "hex",
  "hmac",
  "keyring",
+ "libc",
  "nix 0.29.0",
  "open",
  "pty-process",

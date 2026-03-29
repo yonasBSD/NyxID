@@ -682,6 +682,98 @@ pub enum NodeCommands {
     /// Show node agent version
     #[command(name = "agent-version")]
     AgentVersion,
+
+    /// Manage the node agent background service (install, start, stop, restart, status, logs)
+    Daemon {
+        #[command(subcommand)]
+        command: NodeDaemonCommands,
+    },
+}
+
+// ---- Node Daemon subcommands ----
+
+#[derive(Args, Clone)]
+pub struct NodeDaemonArgs {
+    /// Path to config directory
+    #[arg(long)]
+    pub config: Option<String>,
+}
+
+#[derive(Subcommand)]
+pub enum NodeDaemonCommands {
+    /// Install the node agent as a background service (launchd on macOS, systemd on Linux)
+    Install {
+        #[command(flatten)]
+        args: NodeDaemonArgs,
+        /// Log level for the daemon (trace, debug, info, warn, error)
+        #[arg(long)]
+        log_level: Option<String>,
+        /// Overwrite existing service files
+        #[arg(long)]
+        force: bool,
+    },
+    /// Uninstall the background service
+    Uninstall {
+        #[command(flatten)]
+        args: NodeDaemonArgs,
+    },
+    /// Start the installed background service
+    Start {
+        #[command(flatten)]
+        args: NodeDaemonArgs,
+    },
+    /// Stop the running background service
+    Stop {
+        #[command(flatten)]
+        args: NodeDaemonArgs,
+    },
+    /// Restart the background service
+    Restart {
+        #[command(flatten)]
+        args: NodeDaemonArgs,
+    },
+    /// Show background service status
+    Status {
+        #[command(flatten)]
+        args: NodeDaemonArgs,
+    },
+    /// Show node agent logs
+    Logs {
+        #[command(flatten)]
+        args: NodeDaemonArgs,
+        /// Follow log output (like tail -f)
+        #[arg(long, short)]
+        follow: bool,
+        /// Number of recent lines to show
+        #[arg(long, short, default_value = "50")]
+        lines: usize,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn daemon_subcommands_accept_config_after_subcommand() {
+        let cli = Cli::try_parse_from(["nyxid", "node", "daemon", "install", "--config", "/tmp"])
+            .expect("daemon install should accept --config after the subcommand");
+
+        match cli.command {
+            Commands::Node {
+                command:
+                    NodeCommands::Daemon {
+                        command:
+                            NodeDaemonCommands::Install {
+                                args: NodeDaemonArgs { config },
+                                ..
+                            },
+                    },
+            } => assert_eq!(config.as_deref(), Some("/tmp")),
+            _ => panic!("unexpected parse result"),
+        }
+    }
 }
 
 // ---- Node Credential subcommands ----

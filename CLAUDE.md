@@ -76,6 +76,7 @@ Error variants map to HTTP status codes and numeric error codes (1000-3002, 7000
 - `NodeStatus` is an enum (`Online`/`Offline`/`Draining`) -- not a bare string
 - WS writer channels are bounded (capacity: 256); `try_send` treats full buffers as node offline (H4)
 - Admin node endpoints (`handlers/admin_nodes.rs`) require admin role and have no ownership check
+- `nyxid node daemon` subcommands manage background service lifecycle (`cli/src/node/daemon.rs`): `install` creates a launchd LaunchAgent on macOS or systemd user unit on Linux; `start`/`stop`/`restart`/`status`/`logs`/`uninstall` wrap platform service managers
 
 ### 7. OpenClaw Integration
 
@@ -138,6 +139,7 @@ node-agent/src/
 |-- ws_client.rs         # WebSocket connection loop, exponential backoff reconnection, graceful shutdown
 |-- proxy_executor.rs    # HTTP request execution, credential injection, SSE streaming detection
 |-- credential_store.rs  # In-memory decrypted credential store (header or query_param injection)
+|-- daemon.rs            # Background service lifecycle (launchd on macOS, systemd on Linux)
 |-- signing.rs           # HMAC-SHA256 verification, replay guard (5min skew, 10k nonce cap)
 |-- metrics.rs           # Local atomic counters (total_requests, success_count, error_count)
 |-- encryption.rs        # AES-256-GCM local encryption, keyfile management (0600 mode)
@@ -305,12 +307,21 @@ cargo run                               # Start backend (port 3001)
 cargo build -p nyxid-cli                # Build CLI binary (includes node subcommand)
 cargo test -p nyxid-cli                 # Run CLI tests (includes node agent tests)
 nyxid node register --token nyx_nreg_... --url ws://localhost:3001/api/v1/nodes/ws
-nyxid node start                        # Start node agent
-nyxid node status                       # Show node status
+nyxid node start                        # Start node agent (foreground)
+nyxid node agent-status                 # Show local config status
 nyxid node credentials list             # List configured credentials
 nyxid node openclaw connect --url http://localhost:18789  # Connect OpenClaw (use --credential-env for non-interactive)
 nyxid node openclaw status              # Show OpenClaw connection status
 nyxid node openclaw disconnect          # Remove OpenClaw credentials
+
+# Node daemon lifecycle (background service)
+nyxid node daemon install               # Install as system service (launchd/systemd)
+nyxid node daemon start                 # Start background service
+nyxid node daemon stop                  # Stop background service
+nyxid node daemon restart               # Restart background service
+nyxid node daemon status                # Check if installed and running
+nyxid node daemon logs --follow         # Tail daemon logs
+nyxid node daemon uninstall             # Remove system service
 
 # Frontend (from frontend/)
 npm run dev                             # Dev server (port 3000)
