@@ -254,6 +254,8 @@ nyxid api-key update <ID> --allow-all-services true    # unrestrict
 
 ### Setting up a new node
 
+Registration must happen before installing the daemon. Credentials can be added before or after starting -- the agent reloads them automatically within 5 seconds.
+
 ```bash
 # Step 1: Generate a registration token (on any machine with nyxid CLI)
 nyxid node register-token
@@ -267,16 +269,18 @@ nyxid node register \
   --url "wss://<server>/api/v1/nodes/ws" \
   --keychain
 
-# Step 4: Add credentials (auto-detects requirements from catalog)
-nyxid node credentials setup --service llm-openai
-
-# Step 5: Install and start as a background service (recommended)
+# Step 4: Install and start as a background service (recommended)
 nyxid node daemon install                              # install as system service
 nyxid node daemon start                                # start the service
+
+# Step 5: Add credentials (can be done before or after starting)
+nyxid node credentials setup --service llm-openai      # agent picks up new credentials automatically
 
 # Or run in foreground (for debugging)
 nyxid node start
 ```
+
+> Credentials can be added, updated, or removed while the agent is running. The agent watches the config file and reloads credentials automatically (no restart needed).
 
 ### Managing the node service
 

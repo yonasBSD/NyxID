@@ -1149,6 +1149,8 @@ nyxid node register \
 
 ### Step 4: Add credentials
 
+Credentials can be added before or after starting the agent. The agent watches the config file and reloads credentials automatically within 5 seconds (no restart needed). You can also update or remove credentials while the agent is running.
+
 Add credentials for each service the node will handle:
 
 ```bash
@@ -1241,6 +1243,8 @@ nyxid node credentials add-oauth --service "github" --provider-slug "github"
 ```
 
 ### Step 6: Install and start as a background service
+
+**Prerequisite:** The node must be registered (steps 2-3) before installing the daemon. Credentials (step 4) can be added before or after starting -- the agent picks them up automatically.
 
 The recommended way to run the node agent in production is as a background service. The CLI handles platform-specific service installation automatically (launchd on macOS, systemd on Linux):
 
