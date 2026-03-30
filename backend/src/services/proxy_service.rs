@@ -551,18 +551,22 @@ pub async fn resolve_proxy_target_from_user_service(
     let api_key =
         maybe_refresh_provider_backed_api_key(db, encryption_keys, user_id, api_key).await?;
 
-    if api_key.status != "active" {
-        return Err(AppError::BadRequest(format!(
-            "API key is {}",
-            api_key.status
-        )));
-    }
-
-    let credential = resolve_user_api_key_credential(&api_key, encryption_keys).await?;
-    let has_server_credential = credential.is_some() || user_service.auth_method == "none";
-
-    // Node-routed services may still have a server-side credential available for fallback.
+    // Node-routed services: resolve what we can but don't block on API key status
+    // since the node agent handles credential injection locally.
     if user_service.node_id.is_some() {
+        let credential = match resolve_user_api_key_credential(&api_key, encryption_keys).await {
+            Ok(cred) => cred,
+            Err(e) => {
+                tracing::debug!(
+                    api_key_id = %api_key.id,
+                    error = %e,
+                    "Could not resolve server credential for node-routed service (non-fatal)"
+                );
+                None
+            }
+        };
+        let has_server_credential = credential.is_some();
+
         let now = chrono::Utc::now();
         let minimal_service = build_minimal_downstream_service(&user_service, &endpoint, now);
 
@@ -579,6 +583,15 @@ pub async fn resolve_proxy_target_from_user_service(
             has_server_credential,
         }));
     }
+
+    if api_key.status != "active" {
+        return Err(AppError::BadRequest(format!(
+            "API key is {}",
+            api_key.status
+        )));
+    }
+
+    let credential = resolve_user_api_key_credential(&api_key, encryption_keys).await?;
 
     // Direct routing: require a server-side credential.
     let credential = credential.ok_or_else(|| missing_user_api_key_credential_error(&api_key))?;

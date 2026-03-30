@@ -275,13 +275,19 @@ nyxid node register \
 nyxid node daemon install                              # install as system service
 nyxid node daemon start                                # start the service
 
-# Step 5: Add credentials (can be done before or after starting)
+# Step 5: Add credentials (auto-registers catalog services in the backend)
 nyxid node credentials setup --service llm-openai      # agent picks up new credentials automatically
+
+# For custom endpoints: register first, then add credentials locally
+nyxid service add --custom --via-node my-node           # creates backend record (prompts for URL, auth, etc.)
+nyxid node credentials add --service my-api --header Authorization --secret-format bearer
 
 # Or run in foreground (for debugging)
 nyxid node start
 ```
 
+> `credentials setup` works for **catalog services only** -- it fetches config from the catalog and automatically registers the service in the backend with the node's ID.
+> For **custom endpoints**, use `nyxid service add --custom --via-node <node-name>` first to create the backend record, then `nyxid node credentials add` to store the credential locally on the node.
 > Credentials can be added, updated, or removed while the agent is running. The agent watches the config file and reloads credentials automatically (no restart needed).
 
 ### Managing the node service
@@ -317,7 +323,7 @@ nyxid node credentials list                            # list configured credent
 nyxid node credentials remove --service <SLUG>         # remove credential
 ```
 
-> `credentials setup` auto-detects from the catalog whether a service needs an API key, OAuth, or gateway URL, and guides the user through the right flow.
+> `credentials setup` works for **catalog services**: it auto-detects whether the service needs an API key, OAuth, or gateway URL, guides the user through the right flow, and auto-registers the service in the backend with the node's ID. For **custom endpoints**, use `nyxid service add --custom --via-node <node>` first, then `nyxid node credentials add`.
 
 ## SSH Remote Access
 
