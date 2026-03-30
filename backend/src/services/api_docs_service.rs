@@ -188,6 +188,7 @@ pub fn render_scalar_html(title: &str, spec_url: &str) -> String {
       id="api-reference"
       data-url="{escaped_spec_url}"
       data-layout="modern"
+      data-proxy-url=""
     ></script>
     <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
   </body>

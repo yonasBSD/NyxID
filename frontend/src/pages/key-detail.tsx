@@ -54,6 +54,7 @@ import {
   Terminal,
   Copy,
   Shield,
+  Code,
 } from "lucide-react";
 import { toast } from "sonner";
 import type { SshServiceConfig } from "@/types/api";
@@ -685,6 +686,144 @@ function SshConnectionSection({
   );
 }
 
+function ApiUsageSection({
+  slug,
+  authMethod,
+}: {
+  readonly slug: string;
+  readonly authMethod: string;
+}) {
+  const proxyUrl = `${window.location.origin}/api/v1/proxy/s/${slug}`;
+
+  const authNote =
+    authMethod === "none"
+      ? "This service requires no upstream credentials, but you still need to authenticate with NyxID."
+      : "NyxID injects your stored credentials automatically when proxying.";
+
+  const curlExample = [
+    `curl ${proxyUrl}/v1/chat/completions \\`,
+    `  -H "Authorization: Bearer <NYXID_ACCESS_TOKEN>" \\`,
+    `  -H "Content-Type: application/json" \\`,
+    `  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}'`,
+  ].join("\n");
+
+  const apiKeyExample = [
+    `curl ${proxyUrl}/v1/chat/completions \\`,
+    `  -H "X-API-Key: nyx_..." \\`,
+    `  -H "Content-Type: application/json" \\`,
+    `  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}'`,
+  ].join("\n");
+
+  function handleCopyUrl() {
+    void copyToClipboard(proxyUrl).then(() => {
+      toast.success("Proxy URL copied");
+    });
+  }
+
+  function handleCopyCurl() {
+    void copyToClipboard(apiKeyExample).then(() => {
+      toast.success("Example copied");
+    });
+  }
+
+  return (
+    <Card className="md:col-span-2">
+      <CardHeader className="pb-3">
+        <div className="flex items-center gap-2">
+          <Code className="h-4 w-4 text-primary" />
+          <CardTitle className="text-sm">API Usage</CardTitle>
+        </div>
+        <CardDescription>
+          How to connect to this service through NyxID proxy
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div>
+          <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">
+            Base URL
+          </p>
+          <div className="relative">
+            <pre className="overflow-x-auto rounded-lg bg-muted p-3 pr-10 font-mono text-sm">
+              {proxyUrl}
+            </pre>
+            <Button
+              size="icon"
+              variant="ghost"
+              className="absolute right-2 top-2 h-7 w-7"
+              onClick={handleCopyUrl}
+            >
+              <Copy className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+          <p className="mt-1.5 text-[11px] text-muted-foreground">
+            Append the downstream API path after this URL (e.g.{" "}
+            <code className="rounded bg-background px-1">
+              /v1/chat/completions
+            </code>
+            ). {authNote}
+          </p>
+        </div>
+
+        <div>
+          <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">
+            Authentication
+          </p>
+          <div className="space-y-2 text-xs text-muted-foreground">
+            <p>
+              Authenticate with NyxID using one of these methods:
+            </p>
+            <ul className="list-disc list-inside space-y-1 pl-1">
+              <li>
+                <span className="font-medium text-foreground">API Key:</span>{" "}
+                <code className="rounded bg-background px-1">
+                  X-API-Key: nyx_...
+                </code>{" "}
+                header (create one in API Keys tab)
+              </li>
+              <li>
+                <span className="font-medium text-foreground">
+                  Bearer Token:
+                </span>{" "}
+                <code className="rounded bg-background px-1">
+                  Authorization: Bearer &lt;access_token&gt;
+                </code>
+              </li>
+            </ul>
+          </div>
+        </div>
+
+        <div>
+          <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">
+            Example (with API key)
+          </p>
+          <div className="relative">
+            <pre className="overflow-x-auto rounded-lg bg-muted p-3 pr-10 font-mono text-xs leading-relaxed">
+              {apiKeyExample}
+            </pre>
+            <Button
+              size="icon"
+              variant="ghost"
+              className="absolute right-2 top-2 h-7 w-7"
+              onClick={handleCopyCurl}
+            >
+              <Copy className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+        </div>
+
+        <div>
+          <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">
+            Example (with Bearer token)
+          </p>
+          <pre className="overflow-x-auto rounded-lg bg-muted p-3 font-mono text-xs leading-relaxed">
+            {curlExample}
+          </pre>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 function DeleteKeyDialog({
   open,
   onOpenChange,
@@ -1048,7 +1187,21 @@ export function KeyDetailPage() {
             catalogServiceName={keyInfo.catalog_service_name}
           />
           )}
+
+          {!isSsh && (
+            <ApiUsageSection
+              slug={keyInfo.slug}
+              authMethod={keyInfo.auth_method}
+            />
+          )}
         </div>
+      )}
+
+      {keyInfo.auto_connected && (
+        <ApiUsageSection
+          slug={keyInfo.slug}
+          authMethod={keyInfo.auth_method}
+        />
       )}
 
       {sshConfig && sshServiceId && (
