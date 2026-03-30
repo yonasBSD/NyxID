@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -868,6 +869,62 @@ fn inherited_identity_fields(service: Option<&DownstreamService>) -> InheritedId
     }
 }
 
+fn resolve_available_slug_from_existing(
+    base_slug: &str,
+    active_slugs: &HashSet<String>,
+) -> Option<String> {
+    if !active_slugs.contains(base_slug) {
+        return Some(base_slug.to_string());
+    }
+
+    for n in 2..=100 {
+        let candidate = format!("{base_slug}-{n}");
+        if !active_slugs.contains(&candidate) {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+async fn resolve_migration_user_service_slug(
+    db: &Database,
+    user_id: &str,
+    base_slug: &str,
+) -> Result<Option<String>, mongodb::error::Error> {
+    let mut candidate_slugs = HashSet::new();
+    candidate_slugs.insert(base_slug.to_string());
+    for n in 2..=100 {
+        candidate_slugs.insert(format!("{base_slug}-{n}"));
+    }
+
+    let slug_values: Vec<bson::Bson> = candidate_slugs
+        .iter()
+        .cloned()
+        .map(bson::Bson::String)
+        .collect();
+    let existing: Vec<Document> = db
+        .collection::<Document>(USER_SERVICES)
+        .find(doc! {
+            "user_id": user_id,
+            "is_active": true,
+            "slug": { "$in": slug_values },
+        })
+        .await?
+        .try_collect()
+        .await?;
+
+    let existing_slugs: HashSet<String> = existing
+        .into_iter()
+        .filter_map(|doc| doc.get_str("slug").ok().map(str::to_owned))
+        .collect();
+
+    Ok(resolve_available_slug_from_existing(
+        base_slug,
+        &existing_slugs,
+    ))
+}
+
 /// Migrate UserProviderTokens to the unified UserEndpoint + UserApiKey + UserService model.
 async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error::Error>> {
     let tokens: Vec<UserProviderToken> = db
@@ -946,6 +1003,30 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
                     "Authorization".to_string(),
                 )
             };
+
+        let base_slug = slug;
+        let slug = match resolve_migration_user_service_slug(db, &token.user_id, &base_slug).await {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                tracing::warn!(
+                    user_id = %token.user_id,
+                    source_id = %token.id,
+                    base_slug = %base_slug,
+                    "Skipping provider token migration: active user service slug space exhausted"
+                );
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        };
+        if slug != base_slug {
+            tracing::info!(
+                user_id = %token.user_id,
+                source_id = %token.id,
+                original_slug = %base_slug,
+                resolved_slug = %slug,
+                "Provider token migration resolved active user service slug collision"
+            );
+        }
 
         // Create UserEndpoint
         let endpoint = UserEndpoint {
@@ -1122,6 +1203,30 @@ async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::e
             continue;
         }
 
+        let slug = match resolve_migration_user_service_slug(db, &conn.user_id, &service.slug).await
+        {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                tracing::warn!(
+                    user_id = %conn.user_id,
+                    source_id = %conn.id,
+                    base_slug = %service.slug,
+                    "Skipping service connection migration: active user service slug space exhausted"
+                );
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        };
+        if slug != service.slug {
+            tracing::info!(
+                user_id = %conn.user_id,
+                source_id = %conn.id,
+                original_slug = %service.slug,
+                resolved_slug = %slug,
+                "Service connection migration resolved active user service slug collision"
+            );
+        }
+
         let now = Utc::now();
         let endpoint_id = uuid::Uuid::new_v4().to_string();
         let api_key_id = uuid::Uuid::new_v4().to_string();
@@ -1188,7 +1293,7 @@ async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::e
         let user_service = UserService {
             id: service_id,
             user_id: conn.user_id.clone(),
-            slug: service.slug.clone(),
+            slug,
             endpoint_id: endpoint_id.clone(),
             api_key_id: Some(api_key_id.clone()),
             auth_method: service.auth_method.clone(),
@@ -1318,6 +1423,30 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
             }
         };
 
+        let slug =
+            match resolve_migration_user_service_slug(db, &binding.user_id, &service.slug).await {
+                Ok(Some(s)) => s,
+                Ok(None) => {
+                    tracing::warn!(
+                        user_id = %binding.user_id,
+                        source_id = %binding.id,
+                        base_slug = %service.slug,
+                        "Skipping node binding migration: active user service slug space exhausted"
+                    );
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            };
+        if slug != service.slug {
+            tracing::info!(
+                user_id = %binding.user_id,
+                source_id = %binding.id,
+                original_slug = %service.slug,
+                resolved_slug = %slug,
+                "Node binding migration resolved active user service slug collision"
+            );
+        }
+
         let now = Utc::now();
         let endpoint_id = uuid::Uuid::new_v4().to_string();
         let api_key_id = uuid::Uuid::new_v4().to_string();
@@ -1393,7 +1522,7 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
         let user_service = UserService {
             id: service_id,
             user_id: binding.user_id.clone(),
-            slug: service.slug.clone(),
+            slug,
             endpoint_id: endpoint_id.clone(),
             api_key_id: Some(api_key_id.clone()),
             auth_method: service.auth_method.clone(),
@@ -1506,5 +1635,33 @@ mod tests {
         );
         assert!(fields.inject_delegation_token);
         assert_eq!(fields.delegation_token_scope, "proxy:* llm:status");
+    }
+
+    #[test]
+    fn resolve_available_slug_uses_base_when_available() {
+        let resolved = resolve_available_slug_from_existing("llm-openai", &HashSet::new());
+        assert_eq!(resolved.as_deref(), Some("llm-openai"));
+    }
+
+    #[test]
+    fn resolve_available_slug_suffixes_from_active_conflicts() {
+        let active_slugs = HashSet::from([
+            "llm-openai".to_string(),
+            "llm-openai-2".to_string(),
+            "llm-openai-4".to_string(),
+        ]);
+
+        let resolved = resolve_available_slug_from_existing("llm-openai", &active_slugs);
+        assert_eq!(resolved.as_deref(), Some("llm-openai-3"));
+    }
+
+    #[test]
+    fn resolve_available_slug_returns_none_when_suffix_space_exhausted() {
+        let active_slugs: HashSet<String> = std::iter::once("llm-openai".to_string())
+            .chain((2..=100).map(|n| format!("llm-openai-{n}")))
+            .collect();
+
+        let resolved = resolve_available_slug_from_existing("llm-openai", &active_slugs);
+        assert!(resolved.is_none());
     }
 }
