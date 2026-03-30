@@ -828,10 +828,100 @@ async fn backfill_downstream_service_types(db: &Database) -> Result<(), mongodb:
 pub async fn migrate_to_unified_collections(
     db: &Database,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    cleanup_duplicate_migration_services(db).await?;
     migrate_provider_tokens(db).await?;
     migrate_service_connections(db).await?;
     migrate_node_service_bindings(db).await?;
     tracing::info!("Unified collection migration complete");
+    Ok(())
+}
+
+/// Remove UserService records that were created by the slug-suffix migration path
+/// (e.g., "api-lark-2") when the base slug already had an active record for the
+/// same user + catalog_service_id. Only targets suffixed migration artifacts, not
+/// legitimate multi-key setups where a user intentionally has two connections to
+/// the same provider.
+async fn cleanup_duplicate_migration_services(
+    db: &Database,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Find active migration-sourced UserService records with suffixed slugs
+    // (the "-N" pattern produced by the slug collision resolver).
+    let migration_services: Vec<UserService> = db
+        .collection::<UserService>(USER_SERVICES)
+        .find(doc! {
+            "is_active": true,
+            "source": { "$regex": "^migration_" },
+            "catalog_service_id": { "$ne": null },
+        })
+        .await?
+        .try_collect()
+        .await?;
+
+    let mut cleaned = 0u64;
+    for svc in &migration_services {
+        let csid = match &svc.catalog_service_id {
+            Some(id) => id,
+            None => continue,
+        };
+
+        // Only target slugs that look like migration suffixes (e.g., "api-lark-2").
+        // Extract the base slug by stripping a trailing "-N" where N is 2..=100.
+        let base_slug = match svc.slug.rfind('-') {
+            Some(pos) => {
+                let suffix = &svc.slug[pos + 1..];
+                match suffix.parse::<u32>() {
+                    Ok(n) if (2..=100).contains(&n) => &svc.slug[..pos],
+                    _ => continue, // Not a migration suffix
+                }
+            }
+            None => continue, // No hyphen, not a suffixed slug
+        };
+
+        // Verify the base slug record exists and is active for the same user + catalog service
+        let base_exists = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! {
+                "user_id": &svc.user_id,
+                "slug": base_slug,
+                "catalog_service_id": csid,
+                "is_active": true,
+            })
+            .await?;
+
+        if base_exists.is_none() {
+            continue;
+        }
+
+        // This is a migration-created suffix duplicate -- delete it and its associated records
+        let _ = db
+            .collection::<UserService>(USER_SERVICES)
+            .delete_one(doc! { "_id": &svc.id })
+            .await;
+        let _ = db
+            .collection::<UserEndpoint>(USER_ENDPOINTS)
+            .delete_one(doc! { "_id": &svc.endpoint_id })
+            .await;
+        if let Some(ref ak_id) = svc.api_key_id {
+            let _ = db
+                .collection::<UserApiKey>(USER_API_KEYS)
+                .delete_one(doc! { "_id": ak_id })
+                .await;
+        }
+
+        tracing::info!(
+            user_id = %svc.user_id,
+            slug = %svc.slug,
+            base_slug = %base_slug,
+            service_id = %svc.id,
+            catalog_service_id = %csid,
+            "Cleaned up suffixed migration duplicate"
+        );
+        cleaned += 1;
+    }
+
+    if cleaned > 0 {
+        tracing::info!(count = cleaned, "Cleaned up duplicate migration services");
+    }
     Ok(())
 }
 
@@ -1003,6 +1093,22 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
                     "Authorization".to_string(),
                 )
             };
+
+        // Skip if a UserService already exists for this user + catalog service
+        // (e.g., created by an earlier token for the same provider)
+        if let Some(ref csid) = catalog_service_id {
+            let already_has_service = db
+                .collection::<UserService>(USER_SERVICES)
+                .find_one(doc! {
+                    "user_id": &token.user_id,
+                    "catalog_service_id": csid,
+                    "is_active": true,
+                })
+                .await?;
+            if already_has_service.is_some() {
+                continue;
+            }
+        }
 
         let base_slug = slug;
         let slug = match resolve_migration_user_service_slug(db, &token.user_id, &base_slug).await {
