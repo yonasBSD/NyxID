@@ -90,7 +90,10 @@ fi
 # ---------------------------------------------------------------------------
 
 info "Installing NyxID CLI..."
-cargo install --git "$REPO" nyxid-cli
+# --force ensures we always rebuild from the latest source, even if the
+# version string in Cargo.toml hasn't changed (git commits may add features
+# like WebSocket proxy support without a version bump).
+cargo install --git "$REPO" nyxid-cli --force
 info "NyxID CLI installed at $CARGO_BIN/nyxid"
 
 # ---------------------------------------------------------------------------

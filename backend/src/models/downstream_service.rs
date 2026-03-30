@@ -160,6 +160,48 @@ fn default_delegation_scope() -> String {
 }
 
 #[cfg(test)]
+pub mod test_helpers {
+    use super::*;
+
+    /// Create a minimal `DownstreamService` for unit tests that need a
+    /// valid struct but don't care about specific field values.
+    pub fn dummy_service() -> DownstreamService {
+        DownstreamService {
+            id: "test-id".to_string(),
+            name: "Test".to_string(),
+            slug: "test".to_string(),
+            description: None,
+            base_url: "http://localhost".to_string(),
+            service_type: "http".to_string(),
+            visibility: "public".to_string(),
+            auth_method: "none".to_string(),
+            auth_key_name: String::new(),
+            credential_encrypted: Vec::new(),
+            auth_type: None,
+            openapi_spec_url: None,
+            asyncapi_spec_url: None,
+            streaming_supported: false,
+            ssh_config: None,
+            oauth_client_id: None,
+            service_category: "connection".to_string(),
+            requires_user_credential: false,
+            is_active: true,
+            created_by: "test".to_string(),
+            identity_propagation_mode: "none".to_string(),
+            identity_include_user_id: false,
+            identity_include_email: false,
+            identity_include_name: false,
+            identity_jwt_audience: None,
+            inject_delegation_token: false,
+            delegation_token_scope: String::new(),
+            provider_config_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

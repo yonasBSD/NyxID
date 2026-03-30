@@ -57,6 +57,8 @@ pub struct AppState {
     pub node_ws_manager: Arc<NodeWsManager>,
     /// Concurrent SSH tunnel session limiter
     pub ssh_session_manager: Arc<SshSessionManager>,
+    /// Active WebSocket passthrough connection count (for resource limiting)
+    pub ws_passthrough_count: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// NyxID authentication and SSO platform.
@@ -311,6 +313,7 @@ async fn main() {
         encryption_keys: encryption_keys.clone(),
         node_ws_manager,
         ssh_session_manager,
+        ws_passthrough_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     };
 
     // Create rate limiters
