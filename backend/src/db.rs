@@ -836,15 +836,16 @@ pub async fn migrate_to_unified_collections(
     Ok(())
 }
 
-/// Remove duplicate UserService records created by earlier migration runs that
-/// produced suffixed slugs (e.g., "api-lark-2") when the same user + catalog_service_id
-/// already had an active record. Deletes the duplicate along with its orphaned
-/// UserEndpoint and UserApiKey.
+/// Remove UserService records that were created by the slug-suffix migration path
+/// (e.g., "api-lark-2") when the base slug already had an active record for the
+/// same user + catalog_service_id. Only targets suffixed migration artifacts, not
+/// legitimate multi-key setups where a user intentionally has two connections to
+/// the same provider.
 async fn cleanup_duplicate_migration_services(
     db: &Database,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Find active migration-sourced UserService records that are duplicates:
-    // same (user_id, catalog_service_id) as another active record.
+    // Find active migration-sourced UserService records with suffixed slugs
+    // (the "-N" pattern produced by the slug collision resolver).
     let migration_services: Vec<UserService> = db
         .collection::<UserService>(USER_SERVICES)
         .find(doc! {
@@ -863,22 +864,35 @@ async fn cleanup_duplicate_migration_services(
             None => continue,
         };
 
-        // Check if another active UserService exists for the same user + catalog service
-        let other = db
+        // Only target slugs that look like migration suffixes (e.g., "api-lark-2").
+        // Extract the base slug by stripping a trailing "-N" where N is 2..=100.
+        let base_slug = match svc.slug.rfind('-') {
+            Some(pos) => {
+                let suffix = &svc.slug[pos + 1..];
+                match suffix.parse::<u32>() {
+                    Ok(n) if (2..=100).contains(&n) => &svc.slug[..pos],
+                    _ => continue, // Not a migration suffix
+                }
+            }
+            None => continue, // No hyphen, not a suffixed slug
+        };
+
+        // Verify the base slug record exists and is active for the same user + catalog service
+        let base_exists = db
             .collection::<UserService>(USER_SERVICES)
             .find_one(doc! {
-                "_id": { "$ne": &svc.id },
                 "user_id": &svc.user_id,
+                "slug": base_slug,
                 "catalog_service_id": csid,
                 "is_active": true,
             })
             .await?;
 
-        if other.is_none() {
+        if base_exists.is_none() {
             continue;
         }
 
-        // This is a duplicate -- delete it and its associated records
+        // This is a migration-created suffix duplicate -- delete it and its associated records
         let _ = db
             .collection::<UserService>(USER_SERVICES)
             .delete_one(doc! { "_id": &svc.id })
@@ -897,9 +911,10 @@ async fn cleanup_duplicate_migration_services(
         tracing::info!(
             user_id = %svc.user_id,
             slug = %svc.slug,
+            base_slug = %base_slug,
             service_id = %svc.id,
             catalog_service_id = %csid,
-            "Cleaned up duplicate migration service"
+            "Cleaned up suffixed migration duplicate"
         );
         cleaned += 1;
     }
