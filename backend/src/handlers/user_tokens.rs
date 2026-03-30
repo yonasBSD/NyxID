@@ -209,6 +209,8 @@ pub async fn connect_api_key(
         })),
         None,
         None,
+        None,
+        None,
     );
 
     Ok(Json(ConnectResponse {
@@ -247,6 +249,8 @@ pub async fn initiate_oauth_connect(
         Some(serde_json::json!({ "provider_id": &provider_id })),
         None,
         None,
+        None,
+        None,
     );
 
     Ok(Json(OAuthInitiateResponse {
@@ -278,6 +282,8 @@ pub async fn oauth_callback(
             "provider_id": &provider_id,
             "token_type": "oauth2",
         })),
+        None,
+        None,
         None,
         None,
     );
@@ -321,6 +327,8 @@ async fn generic_oauth_callback_impl(
             })),
             None,
             None,
+            None,
+            None,
         );
         return redirect_callback(frontend_url, "error", Some(msg));
     }
@@ -349,6 +357,8 @@ async fn generic_oauth_callback_impl(
                 Some(serde_json::json!({ "error": e.to_string() })),
                 None,
                 None,
+                None,
+                None,
             );
             return redirect_callback(
                 frontend_url,
@@ -364,6 +374,8 @@ async fn generic_oauth_callback_impl(
             auth_user.as_ref().map(|u| u.user_id.to_string()),
             "provider_oauth_callback_failed".to_string(),
             Some(serde_json::json!({ "error": e.to_string() })),
+            None,
+            None,
             None,
             None,
         );
@@ -395,6 +407,8 @@ async fn generic_oauth_callback_impl(
                 })),
                 None,
                 None,
+                None,
+                None,
             );
 
             if let Err(error) =
@@ -410,6 +424,8 @@ async fn generic_oauth_callback_impl(
                         "error": error.to_string(),
                         "reason": "failed_to_sync_unified_keys",
                     })),
+                    None,
+                    None,
                     None,
                     None,
                 );
@@ -436,6 +452,8 @@ async fn generic_oauth_callback_impl(
                     "error": e.to_string(),
                     "on_behalf_of": &oauth_state.target_user_id,
                 })),
+                None,
+                None,
                 None,
                 None,
             );
@@ -525,6 +543,8 @@ pub async fn disconnect_provider(
         Some(serde_json::json!({ "provider_id": &provider_id })),
         None,
         None,
+        None,
+        None,
     );
 
     Ok(Json(ConnectResponse {
@@ -556,6 +576,8 @@ pub async fn manual_refresh(
         Some(user_id_str),
         "provider_token_refreshed".to_string(),
         Some(serde_json::json!({ "provider_id": &provider_id })),
+        None,
+        None,
         None,
         None,
     );
@@ -591,6 +613,8 @@ pub async fn request_device_code(
         Some(user_id_str),
         "provider_device_code_initiated".to_string(),
         Some(serde_json::json!({ "provider_id": &provider_id })),
+        None,
+        None,
         None,
         None,
     );
@@ -635,6 +659,8 @@ pub async fn poll_device_code(
                 "provider_id": &provider_id,
                 "token_type": "device_code",
             })),
+            None,
+            None,
             None,
             None,
         );
@@ -698,6 +724,8 @@ pub async fn telegram_callback(
             "token_type": "telegram_identity",
             "telegram_user_id": body.id,
         })),
+        None,
+        None,
         None,
         None,
     );
@@ -790,6 +818,10 @@ mod tests {
             allow_all_nodes: true,
             allowed_service_ids: vec![],
             allowed_node_ids: vec![],
+            api_key_id: None,
+            api_key_name: None,
+            rate_limit_per_second: None,
+            rate_limit_burst: None,
         }
     }
 

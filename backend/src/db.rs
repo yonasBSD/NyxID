@@ -262,6 +262,13 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
+    audit
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "api_key_id": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
 
     // ── oauth_clients ── (no special indexes beyond _id)
 
@@ -796,6 +803,23 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 )
                 .build(),
         )
+        .await?;
+
+    // -- agent_service_bindings --
+    let agent_bindings = db.collection::<Document>("agent_service_bindings");
+    agent_bindings
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "api_key_id": 1, "user_service_id": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    agent_bindings
+        .create_index(IndexModel::builder().keys(doc! { "api_key_id": 1 }).build())
+        .await?;
+    agent_bindings
+        .create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
         .await?;
 
     backfill_downstream_service_types(db).await?;

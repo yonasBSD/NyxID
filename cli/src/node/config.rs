@@ -378,18 +378,91 @@ impl NodeConfig {
 /// If a custom path is provided, use it directly.
 /// Otherwise, default to `~/.nyxid-node/`.
 pub fn resolve_config_dir(custom_path: Option<&str>) -> PathBuf {
+    // None profile always passes validation, safe to unwrap
+    resolve_config_dir_with_profile(custom_path, None)
+        .expect("resolve_config_dir with None profile should never fail")
+}
+
+/// Resolve the config directory with profile support.
+/// `None` or `Some("default")` = `~/.nyxid-node/`
+/// `Some(name)` = `~/.nyxid-node/profiles/{name}/`
+///
+/// Returns an error if the profile name fails validation (path traversal prevention).
+pub fn resolve_config_dir_with_profile(
+    custom_path: Option<&str>,
+    profile: Option<&str>,
+) -> Result<PathBuf> {
     if let Some(path) = custom_path {
-        PathBuf::from(path)
-    } else {
-        directories::BaseDirs::new()
-            .map(|dirs| dirs.home_dir().join(".nyxid-node"))
-            .unwrap_or_else(|| PathBuf::from(".nyxid-node"))
+        return Ok(PathBuf::from(path));
     }
+
+    let base = directories::BaseDirs::new()
+        .map(|dirs| dirs.home_dir().join(".nyxid-node"))
+        .unwrap_or_else(|| PathBuf::from(".nyxid-node"));
+
+    match profile {
+        None | Some("default") => Ok(base),
+        Some(name) => {
+            validate_node_profile_name(name)?;
+            Ok(base.join("profiles").join(name))
+        }
+    }
+}
+
+/// Validate a node profile name: 1-64 characters, alphanumeric + hyphens + underscores only.
+/// This prevents path traversal attacks (e.g. `../../etc`, `foo/bar`).
+fn validate_node_profile_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.len() > 64 {
+        return Err(Error::Validation(
+            "Profile name must be 1-64 characters".into(),
+        ));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(Error::Validation(format!(
+            "Profile name must contain only alphanumeric characters, hyphens, \
+             and underscores (got '{name}')"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_dir_default_profile() {
+        let dir_none = resolve_config_dir_with_profile(None, None).unwrap();
+        let dir_default = resolve_config_dir_with_profile(None, Some("default")).unwrap();
+        assert_eq!(dir_none, dir_default);
+    }
+
+    #[test]
+    fn config_dir_named_profile() {
+        let dir = resolve_config_dir_with_profile(None, Some("test-agent")).unwrap();
+        assert!(dir.to_string_lossy().contains("profiles/test-agent"));
+    }
+
+    #[test]
+    fn config_dir_custom_path_ignores_profile() {
+        let dir = resolve_config_dir_with_profile(Some("/tmp/custom"), Some("agent")).unwrap();
+        assert_eq!(dir, PathBuf::from("/tmp/custom"));
+    }
+
+    #[test]
+    fn config_dir_rejects_path_traversal() {
+        let result = resolve_config_dir_with_profile(None, Some("../../etc"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_dir_rejects_slash_in_profile() {
+        let result = resolve_config_dir_with_profile(None, Some("foo/bar"));
+        assert!(result.is_err());
+    }
 
     #[test]
     fn roundtrip_config() {

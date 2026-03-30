@@ -278,6 +278,8 @@ pub async fn decide_request(
         })),
         None,
         None,
+        None,
+        None,
     );
 
     Ok(Json(DecideResponse {
@@ -337,6 +339,8 @@ pub async fn revoke_grant(
         Some(user_id),
         "approval_grant_revoked".to_string(),
         Some(serde_json::json!({ "grant_id": grant_id })),
+        None,
+        None,
         None,
         None,
     );
@@ -444,6 +448,8 @@ pub async fn set_service_config(
         })),
         None,
         None,
+        None,
+        None,
     );
 
     Ok(Json(ServiceApprovalConfigItem {
@@ -473,6 +479,8 @@ pub async fn delete_service_config(
         Some(user_id),
         "service_approval_config_deleted".to_string(),
         Some(serde_json::json!({ "service_id": service_id })),
+        None,
+        None,
         None,
         None,
     );

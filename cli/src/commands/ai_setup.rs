@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 
-use crate::api::CLI_USER_AGENT;
-use crate::cli::{AiSetupCommands, AiToolTarget};
+use crate::api::{ApiClient, CLI_USER_AGENT};
+use crate::cli::{AgentCommands, AiSetupCommands, AiToolTarget, OutputFormat};
 
 /// GitHub raw base URL for the NyxID repository.
 const GITHUB_RAW: &str = "https://raw.githubusercontent.com/ChronoAIProject/NyxID/main";
@@ -24,6 +24,7 @@ pub async fn run(command: AiSetupCommands) -> Result<()> {
         AiSetupCommands::Install { tool, base_url } => install(tool, &base_url).await,
         AiSetupCommands::Update { tool, base_url } => update(tool, &base_url).await,
         AiSetupCommands::Status => status(),
+        AiSetupCommands::Agent { command } => run_agent_command(command).await,
     }
 }
 
@@ -233,6 +234,7 @@ fn skill_paths(tool: AiToolTarget) -> Result<Vec<(String, PathBuf)>> {
             "skill".into(),
             home.join(".openclaw/skills/nyxid/SKILL.md"),
         )]),
+        AiToolTarget::Generic => Ok(vec![]),
     }
 }
 
@@ -361,6 +363,11 @@ async fn install(tool: AiToolTarget, base_url: &Option<String>) -> Result<()> {
         AiToolTarget::Cursor => install_cursor(&content),
         AiToolTarget::Codex => install_codex(&content),
         AiToolTarget::Openclaw => install_openclaw(&content),
+        AiToolTarget::Generic => {
+            bail!(
+                "Generic tool has no skill files. Use `nyxid ai-setup agent create` to create an agent identity instead."
+            )
+        }
     };
 
     if result.is_ok() {
@@ -414,6 +421,7 @@ fn print_post_install(tool: AiToolTarget, content: &SkillContent) {
 
             eprintln!("Verify skill: `openclaw skills check` (should show NyxID as ready).");
         }
+        AiToolTarget::Generic => {}
     }
 
     eprintln!();
@@ -498,6 +506,9 @@ async fn update(tool: Option<AiToolTarget>, base_url: &Option<String>) -> Result
     ];
 
     let tools: Vec<AiToolTarget> = match tool {
+        Some(AiToolTarget::Generic) => {
+            bail!("Generic tool has no skill files to update.")
+        }
         Some(t) => vec![t],
         None => all_tools.to_vec(),
     };
@@ -533,6 +544,7 @@ async fn update(tool: Option<AiToolTarget>, base_url: &Option<String>) -> Result
             AiToolTarget::Cursor => install_cursor(&content)?,
             AiToolTarget::Codex => install_codex(&content)?,
             AiToolTarget::Openclaw => install_openclaw(&content)?,
+            AiToolTarget::Generic => unreachable!(),
         }
     }
 
@@ -590,6 +602,418 @@ fn status() -> Result<()> {
     }
 
     eprintln!("{table}");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Agent identity commands
+// ---------------------------------------------------------------------------
+
+async fn run_agent_command(command: AgentCommands) -> Result<()> {
+    match command {
+        AgentCommands::Create {
+            name,
+            platform,
+            services,
+            scopes,
+            auth,
+        } => agent_create(&auth, &name, platform, services.as_deref(), &scopes).await,
+        AgentCommands::List { auth } => agent_list(&auth).await,
+        AgentCommands::Show { name, auth } => agent_show(&auth, &name).await,
+        AgentCommands::Bind {
+            name,
+            service,
+            credential,
+            auth,
+        } => agent_bind(&auth, &name, &service, &credential).await,
+        AgentCommands::Rotate { name, auth } => agent_rotate(&auth, &name).await,
+        AgentCommands::Delete { name, yes, auth } => agent_delete(&auth, &name, yes).await,
+    }
+}
+
+fn array_from_response<'a>(
+    value: &'a serde_json::Value,
+    field_names: &[&str],
+) -> Option<&'a [serde_json::Value]> {
+    field_names
+        .iter()
+        .find_map(|field| value.get(*field).and_then(|entry| entry.as_array()))
+        .map(Vec::as_slice)
+        .or_else(|| value.as_array().map(Vec::as_slice))
+}
+
+async fn agent_create(
+    auth: &crate::cli::AuthArgs,
+    name: &str,
+    platform: AiToolTarget,
+    services: Option<&str>,
+    scopes: &str,
+) -> Result<()> {
+    let mut api = ApiClient::from_auth(auth)?;
+
+    // Parse service slugs, resolve to UserService IDs
+    let service_slugs: Vec<&str> = services
+        .map(|s| s.split(',').map(str::trim).collect())
+        .unwrap_or_default();
+
+    let allowed_service_ids = if !service_slugs.is_empty() {
+        let user_services: serde_json::Value = api.get("/user-services").await?;
+        let arr = array_from_response(&user_services, &["services"]).unwrap_or(&[]);
+
+        let ids: Vec<String> = arr
+            .iter()
+            .filter(|s| service_slugs.contains(&s["slug"].as_str().unwrap_or("")))
+            .filter_map(|s| s["id"].as_str().map(String::from))
+            .collect();
+
+        if ids.len() != service_slugs.len() {
+            bail!("Some services not found. Run `nyxid service list` to see available services.");
+        }
+        ids
+    } else {
+        vec![]
+    };
+
+    let body = serde_json::json!({
+        "name": name,
+        "scopes": scopes,
+        "description": format!("Agent identity for {} ({})", name, platform),
+        "allowed_service_ids": allowed_service_ids,
+        "allow_all_services": service_slugs.is_empty(),
+        "allow_all_nodes": true,
+        "platform": platform.to_string(),
+    });
+
+    let resp: serde_json::Value = api.post("/api-keys", &body).await?;
+
+    let api_key = resp["full_key"]
+        .as_str()
+        .unwrap_or("(error: key not in response)");
+    let key_id = resp["id"].as_str().unwrap_or("");
+
+    match auth.output {
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "api_key_id": key_id,
+                    "api_key": api_key,
+                    "name": name,
+                    "platform": platform.to_string(),
+                    "setup_instructions": platform_instructions(platform, api_key),
+                }))?
+            );
+        }
+        OutputFormat::Table => {
+            eprintln!("Agent '{name}' created successfully.");
+            eprintln!();
+            eprintln!("API Key (save this -- shown only once):");
+            eprintln!("  {api_key}");
+            eprintln!();
+            eprintln!("{}", platform_instructions(platform, api_key));
+        }
+    }
+
+    Ok(())
+}
+
+fn platform_instructions(platform: AiToolTarget, api_key: &str) -> String {
+    match platform {
+        AiToolTarget::ClaudeCode => format!(
+            "Add to .claude/settings.json:\n\n\
+             {{\n  \"mcpServers\": {{\n    \"nyxid\": {{\n      \
+             \"command\": \"nyxid\",\n      \"args\": [\"mcp\", \"serve\"],\n      \
+             \"env\": {{\n        \"NYXID_ACCESS_TOKEN\": \"{api_key}\"\n      }}\n    }}\n  }}\n}}"
+        ),
+        AiToolTarget::Codex => format!(
+            "Add to your shell profile or Codex project config:\n\n\
+             export NYXID_ACCESS_TOKEN=\"{api_key}\""
+        ),
+        AiToolTarget::Openclaw => format!(
+            "Add to your OpenClaw workspace config:\n\n\
+             skills:\n  nyxid:\n    env:\n      NYXID_ACCESS_TOKEN: \"{api_key}\""
+        ),
+        AiToolTarget::Cursor | AiToolTarget::Generic => format!(
+            "Set NYXID_ACCESS_TOKEN={api_key} in your agent's environment.\n\
+             All nyxid CLI commands will use this token automatically.\n\
+             Proxy: nyxid proxy request <slug> <path> -m POST -d '...'\n\
+             Direct API: curl -H \"X-API-Key: {api_key}\" <base_url>/api/v1/proxy/s/<slug>/<path>"
+        ),
+    }
+}
+
+async fn agent_list(auth: &crate::cli::AuthArgs) -> Result<()> {
+    let mut api = ApiClient::from_auth(auth)?;
+    let keys: serde_json::Value = api.get("/api-keys").await?;
+
+    let items = array_from_response(&keys, &["keys", "api_keys"]);
+
+    match auth.output {
+        OutputFormat::Json => {
+            let agents: Vec<&serde_json::Value> = items
+                .map(|arr| {
+                    arr.iter()
+                        .filter(|k| k.get("platform").and_then(|p| p.as_str()).is_some())
+                        .collect()
+                })
+                .unwrap_or_default();
+            println!("{}", serde_json::to_string_pretty(&agents)?);
+        }
+        OutputFormat::Table => {
+            use comfy_table::{Table, presets::UTF8_FULL_CONDENSED};
+
+            let agents: Vec<&serde_json::Value> = items
+                .map(|arr| {
+                    arr.iter()
+                        .filter(|k| k.get("platform").and_then(|p| p.as_str()).is_some())
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            if agents.is_empty() {
+                eprintln!("No agent identities found.");
+                eprintln!(
+                    "Create one with: nyxid ai-setup agent create --name <name> --platform <platform>"
+                );
+                return Ok(());
+            }
+
+            let mut table = Table::new();
+            table.load_preset(UTF8_FULL_CONDENSED);
+            table.set_header(["Name", "Platform", "Scopes", "Created"]);
+
+            for key in &agents {
+                let name = key["name"].as_str().unwrap_or("-");
+                let platform = key["platform"].as_str().unwrap_or("-");
+                let scopes = key["scopes"].as_str().unwrap_or("-");
+                let created = key["created_at"].as_str().unwrap_or("-");
+                table.add_row([name, platform, scopes, created]);
+            }
+            eprintln!("{table}");
+        }
+    }
+
+    Ok(())
+}
+
+/// Find an API key by name, returning the full key object.
+async fn find_key_by_name(api: &mut ApiClient, name: &str) -> Result<serde_json::Value> {
+    let keys: serde_json::Value = api.get("/api-keys").await?;
+    let items = array_from_response(&keys, &["keys", "api_keys"]);
+
+    let found = items.and_then(|arr| arr.iter().find(|k| k["name"].as_str() == Some(name)));
+
+    match found {
+        Some(k) => Ok(k.clone()),
+        None => bail!("Agent '{name}' not found. Run `nyxid ai-setup agent list` to see agents."),
+    }
+}
+
+async fn agent_show(auth: &crate::cli::AuthArgs, name: &str) -> Result<()> {
+    let mut api = ApiClient::from_auth(auth)?;
+    let key = find_key_by_name(&mut api, name).await?;
+    let key_id = key["id"]
+        .as_str()
+        .or(key["_id"].as_str())
+        .context("Key has no ID")?;
+
+    // Fetch bindings
+    let bindings: serde_json::Value = api
+        .get(&format!("/api-keys/{key_id}/bindings"))
+        .await
+        .unwrap_or_else(|_| serde_json::json!({ "bindings": [] }));
+
+    match auth.output {
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "agent": key,
+                    "bindings": bindings,
+                }))?
+            );
+        }
+        OutputFormat::Table => {
+            let name = key["name"].as_str().unwrap_or("-");
+            let platform = key["platform"].as_str().unwrap_or("-");
+            let scopes = key["scopes"].as_str().unwrap_or("-");
+            let created = key["created_at"].as_str().unwrap_or("-");
+            let active = key["is_active"].as_bool().unwrap_or(false);
+
+            eprintln!("Name:     {name}");
+            eprintln!("ID:       {key_id}");
+            eprintln!("Platform: {platform}");
+            eprintln!("Scopes:   {scopes}");
+            eprintln!("Active:   {active}");
+            eprintln!("Created:  {created}");
+
+            let binding_arr = array_from_response(&bindings, &["bindings"]).unwrap_or(&[]);
+            if !binding_arr.is_empty() {
+                eprintln!();
+                eprintln!("Bindings:");
+
+                use comfy_table::{Table, presets::UTF8_FULL_CONDENSED};
+                let mut table = Table::new();
+                table.load_preset(UTF8_FULL_CONDENSED);
+                table.set_header(["Binding ID", "Service", "Credential"]);
+
+                for b in binding_arr {
+                    let bid = b["id"].as_str().unwrap_or("-");
+                    let service = b["service_label"]
+                        .as_str()
+                        .or(b["service_slug"].as_str())
+                        .or(b["user_service_id"].as_str())
+                        .unwrap_or("-");
+                    let credential = b["credential_label"]
+                        .as_str()
+                        .or(b["user_api_key_id"].as_str())
+                        .unwrap_or("-");
+                    table.add_row([bid, service, credential]);
+                }
+                eprintln!("{table}");
+            } else {
+                eprintln!();
+                eprintln!("No credential bindings.");
+                eprintln!(
+                    "Bind one with: nyxid ai-setup agent bind {name} --service <slug> --credential <label>"
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn agent_bind(
+    auth: &crate::cli::AuthArgs,
+    name: &str,
+    service_slug: &str,
+    credential_label: &str,
+) -> Result<()> {
+    let mut api = ApiClient::from_auth(auth)?;
+
+    // Resolve agent key
+    let key = find_key_by_name(&mut api, name).await?;
+    let key_id = key["id"]
+        .as_str()
+        .or(key["_id"].as_str())
+        .context("Key has no ID")?;
+
+    // Resolve service slug to UserService ID
+    let user_services: serde_json::Value = api.get("/user-services").await?;
+    let service_arr = array_from_response(&user_services, &["services"]).unwrap_or(&[]);
+    let service = service_arr
+        .iter()
+        .find(|s| s["slug"].as_str() == Some(service_slug))
+        .ok_or_else(|| anyhow::anyhow!("Service '{service_slug}' not found"))?;
+    let user_service_id = service["id"].as_str().context("Service has no ID")?;
+
+    // Resolve credential label to UserApiKey ID
+    let ext_keys: serde_json::Value = api.get("/api-keys/external").await?;
+    let ext_arr = array_from_response(&ext_keys, &["api_keys"]).unwrap_or(&[]);
+    let cred = ext_arr
+        .iter()
+        .find(|k| {
+            k["label"].as_str() == Some(credential_label)
+                || k["name"].as_str() == Some(credential_label)
+        })
+        .ok_or_else(|| anyhow::anyhow!("Credential '{credential_label}' not found"))?;
+    let user_api_key_id = cred["id"].as_str().context("Credential has no ID")?;
+
+    // Create binding
+    let body = serde_json::json!({
+        "user_service_id": user_service_id,
+        "user_api_key_id": user_api_key_id,
+    });
+
+    let resp: serde_json::Value = api
+        .post(&format!("/api-keys/{key_id}/bindings"), &body)
+        .await?;
+
+    match auth.output {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+        }
+        OutputFormat::Table => {
+            let binding_id = resp["id"].as_str().unwrap_or("-");
+            eprintln!("Binding created: {binding_id}");
+            eprintln!("  Agent:      {name}");
+            eprintln!("  Service:    {service_slug}");
+            eprintln!("  Credential: {credential_label}");
+        }
+    }
+
+    Ok(())
+}
+
+async fn agent_rotate(auth: &crate::cli::AuthArgs, name: &str) -> Result<()> {
+    let mut api = ApiClient::from_auth(auth)?;
+    let key = find_key_by_name(&mut api, name).await?;
+    let key_id = key["id"]
+        .as_str()
+        .or(key["_id"].as_str())
+        .context("Key has no ID")?;
+
+    let resp: serde_json::Value = api
+        .post(
+            &format!("/api-keys/{key_id}/rotate"),
+            &serde_json::json!({}),
+        )
+        .await?;
+
+    match auth.output {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+        }
+        OutputFormat::Table => {
+            let new_key = resp["full_key"].as_str().unwrap_or("(not in response)");
+            eprintln!("Agent '{name}' key rotated.");
+            eprintln!();
+            eprintln!("New API Key (save this -- shown only once):");
+            eprintln!("  {new_key}");
+
+            if let Some(platform_str) = key["platform"].as_str() {
+                let platform = match platform_str {
+                    "claude-code" => Some(AiToolTarget::ClaudeCode),
+                    "cursor" => Some(AiToolTarget::Cursor),
+                    "codex" => Some(AiToolTarget::Codex),
+                    "openclaw" => Some(AiToolTarget::Openclaw),
+                    "generic" => Some(AiToolTarget::Generic),
+                    _ => None,
+                };
+                if let Some(p) = platform {
+                    eprintln!();
+                    eprintln!("{}", platform_instructions(p, new_key));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn agent_delete(auth: &crate::cli::AuthArgs, name: &str, yes: bool) -> Result<()> {
+    let mut api = ApiClient::from_auth(auth)?;
+    let key = find_key_by_name(&mut api, name).await?;
+    let key_id = key["id"]
+        .as_str()
+        .or(key["_id"].as_str())
+        .context("Key has no ID")?;
+
+    if !yes {
+        use std::io::Write;
+        eprint!("Delete agent '{name}'? [y/N] ");
+        std::io::stderr().flush()?;
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !answer.trim().eq_ignore_ascii_case("y") {
+            eprintln!("Cancelled.");
+            return Ok(());
+        }
+    }
+
+    api.delete_empty(&format!("/api-keys/{key_id}")).await?;
+    eprintln!("Agent '{name}' deleted.");
     Ok(())
 }
 
@@ -677,5 +1101,40 @@ mod tests {
             "nyxid-ai-setup-tests-{}-{suffix}",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn platform_instructions_claude_code_contains_mcp_config() {
+        let instructions =
+            super::platform_instructions(super::AiToolTarget::ClaudeCode, "test-key-123");
+        assert!(instructions.contains("mcpServers"));
+        assert!(instructions.contains("test-key-123"));
+        assert!(instructions.contains("NYXID_ACCESS_TOKEN"));
+    }
+
+    #[test]
+    fn platform_instructions_codex_contains_export() {
+        let instructions = super::platform_instructions(super::AiToolTarget::Codex, "test-key-456");
+        assert!(instructions.contains("export NYXID_ACCESS_TOKEN"));
+        assert!(instructions.contains("test-key-456"));
+    }
+
+    #[test]
+    fn platform_instructions_generic_contains_env_var() {
+        let instructions =
+            super::platform_instructions(super::AiToolTarget::Generic, "test-key-789");
+        assert!(instructions.contains("NYXID_ACCESS_TOKEN=test-key-789"));
+        assert!(instructions.contains("X-API-Key"));
+    }
+
+    #[test]
+    fn ai_tool_target_display_generic() {
+        assert_eq!(super::AiToolTarget::Generic.to_string(), "generic");
+    }
+
+    #[test]
+    fn skill_paths_generic_returns_empty() {
+        let paths = super::skill_paths(super::AiToolTarget::Generic).unwrap();
+        assert!(paths.is_empty());
     }
 }

@@ -17,13 +17,48 @@ use super::error::{Error, Result};
 // Service identity
 // ---------------------------------------------------------------------------
 
-const LAUNCHD_LABEL: &str = "dev.nyxid.node";
-const SYSTEMD_UNIT: &str = "nyxid-node.service";
+const LAUNCHD_LABEL_BASE: &str = "dev.nyxid.node";
+const SYSTEMD_UNIT_BASE: &str = "nyxid-node";
 const PID_FILE_NAME: &str = "nyxid-node.pid";
 const LOG_DIR_NAME: &str = "logs";
 
 const VALID_LOG_LEVELS: &[&str] = &["trace", "debug", "info", "warn", "error"];
 const DAEMON_META_FILE: &str = "daemon.toml";
+
+fn launchd_label(profile: Option<&str>) -> Result<String> {
+    match profile {
+        None | Some("default") => Ok(LAUNCHD_LABEL_BASE.to_string()),
+        Some(name) => {
+            assert_safe_label(name)?;
+            Ok(format!("{LAUNCHD_LABEL_BASE}.{name}"))
+        }
+    }
+}
+
+fn systemd_unit(profile: Option<&str>) -> Result<String> {
+    match profile {
+        None | Some("default") => Ok(format!("{SYSTEMD_UNIT_BASE}.service")),
+        Some(name) => {
+            assert_safe_label(name)?;
+            Ok(format!("{SYSTEMD_UNIT_BASE}-{name}.service"))
+        }
+    }
+}
+
+/// Defense-in-depth: ensure a profile name is safe for use in service labels.
+/// Only alphanumeric, hyphens, and underscores are allowed.
+fn assert_safe_label(name: &str) -> Result<()> {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(Error::Validation(format!(
+            "Profile name '{name}' is not safe for service labels"
+        )));
+    }
+    Ok(())
+}
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -32,7 +67,12 @@ const DAEMON_META_FILE: &str = "daemon.toml";
 /// Install the node agent as a background service (LaunchAgent / systemd unit).
 ///
 /// If `--force` is passed, existing service files are overwritten.
-pub fn install(config_path: Option<&str>, log_level: Option<&str>, force: bool) -> Result<()> {
+pub fn install(
+    config_path: Option<&str>,
+    profile: Option<&str>,
+    log_level: Option<&str>,
+    force: bool,
+) -> Result<()> {
     if let Some(level) = log_level
         && !VALID_LOG_LEVELS.contains(&level)
     {
@@ -42,21 +82,21 @@ pub fn install(config_path: Option<&str>, log_level: Option<&str>, force: bool) 
         )));
     }
 
-    let config_dir = config::resolve_config_dir(config_path);
+    let config_dir = config::resolve_config_dir_with_profile(config_path, profile)?;
     ensure_config_exists(&config_dir)?;
     let config_dir = canonicalize_existing_dir(&config_dir)?;
 
     // Persist the config dir so other daemon subcommands can find it
-    save_daemon_config_dir(&config_dir)?;
+    save_daemon_config_dir(&config_dir, profile)?;
 
     let nyxid_bin = resolve_binary()?;
 
     if cfg!(target_os = "macos") {
         let log_dir = config_dir.join(LOG_DIR_NAME);
         fs::create_dir_all(&log_dir)?;
-        install_launchd(&nyxid_bin, &log_dir, &config_dir, log_level, force)
+        install_launchd(&nyxid_bin, &log_dir, &config_dir, profile, log_level, force)
     } else if cfg!(target_os = "linux") {
-        install_systemd(&nyxid_bin, &config_dir, log_level, force)
+        install_systemd(&nyxid_bin, &config_dir, profile, log_level, force)
     } else {
         Err(Error::Validation(
             "Daemon installation is only supported on macOS and Linux".into(),
@@ -65,14 +105,14 @@ pub fn install(config_path: Option<&str>, log_level: Option<&str>, force: bool) 
 }
 
 /// Uninstall the background service and remove service files.
-pub fn uninstall(config_path: Option<&str>) -> Result<()> {
+pub fn uninstall(config_path: Option<&str>, profile: Option<&str>) -> Result<()> {
     // Stop first (ignore errors -- service may not be running)
-    let _ = stop(config_path);
+    let _ = stop(config_path, profile);
 
     let result = if cfg!(target_os = "macos") {
-        uninstall_launchd()
+        uninstall_launchd(profile)
     } else if cfg!(target_os = "linux") {
-        uninstall_systemd()
+        uninstall_systemd(profile)
     } else {
         Err(Error::Validation(
             "Daemon uninstallation is only supported on macOS and Linux".into(),
@@ -80,7 +120,7 @@ pub fn uninstall(config_path: Option<&str>) -> Result<()> {
     };
 
     // Clean up saved config dir metadata
-    let default_dir = config::resolve_config_dir(None);
+    let default_dir = config::resolve_config_dir_with_profile(None, profile)?;
     let meta_file = default_dir.join(DAEMON_META_FILE);
     let _ = fs::remove_file(meta_file);
 
@@ -88,14 +128,14 @@ pub fn uninstall(config_path: Option<&str>) -> Result<()> {
 }
 
 /// Start the installed service.
-pub fn start(config_path: Option<&str>) -> Result<()> {
-    let config_dir = resolve_daemon_config_dir(config_path);
+pub fn start(config_path: Option<&str>, profile: Option<&str>) -> Result<()> {
+    let config_dir = resolve_daemon_config_dir(config_path, profile)?;
     ensure_config_exists(&config_dir)?;
 
     if cfg!(target_os = "macos") {
-        start_launchd()
+        start_launchd(profile)
     } else if cfg!(target_os = "linux") {
-        start_systemd()
+        start_systemd(profile)
     } else {
         Err(Error::Validation(
             "Daemon start is only supported on macOS and Linux".into(),
@@ -104,13 +144,13 @@ pub fn start(config_path: Option<&str>) -> Result<()> {
 }
 
 /// Stop the running service.
-pub fn stop(config_path: Option<&str>) -> Result<()> {
+pub fn stop(config_path: Option<&str>, profile: Option<&str>) -> Result<()> {
     let _ = config_path;
 
     if cfg!(target_os = "macos") {
-        stop_launchd()
+        stop_launchd(profile)
     } else if cfg!(target_os = "linux") {
-        stop_systemd()
+        stop_systemd(profile)
     } else {
         Err(Error::Validation(
             "Daemon stop is only supported on macOS and Linux".into(),
@@ -119,12 +159,12 @@ pub fn stop(config_path: Option<&str>) -> Result<()> {
 }
 
 /// Restart the running service (stop + start).
-pub fn restart(config_path: Option<&str>) -> Result<()> {
+pub fn restart(config_path: Option<&str>, profile: Option<&str>) -> Result<()> {
     if cfg!(target_os = "macos") {
-        restart_launchd()
+        restart_launchd(profile)
     } else if cfg!(target_os = "linux") {
-        let _ = stop(config_path);
-        start(config_path)
+        let _ = stop(config_path, profile);
+        start(config_path, profile)
     } else {
         Err(Error::Validation(
             "Daemon restart is only supported on macOS and Linux".into(),
@@ -133,8 +173,8 @@ pub fn restart(config_path: Option<&str>) -> Result<()> {
 }
 
 /// Show service status: installed, running, PID, uptime hints.
-pub fn status(config_path: Option<&str>) -> Result<()> {
-    let config_dir = resolve_daemon_config_dir(config_path);
+pub fn status(config_path: Option<&str>, profile: Option<&str>) -> Result<()> {
+    let config_dir = resolve_daemon_config_dir(config_path, profile)?;
 
     println!("NyxID Node Agent Service Status");
     println!("================================");
@@ -157,9 +197,9 @@ pub fn status(config_path: Option<&str>) -> Result<()> {
     }
 
     if cfg!(target_os = "macos") {
-        status_launchd()?;
+        status_launchd(profile)?;
     } else if cfg!(target_os = "linux") {
-        status_systemd()?;
+        status_systemd(profile)?;
     } else {
         println!("Service:    unsupported platform");
     }
@@ -173,14 +213,19 @@ pub fn status(config_path: Option<&str>) -> Result<()> {
 }
 
 /// Tail / show recent log output.
-pub fn logs(config_path: Option<&str>, follow: bool, lines: usize) -> Result<()> {
-    let config_dir = resolve_daemon_config_dir(config_path);
+pub fn logs(
+    config_path: Option<&str>,
+    profile: Option<&str>,
+    follow: bool,
+    lines: usize,
+) -> Result<()> {
+    let config_dir = resolve_daemon_config_dir(config_path, profile)?;
     let log_dir = config_dir.join(LOG_DIR_NAME);
 
     if cfg!(target_os = "macos") {
         logs_launchd(&log_dir, follow, lines)
     } else if cfg!(target_os = "linux") {
-        logs_systemd(follow, lines)
+        logs_systemd(profile, follow, lines)
     } else {
         Err(Error::Validation(
             "Daemon logs are only supported on macOS and Linux".into(),
@@ -192,21 +237,24 @@ pub fn logs(config_path: Option<&str>, follow: bool, lines: usize) -> Result<()>
 // macOS LaunchAgent
 // ---------------------------------------------------------------------------
 
-fn plist_path() -> Result<PathBuf> {
+fn plist_path_for(profile: Option<&str>) -> Result<PathBuf> {
     let home = home_dir()?;
+    let label = launchd_label(profile)?;
     Ok(home
         .join("Library/LaunchAgents")
-        .join(format!("{LAUNCHD_LABEL}.plist")))
+        .join(format!("{label}.plist")))
 }
 
 fn install_launchd(
     nyxid_bin: &Path,
     log_dir: &Path,
     config_dir: &Path,
+    profile: Option<&str>,
     log_level: Option<&str>,
     force: bool,
 ) -> Result<()> {
-    let plist = plist_path()?;
+    let label = launchd_label(profile)?;
+    let plist = plist_path_for(profile)?;
     if plist.exists() && !force {
         return Err(Error::Validation(format!(
             "Service already installed at {}. Use --force to overwrite.",
@@ -214,7 +262,7 @@ fn install_launchd(
         )));
     }
     if force {
-        let _ = launchd_bootout(true);
+        let _ = launchd_bootout(profile, true);
     }
 
     // Build ProgramArguments as separate tokens (handles paths with spaces)
@@ -243,7 +291,7 @@ fn install_launchd(
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>{LAUNCHD_LABEL}</string>
+    <string>{label}</string>
     <key>ProgramArguments</key>
     <array>
 {program_args_xml}
@@ -289,9 +337,9 @@ fn install_launchd(
     Ok(())
 }
 
-fn uninstall_launchd() -> Result<()> {
-    let _ = launchd_bootout(true);
-    let plist = plist_path()?;
+fn uninstall_launchd(profile: Option<&str>) -> Result<()> {
+    let _ = launchd_bootout(profile, true);
+    let plist = plist_path_for(profile)?;
     if plist.exists() {
         fs::remove_file(&plist)?;
         println!("Removed {}", plist.display());
@@ -301,16 +349,16 @@ fn uninstall_launchd() -> Result<()> {
     Ok(())
 }
 
-fn start_launchd() -> Result<()> {
-    let plist = plist_path()?;
+fn start_launchd(profile: Option<&str>) -> Result<()> {
+    let plist = plist_path_for(profile)?;
     if !plist.exists() {
         return Err(Error::Validation(
             "Service not installed. Run `nyxid node daemon install` first.".into(),
         ));
     }
 
-    if launchd_is_loaded()? {
-        let target = launchd_target();
+    if launchd_is_loaded(profile)? {
+        let target = launchd_target_for(profile)?;
         let kick = Command::new("launchctl")
             .args(["kickstart", &target])
             .output()?;
@@ -331,34 +379,34 @@ fn start_launchd() -> Result<()> {
     Ok(())
 }
 
-fn stop_launchd() -> Result<()> {
-    if !launchd_is_loaded()? {
+fn stop_launchd(profile: Option<&str>) -> Result<()> {
+    if !launchd_is_loaded(profile)? {
         println!("Node agent is not running.");
         Ok(())
     } else {
-        launchd_bootout(false)?;
+        launchd_bootout(profile, false)?;
         println!("Node agent stopped.");
         Ok(())
     }
 }
 
-fn restart_launchd() -> Result<()> {
-    let plist = plist_path()?;
+fn restart_launchd(profile: Option<&str>) -> Result<()> {
+    let plist = plist_path_for(profile)?;
     if !plist.exists() {
         return Err(Error::Validation(
             "Service not installed. Run `nyxid node daemon install` first.".into(),
         ));
     }
 
-    let _ = launchd_bootout(true);
+    let _ = launchd_bootout(profile, true);
     bootstrap_launchd(&plist)?;
     println!("Node agent restarted.");
 
     Ok(())
 }
 
-fn status_launchd() -> Result<()> {
-    let plist = plist_path()?;
+fn status_launchd(profile: Option<&str>) -> Result<()> {
+    let plist = plist_path_for(profile)?;
     if !plist.exists() {
         println!("Installed:  no");
         println!();
@@ -367,8 +415,7 @@ fn status_launchd() -> Result<()> {
     }
     println!("Installed:  yes (launchd)");
 
-    let uid = unsafe { libc::getuid() };
-    let target = format!("gui/{uid}/{LAUNCHD_LABEL}");
+    let target = launchd_target_for(profile)?;
 
     let output = Command::new("launchctl")
         .args(["print", &target])
@@ -456,18 +503,21 @@ fn logs_launchd(log_dir: &Path, follow: bool, lines: usize) -> Result<()> {
 // Linux systemd
 // ---------------------------------------------------------------------------
 
-fn unit_path() -> Result<PathBuf> {
+fn unit_path_for(profile: Option<&str>) -> Result<PathBuf> {
     let home = home_dir()?;
-    Ok(home.join(".config/systemd/user").join(SYSTEMD_UNIT))
+    let unit = systemd_unit(profile)?;
+    Ok(home.join(".config/systemd/user").join(unit))
 }
 
 fn install_systemd(
     nyxid_bin: &Path,
     config_dir: &Path,
+    profile: Option<&str>,
     log_level: Option<&str>,
     force: bool,
 ) -> Result<()> {
-    let unit = unit_path()?;
+    let unit_name = systemd_unit(profile)?;
+    let unit = unit_path_for(profile)?;
     if unit.exists() && !force {
         return Err(Error::Validation(format!(
             "Service already installed at {}. Use --force to overwrite.",
@@ -510,7 +560,7 @@ WantedBy=default.target
 
     // Enable the service so it starts on login
     let _ = Command::new("systemctl")
-        .args(["--user", "enable", SYSTEMD_UNIT])
+        .args(["--user", "enable", &unit_name])
         .output();
 
     // Enable lingering so service runs after logout
@@ -540,11 +590,12 @@ WantedBy=default.target
     Ok(())
 }
 
-fn uninstall_systemd() -> Result<()> {
-    let unit = unit_path()?;
+fn uninstall_systemd(profile: Option<&str>) -> Result<()> {
+    let unit_name = systemd_unit(profile)?;
+    let unit = unit_path_for(profile)?;
 
     let _ = Command::new("systemctl")
-        .args(["--user", "disable", SYSTEMD_UNIT])
+        .args(["--user", "disable", &unit_name])
         .output();
 
     if unit.exists() {
@@ -559,8 +610,9 @@ fn uninstall_systemd() -> Result<()> {
     Ok(())
 }
 
-fn start_systemd() -> Result<()> {
-    let unit = unit_path()?;
+fn start_systemd(profile: Option<&str>) -> Result<()> {
+    let unit_name = systemd_unit(profile)?;
+    let unit = unit_path_for(profile)?;
     if !unit.exists() {
         return Err(Error::Validation(
             "Service not installed. Run `nyxid node daemon install` first.".into(),
@@ -568,7 +620,7 @@ fn start_systemd() -> Result<()> {
     }
 
     let output = Command::new("systemctl")
-        .args(["--user", "start", SYSTEMD_UNIT])
+        .args(["--user", "start", &unit_name])
         .output()?;
 
     if output.status.success() {
@@ -581,9 +633,11 @@ fn start_systemd() -> Result<()> {
     Ok(())
 }
 
-fn stop_systemd() -> Result<()> {
+fn stop_systemd(profile: Option<&str>) -> Result<()> {
+    let unit_name = systemd_unit(profile)?;
+
     let output = Command::new("systemctl")
-        .args(["--user", "stop", SYSTEMD_UNIT])
+        .args(["--user", "stop", &unit_name])
         .output()?;
 
     if output.status.success() {
@@ -600,8 +654,9 @@ fn stop_systemd() -> Result<()> {
     Ok(())
 }
 
-fn status_systemd() -> Result<()> {
-    let unit = unit_path()?;
+fn status_systemd(profile: Option<&str>) -> Result<()> {
+    let unit_name = systemd_unit(profile)?;
+    let unit = unit_path_for(profile)?;
     if !unit.exists() {
         println!("Installed:  no");
         println!();
@@ -611,7 +666,7 @@ fn status_systemd() -> Result<()> {
     println!("Installed:  yes (systemd)");
 
     let output = Command::new("systemctl")
-        .args(["--user", "is-active", SYSTEMD_UNIT])
+        .args(["--user", "is-active", &unit_name])
         .output()?;
 
     let state = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -623,7 +678,7 @@ fn status_systemd() -> Result<()> {
     }
 
     let pid_output = Command::new("systemctl")
-        .args(["--user", "show", SYSTEMD_UNIT, "--property=MainPID"])
+        .args(["--user", "show", &unit_name, "--property=MainPID"])
         .output()?;
     let pid_line = String::from_utf8_lossy(&pid_output.stdout);
     if let Some(pid_str) = pid_line.trim().strip_prefix("MainPID=")
@@ -636,11 +691,12 @@ fn status_systemd() -> Result<()> {
     Ok(())
 }
 
-fn logs_systemd(follow: bool, lines: usize) -> Result<()> {
+fn logs_systemd(profile: Option<&str>, follow: bool, lines: usize) -> Result<()> {
+    let unit_name = systemd_unit(profile)?;
     let mut cmd = Command::new("journalctl");
     cmd.args([
         "--user-unit",
-        SYSTEMD_UNIT,
+        &unit_name,
         "-n",
         &lines.to_string(),
         "--no-pager",
@@ -673,22 +729,22 @@ fn home_dir() -> Result<PathBuf> {
 /// If the user passes `--config`, use that. Otherwise, check if `install`
 /// previously saved a config path in `daemon.toml` and use that. Falls back
 /// to the default `~/.nyxid-node/`.
-fn resolve_daemon_config_dir(config_path: Option<&str>) -> PathBuf {
+fn resolve_daemon_config_dir(config_path: Option<&str>, profile: Option<&str>) -> Result<PathBuf> {
     if config_path.is_some() {
-        return config::resolve_config_dir(config_path);
+        return Ok(config::resolve_config_dir(config_path));
     }
 
     // Try to read the path saved by `daemon install`
-    if let Some(saved) = load_daemon_config_dir() {
-        return saved;
+    if let Some(saved) = load_daemon_config_dir(profile)? {
+        return Ok(saved);
     }
 
-    config::resolve_config_dir(None)
+    config::resolve_config_dir_with_profile(None, profile)
 }
 
 /// Save the canonical config directory so other daemon subcommands can find it.
-fn save_daemon_config_dir(config_dir: &Path) -> Result<()> {
-    let default_dir = config::resolve_config_dir(None);
+fn save_daemon_config_dir(config_dir: &Path, profile: Option<&str>) -> Result<()> {
+    let default_dir = config::resolve_config_dir_with_profile(None, profile)?;
     let meta_file = default_dir.join(DAEMON_META_FILE);
     fs::create_dir_all(&default_dir)?;
     let content = format!("config_dir = \"{}\"\n", config_dir.display());
@@ -697,14 +753,20 @@ fn save_daemon_config_dir(config_dir: &Path) -> Result<()> {
 }
 
 /// Load the config directory saved by `daemon install`.
-fn load_daemon_config_dir() -> Option<PathBuf> {
-    let default_dir = config::resolve_config_dir(None);
+fn load_daemon_config_dir(profile: Option<&str>) -> Result<Option<PathBuf>> {
+    let default_dir = config::resolve_config_dir_with_profile(None, profile)?;
     let meta_file = default_dir.join(DAEMON_META_FILE);
-    let content = fs::read_to_string(&meta_file).ok()?;
-    let table: toml::Table = content.parse().ok()?;
-    let dir = table.get("config_dir")?.as_str()?;
+    let Ok(content) = fs::read_to_string(&meta_file) else {
+        return Ok(None);
+    };
+    let Ok(table) = content.parse::<toml::Table>() else {
+        return Ok(None);
+    };
+    let Some(dir) = table.get("config_dir").and_then(|v| v.as_str()) else {
+        return Ok(None);
+    };
     let path = PathBuf::from(dir);
-    if path.exists() { Some(path) } else { None }
+    Ok(if path.exists() { Some(path) } else { None })
 }
 
 /// Resolve a config directory to an absolute path for long-lived service files.
@@ -722,19 +784,19 @@ fn launchd_domain() -> String {
     format!("gui/{uid}")
 }
 
-fn launchd_target() -> String {
-    format!("{}/{}", launchd_domain(), LAUNCHD_LABEL)
+fn launchd_target_for(profile: Option<&str>) -> Result<String> {
+    Ok(format!("{}/{}", launchd_domain(), launchd_label(profile)?))
 }
 
-fn launchd_is_loaded() -> Result<bool> {
+fn launchd_is_loaded(profile: Option<&str>) -> Result<bool> {
     let output = Command::new("launchctl")
-        .args(["print", &launchd_target()])
+        .args(["print", &launchd_target_for(profile)?])
         .output()?;
     Ok(output.status.success())
 }
 
-fn launchd_bootout(ignore_missing: bool) -> Result<()> {
-    let target = launchd_target();
+fn launchd_bootout(profile: Option<&str>, ignore_missing: bool) -> Result<()> {
+    let target = launchd_target_for(profile)?;
     let output = Command::new("launchctl")
         .args(["bootout", &target])
         .output()?;
@@ -850,6 +912,46 @@ mod tests {
     use std::io::Write;
     use std::path::{Path, PathBuf};
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn launchd_label_default() {
+        assert_eq!(launchd_label(None).unwrap(), "dev.nyxid.node");
+        assert_eq!(launchd_label(Some("default")).unwrap(), "dev.nyxid.node");
+    }
+
+    #[test]
+    fn launchd_label_profiled() {
+        assert_eq!(
+            launchd_label(Some("coding-agent")).unwrap(),
+            "dev.nyxid.node.coding-agent"
+        );
+    }
+
+    #[test]
+    fn launchd_label_rejects_unsafe_name() {
+        assert!(launchd_label(Some("../../etc")).is_err());
+        assert!(launchd_label(Some("; rm -rf /")).is_err());
+    }
+
+    #[test]
+    fn systemd_unit_default() {
+        assert_eq!(systemd_unit(None).unwrap(), "nyxid-node.service");
+        assert_eq!(systemd_unit(Some("default")).unwrap(), "nyxid-node.service");
+    }
+
+    #[test]
+    fn systemd_unit_profiled() {
+        assert_eq!(
+            systemd_unit(Some("research")).unwrap(),
+            "nyxid-node-research.service"
+        );
+    }
+
+    #[test]
+    fn systemd_unit_rejects_unsafe_name() {
+        assert!(systemd_unit(Some("../../etc")).is_err());
+        assert!(systemd_unit(Some("; rm -rf /")).is_err());
+    }
 
     #[test]
     fn xml_escape_special_chars() {

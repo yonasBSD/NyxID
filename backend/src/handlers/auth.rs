@@ -325,6 +325,8 @@ pub async fn register(
         Some(serde_json::json!({ "email": body.email })),
         extract_ip(&headers, Some(peer)),
         extract_user_agent(&headers),
+        None,
+        None,
     );
 
     #[cfg(debug_assertions)]
@@ -418,6 +420,8 @@ pub async fn login(
                 Some(serde_json::json!({ "session_id": session.session_id })),
                 ip,
                 ua,
+                None,
+                None,
             );
 
             apply_browser_session_cookies(
@@ -455,6 +459,8 @@ pub async fn login(
                 Some(serde_json::json!({ "session_id": tokens.session_id })),
                 ip,
                 ua,
+                None,
+                None,
             );
 
             Ok((
@@ -495,6 +501,8 @@ pub async fn logout(
         None,
         extract_ip(&headers, Some(peer)),
         extract_user_agent(&headers),
+        None,
+        None,
     );
 
     let secure = state.config.use_secure_cookies();
@@ -754,6 +762,8 @@ pub async fn setup(
         })),
         extract_ip(&headers, Some(peer)),
         extract_user_agent(&headers),
+        None,
+        None,
     );
 
     tracing::info!(user_id = %result.user_id, email = %body.email, "Initial admin created via bootstrap");

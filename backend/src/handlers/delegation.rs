@@ -51,6 +51,8 @@ pub async fn refresh_delegation_token(
         })),
         None,
         None,
+        None,
+        None,
     );
 
     Ok(Json(DelegationRefreshResponse {

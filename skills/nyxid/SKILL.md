@@ -248,7 +248,130 @@ nyxid api-key delete <ID> --yes
 # Scope management (restrict which services/nodes a key can access)
 nyxid api-key update <ID> --allowed-services "svc-id-1,svc-id-2" --allow-all-services false
 nyxid api-key update <ID> --allow-all-services true    # unrestrict
+
+# Agent credential bindings (override which credential an agent uses for a service)
+nyxid api-key bind <KEY_ID> --service <SERVICE_SLUG> --credential <CREDENTIAL_NAME>
+nyxid api-key unbind <KEY_ID> --service <SERVICE_SLUG>
+nyxid api-key bindings <KEY_ID> --output json
+
+# Platform tagging (label which agent platform uses this key)
+nyxid api-key update <KEY_ID> --platform claude-code
+
+# Per-agent rate limits
+nyxid api-key update <KEY_ID> --rate-limit-per-second 10 --rate-limit-burst 30
 ```
+
+## Agent Identity
+
+Each AI agent (Claude Code, Codex, OpenClaw, etc.) should use its own NyxID API key for isolation. This gives each agent independent credentials, rate limits, and audit trails.
+
+### Why agent isolation matters
+
+- **Security**: If one agent's key is compromised, revoke it without affecting others
+- **Audit**: Track which agent made which request in the audit log
+- **Rate limits**: Set per-agent rate limits to prevent one agent from consuming all quota
+- **Credential bindings**: Give each agent different credentials for the same service
+
+### Setting up agent isolation
+
+```bash
+# Create a scoped API key for a specific agent
+nyxid ai-setup agent create --name "coding-agent" --platform claude-code --services llm-openai,api-github
+
+# List agent identities
+nyxid ai-setup agent list --output json
+
+# Show agent details including credential bindings
+nyxid ai-setup agent show coding-agent --output json
+
+# Bind a specific credential to an agent for a service
+nyxid ai-setup agent bind coding-agent --service llm-openai --credential openai-premium
+
+# Rotate an agent's API key
+nyxid ai-setup agent rotate coding-agent
+
+# Delete an agent identity
+nyxid ai-setup agent delete coding-agent --yes
+```
+
+### Using the key
+
+Set `NYXID_ACCESS_TOKEN` in the agent's environment:
+
+```bash
+# Claude Code (~/.claude/settings.json env block or shell profile)
+export NYXID_ACCESS_TOKEN="nyxid_ag_..."
+
+# Codex (project .env or shell profile)
+export NYXID_ACCESS_TOKEN="nyxid_ag_..."
+```
+
+The `nyxid` CLI automatically uses `NYXID_ACCESS_TOKEN` if set, falling back to the session token in `~/.nyxid/`.
+
+### Platform setup examples
+
+**Claude Code** (via `~/.claude/settings.json`):
+
+```json
+{
+  "mcpServers": {
+    "nyxid": {
+      "command": "nyxid",
+      "args": ["mcp", "serve"],
+      "env": {
+        "NYXID_ACCESS_TOKEN": "nyxid_ag_..."
+      }
+    }
+  }
+}
+```
+
+**Codex** (via project `.env` or shell profile):
+
+```bash
+export NYXID_ACCESS_TOKEN="nyxid_ag_..."
+```
+
+**OpenClaw** (via workspace config):
+
+```yaml
+skills:
+  nyxid:
+    env:
+      NYXID_ACCESS_TOKEN: "nyxid_ag_..."
+```
+
+**Generic / other platforms**:
+
+Set `NYXID_ACCESS_TOKEN=nyxid_ag_...` in your agent's environment. All `nyxid` CLI commands use this token automatically.
+
+### CLI profiles
+
+For managing multiple agent identities on a single machine, the CLI supports `--profile`:
+
+```bash
+# Login for a specific profile
+nyxid login --base-url https://nyx-api.chrono-ai.fun --profile coding-agent
+
+# All commands support --profile
+nyxid service list --profile coding-agent
+nyxid proxy request llm-openai /chat/completions --profile coding-agent -m POST -d '...'
+
+# Or use the NYXID_PROFILE environment variable
+NYXID_PROFILE=coding-agent nyxid proxy request ...
+```
+
+Profiles store tokens under `~/.nyxid/profiles/{name}/`. Without `--profile`, the default `~/.nyxid/` path is used (full backward compatibility).
+
+Node agents also support profiles for multi-instance operation:
+
+```bash
+nyxid node register --token nyx_nreg_... --profile coding-agent
+nyxid node daemon install --profile coding-agent
+nyxid node daemon start --profile coding-agent
+```
+
+Each profile gets its own daemon process and service label.
 
 ## Node Management
 
@@ -280,9 +403,14 @@ nyxid node credentials setup --service llm-openai      # agent picks up new cred
 
 # Or run in foreground (for debugging)
 nyxid node start
+
+# Or run via Docker (good for multi-profile isolation)
+nyxid node docker build                                # build image (once)
+nyxid node docker start                                # start default node container
+nyxid node docker start --profile coding-agent         # start profile-specific container
 ```
 
-> Credentials can be added, updated, or removed while the agent is running. The agent watches the config file and reloads credentials automatically (no restart needed).
+> Credentials can be added, updated, or removed while the agent is running. The agent watches the config file and reloads credentials automatically (no restart needed). This works for both native daemons and Docker containers (config is mounted as a volume).
 
 ### Managing the node service
 
@@ -446,6 +574,7 @@ nyxid mcp config --tool vscode                         # generate MCP config for
 - Use exact downstream API paths. Do not guess undocumented endpoints.
 - Keep request bodies minimal and service-correct.
 - Never try to extract or display the user's stored provider credentials.
+- If multiple AI agents share a machine, each should have its own `NYXID_ACCESS_TOKEN`. Never share a single API key across multiple agents -- it defeats audit isolation and makes revocation impossible without disrupting all agents.
 
 ## External Endpoints
 

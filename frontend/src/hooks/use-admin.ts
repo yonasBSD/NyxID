@@ -12,6 +12,7 @@ import type {
   RevokeSessionsResponse,
   CreateUserRequest,
   CreateUserResponse,
+  AdminAuditLogListResponse,
 } from "@/types/admin";
 
 export function useAdminUsers(page: number, perPage: number, search?: string) {
@@ -49,6 +50,34 @@ export function useAdminUserSessions(userId: string) {
       );
     },
     enabled: userId.length > 0,
+  });
+}
+
+export function useAdminAuditLog(
+  page: number,
+  perPage: number,
+  filters?: {
+    readonly userId?: string;
+    readonly apiKeyId?: string;
+  },
+) {
+  return useQuery({
+    queryKey: ["admin", "audit-log", page, perPage, filters?.userId, filters?.apiKeyId],
+    queryFn: async (): Promise<AdminAuditLogListResponse> => {
+      const params = new URLSearchParams({
+        page: String(page),
+        per_page: String(perPage),
+      });
+      if (filters?.userId) {
+        params.set("user_id", filters.userId);
+      }
+      if (filters?.apiKeyId) {
+        params.set("api_key_id", filters.apiKeyId);
+      }
+      return api.get<AdminAuditLogListResponse>(
+        `/admin/audit-log?${params.toString()}`,
+      );
+    },
   });
 }
 

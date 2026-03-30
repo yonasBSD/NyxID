@@ -463,6 +463,8 @@ pub async fn mcp_delete(State(state): State<AppState>, headers: HeaderMap) -> Re
         Some(serde_json::json!({ "session_id": &sid })),
         None,
         None,
+        None,
+        None,
     );
 
     StatusCode::NO_CONTENT.into_response()
@@ -484,6 +486,8 @@ fn handle_initialize(state: &AppState, user_id: &str, request: &JsonRpcRequest) 
         Some(user_id.to_string()),
         "mcp_session_created".to_string(),
         Some(serde_json::json!({ "session_id": &session_id })),
+        None,
+        None,
         None,
         None,
     );
@@ -716,6 +720,8 @@ async fn handle_tools_call(
         })),
         None,
         None,
+        None,
+        None,
     );
 
     let is_error = !(200..300).contains(&status);
@@ -857,6 +863,8 @@ async fn handle_meta_call_tool(
             "response_status": status,
             "via": "nyx__call_tool",
         })),
+        None,
+        None,
         None,
         None,
     );
@@ -1060,6 +1068,8 @@ async fn handle_meta_connect(
                 Some(user_id.to_string()),
                 "mcp_connect_service".to_string(),
                 Some(serde_json::json!({ "service_id": service_id })),
+                None,
+                None,
                 None,
                 None,
             );
@@ -1281,6 +1291,8 @@ async fn handle_mcp_ssh_list(
         Some(serde_json::json!({ "count": count })),
         None,
         None,
+        None,
+        None,
     );
 
     tool_result(request_id, &text, false)
@@ -1446,6 +1458,8 @@ async fn execute_ssh_command_internal(
                         "routed_via": "node",
                         "node_id": node_id,
                     })),
+                    None,
+                    None,
                     None,
                     None,
                 );

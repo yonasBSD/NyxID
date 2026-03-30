@@ -65,6 +65,8 @@ pub async fn exchange_social_token(
                 })),
                 None,
                 None,
+                None,
+                None,
             );
         }
         Err(err) => {
@@ -79,6 +81,8 @@ pub async fn exchange_social_token(
                     "result": "failure",
                     "error": err.to_string(),
                 })),
+                None,
+                None,
                 None,
                 None,
             );

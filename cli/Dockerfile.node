@@ -1,0 +1,57 @@
+# NyxID Node Agent - Docker Image
+#
+# Build:  docker build -f cli/Dockerfile.node -t nyxid-node .
+# Run:    docker run -v ~/.nyxid-node:/app/config nyxid-node
+#
+# For multi-profile:
+#   docker run -v ~/.nyxid-node/profiles/coding-agent:/app/config nyxid-node
+#
+# Pre-requisite: register the node on the host first:
+#   nyxid node register --token <token> --url <ws-url> [--profile <name>]
+
+# -- Stage 1: Build --------------------------------------------------------
+FROM rust:1.93-bookworm AS builder
+
+# libdbus-1-dev is required by the keyring crate (sync-secret-service feature)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends pkg-config libdbus-1-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy entire workspace (needed for workspace dependency resolution)
+COPY Cargo.toml Cargo.lock ./
+COPY backend/ backend/
+COPY node-agent/ node-agent/
+COPY cli/ cli/
+COPY docs/AI_AGENT_PLAYBOOK.md docs/AI_AGENT_PLAYBOOK.md
+
+# Build only the CLI binary (includes node agent subcommand)
+RUN cargo build --release -p nyxid-cli
+
+# -- Stage 2: Runtime -------------------------------------------------------
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates libdbus-1-3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create a non-root user
+RUN groupadd -r nyxid && useradd -r -g nyxid -d /app -s /sbin/nologin nyxid
+
+WORKDIR /app
+
+# Copy the compiled CLI binary
+COPY --from=builder /build/target/release/nyxid /usr/local/bin/nyxid
+
+# Config directory: mount a volume here at runtime
+RUN mkdir -p /app/config && chown nyxid:nyxid /app/config
+
+USER nyxid
+
+# No ports exposed -- node agent initiates outbound WebSocket connections.
+# Health can be checked via the node's heartbeat to the NyxID server.
+
+# Run the node agent in foreground mode, reading config from /app/config.
+# Override --config if you mount the volume elsewhere.
+ENTRYPOINT ["nyxid", "node", "start", "--config", "/app/config"]

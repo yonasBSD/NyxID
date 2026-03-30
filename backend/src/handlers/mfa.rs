@@ -213,6 +213,8 @@ pub async fn verify(
                 Some(serde_json::json!({ "session_id": session.session_id })),
                 ip,
                 ua,
+                None,
+                None,
             );
 
             apply_browser_session_cookies(
@@ -250,6 +252,8 @@ pub async fn verify(
                 Some(serde_json::json!({ "session_id": tokens.session_id })),
                 ip,
                 ua,
+                None,
+                None,
             );
 
             Ok((

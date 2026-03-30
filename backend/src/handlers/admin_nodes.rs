@@ -225,6 +225,8 @@ pub async fn admin_disconnect_node(
         Some(serde_json::json!({ "node_id": &node_id })),
         None,
         None,
+        None,
+        None,
     );
 
     Ok(StatusCode::NO_CONTENT)
@@ -253,6 +255,8 @@ pub async fn admin_delete_node(
         Some(auth_user.user_id.to_string()),
         "admin_node_deleted".to_string(),
         Some(serde_json::json!({ "node_id": &node_id })),
+        None,
+        None,
         None,
         None,
     );

@@ -57,6 +57,8 @@ pub struct AppState {
     pub node_ws_manager: Arc<NodeWsManager>,
     /// Concurrent SSH tunnel session limiter
     pub ssh_session_manager: Arc<SshSessionManager>,
+    /// Per-agent rate limiter keyed by API key ID
+    pub per_agent_limiter: mw::rate_limit::SharedPerAgentRateLimiter,
 }
 
 /// NyxID authentication and SSO platform.
@@ -311,6 +313,7 @@ async fn main() {
         encryption_keys: encryption_keys.clone(),
         node_ws_manager,
         ssh_session_manager,
+        per_agent_limiter: Arc::new(mw::rate_limit::PerAgentRateLimiter::new()),
     };
 
     // Create rate limiters
@@ -328,6 +331,19 @@ async fn main() {
         loop {
             interval.tick().await;
             cleanup_limiter.cleanup();
+        }
+    });
+
+    // Spawn background cleanup task for the per-agent token bucket limiter.
+    // Entries are retained for 120 seconds to avoid re-allocation for agents
+    // that send bursts slightly apart.
+    // 60-second cleanup interval is intentionally coarse to minimize lock contention.
+    let cleanup_agent_limiter = state.per_agent_limiter.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            cleanup_agent_limiter.cleanup();
         }
     });
 
@@ -542,6 +558,8 @@ async fn run_promote_admin(db: &mongodb::Database, email: &str) {
                     "email": email,
                     "method": "cli"
                 })),
+                None,
+                None,
                 None,
                 None,
             );

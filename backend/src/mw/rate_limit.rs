@@ -70,6 +70,80 @@ impl PerIpRateLimiter {
 /// Shared per-IP rate limiter type for use as an Extension.
 pub type SharedPerIpRateLimiter = Arc<PerIpRateLimiter>;
 
+/// Per-agent rate limiter keyed by API key ID.
+/// Each agent gets its own token bucket keyed by API key ID.
+/// `rate_limit_per_second` controls refill rate and `burst` controls capacity.
+#[derive(Clone)]
+pub struct PerAgentRateLimiter {
+    state: Arc<Mutex<HashMap<String, AgentBucket>>>,
+}
+
+#[derive(Clone, Debug)]
+struct AgentBucket {
+    tokens: f64,
+    last_refill: Instant,
+}
+
+impl PerAgentRateLimiter {
+    pub fn new() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Check if a request from the given agent should be allowed.
+    /// Returns true if allowed, false if rate limited.
+    pub fn check(&self, agent_id: &str, rate_per_second: u32, burst_capacity: u32) -> bool {
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = state.entry(agent_id.to_string()).or_insert(AgentBucket {
+            tokens: burst_capacity as f64,
+            last_refill: now,
+        });
+
+        let elapsed_secs = now.duration_since(entry.last_refill).as_secs_f64();
+        entry.tokens =
+            (entry.tokens + elapsed_secs * rate_per_second as f64).min(burst_capacity as f64);
+        entry.last_refill = now;
+
+        if entry.tokens < 1.0 {
+            return false;
+        }
+        entry.tokens -= 1.0;
+        true
+    }
+
+    /// Remove stale entries to prevent unbounded memory growth.
+    pub fn cleanup(&self) {
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.retain(|_, bucket| now.duration_since(bucket.last_refill).as_secs() < 120);
+    }
+}
+
+pub type SharedPerAgentRateLimiter = Arc<PerAgentRateLimiter>;
+
+/// Check per-agent rate limit. Call from proxy handlers after auth extraction.
+pub fn check_agent_rate_limit(
+    limiter: &PerAgentRateLimiter,
+    auth_user: &crate::mw::auth::AuthUser,
+) -> Result<(), crate::errors::AppError> {
+    if let (Some(agent_id), Some(rps)) = (&auth_user.api_key_id, auth_user.rate_limit_per_second) {
+        // When no explicit burst is set, use the sustained rate as the ceiling.
+        // Users who want a higher burst can set rate_limit_burst explicitly.
+        let burst = auth_user.rate_limit_burst.unwrap_or(rps);
+        if !limiter.check(agent_id, rps, burst) {
+            tracing::warn!(
+                agent_id = %agent_id,
+                rate_limit = rps,
+                "Per-agent rate limit exceeded"
+            );
+            return Err(crate::errors::AppError::RateLimited);
+        }
+    }
+    Ok(())
+}
+
 /// Create a new global rate limiter (kept as fallback).
 ///
 /// The limiter allows `per_second` requests per second with a burst capacity
@@ -267,5 +341,44 @@ mod tests {
             .unwrap();
         let ip = extract_client_ip(&req);
         assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)));
+    }
+
+    #[test]
+    fn per_agent_allows_under_limit() {
+        let limiter = PerAgentRateLimiter::new();
+        assert!(limiter.check("agent-1", 3, 3));
+        assert!(limiter.check("agent-1", 3, 3));
+        assert!(limiter.check("agent-1", 3, 3));
+    }
+
+    #[test]
+    fn per_agent_blocks_over_limit() {
+        let limiter = PerAgentRateLimiter::new();
+        assert!(limiter.check("agent-2", 2, 2));
+        assert!(limiter.check("agent-2", 2, 2));
+        assert!(!limiter.check("agent-2", 2, 2));
+    }
+
+    #[test]
+    fn per_agent_different_agents_independent() {
+        let limiter = PerAgentRateLimiter::new();
+        assert!(limiter.check("agent-a", 1, 1));
+        assert!(!limiter.check("agent-a", 1, 1));
+        assert!(limiter.check("agent-b", 1, 1));
+    }
+
+    #[test]
+    fn per_agent_uses_burst_without_turning_it_into_sustained_limit() {
+        let limiter = PerAgentRateLimiter::new();
+        assert!(limiter.check("agent-burst", 1, 2));
+        assert!(limiter.check("agent-burst", 1, 2));
+        assert!(!limiter.check("agent-burst", 1, 2));
+    }
+
+    #[test]
+    fn per_agent_cleanup_does_not_panic() {
+        let limiter = PerAgentRateLimiter::new();
+        limiter.check("agent-x", 10, 10);
+        limiter.cleanup();
     }
 }

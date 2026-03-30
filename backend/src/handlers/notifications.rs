@@ -154,6 +154,8 @@ pub async fn update_settings(
         })),
         None,
         None,
+        None,
+        None,
     );
 
     Ok(Json(to_settings_response(&updated)))
@@ -260,6 +262,8 @@ pub async fn telegram_disconnect(
         } else {
             None
         },
+        None,
+        None,
         None,
         None,
     );

@@ -1,0 +1,53 @@
+# Docker Compose for NyxID Node Agents
+#
+# Usage:
+#   # Start a single default node agent:
+#   docker compose -f docker-compose.node.yml up -d
+#
+#   # Start multiple profile-specific node agents:
+#   PROFILES="coding-agent,research-agent" docker compose -f docker-compose.node.yml up -d
+#
+# Pre-requisite: register each node on the host first:
+#   nyxid node register --token <token> --url <ws-url>
+#   nyxid node register --token <token> --url <ws-url> --profile coding-agent
+#   nyxid node register --token <token> --url <ws-url> --profile research-agent
+#
+# Each profile gets its own container with isolated credentials.
+
+services:
+  # Default node agent (reads from ~/.nyxid-node/)
+  node:
+    build:
+      context: .
+      dockerfile: cli/Dockerfile.node
+    image: nyxid-node:latest
+    container_name: nyxid-node
+    restart: unless-stopped
+    volumes:
+      - ${NYXID_NODE_CONFIG:-~/.nyxid-node}:/app/config:rw
+    # No ports needed -- agent initiates outbound WebSocket connections.
+    # For local dev, use host networking so the agent can reach localhost:3001:
+    # network_mode: host
+
+  # Example: profile-specific node agents
+  # Uncomment and duplicate for each agent profile.
+  #
+  # node-coding-agent:
+  #   build:
+  #     context: .
+  #     dockerfile: cli/Dockerfile.node
+  #   image: nyxid-node:latest
+  #   container_name: nyxid-node-coding-agent
+  #   restart: unless-stopped
+  #   volumes:
+  #     - ~/.nyxid-node/profiles/coding-agent:/app/config:rw
+  #
+  # node-research-agent:
+  #   build:
+  #     context: .
+  #     dockerfile: cli/Dockerfile.node
+  #   image: nyxid-node:latest
+  #   container_name: nyxid-node-research-agent
+  #   restart: unless-stopped
+  #   volumes:
+  #     - ~/.nyxid-node/profiles/research-agent:/app/config:rw

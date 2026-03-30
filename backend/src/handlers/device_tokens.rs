@@ -302,6 +302,8 @@ pub async fn register_device(
         })),
         None,
         None,
+        None,
+        None,
     );
 
     Ok(Json(DeviceResponse {
@@ -408,6 +410,8 @@ pub async fn remove_device(
         })),
         None,
         None,
+        None,
+        None,
     );
 
     let message = if approval_auto_disabled && channel.approval_required {
@@ -476,6 +480,8 @@ pub async fn remove_current_device(
             "token_removed": true,
             "approval_auto_disabled": approval_auto_disabled,
         })),
+        None,
+        None,
         None,
         None,
     );

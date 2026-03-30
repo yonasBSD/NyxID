@@ -47,6 +47,7 @@ const DEVELOPER_NAV_ITEMS = [
 
 const ADMIN_NAV_ITEMS = [
   { to: "/admin/users", icon: Users, label: "Users" },
+  { to: "/admin/audit-log", icon: ClipboardList, label: "Audit Log" },
   { to: "/admin/service-accounts", icon: Bot, label: "Service Accounts" },
   { to: "/admin/roles", icon: ShieldCheck, label: "Roles" },
   { to: "/admin/groups", icon: UsersRound, label: "Groups" },

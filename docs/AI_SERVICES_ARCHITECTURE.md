@@ -23,10 +23,11 @@ graph TB
         AUTH["Auth + JWT<br/>SSO, MFA, Sessions"]
     end
 
-    subgraph "User Data (3 collections)"
+    subgraph "User Data (4 collections)"
         UE["UserEndpoint<br/>Target URLs"]
         UAK["UserApiKey<br/>Credentials"]
         US["UserService<br/>Routing Config"]
+        ASB["AgentServiceBinding<br/>Per-agent credential overrides"]
     end
 
     subgraph "Node Infrastructure"
@@ -52,6 +53,9 @@ graph TB
     NODE --> TARGET
 
     NODE_CLI --> NODE
+
+    ASB --> US
+    ASB --> UAK
 ```
 
 ## Data Model Relationships
@@ -105,7 +109,23 @@ erDiagram
         bool allow_all_nodes
         string allowed_service_ids "UserService IDs"
         string allowed_node_ids "Node IDs"
+        int rate_limit_per_second "optional per-agent"
+        int rate_limit_burst "optional per-agent"
+        string platform "claude-code, codex, etc"
     }
+
+    AgentServiceBinding {
+        string id PK
+        string api_key_id FK
+        string user_id
+        string user_service_id FK
+        string user_api_key_id FK
+        datetime created_at
+        datetime updated_at
+    }
+    ApiKey ||--o{ AgentServiceBinding : "has bindings"
+    UserService ||--o{ AgentServiceBinding : "bound to"
+    UserApiKey ||--o{ AgentServiceBinding : "overrides with"
 
     ServiceCatalog {
         string slug PK
@@ -266,4 +286,45 @@ flowchart TD
     NODE_SETUP --> DONE
 
     style DONE fill:#4f8,stroke:#333
+```
+
+## Agent Isolation Data Flow
+
+When a proxy request arrives with an agent-scoped API key (`nyxid_ag_` prefix):
+
+1. **Auth middleware** (`mw/auth.rs`) resolves the API key, extracts `api_key_id` and `api_key_name` into `AuthUser`
+2. **Per-agent rate limiter** (`mw/rate_limit.rs`) checks per-agent rate limits from `ApiKey.rate_limit_per_second` / `rate_limit_burst` if configured, using a separate bucket per `api_key_id`
+3. **Proxy handler** (`handlers/proxy.rs`) passes `AuthUser` to credential resolution
+4. **Credential resolution** checks `agent_service_bindings` for a binding matching `(api_key_id, user_service_id)`
+5. **If binding exists**: Uses the override `user_api_key_id` instead of the service's default credential
+6. **If no binding**: Falls back to the service's default `api_key_id`
+7. **Response header**: `X-NyxID-Agent-Id` is returned on proxy responses when the request was made with an API key
+8. **Audit logging** includes `api_key_id` and `api_key_name` in event data for per-agent attribution
+
+```mermaid
+sequenceDiagram
+    participant Agent as AI Agent
+    participant API as NyxID API
+    participant RL as Rate Limiter
+    participant US as UserService
+    participant ASB as AgentServiceBinding
+    participant UAK as UserApiKey
+    participant Target as Target Service
+
+    Agent->>API: POST /proxy/s/llm-openai/chat/completions<br/>X-API-Key: nyxid_ag_...
+    API->>API: AuthUser { api_key_id, api_key_name, rate_limit_* }
+    API->>RL: Check per-agent rate limit
+    RL-->>API: Allowed
+    API->>US: Find UserService by slug + user_id
+    API->>ASB: Lookup (api_key_id, user_service_id)
+    alt Binding found
+        ASB-->>API: Override user_api_key_id
+        API->>UAK: Decrypt override credential
+    else No binding
+        API->>UAK: Decrypt default credential
+    end
+    API->>Target: Forward request with credential
+    Target-->>API: Response
+    API->>API: Audit log { api_key_id, api_key_name }
+    API-->>Agent: Response + X-NyxID-Agent-Id header
 ```

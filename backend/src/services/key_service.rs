@@ -23,6 +23,9 @@ pub struct CreatedApiKey {
     pub allowed_node_ids: Vec<String>,
     pub allow_all_services: bool,
     pub allow_all_nodes: bool,
+    pub rate_limit_per_second: Option<u32>,
+    pub rate_limit_burst: Option<u32>,
+    pub platform: Option<String>,
 }
 
 /// Valid scopes that can be assigned to API keys.
@@ -37,6 +40,23 @@ const VALID_API_KEY_SCOPES: &[&str] = &[
     "services:write",
     "proxy",
 ];
+
+/// Valid platform identifiers for API keys.
+const VALID_PLATFORMS: &[&str] = &["claude-code", "cursor", "codex", "openclaw", "generic"];
+
+/// Validate the platform field if provided.
+fn validate_platform(platform: Option<&str>) -> AppResult<()> {
+    if let Some(p) = platform
+        && !VALID_PLATFORMS.contains(&p)
+    {
+        return Err(AppError::ValidationError(format!(
+            "Invalid platform '{}'. Valid platforms: {}",
+            p,
+            VALID_PLATFORMS.join(", ")
+        )));
+    }
+    Ok(())
+}
 
 /// Validate that all requested scopes are from the allowed set.
 fn validate_api_key_scopes(scopes: &str) -> AppResult<()> {
@@ -137,6 +157,9 @@ pub async fn create_api_key(
     allowed_node_ids: Option<&[String]>,
     allow_all_services: Option<bool>,
     allow_all_nodes: Option<bool>,
+    rate_limit_per_second: Option<u32>,
+    rate_limit_burst: Option<u32>,
+    platform: Option<&str>,
 ) -> AppResult<CreatedApiKey> {
     if name.is_empty() || name.len() > 200 {
         return Err(AppError::ValidationError(
@@ -145,6 +168,7 @@ pub async fn create_api_key(
     }
 
     validate_api_key_scopes(scopes)?;
+    validate_platform(platform)?;
 
     let svc_ids = allowed_service_ids.unwrap_or(&[]).to_vec();
     let node_ids = allowed_node_ids.unwrap_or(&[]).to_vec();
@@ -185,6 +209,9 @@ pub async fn create_api_key(
         allowed_node_ids: node_ids.clone(),
         allow_all_services: all_svcs,
         allow_all_nodes: all_nodes,
+        rate_limit_per_second,
+        rate_limit_burst,
+        platform: platform.map(|s| s.to_string()),
     };
 
     db.collection::<ApiKey>(API_KEYS)
@@ -203,6 +230,9 @@ pub async fn create_api_key(
         allowed_node_ids: node_ids,
         allow_all_services: all_svcs,
         allow_all_nodes: all_nodes,
+        rate_limit_per_second,
+        rate_limit_burst,
+        platform: platform.map(|s| s.to_string()),
     })
 }
 
@@ -279,6 +309,9 @@ pub async fn rotate_api_key(
         Some(&old_key.allowed_node_ids),
         Some(old_key.allow_all_services),
         Some(old_key.allow_all_nodes),
+        old_key.rate_limit_per_second,
+        old_key.rate_limit_burst,
+        old_key.platform.as_deref(),
     )
     .await?;
 
@@ -305,6 +338,9 @@ pub async fn update_api_key_scope(
     allowed_node_ids: Option<&[String]>,
     allow_all_services: Option<bool>,
     allow_all_nodes: Option<bool>,
+    rate_limit_per_second: Option<Option<u32>>,
+    rate_limit_burst: Option<Option<u32>>,
+    platform: Option<Option<&str>>,
 ) -> AppResult<ApiKey> {
     let existing = db
         .collection::<ApiKey>(API_KEYS)
@@ -318,6 +354,9 @@ pub async fn update_api_key_scope(
         return Err(AppError::ValidationError(
             "API key name must be between 1 and 200 characters".to_string(),
         ));
+    }
+    if let Some(platform) = platform {
+        validate_platform(platform)?;
     }
 
     let effective_all_svcs = allow_all_services.unwrap_or(existing.allow_all_services);
@@ -356,6 +395,36 @@ pub async fn update_api_key_scope(
     }
     if let Some(v) = allow_all_nodes {
         update.insert("allow_all_nodes", v);
+    }
+    if let Some(rps) = rate_limit_per_second {
+        match rps {
+            Some(v) => {
+                update.insert("rate_limit_per_second", v as i32);
+            }
+            None => {
+                update.insert("rate_limit_per_second", bson::Bson::Null);
+            }
+        }
+    }
+    if let Some(burst) = rate_limit_burst {
+        match burst {
+            Some(v) => {
+                update.insert("rate_limit_burst", v as i32);
+            }
+            None => {
+                update.insert("rate_limit_burst", bson::Bson::Null);
+            }
+        }
+    }
+    if let Some(platform) = platform {
+        match platform {
+            Some(value) => {
+                update.insert("platform", value);
+            }
+            None => {
+                update.insert("platform", bson::Bson::Null);
+            }
+        }
     }
 
     if update.is_empty() {

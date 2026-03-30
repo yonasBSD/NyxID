@@ -186,6 +186,8 @@ pub async fn delete_me(
         Some(serde_json::json!({ "self_service": true })),
         extract_ip(&headers),
         extract_user_agent(&headers),
+        None,
+        None,
     );
 
     Ok(Json(DeleteAccountResponse {

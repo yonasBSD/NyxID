@@ -1,17 +1,21 @@
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
 };
 use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
-use mongodb::bson::doc;
+use mongodb::bson::{DateTime as BsonDateTime, doc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
+use crate::models::agent_service_binding::{
+    AgentServiceBinding, COLLECTION_NAME as AGENT_SERVICE_BINDINGS,
+};
 use crate::models::api_key::ApiKey;
+use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
@@ -19,7 +23,7 @@ use crate::models::node::{COLLECTION_NAME as NODES, Node};
 use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::mw::auth::AuthUser;
-use crate::services::key_service;
+use crate::services::{key_service, llm_usage_service};
 
 // --- Request / Response types ---
 
@@ -42,6 +46,9 @@ pub struct CreateApiKeyRequest {
     pub allow_all_services: bool,
     #[serde(default = "default_true")]
     pub allow_all_nodes: bool,
+    pub rate_limit_per_second: Option<u32>,
+    pub rate_limit_burst: Option<u32>,
+    pub platform: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -53,6 +60,9 @@ pub struct UpdateApiKeyRequest {
     pub allowed_node_ids: Option<Vec<String>>,
     pub allow_all_services: Option<bool>,
     pub allow_all_nodes: Option<bool>,
+    pub rate_limit_per_second: Option<Option<u32>>,
+    pub rate_limit_burst: Option<Option<u32>>,
+    pub platform: Option<Option<String>>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -69,6 +79,12 @@ pub struct CreateApiKeyResponse {
     pub allowed_node_ids: Vec<String>,
     pub allow_all_services: bool,
     pub allow_all_nodes: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit_per_second: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit_burst: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -106,11 +122,73 @@ pub struct ApiKeyResponse {
     pub allow_all_nodes: bool,
     pub allowed_services: Vec<AllowedServiceInfo>,
     pub allowed_nodes: Vec<AllowedNodeInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit_per_second: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit_burst: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    pub bindings_count: u64,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ApiKeyListResponse {
     pub keys: Vec<ApiKeyResponse>,
+}
+
+fn default_usage_days() -> u32 {
+    7
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ApiKeyUsageQuery {
+    #[serde(default = "default_usage_days")]
+    pub days: u32,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ApiKeyServiceUsage {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_id: Option<String>,
+    pub service_slug: String,
+    pub service_label: String,
+    pub request_count: u64,
+    pub error_count: u64,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ApiKeyUsageBucket {
+    pub date: String,
+    pub request_count: u64,
+    pub error_count: u64,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ApiKeyUsageResponse {
+    pub api_key_id: String,
+    pub api_key_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    pub request_count: u64,
+    pub success_count: u64,
+    pub error_count: u64,
+    pub error_rate: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_used_at: Option<String>,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reported_cost: Option<f64>,
+    pub top_services: Vec<ApiKeyServiceUsage>,
+    pub daily_buckets: Vec<ApiKeyUsageBucket>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ApiKeyUsageListResponse {
+    pub usage: Vec<ApiKeyUsageResponse>,
+    pub since: String,
+    pub days: u32,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -126,18 +204,20 @@ async fn enrich_api_keys_batch(
     state: &AppState,
     keys: &[ApiKey],
 ) -> AppResult<Vec<ApiKeyResponse>> {
+    let key_ids: Vec<&str> = keys.iter().map(|k| k.id.as_str()).collect();
+
     // Collect all referenced IDs across all keys
     let all_service_ids: Vec<&str> = keys
         .iter()
         .flat_map(|k| k.allowed_service_ids.iter().map(|s| s.as_str()))
-        .collect::<std::collections::HashSet<_>>()
+        .collect::<HashSet<_>>()
         .into_iter()
         .collect();
 
     let all_node_ids: Vec<&str> = keys
         .iter()
         .flat_map(|k| k.allowed_node_ids.iter().map(|s| s.as_str()))
-        .collect::<std::collections::HashSet<_>>()
+        .collect::<HashSet<_>>()
         .into_iter()
         .collect();
 
@@ -159,7 +239,7 @@ async fn enrich_api_keys_batch(
     let catalog_ids: Vec<&str> = service_map
         .values()
         .filter_map(|s| s.catalog_service_id.as_deref())
-        .collect::<std::collections::HashSet<_>>()
+        .collect::<HashSet<_>>()
         .into_iter()
         .collect();
 
@@ -183,7 +263,7 @@ async fn enrich_api_keys_batch(
     let endpoint_ids: Vec<&str> = service_map
         .values()
         .map(|s| s.endpoint_id.as_str())
-        .collect::<std::collections::HashSet<_>>()
+        .collect::<HashSet<_>>()
         .into_iter()
         .collect();
 
@@ -215,6 +295,24 @@ async fn enrich_api_keys_batch(
             .try_collect()
             .await?;
         nodes.into_iter().map(|n| (n.id.clone(), n)).collect()
+    };
+
+    let binding_counts: HashMap<String, u64> = if key_ids.is_empty() {
+        HashMap::new()
+    } else {
+        let bindings: Vec<AgentServiceBinding> = state
+            .db
+            .collection::<AgentServiceBinding>(AGENT_SERVICE_BINDINGS)
+            .find(doc! { "api_key_id": { "$in": &key_ids } })
+            .await?
+            .try_collect()
+            .await?;
+
+        let mut counts = HashMap::new();
+        for binding in bindings {
+            *counts.entry(binding.api_key_id).or_insert(0) += 1;
+        }
+        counts
     };
 
     // Build responses
@@ -272,11 +370,340 @@ async fn enrich_api_keys_batch(
                 allow_all_nodes: key.allow_all_nodes,
                 allowed_services,
                 allowed_nodes,
+                rate_limit_per_second: key.rate_limit_per_second,
+                rate_limit_burst: key.rate_limit_burst,
+                platform: key.platform.clone(),
+                bindings_count: binding_counts.get(&key.id).copied().unwrap_or(0),
             }
         })
         .collect();
 
     Ok(items)
+}
+
+#[derive(Default)]
+struct ServiceUsageAccumulator {
+    service_id: Option<String>,
+    service_slug: String,
+    service_label: String,
+    request_count: u64,
+    error_count: u64,
+}
+
+struct ApiKeyUsageAccumulator {
+    api_key_id: String,
+    api_key_name: String,
+    platform: Option<String>,
+    request_count: u64,
+    error_count: u64,
+    last_used_at: Option<DateTime<Utc>>,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    total_tokens: u64,
+    reported_cost: Option<f64>,
+    top_services: HashMap<String, ServiceUsageAccumulator>,
+    daily_buckets: BTreeMap<String, (u64, u64)>,
+}
+
+impl ApiKeyUsageAccumulator {
+    fn new(key: &ApiKey) -> Self {
+        Self {
+            api_key_id: key.id.clone(),
+            api_key_name: key.name.clone(),
+            platform: key.platform.clone(),
+            request_count: 0,
+            error_count: 0,
+            last_used_at: key.last_used_at,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            reported_cost: None,
+            top_services: HashMap::new(),
+            daily_buckets: BTreeMap::new(),
+        }
+    }
+}
+
+async fn load_user_service_info_map(
+    state: &AppState,
+    user_id: &str,
+) -> AppResult<HashMap<String, (String, String)>> {
+    let services: Vec<UserService> = state
+        .db
+        .collection::<UserService>(USER_SERVICES)
+        .find(doc! { "user_id": user_id })
+        .await?
+        .try_collect()
+        .await?;
+
+    let endpoint_ids: Vec<&str> = services
+        .iter()
+        .map(|service| service.endpoint_id.as_str())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    let endpoint_label_map: HashMap<String, String> = if endpoint_ids.is_empty() {
+        HashMap::new()
+    } else {
+        let endpoints: Vec<UserEndpoint> = state
+            .db
+            .collection::<UserEndpoint>(USER_ENDPOINTS)
+            .find(doc! { "_id": { "$in": &endpoint_ids } })
+            .await?
+            .try_collect()
+            .await?;
+        endpoints
+            .into_iter()
+            .map(|endpoint| (endpoint.id, endpoint.label))
+            .collect()
+    };
+
+    Ok(services
+        .into_iter()
+        .map(|service| {
+            let label = endpoint_label_map
+                .get(&service.endpoint_id)
+                .cloned()
+                .unwrap_or_else(|| service.slug.clone());
+            (service.id, (service.slug, label))
+        })
+        .collect())
+}
+
+fn extract_response_status(event_data: Option<&serde_json::Value>) -> Option<u16> {
+    event_data
+        .and_then(|value| value.get("response_status"))
+        .and_then(|value| value.as_u64())
+        .and_then(|status| u16::try_from(status).ok())
+}
+
+fn extract_service_usage_info(
+    event_data: Option<&serde_json::Value>,
+    service_info_map: &HashMap<String, (String, String)>,
+) -> (String, Option<String>, String, String) {
+    if let Some(provider_slug) = event_data
+        .and_then(|value| value.get("provider_slug"))
+        .and_then(|value| value.as_str())
+    {
+        return (
+            format!("provider:{provider_slug}"),
+            None,
+            provider_slug.to_string(),
+            provider_slug.to_string(),
+        );
+    }
+
+    if let Some(service_id) = event_data
+        .and_then(|value| value.get("service_id"))
+        .and_then(|value| value.as_str())
+    {
+        if let Some((slug, label)) = service_info_map.get(service_id) {
+            return (
+                format!("service:{service_id}"),
+                Some(service_id.to_string()),
+                slug.clone(),
+                label.clone(),
+            );
+        }
+
+        return (
+            format!("service:{service_id}"),
+            Some(service_id.to_string()),
+            service_id.to_string(),
+            service_id.to_string(),
+        );
+    }
+
+    (
+        "unknown".to_string(),
+        None,
+        "unknown".to_string(),
+        "Unknown".to_string(),
+    )
+}
+
+async fn build_api_key_usage(
+    state: &AppState,
+    user_id: &str,
+    keys: &[ApiKey],
+    days: u32,
+) -> AppResult<Vec<ApiKeyUsageResponse>> {
+    if keys.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let clamped_days = days.clamp(1, 30);
+    let since = Utc::now() - chrono::Duration::days(i64::from(clamped_days));
+    let since_bson = BsonDateTime::from_millis(since.timestamp_millis());
+    let key_ids: Vec<&str> = keys.iter().map(|key| key.id.as_str()).collect();
+
+    let service_info_map = load_user_service_info_map(state, user_id).await?;
+
+    let entries: Vec<AuditLog> = state
+        .db
+        .collection::<AuditLog>(AUDIT_LOG)
+        .find(doc! {
+            "user_id": user_id,
+            "api_key_id": { "$in": &key_ids },
+            "event_type": {
+                "$in": [
+                    "proxy_request",
+                    "proxy_request_denied",
+                    "llm_proxy_request",
+                    "llm_gateway_request",
+                    "llm_usage_reported"
+                ]
+            },
+            "created_at": { "$gte": since_bson },
+        })
+        .sort(doc! { "created_at": 1 })
+        .await?
+        .try_collect()
+        .await?;
+
+    let mut usage_map: HashMap<String, ApiKeyUsageAccumulator> = keys
+        .iter()
+        .map(|key| (key.id.clone(), ApiKeyUsageAccumulator::new(key)))
+        .collect();
+
+    for entry in entries {
+        let Some(api_key_id) = entry.api_key_id.as_ref() else {
+            continue;
+        };
+        let Some(accumulator) = usage_map.get_mut(api_key_id) else {
+            continue;
+        };
+
+        if entry.event_type == "llm_usage_reported" {
+            if let Some(usage) = entry
+                .event_data
+                .as_ref()
+                .and_then(llm_usage_service::extract_reported_usage)
+            {
+                accumulator.prompt_tokens += usage.prompt_tokens;
+                accumulator.completion_tokens += usage.completion_tokens;
+                accumulator.total_tokens += usage.total_tokens;
+                if let Some(cost) = usage.reported_cost {
+                    accumulator.reported_cost = Some(
+                        accumulator
+                            .reported_cost
+                            .map(|current| current + cost)
+                            .unwrap_or(cost),
+                    );
+                }
+            }
+            continue;
+        }
+
+        let is_error = matches!(entry.event_type.as_str(), "proxy_request_denied")
+            || extract_response_status(entry.event_data.as_ref())
+                .is_some_and(|status| status >= 400);
+
+        accumulator.request_count += 1;
+        if is_error {
+            accumulator.error_count += 1;
+        }
+        accumulator.last_used_at = accumulator
+            .last_used_at
+            .map(|current| current.max(entry.created_at))
+            .or(Some(entry.created_at));
+
+        let bucket_key = entry.created_at.format("%Y-%m-%d").to_string();
+        let bucket = accumulator
+            .daily_buckets
+            .entry(bucket_key)
+            .or_insert((0, 0));
+        bucket.0 += 1;
+        if is_error {
+            bucket.1 += 1;
+        }
+
+        let (service_key, service_id, service_slug, service_label) =
+            extract_service_usage_info(entry.event_data.as_ref(), &service_info_map);
+        let service_usage = accumulator
+            .top_services
+            .entry(service_key)
+            .or_insert_with(|| ServiceUsageAccumulator {
+                service_id,
+                service_slug,
+                service_label,
+                ..ServiceUsageAccumulator::default()
+            });
+        service_usage.request_count += 1;
+        if is_error {
+            service_usage.error_count += 1;
+        }
+    }
+
+    let mut usage: Vec<ApiKeyUsageResponse> = usage_map
+        .into_values()
+        .map(|accumulator| {
+            let mut top_services: Vec<ApiKeyServiceUsage> = accumulator
+                .top_services
+                .into_values()
+                .map(|service| ApiKeyServiceUsage {
+                    service_id: service.service_id,
+                    service_slug: service.service_slug,
+                    service_label: service.service_label,
+                    request_count: service.request_count,
+                    error_count: service.error_count,
+                })
+                .collect();
+            top_services.sort_by(|left, right| {
+                right
+                    .request_count
+                    .cmp(&left.request_count)
+                    .then_with(|| left.service_slug.cmp(&right.service_slug))
+            });
+            top_services.truncate(5);
+
+            let daily_buckets = accumulator
+                .daily_buckets
+                .into_iter()
+                .map(|(date, (request_count, error_count))| ApiKeyUsageBucket {
+                    date,
+                    request_count,
+                    error_count,
+                })
+                .collect::<Vec<_>>();
+
+            let success_count = accumulator
+                .request_count
+                .saturating_sub(accumulator.error_count);
+            let error_rate = if accumulator.request_count == 0 {
+                0.0
+            } else {
+                accumulator.error_count as f64 / accumulator.request_count as f64
+            };
+
+            ApiKeyUsageResponse {
+                api_key_id: accumulator.api_key_id,
+                api_key_name: accumulator.api_key_name,
+                platform: accumulator.platform,
+                request_count: accumulator.request_count,
+                success_count,
+                error_count: accumulator.error_count,
+                error_rate,
+                last_used_at: accumulator.last_used_at.map(|dt| dt.to_rfc3339()),
+                prompt_tokens: accumulator.prompt_tokens,
+                completion_tokens: accumulator.completion_tokens,
+                total_tokens: accumulator.total_tokens,
+                reported_cost: accumulator.reported_cost,
+                top_services,
+                daily_buckets,
+            }
+        })
+        .collect();
+
+    usage.sort_by(|left, right| {
+        right
+            .request_count
+            .cmp(&left.request_count)
+            .then_with(|| left.api_key_name.cmp(&right.api_key_name))
+    });
+
+    Ok(usage)
 }
 
 // --- Handlers ---
@@ -324,6 +751,64 @@ pub async fn get_key(
     let key = key_service::get_api_key(&state.db, &user_id_str, &key_id).await?;
     let enriched = enrich_api_keys_batch(&state, &[key]).await?;
     Ok(Json(enriched.into_iter().next().unwrap()))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/api-keys/usage",
+    params(
+        ("days" = Option<u32>, Query, description = "Number of trailing days to aggregate (1-30)")
+    ),
+    responses(
+        (status = 200, description = "Usage summary for the user's API keys", body = ApiKeyUsageListResponse),
+        (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse)
+    ),
+    tag = "API Keys"
+)]
+/// GET /api/v1/api-keys/usage
+pub async fn list_key_usage(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Query(query): Query<ApiKeyUsageQuery>,
+) -> AppResult<Json<ApiKeyUsageListResponse>> {
+    let user_id_str = auth_user.user_id.to_string();
+    let days = query.days.clamp(1, 30);
+    let keys = key_service::list_api_keys(&state.db, &user_id_str).await?;
+    let usage = build_api_key_usage(&state, &user_id_str, &keys, days).await?;
+    let since = (Utc::now() - chrono::Duration::days(i64::from(days))).to_rfc3339();
+
+    Ok(Json(ApiKeyUsageListResponse { usage, since, days }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/api-keys/{key_id}/usage",
+    params(
+        ("key_id" = String, Path, description = "API key ID"),
+        ("days" = Option<u32>, Query, description = "Number of trailing days to aggregate (1-30)")
+    ),
+    responses(
+        (status = 200, description = "Usage summary for a specific API key", body = ApiKeyUsageResponse),
+        (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse),
+        (status = 404, description = "API key not found", body = crate::errors::ErrorResponse)
+    ),
+    tag = "API Keys"
+)]
+/// GET /api/v1/api-keys/{key_id}/usage
+pub async fn get_key_usage(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(key_id): Path<String>,
+    Query(query): Query<ApiKeyUsageQuery>,
+) -> AppResult<Json<ApiKeyUsageResponse>> {
+    let user_id_str = auth_user.user_id.to_string();
+    let days = query.days.clamp(1, 30);
+    let key = key_service::get_api_key(&state.db, &user_id_str, &key_id).await?;
+    let mut usage = build_api_key_usage(&state, &user_id_str, &[key], days).await?;
+    let response = usage
+        .pop()
+        .ok_or_else(|| AppError::NotFound("API key usage not found".to_string()))?;
+    Ok(Json(response))
 }
 
 /// Parse an optional expiry date string. Accepts RFC 3339 datetime
@@ -388,6 +873,9 @@ pub async fn create_key(
         Some(&body.allowed_node_ids),
         Some(body.allow_all_services),
         Some(body.allow_all_nodes),
+        body.rate_limit_per_second,
+        body.rate_limit_burst,
+        body.platform.as_deref(),
     )
     .await?;
 
@@ -403,6 +891,9 @@ pub async fn create_key(
         allowed_node_ids: created.allowed_node_ids,
         allow_all_services: created.allow_all_services,
         allow_all_nodes: created.allow_all_nodes,
+        rate_limit_per_second: created.rate_limit_per_second,
+        rate_limit_burst: created.rate_limit_burst,
+        platform: created.platform,
     }))
 }
 
@@ -440,6 +931,9 @@ pub async fn update_key(
         body.allowed_node_ids.as_deref(),
         body.allow_all_services,
         body.allow_all_nodes,
+        body.rate_limit_per_second,
+        body.rate_limit_burst,
+        body.platform.as_ref().map(|platform| platform.as_deref()),
     )
     .await?;
 
@@ -508,5 +1002,8 @@ pub async fn rotate_key(
         allowed_node_ids: created.allowed_node_ids,
         allow_all_services: created.allow_all_services,
         allow_all_nodes: created.allow_all_nodes,
+        rate_limit_per_second: created.rate_limit_per_second,
+        rate_limit_burst: created.rate_limit_burst,
+        platform: created.platform,
     }))
 }

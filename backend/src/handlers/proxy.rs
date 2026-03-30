@@ -9,6 +9,7 @@ use futures::{StreamExt, TryStreamExt};
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use tokio_stream::wrappers::ReceiverStream;
 use utoipa::ToSchema;
 
 use crate::AppState;
@@ -24,8 +25,8 @@ use crate::mw::auth::AuthUser;
 use crate::services::node_ws_manager::{NodeProxyRequest, ProxyResponseType, StreamChunk};
 use crate::services::{
     action_description, approval_service, audit_service, chatgpt_translator, delegation_service,
-    identity_service, node_metrics_service, node_routing_service, node_service,
-    notification_service, proxy_service,
+    identity_service, llm_usage_service, node_metrics_service, node_routing_service, node_service,
+    notification_service, proxy_service, sse_parser,
 };
 
 /// Response headers that are safe to forward back to the client.
@@ -212,6 +213,7 @@ async fn execute_proxy(
 /// Resolve proxy target and node routing via the old DownstreamService path.
 async fn resolve_via_downstream_service(
     state: &AppState,
+    auth_user: &AuthUser,
     user_id_str: &str,
     service_id: &str,
 ) -> AppResult<(
@@ -249,6 +251,8 @@ async fn resolve_via_downstream_service(
                     })),
                     None,
                     None,
+                    auth_user.api_key_id.clone(),
+                    auth_user.api_key_name.clone(),
                 );
                 return Err(e);
             }
@@ -274,6 +278,8 @@ async fn resolve_via_downstream_service(
                     })),
                     None,
                     None,
+                    auth_user.api_key_id.clone(),
+                    auth_user.api_key_name.clone(),
                 );
                 return Err(e);
             }
@@ -323,59 +329,80 @@ async fn execute_proxy_inner(
     request: Request<Body>,
     pre_resolved: Option<PreResolved>,
 ) -> AppResult<Response> {
+    // Per-agent rate limit check (before any work)
+    crate::mw::rate_limit::check_agent_rate_limit(&state.per_agent_limiter, auth_user)?;
+
     let user_id_str = auth_user.user_id.to_string();
     let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
 
     // Resolve target and node routing
-    let (node_route, target, has_server_credential, _resolved_user_service_id) = if let Some(pre) =
-        pre_resolved
-    {
-        // New UserService path: target already resolved
-        let mut node_route =
-            build_pre_resolved_node_route(state, &user_id_str, service_id, pre.node_id.as_deref())
-                .await?;
+    let (node_route, target, has_server_credential, _resolved_user_service_id) =
+        if let Some(mut pre) = pre_resolved {
+            // New UserService path: target already resolved
+            let mut node_route = build_pre_resolved_node_route(
+                state,
+                &user_id_str,
+                service_id,
+                pre.node_id.as_deref(),
+            )
+            .await?;
 
-        // API key scope enforcement
-        if let Some(ref us_id) = pre.user_service_id
-            && !auth_user.allow_all_services
-            && !auth_user.allowed_service_ids.contains(us_id)
-        {
-            return Err(AppError::ApiKeyScopeForbidden(
-                "API key does not have access to this service".to_string(),
-            ));
-        }
-        if let Some(ref nid) = pre.node_id
-            && !auth_user.allow_all_nodes
-            && !auth_user.allowed_node_ids.contains(nid)
-        {
-            return Err(AppError::ApiKeyScopeForbidden(
-                "API key does not have access to this node".to_string(),
-            ));
-        }
-        if !auth_user.allow_all_nodes
-            && let Some(route) = node_route.as_mut()
-        {
-            route
-                .fallback_node_ids
-                .retain(|nid| auth_user.allowed_node_ids.contains(nid));
-        }
+            // API key scope enforcement
+            if let Some(ref us_id) = pre.user_service_id
+                && !auth_user.allow_all_services
+                && !auth_user.allowed_service_ids.contains(us_id)
+            {
+                return Err(AppError::ApiKeyScopeForbidden(
+                    "API key does not have access to this service".to_string(),
+                ));
+            }
+            if let Some(ref nid) = pre.node_id
+                && !auth_user.allow_all_nodes
+                && !auth_user.allowed_node_ids.contains(nid)
+            {
+                return Err(AppError::ApiKeyScopeForbidden(
+                    "API key does not have access to this node".to_string(),
+                ));
+            }
+            if !auth_user.allow_all_nodes
+                && let Some(route) = node_route.as_mut()
+            {
+                route
+                    .fallback_node_ids
+                    .retain(|nid| auth_user.allowed_node_ids.contains(nid));
+            }
 
-        (
-            node_route,
-            pre.target,
-            pre.has_server_credential,
-            pre.user_service_id,
-        )
-    } else {
-        // Old DownstreamService path -- scoped keys must use configured services
-        if !auth_user.allow_all_services {
-            return Err(AppError::ApiKeyScopeForbidden(
-                "Scoped API keys must use configured services".to_string(),
-            ));
-        }
+            // Per-agent credential override: if this request is via an API key and
+            // the user has bound a different credential for this service, swap it in.
+            if let (Some(ak_id), Some(us_id)) = (&auth_user.api_key_id, &pre.user_service_id)
+                && let Some(override_cred) = proxy_service::resolve_agent_credential_override(
+                    &state.db,
+                    &state.encryption_keys,
+                    &user_id_str,
+                    ak_id,
+                    us_id,
+                )
+                .await?
+            {
+                pre.target.credential = override_cred;
+            }
 
-        resolve_via_downstream_service(state, &user_id_str, service_id).await?
-    };
+            (
+                node_route,
+                pre.target,
+                pre.has_server_credential,
+                pre.user_service_id,
+            )
+        } else {
+            // Old DownstreamService path -- scoped keys must use configured services
+            if !auth_user.allow_all_services {
+                return Err(AppError::ApiKeyScopeForbidden(
+                    "Scoped API keys must use configured services".to_string(),
+                ));
+            }
+
+            resolve_via_downstream_service(state, auth_user, &user_id_str, service_id).await?
+        };
 
     // === Request Decomposition ===
     // Extract method, query, headers BEFORE body consumption.
@@ -703,7 +730,7 @@ async fn execute_proxy_inner(
                             node_metrics_service::record_success(db_clone, nid, latency_ms).await;
                     });
 
-                    let response = match proxy_response {
+                    let mut response = match proxy_response {
                         ProxyResponseType::Complete(node_response) => {
                             let status = StatusCode::from_u16(node_response.status)
                                 .unwrap_or(StatusCode::BAD_GATEWAY);
@@ -844,7 +871,15 @@ async fn execute_proxy_inner(
                         })),
                         None,
                         None,
+                        auth_user.api_key_id.clone(),
+                        auth_user.api_key_name.clone(),
                     );
+
+                    if let Some(ref agent_id) = auth_user.api_key_id
+                        && let Ok(val) = axum::http::HeaderValue::from_str(agent_id)
+                    {
+                        response.headers_mut().insert("x-nyxid-agent-id", val);
+                    }
 
                     return Ok(response);
                 }
@@ -945,12 +980,25 @@ async fn execute_proxy_inner(
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let response = chatgpt_translator::send_to_chatgpt(
+        let mut response = chatgpt_translator::send_to_chatgpt(
             &translated.body,
             &bearer_token,
             is_streaming,
             is_chat_completions_path,
             query.as_deref(),
+            Some(llm_usage_service::UsageAuditContext {
+                db: state.db.clone(),
+                user_id: user_id_str.clone(),
+                provider_slug: None,
+                service_id: Some(service_id.to_string()),
+                model: body_json
+                    .get("model")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+                path: path.to_string(),
+                api_key_id: auth_user.api_key_id.clone(),
+                api_key_name: auth_user.api_key_name.clone(),
+            }),
         )
         .await?;
 
@@ -970,7 +1018,15 @@ async fn execute_proxy_inner(
             })),
             None,
             None,
+            auth_user.api_key_id.clone(),
+            auth_user.api_key_name.clone(),
         );
+
+        if let Some(ref agent_id) = auth_user.api_key_id
+            && let Ok(val) = axum::http::HeaderValue::from_str(agent_id)
+        {
+            response.headers_mut().insert("x-nyxid-agent-id", val);
+        }
 
         return Ok(response);
     }
@@ -999,6 +1055,21 @@ async fn execute_proxy_inner(
         .and_then(|v| v.to_str().ok())
         .is_some_and(|ct| ct.contains("text/event-stream"));
     let should_stream = should_stream_response(&downstream_response, status, is_sse);
+    let usage_context =
+        target
+            .service
+            .slug
+            .starts_with("llm-")
+            .then(|| llm_usage_service::UsageAuditContext {
+                db: state.db.clone(),
+                user_id: user_id_str.clone(),
+                provider_slug: None,
+                service_id: Some(service_id.to_string()),
+                model: None,
+                path: path.to_string(),
+                api_key_id: auth_user.api_key_id.clone(),
+                api_key_name: auth_user.api_key_name.clone(),
+            });
 
     let mut response_builder = Response::builder().status(status);
 
@@ -1019,47 +1090,139 @@ async fn execute_proxy_inner(
         }
     }
 
-    let response = if should_stream {
-        // Stream response directly without buffering.
-        let service_id_owned = service_id.to_string();
-        let idle_timeout =
-            std::time::Duration::from_secs(state.config.proxy_stream_idle_timeout_secs);
-        let idle_timeout_secs = state.config.proxy_stream_idle_timeout_secs;
-        let mut upstream_stream = downstream_response.bytes_stream();
-        let stream = async_stream::stream! {
-            loop {
-                match tokio::time::timeout(idle_timeout, upstream_stream.next()).await {
-                    Ok(Some(Ok(bytes))) => {
-                        yield Ok::<_, std::io::Error>(bytes);
-                    }
-                    Ok(Some(Err(e))) => {
-                        tracing::error!(
-                            service_id = %service_id_owned,
-                            error = %e,
-                            error_debug = ?e,
-                            "Proxy stream error from upstream — connection dropped"
-                        );
-                        yield Err(std::io::Error::other(format!(
-                            "upstream stream error: {e}"
-                        )));
-                        break;
-                    }
-                    Ok(None) => break,
-                    Err(_) => {
-                        tracing::warn!(
-                            service_id = %service_id_owned,
-                            idle_timeout_secs,
-                            "Proxy stream idle timeout reached"
-                        );
-                        break;
+    let mut response = if should_stream {
+        // Stream responses without buffering, but use a forwarding task when
+        // we need to observe SSE usage so client disconnects are visible.
+        if let Some(stream_usage_context) = if is_sse { usage_context.clone() } else { None } {
+            let service_id_owned = service_id.to_string();
+            let idle_timeout =
+                std::time::Duration::from_secs(state.config.proxy_stream_idle_timeout_secs);
+            let idle_timeout_secs = state.config.proxy_stream_idle_timeout_secs;
+            let mut upstream_stream = downstream_response.bytes_stream();
+            let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(32);
+
+            tokio::spawn(async move {
+                let mut sse_buffer = String::new();
+                let mut usage_accumulator =
+                    llm_usage_service::ReportedLlmUsageAccumulator::default();
+
+                loop {
+                    match tokio::time::timeout(idle_timeout, upstream_stream.next()).await {
+                        Ok(Some(Ok(bytes))) => {
+                            sse_buffer.push_str(&String::from_utf8_lossy(&bytes));
+                            while let Some(event) = parse_sse_event(&mut sse_buffer) {
+                                if let Some((usage, mode)) =
+                                    llm_usage_service::extract_reported_usage_from_sse_event(
+                                        event.event_type.as_deref(),
+                                        &event.data,
+                                    )
+                                {
+                                    usage_accumulator.observe(usage, mode);
+                                }
+                            }
+
+                            if tx.send(Ok(bytes)).await.is_err() {
+                                if let Some(usage) = usage_accumulator.finalize() {
+                                    llm_usage_service::log_reported_usage_async(
+                                        stream_usage_context.clone(),
+                                        usage,
+                                    );
+                                }
+                                return;
+                            }
+                        }
+                        Ok(Some(Err(e))) => {
+                            tracing::error!(
+                                service_id = %service_id_owned,
+                                error = %e,
+                                error_debug = ?e,
+                                "Proxy stream error from upstream — connection dropped"
+                            );
+                            if let Some(usage) = usage_accumulator.finalize() {
+                                llm_usage_service::log_reported_usage_async(
+                                    stream_usage_context.clone(),
+                                    usage,
+                                );
+                            }
+                            let _ = tx
+                                .send(Err(std::io::Error::other(format!(
+                                    "upstream stream error: {e}"
+                                ))))
+                                .await;
+                            return;
+                        }
+                        Ok(None) => {
+                            if let Some(usage) = usage_accumulator.finalize() {
+                                llm_usage_service::log_reported_usage_async(
+                                    stream_usage_context.clone(),
+                                    usage,
+                                );
+                            }
+                            return;
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                service_id = %service_id_owned,
+                                idle_timeout_secs,
+                                "Proxy stream idle timeout reached"
+                            );
+                            if let Some(usage) = usage_accumulator.finalize() {
+                                llm_usage_service::log_reported_usage_async(
+                                    stream_usage_context.clone(),
+                                    usage,
+                                );
+                            }
+                            return;
+                        }
                     }
                 }
-            }
-        };
-        let body = Body::from_stream(stream);
-        response_builder
-            .body(body)
-            .map_err(|e| AppError::Internal(format!("Failed to build response: {e}")))?
+            });
+
+            let body = Body::from_stream(ReceiverStream::new(rx));
+            response_builder
+                .body(body)
+                .map_err(|e| AppError::Internal(format!("Failed to build response: {e}")))?
+        } else {
+            let service_id_owned = service_id.to_string();
+            let idle_timeout =
+                std::time::Duration::from_secs(state.config.proxy_stream_idle_timeout_secs);
+            let idle_timeout_secs = state.config.proxy_stream_idle_timeout_secs;
+            let mut upstream_stream = downstream_response.bytes_stream();
+            let stream = async_stream::stream! {
+                loop {
+                    match tokio::time::timeout(idle_timeout, upstream_stream.next()).await {
+                        Ok(Some(Ok(bytes))) => {
+                            yield Ok::<_, std::io::Error>(bytes);
+                        }
+                        Ok(Some(Err(e))) => {
+                            tracing::error!(
+                                service_id = %service_id_owned,
+                                error = %e,
+                                error_debug = ?e,
+                                "Proxy stream error from upstream — connection dropped"
+                            );
+                            yield Err(std::io::Error::other(format!(
+                                "upstream stream error: {e}"
+                            )));
+                            break;
+                        }
+                        Ok(None) => break,
+                        Err(_) => {
+                            tracing::warn!(
+                                service_id = %service_id_owned,
+                                idle_timeout_secs,
+                                "Proxy stream idle timeout reached"
+                            );
+                            break;
+                        }
+                    }
+                }
+            };
+            let body = Body::from_stream(stream);
+            response_builder
+                .body(body)
+                .map_err(|e| AppError::Internal(format!("Failed to build response: {e}")))?
+        }
     } else {
         // Buffer small / error responses so we can log diagnostics.
         let response_body = downstream_response
@@ -1076,6 +1239,13 @@ async fn execute_proxy_inner(
                 body = %body_preview,
                 "Upstream returned error response"
             );
+        }
+
+        if let Some(nonstream_usage_context) = usage_context
+            && let Ok(json) = serde_json::from_slice::<serde_json::Value>(&response_body)
+            && let Some(usage) = llm_usage_service::extract_reported_usage(&json)
+        {
+            llm_usage_service::log_reported_usage_async(nonstream_usage_context, usage);
         }
 
         response_builder
@@ -1097,7 +1267,15 @@ async fn execute_proxy_inner(
         })),
         None,
         None,
+        auth_user.api_key_id.clone(),
+        auth_user.api_key_name.clone(),
     );
+
+    if let Some(ref agent_id) = auth_user.api_key_id
+        && let Ok(val) = axum::http::HeaderValue::from_str(agent_id)
+    {
+        response.headers_mut().insert("x-nyxid-agent-id", val);
+    }
 
     Ok(response)
 }
@@ -1129,6 +1307,11 @@ fn should_enforce_runtime_approval(
     auth_method: &crate::mw::auth::AuthMethod,
 ) -> bool {
     requires_approval && *auth_method != crate::mw::auth::AuthMethod::Session
+}
+
+/// Convenience alias so existing call-sites compile without renaming.
+fn parse_sse_event(buffer: &mut String) -> Option<sse_parser::SseEvent> {
+    sse_parser::parse_next_event(buffer)
 }
 
 /// Threshold below which non-error responses are buffered (so small API
