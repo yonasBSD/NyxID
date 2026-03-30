@@ -828,10 +828,85 @@ async fn backfill_downstream_service_types(db: &Database) -> Result<(), mongodb:
 pub async fn migrate_to_unified_collections(
     db: &Database,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    cleanup_duplicate_migration_services(db).await?;
     migrate_provider_tokens(db).await?;
     migrate_service_connections(db).await?;
     migrate_node_service_bindings(db).await?;
     tracing::info!("Unified collection migration complete");
+    Ok(())
+}
+
+/// Remove duplicate UserService records created by earlier migration runs that
+/// produced suffixed slugs (e.g., "api-lark-2") when the same user + catalog_service_id
+/// already had an active record. Deletes the duplicate along with its orphaned
+/// UserEndpoint and UserApiKey.
+async fn cleanup_duplicate_migration_services(
+    db: &Database,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Find active migration-sourced UserService records that are duplicates:
+    // same (user_id, catalog_service_id) as another active record.
+    let migration_services: Vec<UserService> = db
+        .collection::<UserService>(USER_SERVICES)
+        .find(doc! {
+            "is_active": true,
+            "source": { "$regex": "^migration_" },
+            "catalog_service_id": { "$ne": null },
+        })
+        .await?
+        .try_collect()
+        .await?;
+
+    let mut cleaned = 0u64;
+    for svc in &migration_services {
+        let csid = match &svc.catalog_service_id {
+            Some(id) => id,
+            None => continue,
+        };
+
+        // Check if another active UserService exists for the same user + catalog service
+        let other = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! {
+                "_id": { "$ne": &svc.id },
+                "user_id": &svc.user_id,
+                "catalog_service_id": csid,
+                "is_active": true,
+            })
+            .await?;
+
+        if other.is_none() {
+            continue;
+        }
+
+        // This is a duplicate -- delete it and its associated records
+        let _ = db
+            .collection::<UserService>(USER_SERVICES)
+            .delete_one(doc! { "_id": &svc.id })
+            .await;
+        let _ = db
+            .collection::<UserEndpoint>(USER_ENDPOINTS)
+            .delete_one(doc! { "_id": &svc.endpoint_id })
+            .await;
+        if let Some(ref ak_id) = svc.api_key_id {
+            let _ = db
+                .collection::<UserApiKey>(USER_API_KEYS)
+                .delete_one(doc! { "_id": ak_id })
+                .await;
+        }
+
+        tracing::info!(
+            user_id = %svc.user_id,
+            slug = %svc.slug,
+            service_id = %svc.id,
+            catalog_service_id = %csid,
+            "Cleaned up duplicate migration service"
+        );
+        cleaned += 1;
+    }
+
+    if cleaned > 0 {
+        tracing::info!(count = cleaned, "Cleaned up duplicate migration services");
+    }
     Ok(())
 }
 
@@ -1003,6 +1078,22 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
                     "Authorization".to_string(),
                 )
             };
+
+        // Skip if a UserService already exists for this user + catalog service
+        // (e.g., created by an earlier token for the same provider)
+        if let Some(ref csid) = catalog_service_id {
+            let already_has_service = db
+                .collection::<UserService>(USER_SERVICES)
+                .find_one(doc! {
+                    "user_id": &token.user_id,
+                    "catalog_service_id": csid,
+                    "is_active": true,
+                })
+                .await?;
+            if already_has_service.is_some() {
+                continue;
+            }
+        }
 
         let base_slug = slug;
         let slug = match resolve_migration_user_service_slug(db, &token.user_id, &base_slug).await {
