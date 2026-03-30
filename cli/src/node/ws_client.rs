@@ -42,6 +42,31 @@ enum SshTunnelControl {
     Close,
 }
 
+enum WsProxyControl {
+    Text(String),
+    Binary(Vec<u8>),
+    Close {
+        code: Option<u16>,
+        reason: Option<String>,
+    },
+}
+
+type ActiveWsProxyMap = Arc<tokio::sync::Mutex<HashMap<String, ActiveWsProxyEntry>>>;
+
+struct ActiveWsProxyEntry {
+    control_tx: mpsc::Sender<WsProxyControl>,
+    task_handle: tokio::task::JoinHandle<()>,
+}
+
+const WS_PROXY_CONTROL_CHANNEL_SIZE: usize = 256;
+const WS_PROXY_CONNECT_TIMEOUT_SECS: u64 = 10;
+/// Must match server-side WS_PASSTHROUGH_MAX_DURATION_SECS.
+const WS_PROXY_MAX_DURATION_SECS: u64 = 3600;
+/// Must match server-side WS_PASSTHROUGH_IDLE_TIMEOUT_SECS.
+const WS_PROXY_IDLE_TIMEOUT_SECS: u64 = 300;
+/// Must match server-side WS_PASSTHROUGH_MAX_MESSAGE_SIZE.
+const WS_PROXY_MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
+
 const SSH_CONTROL_CHANNEL_SIZE: usize = 256;
 const SSH_CONNECT_TIMEOUT_SECS: u64 = 10;
 const SSH_SHUTDOWN_DRAIN_TIMEOUT_SECS: u64 = 5;
@@ -397,6 +422,7 @@ async fn connect_and_serve(
     >::new()));
     let active_web_terminals: ActiveWebTerminalMap =
         Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let active_ws_proxies: ActiveWsProxyMap = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
 
     // Writer task: forwards messages from the channel to the WS sink.
     // Text frames carry JSON control messages; binary frames carry raw data chunks.
@@ -559,6 +585,26 @@ async fn connect_and_serve(
                     let _ = send_ws_message(&tx, ack).await;
                 }
             }
+            Some("ws_proxy_open") => {
+                let tx_clone = tx.clone();
+                let creds = credentials.snapshot();
+                let secret = signing_secret.clone();
+                let replay = replay_guard.clone();
+                let ws_proxies = active_ws_proxies.clone();
+                tokio::spawn(async move {
+                    handle_ws_proxy_open(&parsed, &creds, tx_clone, ws_proxies, secret, replay)
+                        .await;
+                });
+            }
+            Some("ws_proxy_text") => {
+                handle_ws_proxy_text(&parsed, &tx, &active_ws_proxies).await;
+            }
+            Some("ws_proxy_binary") => {
+                handle_ws_proxy_binary(&parsed, &tx, &active_ws_proxies).await;
+            }
+            Some("ws_proxy_close") => {
+                handle_ws_proxy_close(&parsed, &tx, &active_ws_proxies).await;
+            }
             Some("error") => {
                 let msg = parsed["message"].as_str().unwrap_or("unknown");
                 tracing::error!(message = %msg, "Server error");
@@ -579,6 +625,7 @@ async fn connect_and_serve(
         drain_active_ssh_tunnels(&active_ssh_tunnels).await;
     }
     drain_active_web_terminals(&active_web_terminals).await;
+    drain_active_ws_proxies(&active_ws_proxies).await;
     writer_task.abort();
     Ok(())
 }
@@ -2130,6 +2177,589 @@ async fn shutdown_signal() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// WebSocket proxy passthrough handlers
+// ---------------------------------------------------------------------------
+
+async fn handle_ws_proxy_open(
+    parsed: &serde_json::Value,
+    credentials: &CredentialStore,
+    tx: mpsc::Sender<NodeWsMessage>,
+    active_ws_proxies: ActiveWsProxyMap,
+    signing_secret: Option<SharedSigningSecret>,
+    replay_guard: Arc<tokio::sync::Mutex<ReplayGuard>>,
+) {
+    let session_id = match parsed["session_id"].as_str() {
+        Some(id) if !id.is_empty() => id.to_string(),
+        _ => {
+            tracing::warn!("ws_proxy_open missing session_id");
+            return;
+        }
+    };
+
+    // Verify HMAC if signing is enabled.
+    if let Some(secret) = signing_secret.as_deref()
+        && let Err(error) =
+            verify_signed_ws_proxy_open(parsed, &session_id, secret.as_str(), &replay_guard).await
+    {
+        let _ = send_ws_proxy_error(&tx, &session_id, error).await;
+        return;
+    }
+
+    let service_slug = match parsed["service_slug"].as_str() {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => {
+            let _ = send_ws_proxy_error(&tx, &session_id, "missing_service_slug").await;
+            return;
+        }
+    };
+
+    let base_url = parsed["base_url"].as_str().unwrap_or("");
+    let path = parsed["path"].as_str().unwrap_or("");
+    let query = parsed["query"].as_str();
+
+    // Resolve credentials.
+    let cred = match credentials.get(&service_slug) {
+        Some(c) => c,
+        None => {
+            let _ = send_ws_proxy_error(
+                &tx,
+                &session_id,
+                &format!("No credentials configured for service '{service_slug}'"),
+            )
+            .await;
+            return;
+        }
+    };
+
+    // Resolve effective base URL.
+    let effective_base_url = if base_url.is_empty() {
+        match cred.target_url() {
+            Some(url) => url.to_string(),
+            None => {
+                let _ = send_ws_proxy_error(
+                    &tx,
+                    &session_id,
+                    &format!("No target URL configured for service '{service_slug}'"),
+                )
+                .await;
+                return;
+            }
+        }
+    } else {
+        base_url.to_string()
+    };
+
+    // Build WS URL: convert http(s) to ws(s).
+    let base = effective_base_url.trim_end_matches('/');
+    let ws_base = if base.starts_with("https://") {
+        base.replacen("https://", "wss://", 1)
+    } else if base.starts_with("http://") {
+        base.replacen("http://", "ws://", 1)
+    } else if base.starts_with("ws://") || base.starts_with("wss://") {
+        base.to_string()
+    } else {
+        let _ = send_ws_proxy_error(&tx, &session_id, "unsupported_base_url_scheme").await;
+        return;
+    };
+
+    let normalized_path = if path.is_empty() {
+        String::new()
+    } else if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    };
+    let mut url = format!("{ws_base}{normalized_path}");
+    if let Some(q) = query
+        && !q.is_empty()
+    {
+        url = format!("{url}?{q}");
+    }
+
+    // Append query-param credential.
+    if let Some((param_name, param_value)) = cred.query_param() {
+        url = proxy_executor::append_query_param(&url, param_name, param_value);
+    }
+
+    // Build WS connect request with header injection.
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut ws_request = match url.into_client_request() {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = send_ws_proxy_error(
+                &tx,
+                &session_id,
+                &format!("Failed to build WS request: {e}"),
+            )
+            .await;
+            return;
+        }
+    };
+
+    // Forward headers from the proxy message.
+    if let Some(headers) = parsed["headers"].as_object() {
+        for (name, value) in headers {
+            if let Some(v) = value.as_str()
+                && let (Ok(hn), Ok(hv)) = (
+                    reqwest::header::HeaderName::from_bytes(name.as_bytes()),
+                    reqwest::header::HeaderValue::from_str(v),
+                )
+            {
+                ws_request.headers_mut().insert(hn, hv);
+            }
+        }
+    }
+
+    // Inject header credential.
+    if let Some((hdr_name, hdr_value)) = cred.header()
+        && let (Ok(hn), Ok(hv)) = (
+            reqwest::header::HeaderName::from_bytes(hdr_name.as_bytes()),
+            reqwest::header::HeaderValue::from_str(hdr_value),
+        )
+    {
+        ws_request.headers_mut().insert(hn, hv);
+    }
+
+    // Connect to downstream WS with timeout and message size limits
+    // matching the server-side WS_PASSTHROUGH_MAX_MESSAGE_SIZE.
+    let mut ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
+    ws_config.max_message_size = Some(WS_PROXY_MAX_MESSAGE_SIZE);
+    ws_config.max_frame_size = Some(WS_PROXY_MAX_MESSAGE_SIZE);
+    let connect_result = tokio::time::timeout(
+        Duration::from_secs(WS_PROXY_CONNECT_TIMEOUT_SECS),
+        tokio_tungstenite::connect_async_with_config(ws_request, Some(ws_config), false),
+    )
+    .await;
+
+    let (downstream_ws, selected_protocol) = match connect_result {
+        Ok(Ok((ws, response))) => {
+            let selected_protocol = response
+                .headers()
+                .get("sec-websocket-protocol")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
+            (ws, selected_protocol)
+        }
+        Ok(Err(e)) => {
+            let _ = send_ws_proxy_error(
+                &tx,
+                &session_id,
+                &format!("Downstream WS connection failed: {e}"),
+            )
+            .await;
+            return;
+        }
+        Err(_) => {
+            let _ =
+                send_ws_proxy_error(&tx, &session_id, "Downstream WS connection timed out").await;
+            return;
+        }
+    };
+
+    // Register and spawn relay task.
+    let (control_tx, control_rx) = mpsc::channel(WS_PROXY_CONTROL_CHANNEL_SIZE);
+
+    let open_rejection = {
+        let mut guard = active_ws_proxies.lock().await;
+        if guard.contains_key(&session_id) {
+            Some("duplicate_session_id")
+        } else {
+            let task_session_id = session_id.clone();
+            let task_tx = tx.clone();
+            let task_proxies = active_ws_proxies.clone();
+            let task_handle = tokio::spawn(async move {
+                run_ws_proxy_session(
+                    task_session_id,
+                    downstream_ws,
+                    control_rx,
+                    task_tx,
+                    task_proxies,
+                )
+                .await;
+            });
+            guard.insert(
+                session_id.clone(),
+                ActiveWsProxyEntry {
+                    control_tx,
+                    task_handle,
+                },
+            );
+            None
+        }
+    };
+
+    if let Some(error) = open_rejection {
+        let _ = send_ws_proxy_error(&tx, &session_id, error).await;
+        return;
+    }
+
+    // Send ws_proxy_opened acknowledgement.
+    let mut opened = serde_json::json!({
+        "type": "ws_proxy_opened",
+        "session_id": session_id,
+    });
+    if let Some(protocol) = selected_protocol {
+        opened["selected_protocol"] = serde_json::Value::String(protocol);
+    }
+    let _ = send_ws_message(&tx, opened.to_string()).await;
+}
+
+/// Relay loop: bridges frames between the management WS (via control channel)
+/// and the downstream WS connection.
+async fn run_ws_proxy_session(
+    session_id: String,
+    downstream_ws: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    control_rx: mpsc::Receiver<WsProxyControl>,
+    tx: mpsc::Sender<NodeWsMessage>,
+    active_ws_proxies: ActiveWsProxyMap,
+) {
+    run_ws_proxy_session_with_limits(
+        session_id,
+        downstream_ws,
+        control_rx,
+        tx,
+        active_ws_proxies,
+        Duration::from_secs(WS_PROXY_MAX_DURATION_SECS),
+        Duration::from_secs(WS_PROXY_IDLE_TIMEOUT_SECS),
+    )
+    .await;
+}
+
+async fn run_ws_proxy_session_with_limits<S>(
+    session_id: String,
+    downstream_ws: tokio_tungstenite::WebSocketStream<S>,
+    mut control_rx: mpsc::Receiver<WsProxyControl>,
+    tx: mpsc::Sender<NodeWsMessage>,
+    active_ws_proxies: ActiveWsProxyMap,
+    max_duration_limit: Duration,
+    idle_timeout_limit: Duration,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+
+    let (mut downstream_sink, mut downstream_stream) = downstream_ws.split();
+
+    let max_duration = tokio::time::sleep(max_duration_limit);
+    tokio::pin!(max_duration);
+
+    let idle_timeout = tokio::time::sleep(idle_timeout_limit);
+    tokio::pin!(idle_timeout);
+
+    let reset_idle = || tokio::time::Instant::now() + idle_timeout_limit;
+
+    loop {
+        tokio::select! {
+            _ = &mut max_duration => {
+                tracing::info!(session_id = %session_id, "WS proxy max duration reached");
+                let json = serde_json::json!({
+                    "type": "ws_proxy_closed",
+                    "session_id": session_id,
+                    "reason": "max duration reached",
+                });
+                let _ = send_ws_message(&tx, json.to_string()).await;
+                break;
+            }
+            _ = &mut idle_timeout => {
+                tracing::info!(session_id = %session_id, "WS proxy idle timeout reached");
+                let json = serde_json::json!({
+                    "type": "ws_proxy_closed",
+                    "session_id": session_id,
+                    "reason": "idle timeout",
+                });
+                let _ = send_ws_message(&tx, json.to_string()).await;
+                break;
+            }
+            // Server -> downstream (via control channel)
+            ctrl = control_rx.recv() => {
+                match ctrl {
+                    Some(WsProxyControl::Text(data)) => {
+                        idle_timeout.as_mut().reset(reset_idle());
+                        let msg = Message::Text(data.into());
+                        if downstream_sink.send(msg).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(WsProxyControl::Binary(data)) => {
+                        idle_timeout.as_mut().reset(reset_idle());
+                        let msg = Message::Binary(data.into());
+                        if downstream_sink.send(msg).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(WsProxyControl::Close { code, reason }) => {
+                        let close_frame = code.map(|c| {
+                            tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                                code: CloseCode::from(c),
+                                reason: reason.unwrap_or_default().into(),
+                            }
+                        });
+                        let _ = downstream_sink.send(Message::Close(close_frame)).await;
+                        break;
+                    }
+                    None => break, // Server disconnected
+                }
+            }
+            // Downstream -> server
+            msg = downstream_stream.next() => {
+                match msg {
+                    Some(Ok(Message::Text(t))) => {
+                        idle_timeout.as_mut().reset(reset_idle());
+                        let json = serde_json::json!({
+                            "type": "ws_proxy_text",
+                            "session_id": session_id,
+                            "data": t.to_string(),
+                        });
+                        if !send_ws_message(&tx, json.to_string()).await {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Binary(b))) => {
+                        idle_timeout.as_mut().reset(reset_idle());
+                        let json = serde_json::json!({
+                            "type": "ws_proxy_binary",
+                            "session_id": session_id,
+                            "data": base64::engine::general_purpose::STANDARD.encode(&b),
+                        });
+                        if !send_ws_message(&tx, json.to_string()).await {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Close(frame))) => {
+                        let (code, reason) = frame
+                            .map(|f| (Some(u16::from(f.code)), Some(f.reason.to_string())))
+                            .unwrap_or((None, None));
+                        let json = serde_json::json!({
+                            "type": "ws_proxy_closed",
+                            "session_id": session_id,
+                            "code": code,
+                            "reason": reason,
+                        });
+                        let _ = send_ws_message(&tx, json.to_string()).await;
+                        break;
+                    }
+                    Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {
+                        // Handled at protocol level by tungstenite
+                    }
+                    Some(Ok(Message::Frame(_))) => {}
+                    Some(Err(e)) => {
+                        tracing::debug!(
+                            session_id = %session_id,
+                            error = %e,
+                            "Downstream WS error in node proxy"
+                        );
+                        let json = serde_json::json!({
+                            "type": "ws_proxy_closed",
+                            "session_id": session_id,
+                            "reason": format!("downstream error: {e}"),
+                        });
+                        let _ = send_ws_message(&tx, json.to_string()).await;
+                        break;
+                    }
+                    None => {
+                        let json = serde_json::json!({
+                            "type": "ws_proxy_closed",
+                            "session_id": session_id,
+                        });
+                        let _ = send_ws_message(&tx, json.to_string()).await;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    let _ = downstream_sink.close().await;
+
+    // Remove from active map.
+    let mut guard = active_ws_proxies.lock().await;
+    guard.remove(&session_id);
+    tracing::debug!(session_id = %session_id, "WS proxy session ended");
+}
+
+async fn verify_signed_ws_proxy_open(
+    parsed: &serde_json::Value,
+    session_id: &str,
+    signing_secret: &str,
+    replay_guard: &Arc<tokio::sync::Mutex<ReplayGuard>>,
+) -> std::result::Result<(), &'static str> {
+    let timestamp = parsed["timestamp"].as_str();
+    let nonce = parsed["nonce"].as_str();
+    let signature = parsed["signature"].as_str();
+
+    let (Some(timestamp), Some(nonce), Some(signature)) = (timestamp, nonce, signature) else {
+        tracing::warn!(session_id = %session_id, "ws_proxy_open missing HMAC fields");
+        return Err("missing_hmac_fields");
+    };
+
+    if !signing::verify_ws_proxy_signature(parsed, signing_secret, signature) {
+        tracing::warn!(session_id = %session_id, "ws_proxy_open HMAC verification failed");
+        return Err("invalid_hmac_signature");
+    }
+
+    let mut guard = replay_guard.lock().await;
+    if !guard.check(timestamp, nonce) {
+        tracing::warn!(session_id = %session_id, "ws_proxy_open rejected by replay guard");
+        return Err("replay_detected");
+    }
+
+    Ok(())
+}
+
+async fn fail_ws_proxy_session(
+    active_ws_proxies: &ActiveWsProxyMap,
+    tx: &mpsc::Sender<NodeWsMessage>,
+    session_id: &str,
+    error: &str,
+) {
+    let removed = {
+        let mut guard = active_ws_proxies.lock().await;
+        guard.remove(session_id)
+    };
+    if let Some(entry) = removed {
+        entry.task_handle.abort();
+    }
+    let _ = send_ws_proxy_error(tx, session_id, error).await;
+}
+
+async fn handle_ws_proxy_text(
+    parsed: &serde_json::Value,
+    tx: &mpsc::Sender<NodeWsMessage>,
+    active_ws_proxies: &ActiveWsProxyMap,
+) {
+    let session_id = parsed["session_id"].as_str().unwrap_or("");
+    let data = parsed["data"].as_str().unwrap_or("");
+    let send_result = {
+        let guard = active_ws_proxies.lock().await;
+        guard.get(session_id).map(|entry| {
+            entry
+                .control_tx
+                .try_send(WsProxyControl::Text(data.to_string()))
+        })
+    };
+    match send_result {
+        Some(Err(mpsc::error::TrySendError::Full(_))) => {
+            fail_ws_proxy_session(
+                active_ws_proxies,
+                tx,
+                session_id,
+                "ws_proxy_control_buffer_full",
+            )
+            .await;
+        }
+        Some(Err(mpsc::error::TrySendError::Closed(_))) => {
+            fail_ws_proxy_session(active_ws_proxies, tx, session_id, "ws_proxy_session_closed")
+                .await;
+        }
+        _ => {}
+    }
+}
+
+async fn handle_ws_proxy_binary(
+    parsed: &serde_json::Value,
+    tx: &mpsc::Sender<NodeWsMessage>,
+    active_ws_proxies: &ActiveWsProxyMap,
+) {
+    let session_id = parsed["session_id"].as_str().unwrap_or("");
+    let data_b64 = parsed["data"].as_str().unwrap_or("");
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data_b64) else {
+        fail_ws_proxy_session(active_ws_proxies, tx, session_id, "invalid_ws_proxy_binary").await;
+        return;
+    };
+    let send_result = {
+        let guard = active_ws_proxies.lock().await;
+        guard
+            .get(session_id)
+            .map(|entry| entry.control_tx.try_send(WsProxyControl::Binary(bytes)))
+    };
+    match send_result {
+        Some(Err(mpsc::error::TrySendError::Full(_))) => {
+            fail_ws_proxy_session(
+                active_ws_proxies,
+                tx,
+                session_id,
+                "ws_proxy_control_buffer_full",
+            )
+            .await;
+        }
+        Some(Err(mpsc::error::TrySendError::Closed(_))) => {
+            fail_ws_proxy_session(active_ws_proxies, tx, session_id, "ws_proxy_session_closed")
+                .await;
+        }
+        _ => {}
+    }
+}
+
+async fn handle_ws_proxy_close(
+    parsed: &serde_json::Value,
+    tx: &mpsc::Sender<NodeWsMessage>,
+    active_ws_proxies: &ActiveWsProxyMap,
+) {
+    let session_id = parsed["session_id"].as_str().unwrap_or("").to_string();
+    let code = parsed["code"].as_u64().map(|c| c as u16);
+    let reason = parsed["reason"].as_str().map(|s| s.to_string());
+    let send_result = {
+        let guard = active_ws_proxies.lock().await;
+        guard.get(&session_id).map(|entry| {
+            entry
+                .control_tx
+                .try_send(WsProxyControl::Close { code, reason })
+        })
+    };
+    match send_result {
+        Some(Err(mpsc::error::TrySendError::Full(_))) => {
+            fail_ws_proxy_session(
+                active_ws_proxies,
+                tx,
+                &session_id,
+                "ws_proxy_control_buffer_full",
+            )
+            .await;
+        }
+        Some(Err(mpsc::error::TrySendError::Closed(_))) => {
+            fail_ws_proxy_session(
+                active_ws_proxies,
+                tx,
+                &session_id,
+                "ws_proxy_session_closed",
+            )
+            .await;
+        }
+        _ => {}
+    }
+}
+
+async fn send_ws_proxy_error(
+    tx: &mpsc::Sender<NodeWsMessage>,
+    session_id: &str,
+    error: &str,
+) -> bool {
+    send_ws_message(
+        tx,
+        serde_json::json!({
+            "type": "ws_proxy_error",
+            "session_id": session_id,
+            "error": error,
+        })
+        .to_string(),
+    )
+    .await
+}
+
+async fn drain_active_ws_proxies(active_ws_proxies: &ActiveWsProxyMap) {
+    let entries = {
+        let mut guard = active_ws_proxies.lock().await;
+        guard.drain().collect::<Vec<_>>()
+    };
+    for (session_id, entry) in entries {
+        entry.task_handle.abort();
+        tracing::debug!(session_id = %session_id, "WS proxy drained on disconnect");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2137,6 +2767,7 @@ mod tests {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
     use tokio::net::TcpListener;
+    use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
 
     /// Unwrap a NodeWsMessage::Text variant, panicking if it's Binary.
     fn unwrap_text(msg: NodeWsMessage) -> String {
@@ -2188,6 +2819,117 @@ mod tests {
             "nonce": nonce,
             "signature": hex::encode(mac.finalize().into_bytes()),
         })
+    }
+
+    #[tokio::test]
+    async fn ws_proxy_text_backpressure_reports_error_and_removes_session() {
+        let active_ws_proxies: ActiveWsProxyMap = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let (control_tx, _control_rx) = mpsc::channel(1);
+        control_tx
+            .try_send(WsProxyControl::Text("queued".to_string()))
+            .expect("fill control buffer");
+
+        let task_handle = tokio::spawn(async {
+            std::future::pending::<()>().await;
+        });
+
+        active_ws_proxies.lock().await.insert(
+            "sess-1".to_string(),
+            ActiveWsProxyEntry {
+                control_tx,
+                task_handle,
+            },
+        );
+
+        let (tx, mut rx) = mpsc::channel(4);
+        let parsed = serde_json::json!({
+            "session_id": "sess-1",
+            "data": "hello",
+        });
+
+        handle_ws_proxy_text(&parsed, &tx, &active_ws_proxies).await;
+
+        let msg = unwrap_text(rx.recv().await.expect("ws_proxy_error"));
+        let payload: serde_json::Value =
+            serde_json::from_str(&msg).expect("valid ws_proxy_error payload");
+        assert_eq!(payload["type"], "ws_proxy_error");
+        assert_eq!(payload["session_id"], "sess-1");
+        assert_eq!(payload["error"], "ws_proxy_control_buffer_full");
+        assert!(active_ws_proxies.lock().await.is_empty());
+    }
+
+    async fn duplex_websocket_pair() -> (
+        WebSocketStream<tokio::io::DuplexStream>,
+        WebSocketStream<tokio::io::DuplexStream>,
+    ) {
+        let (client_io, server_io) = tokio::io::duplex(1024);
+        let client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+        let server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+        (client, server)
+    }
+
+    #[tokio::test]
+    async fn ws_proxy_session_reports_idle_timeout() {
+        let active_ws_proxies: ActiveWsProxyMap = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let (downstream_ws, _peer_ws) = duplex_websocket_pair().await;
+        let (control_tx, control_rx) = mpsc::channel(4);
+        let (tx, mut rx) = mpsc::channel(4);
+
+        let relay = tokio::spawn(run_ws_proxy_session_with_limits(
+            "sess-idle".to_string(),
+            downstream_ws,
+            control_rx,
+            tx,
+            active_ws_proxies,
+            Duration::from_millis(200),
+            Duration::from_millis(25),
+        ));
+
+        let msg = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("idle timeout message arrives")
+            .expect("ws_proxy_closed message");
+        let payload: serde_json::Value =
+            serde_json::from_str(&unwrap_text(msg)).expect("valid ws_proxy_closed payload");
+
+        assert_eq!(payload["type"], "ws_proxy_closed");
+        assert_eq!(payload["session_id"], "sess-idle");
+        assert_eq!(payload["reason"], "idle timeout");
+
+        relay.await.expect("relay task completes");
+        drop(control_tx);
+    }
+
+    #[tokio::test]
+    async fn ws_proxy_session_reports_max_duration() {
+        let active_ws_proxies: ActiveWsProxyMap = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let (downstream_ws, _peer_ws) = duplex_websocket_pair().await;
+        let (control_tx, control_rx) = mpsc::channel(4);
+        let (tx, mut rx) = mpsc::channel(4);
+
+        let relay = tokio::spawn(run_ws_proxy_session_with_limits(
+            "sess-max".to_string(),
+            downstream_ws,
+            control_rx,
+            tx,
+            active_ws_proxies,
+            Duration::from_millis(25),
+            Duration::from_millis(200),
+        ));
+
+        let msg = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("max duration message arrives")
+            .expect("ws_proxy_closed message");
+        let payload: serde_json::Value =
+            serde_json::from_str(&unwrap_text(msg)).expect("valid ws_proxy_closed payload");
+
+        assert_eq!(payload["type"], "ws_proxy_closed");
+        assert_eq!(payload["session_id"], "sess-max");
+        assert_eq!(payload["reason"], "max duration reached");
+
+        relay.await.expect("relay task completes");
+        drop(control_tx);
     }
 
     #[test]

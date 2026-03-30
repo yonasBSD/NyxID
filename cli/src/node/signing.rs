@@ -153,6 +153,27 @@ pub fn verify_web_terminal_signature(
     verify_signature(secret_hex, expected_signature, &message)
 }
 
+/// Verify the HMAC-SHA256 signature on a WS proxy open request.
+/// Message format:
+/// `{timestamp}\n{nonce}\n{session_id}\n{service_slug}\n{base_url}\n{path}\n{query}`
+pub fn verify_ws_proxy_signature(
+    request: &serde_json::Value,
+    secret_hex: &str,
+    expected_signature: &str,
+) -> bool {
+    let timestamp = request["timestamp"].as_str().unwrap_or("");
+    let nonce = request["nonce"].as_str().unwrap_or("");
+    let session_id = request["session_id"].as_str().unwrap_or("");
+    let service_slug = request["service_slug"].as_str().unwrap_or("");
+    let base_url = request["base_url"].as_str().unwrap_or("");
+    let path = request["path"].as_str().unwrap_or("");
+    let query = request["query"].as_str().unwrap_or("");
+
+    let message =
+        format!("{timestamp}\n{nonce}\n{session_id}\n{service_slug}\n{base_url}\n{path}\n{query}");
+    verify_signature(secret_hex, expected_signature, &message)
+}
+
 fn verify_signature(secret_hex: &str, expected_signature: &str, message: &str) -> bool {
     let secret_bytes = match hex::decode(secret_hex) {
         Ok(b) => b,
@@ -216,6 +237,23 @@ mod tests {
         let mut mac = Hmac::<Sha256>::new_from_slice(&secret_bytes).unwrap();
         mac.update(message.as_bytes());
         hex::encode(mac.finalize().into_bytes())
+    }
+
+    fn compute_ws_proxy_signature(secret_hex: &str, request: &serde_json::Value) -> String {
+        let timestamp = request["timestamp"].as_str().unwrap_or("");
+        let nonce = request["nonce"].as_str().unwrap_or("");
+        let session_id = request["session_id"].as_str().unwrap_or("");
+        let service_slug = request["service_slug"].as_str().unwrap_or("");
+        let base_url = request["base_url"].as_str().unwrap_or("");
+        let path = request["path"].as_str().unwrap_or("");
+        let query = request["query"].as_str().unwrap_or("");
+
+        compute_signature_for_message(
+            secret_hex,
+            &format!(
+                "{timestamp}\n{nonce}\n{session_id}\n{service_slug}\n{base_url}\n{path}\n{query}"
+            ),
+        )
     }
 
     #[test]
@@ -436,6 +474,50 @@ mod tests {
         });
 
         assert!(!verify_ssh_exec_signature(&tampered, &secret, &sig));
+    }
+
+    #[test]
+    fn valid_ws_proxy_signature_passes() {
+        let secret = "ab".repeat(32);
+        let request = serde_json::json!({
+            "timestamp": "2026-03-12T10:30:00.000Z",
+            "nonce": "test-nonce",
+            "session_id": "ws-sess-1",
+            "service_slug": "openclaw",
+            "base_url": "https://gateway.example.com",
+            "path": "/socket",
+            "query": "stream=true&api_key=abc",
+        });
+
+        let sig = compute_ws_proxy_signature(&secret, &request);
+        assert!(verify_ws_proxy_signature(&request, &secret, &sig));
+    }
+
+    #[test]
+    fn tampered_ws_proxy_query_fails() {
+        let secret = "ab".repeat(32);
+        let request = serde_json::json!({
+            "timestamp": "2026-03-12T10:30:00.000Z",
+            "nonce": "test-nonce",
+            "session_id": "ws-sess-1",
+            "service_slug": "openclaw",
+            "base_url": "https://gateway.example.com",
+            "path": "/socket",
+            "query": "stream=true&api_key=abc",
+        });
+
+        let sig = compute_ws_proxy_signature(&secret, &request);
+        let tampered = serde_json::json!({
+            "timestamp": "2026-03-12T10:30:00.000Z",
+            "nonce": "test-nonce",
+            "session_id": "ws-sess-1",
+            "service_slug": "openclaw",
+            "base_url": "https://gateway.example.com",
+            "path": "/socket",
+            "query": "stream=false&api_key=abc",
+        });
+
+        assert!(!verify_ws_proxy_signature(&tampered, &secret, &sig));
     }
 
     #[test]

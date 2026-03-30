@@ -606,6 +606,7 @@ mod tests {
             ssh_max_sessions_per_user: 4,
             ssh_connect_timeout_secs: 10,
             ssh_max_tunnel_duration_secs: 3600,
+            ws_passthrough_max_connections: 200,
         };
 
         (keys, config)

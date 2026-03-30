@@ -159,6 +159,8 @@ pub struct AppConfig {
     pub ssh_connect_timeout_secs: u64,
     /// Maximum duration for an SSH tunnel session in seconds (default: 3600)
     pub ssh_max_tunnel_duration_secs: u64,
+    /// Maximum concurrent WebSocket passthrough connections (default: 200)
+    pub ws_passthrough_max_connections: usize,
 }
 
 impl std::fmt::Debug for AppConfig {
@@ -286,6 +288,10 @@ impl std::fmt::Debug for AppConfig {
             .field(
                 "ssh_max_tunnel_duration_secs",
                 &self.ssh_max_tunnel_duration_secs,
+            )
+            .field(
+                "ws_passthrough_max_connections",
+                &self.ws_passthrough_max_connections,
             )
             .finish()
     }
@@ -472,6 +478,10 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(3600),
+            ws_passthrough_max_connections: env::var("WS_PASSTHROUGH_MAX_CONNECTIONS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(200),
         }
     }
 
@@ -761,6 +771,7 @@ mod tests {
             ssh_max_sessions_per_user: 4,
             ssh_connect_timeout_secs: 10,
             ssh_max_tunnel_duration_secs: 3600,
+            ws_passthrough_max_connections: 200,
         }
     }
 

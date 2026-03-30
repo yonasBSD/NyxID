@@ -11,6 +11,7 @@ use crate::errors::{AppError, AppResult};
 const STREAM_BUFFER_CAPACITY: usize = 1024;
 const SSH_TUNNEL_BUFFER_CAPACITY: usize = 256;
 const WEB_TERMINAL_BUFFER_CAPACITY: usize = 256;
+const WS_PROXY_BUFFER_CAPACITY: usize = 512;
 
 /// Request sent to a node via WebSocket.
 #[derive(Clone)]
@@ -101,6 +102,43 @@ pub(crate) enum PendingSshTunnel {
     Active(mpsc::Sender<SshTunnelChunk>),
 }
 
+/// A frame in a node-backed WS proxy session.
+#[derive(Debug)]
+pub enum WsProxyFrame {
+    /// Text WS frame from downstream.
+    Text(String),
+    /// Binary WS frame from downstream.
+    Binary(Vec<u8>),
+    /// Downstream closed the WS connection.
+    Closed {
+        code: Option<u16>,
+        reason: Option<String>,
+    },
+    /// Error from downstream.
+    Error(String),
+}
+
+pub struct NodeWsProxySession {
+    pub frames: mpsc::Receiver<WsProxyFrame>,
+    pub selected_protocol: Option<String>,
+}
+
+pub(crate) enum PendingWsProxy {
+    Awaiting(oneshot::Sender<AppResult<NodeWsProxySession>>),
+    Active(mpsc::Sender<WsProxyFrame>),
+}
+
+/// Request sent to a node to open a WS proxy connection.
+#[derive(Clone)]
+pub struct NodeWsProxyRequest {
+    pub session_id: String,
+    pub service_slug: String,
+    pub base_url: String,
+    pub path: String,
+    pub query: Option<String>,
+    pub headers: Vec<(String, String)>,
+}
+
 pub(crate) enum PendingWebTerminal {
     Awaiting(oneshot::Sender<AppResult<mpsc::Receiver<WebTerminalChunk>>>),
     Active(mpsc::Sender<WebTerminalChunk>),
@@ -167,6 +205,8 @@ struct NodeConnection {
     web_terminals: Arc<DashMap<String, PendingWebTerminal>>,
     /// Pending SSH exec requests keyed by request_id
     ssh_exec_requests: Arc<DashMap<String, PendingSshExec>>,
+    /// Pending and active WS proxy sessions keyed by session_id
+    ws_proxies: Arc<DashMap<String, PendingWsProxy>>,
 }
 
 /// In-memory WebSocket connection manager for credential nodes.
@@ -243,6 +283,56 @@ struct WsSshTunnelClose {
     #[serde(rename = "type")]
     msg_type: &'static str,
     session_id: String,
+}
+
+/// JSON ws_proxy_open sent to node.
+#[derive(Debug, Serialize)]
+struct WsProxyOpen {
+    #[serde(rename = "type")]
+    msg_type: &'static str,
+    session_id: String,
+    service_slug: String,
+    base_url: String,
+    path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    query: Option<String>,
+    headers: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timestamp: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nonce: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signature: Option<String>,
+}
+
+/// JSON ws_proxy_text sent to node.
+#[derive(Debug, Serialize)]
+struct WsProxyTextMsg {
+    #[serde(rename = "type")]
+    msg_type: &'static str,
+    session_id: String,
+    data: String,
+}
+
+/// JSON ws_proxy_binary sent to node (base64-encoded payload).
+#[derive(Debug, Serialize)]
+struct WsProxyBinaryMsg {
+    #[serde(rename = "type")]
+    msg_type: &'static str,
+    session_id: String,
+    data: String,
+}
+
+/// JSON ws_proxy_close sent to node.
+#[derive(Debug, Serialize)]
+struct WsProxyCloseMsg {
+    #[serde(rename = "type")]
+    msg_type: &'static str,
+    session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -375,6 +465,45 @@ pub struct WsSshTunnelClosedMsg {
     pub session_id: String,
     #[serde(default)]
     pub error: Option<String>,
+}
+
+/// JSON ws_proxy_opened from node.
+#[derive(Debug, Deserialize)]
+pub struct WsProxyOpenedInbound {
+    pub session_id: String,
+    #[serde(default)]
+    pub selected_protocol: Option<String>,
+}
+
+/// JSON ws_proxy_text from node.
+#[derive(Debug, Deserialize)]
+pub struct WsProxyTextInbound {
+    pub session_id: String,
+    pub data: String,
+}
+
+/// JSON ws_proxy_binary from node (base64-encoded payload).
+#[derive(Debug, Deserialize)]
+pub struct WsProxyBinaryInbound {
+    pub session_id: String,
+    pub data: String,
+}
+
+/// JSON ws_proxy_closed from node.
+#[derive(Debug, Deserialize)]
+pub struct WsProxyClosedInbound {
+    pub session_id: String,
+    #[serde(default)]
+    pub code: Option<u16>,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// JSON ws_proxy_error from node.
+#[derive(Debug, Deserialize)]
+pub struct WsProxyErrorInbound {
+    pub session_id: String,
+    pub error: String,
 }
 
 /// JSON ssh_exec_result from node.
@@ -618,6 +747,7 @@ impl NodeWsManager {
         let ssh_tunnels = Arc::new(DashMap::new());
         let web_terminals = Arc::new(DashMap::new());
         let ssh_exec_requests = Arc::new(DashMap::new());
+        let ws_proxies = Arc::new(DashMap::new());
         let return_pending = pending.clone();
 
         self.connections.insert(
@@ -628,6 +758,7 @@ impl NodeWsManager {
                 ssh_tunnels,
                 web_terminals,
                 ssh_exec_requests,
+                ws_proxies,
             },
         );
 
@@ -642,6 +773,7 @@ impl NodeWsManager {
             conn.ssh_tunnels.clear();
             conn.web_terminals.clear();
             conn.ssh_exec_requests.clear();
+            conn.ws_proxies.clear();
         }
     }
 
@@ -654,6 +786,7 @@ impl NodeWsManager {
             conn.ssh_tunnels.clear();
             conn.web_terminals.clear();
             conn.ssh_exec_requests.clear();
+            conn.ws_proxies.clear();
             let close_msg = NodeOutboundMessage::Close {
                 code,
                 reason: reason.to_string(),
@@ -1646,6 +1779,358 @@ impl NodeWsManager {
             }
         }
     }
+
+    // ---- WebSocket proxy passthrough ----
+
+    /// Open a WS proxy session through a connected node.
+    /// Sends `ws_proxy_open` and waits for `ws_proxy_opened` or error.
+    pub async fn open_ws_proxy(
+        &self,
+        node_id: &str,
+        request: NodeWsProxyRequest,
+        signing_secret: Option<&[u8]>,
+    ) -> AppResult<NodeWsProxySession> {
+        let conn = self
+            .connections
+            .get(node_id)
+            .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
+        let session_id = request.session_id.clone();
+        let (ready_tx, ready_rx) = oneshot::channel();
+        conn.ws_proxies
+            .insert(session_id.clone(), PendingWsProxy::Awaiting(ready_tx));
+
+        let (timestamp, nonce, signature) = if let Some(secret) = signing_secret {
+            let ts = chrono::Utc::now().to_rfc3339();
+            let n = uuid::Uuid::new_v4().to_string();
+            let sig = compute_ws_proxy_hmac_signature(
+                secret,
+                &ts,
+                &n,
+                &request.session_id,
+                &request.service_slug,
+                &request.base_url,
+                &request.path,
+                request.query.as_deref(),
+            );
+            (Some(ts), Some(n), Some(sig))
+        } else {
+            (None, None, None)
+        };
+
+        let headers_json: serde_json::Value = request
+            .headers
+            .iter()
+            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+            .collect::<serde_json::Map<_, _>>()
+            .into();
+
+        let msg = serde_json::to_string(&WsProxyOpen {
+            msg_type: "ws_proxy_open",
+            session_id: request.session_id,
+            service_slug: request.service_slug,
+            base_url: request.base_url,
+            path: request.path,
+            query: request.query,
+            headers: headers_json,
+            timestamp,
+            nonce,
+            signature,
+        })
+        .map_err(|e| {
+            conn.ws_proxies.remove(&session_id);
+            AppError::Internal(format!("Failed to serialize ws_proxy_open: {e}"))
+        })?;
+
+        match conn.tx.try_send(NodeOutboundMessage::Text(msg)) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                conn.ws_proxies.remove(&session_id);
+                return Err(AppError::NodeOffline(format!(
+                    "Node {node_id} write buffer full"
+                )));
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                conn.ws_proxies.remove(&session_id);
+                return Err(AppError::NodeOffline(format!(
+                    "Node {node_id} connection closed"
+                )));
+            }
+        }
+
+        drop(conn);
+
+        let timeout = std::time::Duration::from_secs(self.proxy_timeout_secs);
+        match tokio::time::timeout(timeout, ready_rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(AppError::NodeOffline(format!(
+                "Node {node_id} disconnected during WS proxy open"
+            ))),
+            Err(_) => {
+                if let Some(conn) = self.connections.get(node_id) {
+                    conn.ws_proxies.remove(&session_id);
+                }
+                Err(AppError::NodeProxyTimeout)
+            }
+        }
+    }
+
+    /// Forward a text WS frame to a node-backed WS proxy session.
+    pub fn send_ws_proxy_text(&self, node_id: &str, session_id: &str, data: &str) -> AppResult<()> {
+        let conn = self
+            .connections
+            .get(node_id)
+            .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
+        if !conn.ws_proxies.contains_key(session_id) {
+            return Err(AppError::NodeOffline(format!(
+                "WS proxy session {session_id} is not active"
+            )));
+        }
+        let msg = serde_json::to_string(&WsProxyTextMsg {
+            msg_type: "ws_proxy_text",
+            session_id: session_id.to_string(),
+            data: data.to_string(),
+        })
+        .map_err(|e| AppError::Internal(format!("Failed to serialize ws_proxy_text: {e}")))?;
+        conn.tx
+            .try_send(NodeOutboundMessage::Text(msg))
+            .map_err(|_| {
+                AppError::NodeOffline(format!("Node {node_id} connection closed or buffer full"))
+            })?;
+        Ok(())
+    }
+
+    /// Forward a binary WS frame to a node-backed WS proxy session.
+    pub fn send_ws_proxy_binary(
+        &self,
+        node_id: &str,
+        session_id: &str,
+        data: &[u8],
+    ) -> AppResult<()> {
+        let conn = self
+            .connections
+            .get(node_id)
+            .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
+        if !conn.ws_proxies.contains_key(session_id) {
+            return Err(AppError::NodeOffline(format!(
+                "WS proxy session {session_id} is not active"
+            )));
+        }
+        let msg = serde_json::to_string(&WsProxyBinaryMsg {
+            msg_type: "ws_proxy_binary",
+            session_id: session_id.to_string(),
+            data: base64::engine::general_purpose::STANDARD.encode(data),
+        })
+        .map_err(|e| AppError::Internal(format!("Failed to serialize ws_proxy_binary: {e}")))?;
+        conn.tx
+            .try_send(NodeOutboundMessage::Text(msg))
+            .map_err(|_| {
+                AppError::NodeOffline(format!("Node {node_id} connection closed or buffer full"))
+            })?;
+        Ok(())
+    }
+
+    /// Request closure of a node-backed WS proxy session.
+    pub fn send_ws_proxy_close(
+        &self,
+        node_id: &str,
+        session_id: &str,
+        code: Option<u16>,
+        reason: Option<String>,
+    ) -> AppResult<()> {
+        let conn = self
+            .connections
+            .get(node_id)
+            .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
+        let msg = serde_json::to_string(&WsProxyCloseMsg {
+            msg_type: "ws_proxy_close",
+            session_id: session_id.to_string(),
+            code,
+            reason,
+        })
+        .map_err(|e| AppError::Internal(format!("Failed to serialize ws_proxy_close: {e}")))?;
+        conn.tx
+            .try_send(NodeOutboundMessage::Text(msg))
+            .map_err(|_| {
+                AppError::NodeOffline(format!("Node {node_id} connection closed or buffer full"))
+            })?;
+        conn.ws_proxies.remove(session_id);
+        Ok(())
+    }
+
+    /// Deliver a ws_proxy_opened acknowledgement from a node.
+    pub fn deliver_ws_proxy_opened(
+        &self,
+        node_id: &str,
+        session_id: &str,
+        selected_protocol: Option<String>,
+    ) -> bool {
+        let Some(conn) = self.connections.get(node_id) else {
+            return false;
+        };
+        let Some((_, pending)) = conn.ws_proxies.remove(session_id) else {
+            return false;
+        };
+
+        match pending {
+            PendingWsProxy::Awaiting(sender) => {
+                let (tx, rx) = mpsc::channel(WS_PROXY_BUFFER_CAPACITY);
+                let sent = sender
+                    .send(Ok(NodeWsProxySession {
+                        frames: rx,
+                        selected_protocol,
+                    }))
+                    .is_ok();
+                if sent {
+                    conn.ws_proxies
+                        .insert(session_id.to_string(), PendingWsProxy::Active(tx));
+                }
+                sent
+            }
+            PendingWsProxy::Active(tx) => {
+                conn.ws_proxies
+                    .insert(session_id.to_string(), PendingWsProxy::Active(tx));
+                true
+            }
+        }
+    }
+
+    /// Deliver a text WS frame from the downstream through the node.
+    pub fn deliver_ws_proxy_text(&self, node_id: &str, session_id: &str, data: String) {
+        if let Some(conn) = self.connections.get(node_id) {
+            let send_result = {
+                let Some(pending) = conn.ws_proxies.get(session_id) else {
+                    tracing::trace!(
+                        node_id = %node_id,
+                        session_id = %session_id,
+                        "WS proxy text frame for unknown session"
+                    );
+                    return;
+                };
+                let PendingWsProxy::Active(tx) = pending.value() else {
+                    return;
+                };
+                tx.try_send(WsProxyFrame::Text(data))
+            };
+            match send_result {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    tracing::warn!(
+                        node_id = %node_id,
+                        session_id = %session_id,
+                        "Dropping WS proxy due to full receive buffer"
+                    );
+                    conn.ws_proxies.remove(session_id);
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    conn.ws_proxies.remove(session_id);
+                }
+            }
+        }
+    }
+
+    /// Deliver a binary WS frame from the downstream through the node.
+    pub fn deliver_ws_proxy_binary(&self, node_id: &str, session_id: &str, data: Vec<u8>) {
+        if let Some(conn) = self.connections.get(node_id) {
+            let send_result = {
+                let Some(pending) = conn.ws_proxies.get(session_id) else {
+                    tracing::trace!(
+                        node_id = %node_id,
+                        session_id = %session_id,
+                        "WS proxy binary frame for unknown session"
+                    );
+                    return;
+                };
+                let PendingWsProxy::Active(tx) = pending.value() else {
+                    return;
+                };
+                tx.try_send(WsProxyFrame::Binary(data))
+            };
+            match send_result {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    tracing::warn!(
+                        node_id = %node_id,
+                        session_id = %session_id,
+                        "Dropping WS proxy due to full receive buffer"
+                    );
+                    conn.ws_proxies.remove(session_id);
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    conn.ws_proxies.remove(session_id);
+                }
+            }
+        }
+    }
+
+    /// Deliver a ws_proxy_closed from the node (downstream closed).
+    pub fn deliver_ws_proxy_closed(
+        &self,
+        node_id: &str,
+        session_id: &str,
+        code: Option<u16>,
+        reason: Option<String>,
+    ) {
+        if let Some(conn) = self.connections.get(node_id)
+            && let Some((_, pending)) = conn.ws_proxies.remove(session_id)
+        {
+            match pending {
+                PendingWsProxy::Awaiting(sender) => {
+                    let _ = sender.send(Err(AppError::NodeOffline(
+                        reason.unwrap_or_else(|| "WS proxy closed before opening".to_string()),
+                    )));
+                }
+                PendingWsProxy::Active(tx) => {
+                    let _ = tx.try_send(WsProxyFrame::Closed { code, reason });
+                }
+            }
+        }
+    }
+
+    /// Deliver a ws_proxy_error from the node.
+    pub fn deliver_ws_proxy_error(&self, node_id: &str, session_id: &str, error: &str) {
+        if let Some(conn) = self.connections.get(node_id)
+            && let Some((_, pending)) = conn.ws_proxies.remove(session_id)
+        {
+            match pending {
+                PendingWsProxy::Awaiting(sender) => {
+                    let _ = sender.send(Err(AppError::Internal(error.to_string())));
+                }
+                PendingWsProxy::Active(tx) => {
+                    let _ = tx.try_send(WsProxyFrame::Error(error.to_string()));
+                }
+            }
+        }
+    }
+}
+
+/// Compute HMAC-SHA256 signature for a WS proxy open request.
+#[allow(clippy::too_many_arguments)]
+pub fn compute_ws_proxy_hmac_signature(
+    secret: &[u8],
+    timestamp: &str,
+    nonce: &str,
+    session_id: &str,
+    service_slug: &str,
+    base_url: &str,
+    path: &str,
+    query: Option<&str>,
+) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    let message = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        timestamp,
+        nonce,
+        session_id,
+        service_slug,
+        base_url,
+        path,
+        query.unwrap_or("")
+    );
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key size");
+    mac.update(message.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
 }
 
 #[cfg(test)]
@@ -1731,6 +2216,33 @@ mod tests {
             None,
             None,
         );
+        assert_ne!(sig1, sig2);
+    }
+
+    #[test]
+    fn ws_proxy_hmac_signature_changes_with_query() {
+        let secret = b"test-secret-key-bytes-here-32byt";
+        let sig1 = compute_ws_proxy_hmac_signature(
+            secret,
+            "2026-03-12T10:00:00Z",
+            "nonce-123",
+            "sess-1",
+            "openclaw",
+            "https://gateway.example.com",
+            "/socket",
+            Some("stream=true"),
+        );
+        let sig2 = compute_ws_proxy_hmac_signature(
+            secret,
+            "2026-03-12T10:00:00Z",
+            "nonce-123",
+            "sess-1",
+            "openclaw",
+            "https://gateway.example.com",
+            "/socket",
+            Some("stream=false"),
+        );
+
         assert_ne!(sig1, sig2);
     }
 
