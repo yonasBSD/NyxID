@@ -111,6 +111,33 @@ impl ApiClient {
         self.get(path).await
     }
 
+    /// GET that returns `Ok(None)` on 404 instead of an error.
+    pub async fn get_optional<T: DeserializeOwned>(&mut self, path: &str) -> Result<Option<T>> {
+        let url = format!("{}{path}", self.base_url);
+        let mut resp = self
+            .client
+            .get(&url)
+            .bearer_auth(&self.access_token)
+            .send()
+            .await
+            .with_context(|| format!("GET {path} failed"))?;
+
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
+            resp = self
+                .client
+                .get(&url)
+                .bearer_auth(&self.access_token)
+                .send()
+                .await
+                .with_context(|| format!("GET {path} failed (retry)"))?;
+        }
+
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        Self::handle_response(resp, path).await.map(Some)
+    }
+
     pub async fn post<T: DeserializeOwned, B: Serialize>(
         &mut self,
         path: &str,
