@@ -313,15 +313,26 @@ nyxid node credentials add --service my-api --header Authorization --secret-form
 # Or run in foreground (for debugging)
 nyxid node start
 
-# Or run via Docker (good for multi-profile isolation)
-nyxid node docker build                                # build image (once)
-nyxid node docker start                                # start default node container
-nyxid node docker start --profile coding-agent         # start profile-specific container
+# Or run via Docker
+docker build -f cli/Dockerfile.node -t nyxid-node .    # build image (once)
+
+# Option A: auto-register + start (no host setup needed)
+docker run --user "$(id -u):$(id -g)" \
+  -v ~/.nyxid-node:/app/config \
+  -e NYXID_NODE_TOKEN=nyx_nreg_... \
+  -e NYXID_NODE_URL=wss://<server>/api/v1/nodes/ws \
+  nyxid-node
+
+# Option B: mount existing config (registered on host)
+docker run --user "$(id -u):$(id -g)" \
+  -v ~/.nyxid-node:/app/config \
+  nyxid-node
 ```
 
 > `credentials setup` works for **catalog services only** -- it fetches config from the catalog and automatically registers the service in the backend with the node's ID.
 > For **custom endpoints**, use `nyxid service add --custom --via-node <node-name>` first to create the backend record, then `nyxid node credentials add` to store the credential locally on the node.
 > Credentials can be added, updated, or removed while the agent is running. The agent watches the config file and reloads credentials automatically (no restart needed). This works for both native daemons and Docker containers (config is mounted as a volume).
+> Docker containers use the file backend (AES-GCM encrypted) -- OS keychain is not available in containers.
 
 ### Managing the node service
 
