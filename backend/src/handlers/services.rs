@@ -641,6 +641,8 @@ pub async fn create_service(
         Some(serde_json::json!({ "service_id": &id, "name": &body.name })),
         None,
         None,
+        None,
+        None,
     );
 
     Ok(Json(service_to_response(new_service)))
@@ -711,6 +713,8 @@ pub async fn delete_service(
         Some(auth_user.user_id.to_string()),
         "service_deleted".to_string(),
         Some(serde_json::json!({ "service_id": &service_id })),
+        None,
+        None,
         None,
         None,
     );
@@ -1058,6 +1062,8 @@ pub async fn update_service(
         Some(serde_json::json!({ "service_id": &service_id })),
         None,
         None,
+        None,
+        None,
     );
 
     // Re-fetch the updated service to return fresh data
@@ -1129,6 +1135,8 @@ pub async fn get_oidc_credentials(
         Some(auth_user.user_id.to_string()),
         "oidc_credentials_accessed".to_string(),
         Some(serde_json::json!({ "service_id": &service_id })),
+        None,
+        None,
         None,
         None,
     );
@@ -1242,6 +1250,8 @@ pub async fn update_redirect_uris(
         Some(serde_json::json!({ "service_id": &service_id })),
         None,
         None,
+        None,
+        None,
     );
 
     Ok(Json(RedirectUrisResponse {
@@ -1336,6 +1346,8 @@ pub async fn regenerate_oidc_secret(
         Some(auth_user.user_id.to_string()),
         "oidc_secret_regenerated".to_string(),
         Some(serde_json::json!({ "service_id": &service_id })),
+        None,
+        None,
         None,
         None,
     );

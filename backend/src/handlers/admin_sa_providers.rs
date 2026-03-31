@@ -165,6 +165,8 @@ pub async fn connect_api_key_for_sa(
         })),
         extract_ip(&headers),
         extract_user_agent(&headers),
+        None,
+        None,
     );
 
     Ok(Json(AdminSaProviderActionResponse {
@@ -203,6 +205,8 @@ pub async fn disconnect_sa_provider(
         })),
         extract_ip(&headers),
         extract_user_agent(&headers),
+        None,
+        None,
     );
 
     Ok(Json(AdminSaProviderActionResponse {
@@ -254,6 +258,8 @@ pub async fn initiate_oauth_for_sa(
         })),
         extract_ip(&headers),
         extract_user_agent(&headers),
+        None,
+        None,
     );
 
     Ok(Json(AdminSaOAuthInitiateResponse {
@@ -301,6 +307,8 @@ pub async fn initiate_device_code_for_sa(
         })),
         extract_ip(&headers),
         extract_user_agent(&headers),
+        None,
+        None,
     );
 
     Ok(Json(AdminSaDeviceCodeInitiateResponse {
@@ -351,6 +359,8 @@ pub async fn poll_device_code_for_sa(
             })),
             extract_ip(&headers),
             extract_user_agent(&headers),
+            None,
+            None,
         );
     }
 

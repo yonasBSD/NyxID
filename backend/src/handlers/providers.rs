@@ -498,6 +498,8 @@ pub async fn create_provider(
         })),
         None,
         None,
+        None,
+        None,
     );
 
     Ok(Json(provider_to_response(provider)))
@@ -582,6 +584,8 @@ pub async fn update_provider(
         Some(serde_json::json!({ "provider_id": &provider_id })),
         None,
         None,
+        None,
+        None,
     );
 
     Ok(Json(provider_to_response(updated)))
@@ -602,6 +606,8 @@ pub async fn delete_provider(
         Some(auth_user.user_id.to_string()),
         "provider_deleted".to_string(),
         Some(serde_json::json!({ "provider_id": &provider_id })),
+        None,
+        None,
         None,
         None,
     );

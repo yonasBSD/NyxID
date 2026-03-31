@@ -26,6 +26,10 @@ export interface ApiKey {
   readonly allow_all_nodes: boolean;
   readonly allowed_services: readonly AllowedServiceInfo[];
   readonly allowed_nodes: readonly AllowedNodeInfo[];
+  readonly platform: string | null;
+  readonly rate_limit_per_second: number | null;
+  readonly rate_limit_burst: number | null;
+  readonly bindings_count: number;
 }
 
 export interface AllowedServiceInfo {
@@ -48,6 +52,43 @@ export interface ApiKeyCreateResponse {
   readonly key_prefix: string;
   readonly scopes: string;
   readonly created_at: string;
+}
+
+export interface ApiKeyUsageService {
+  readonly service_id: string | null;
+  readonly service_slug: string;
+  readonly service_label: string;
+  readonly request_count: number;
+  readonly error_count: number;
+}
+
+export interface ApiKeyUsageBucket {
+  readonly date: string;
+  readonly request_count: number;
+  readonly error_count: number;
+}
+
+export interface ApiKeyUsage {
+  readonly api_key_id: string;
+  readonly api_key_name: string;
+  readonly platform: string | null;
+  readonly request_count: number;
+  readonly success_count: number;
+  readonly error_count: number;
+  readonly error_rate: number;
+  readonly last_used_at: string | null;
+  readonly prompt_tokens: number;
+  readonly completion_tokens: number;
+  readonly total_tokens: number;
+  readonly reported_cost: number | null;
+  readonly top_services: readonly ApiKeyUsageService[];
+  readonly daily_buckets: readonly ApiKeyUsageBucket[];
+}
+
+export interface ApiKeyUsageListResponse {
+  readonly usage: readonly ApiKeyUsage[];
+  readonly since: string;
+  readonly days: number;
 }
 
 export interface OAuthClient {

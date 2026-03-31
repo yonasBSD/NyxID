@@ -192,6 +192,8 @@ pub async fn connect_sa_service(
         })),
         extract_ip(&headers),
         extract_user_agent(&headers),
+        None,
+        None,
     );
 
     Ok(Json(AdminSaConnectResponse {
@@ -241,6 +243,8 @@ pub async fn update_sa_connection_credential(
         })),
         extract_ip(&headers),
         extract_user_agent(&headers),
+        None,
+        None,
     );
 
     Ok(Json(AdminSaConnectionActionResponse {
@@ -281,6 +285,8 @@ pub async fn disconnect_sa_service(
         })),
         extract_ip(&headers),
         extract_user_agent(&headers),
+        None,
+        None,
     );
 
     Ok(Json(AdminSaConnectionActionResponse {

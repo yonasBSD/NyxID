@@ -8,6 +8,7 @@ use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
 /// Spawns a background task to write the audit record so that the calling
 /// handler is not blocked by the database write. Errors are logged but
 /// do not propagate.
+#[allow(clippy::too_many_arguments)]
 pub fn log_async(
     db: mongodb::Database,
     user_id: Option<String>,
@@ -15,6 +16,8 @@ pub fn log_async(
     event_data: Option<serde_json::Value>,
     ip_address: Option<String>,
     user_agent: Option<String>,
+    api_key_id: Option<String>,
+    api_key_name: Option<String>,
 ) {
     tokio::spawn(async move {
         let entry = AuditLog {
@@ -24,6 +27,8 @@ pub fn log_async(
             event_data,
             ip_address,
             user_agent,
+            api_key_id,
+            api_key_name,
             created_at: Utc::now(),
         };
 

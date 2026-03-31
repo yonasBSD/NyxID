@@ -146,6 +146,8 @@ async fn handle_callback_query(
                 })),
                 None,
                 None,
+                None,
+                None,
             );
         }
         Err(e) => {
@@ -256,6 +258,8 @@ async fn handle_link_message(state: &AppState, message: telegram_service::Telegr
                     "telegram_chat_id": chat_id,
                     "approval_auto_enabled": true,
                 })),
+                None,
+                None,
                 None,
                 None,
             );

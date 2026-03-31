@@ -233,6 +233,7 @@ fn skill_paths(tool: AiToolTarget) -> Result<Vec<(String, PathBuf)>> {
             "skill".into(),
             home.join(".openclaw/skills/nyxid/SKILL.md"),
         )]),
+        AiToolTarget::Generic => Ok(vec![]),
     }
 }
 
@@ -361,6 +362,11 @@ async fn install(tool: AiToolTarget, base_url: &Option<String>) -> Result<()> {
         AiToolTarget::Cursor => install_cursor(&content),
         AiToolTarget::Codex => install_codex(&content),
         AiToolTarget::Openclaw => install_openclaw(&content),
+        AiToolTarget::Generic => {
+            bail!(
+                "Generic tool has no skill files. Use `nyxid ai-setup agent create` to create an agent identity instead."
+            )
+        }
     };
 
     if result.is_ok() {
@@ -414,6 +420,7 @@ fn print_post_install(tool: AiToolTarget, content: &SkillContent) {
 
             eprintln!("Verify skill: `openclaw skills check` (should show NyxID as ready).");
         }
+        AiToolTarget::Generic => {}
     }
 
     eprintln!();
@@ -498,6 +505,9 @@ async fn update(tool: Option<AiToolTarget>, base_url: &Option<String>) -> Result
     ];
 
     let tools: Vec<AiToolTarget> = match tool {
+        Some(AiToolTarget::Generic) => {
+            bail!("Generic tool has no skill files to update.")
+        }
         Some(t) => vec![t],
         None => all_tools.to_vec(),
     };
@@ -533,6 +543,7 @@ async fn update(tool: Option<AiToolTarget>, base_url: &Option<String>) -> Result
             AiToolTarget::Cursor => install_cursor(&content)?,
             AiToolTarget::Codex => install_codex(&content)?,
             AiToolTarget::Openclaw => install_openclaw(&content)?,
+            AiToolTarget::Generic => unreachable!(),
         }
     }
 
@@ -677,5 +688,16 @@ mod tests {
             "nyxid-ai-setup-tests-{}-{suffix}",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn ai_tool_target_display_generic() {
+        assert_eq!(super::AiToolTarget::Generic.to_string(), "generic");
+    }
+
+    #[test]
+    fn skill_paths_generic_returns_empty() {
+        let paths = super::skill_paths(super::AiToolTarget::Generic).unwrap();
+        assert!(paths.is_empty());
     }
 }

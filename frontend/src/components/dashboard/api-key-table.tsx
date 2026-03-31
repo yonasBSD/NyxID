@@ -124,8 +124,10 @@ export function ApiKeyTable() {
           <TableRow>
             <TableHead>Name</TableHead>
             <TableHead>Key</TableHead>
+            <TableHead>Platform</TableHead>
             <TableHead>Scopes</TableHead>
             <TableHead>Services</TableHead>
+            <TableHead>Bindings</TableHead>
             <TableHead>Created</TableHead>
             <TableHead>Last Used</TableHead>
             <TableHead className="w-12">
@@ -153,6 +155,15 @@ export function ApiKeyTable() {
                   </code>
                 </TableCell>
                 <TableCell>
+                  {key.platform ? (
+                    <Badge variant="secondary" className="text-xs">
+                      {key.platform}
+                    </Badge>
+                  ) : (
+                    <span className="text-xs text-muted-foreground">--</span>
+                  )}
+                </TableCell>
+                <TableCell>
                   <div className="flex flex-wrap gap-1">
                     {scopesList.map((scope) => (
                       <Badge
@@ -167,6 +178,11 @@ export function ApiKeyTable() {
                 </TableCell>
                 <TableCell className="text-muted-foreground text-xs">
                   {servicesSummary(key)}
+                </TableCell>
+                <TableCell className="text-muted-foreground text-xs">
+                  {key.bindings_count > 0
+                    ? `${String(key.bindings_count)} binding${key.bindings_count === 1 ? "" : "s"}`
+                    : "--"}
                 </TableCell>
                 <TableCell className="text-muted-foreground">
                   {formatDate(key.created_at)}

@@ -231,6 +231,8 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
                         Some(serde_json::json!({ "reason": "invalid_message_format" })),
                         None,
                         None,
+                        None,
+                        None,
                     );
                     return None;
                 }
@@ -273,6 +275,8 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
                                 Some(serde_json::json!({ "reason": "registration_failed" })),
                                 None,
                                 None,
+                                None,
+                                None,
                             );
                             return None;
                         }
@@ -310,6 +314,8 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
                                 })),
                                 None,
                                 None,
+                                None,
+                                None,
                             );
                             return None;
                         }
@@ -328,6 +334,8 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
                                 None,
                                 "node_ws_auth_failed".to_string(),
                                 Some(serde_json::json!({ "reason": "invalid_auth_token" })),
+                                None,
+                                None,
                                 None,
                                 None,
                             );
@@ -349,6 +357,8 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
                         None,
                         "node_ws_auth_failed".to_string(),
                         Some(serde_json::json!({ "reason": "unexpected_first_message" })),
+                        None,
+                        None,
                         None,
                         None,
                     );

@@ -73,13 +73,24 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
     let api_key_routes = Router::new()
         .route("/", get(handlers::api_keys::list_keys))
         .route("/", post(handlers::api_keys::create_key))
+        .route("/usage", get(handlers::api_keys::list_key_usage))
         .route(
             "/{key_id}",
             get(handlers::api_keys::get_key)
                 .put(handlers::api_keys::update_key)
                 .delete(handlers::api_keys::delete_key),
         )
-        .route("/{key_id}/rotate", post(handlers::api_keys::rotate_key));
+        .route("/{key_id}/usage", get(handlers::api_keys::get_key_usage))
+        .route("/{key_id}/rotate", post(handlers::api_keys::rotate_key))
+        .route(
+            "/{key_id}/bindings",
+            get(handlers::agent_bindings::list_bindings)
+                .post(handlers::agent_bindings::create_binding),
+        )
+        .route(
+            "/{key_id}/bindings/{binding_id}",
+            delete(handlers::agent_bindings::delete_binding),
+        );
 
     let service_routes = Router::new()
         .route("/", get(handlers::services::list_services))

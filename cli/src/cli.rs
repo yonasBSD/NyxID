@@ -123,18 +123,21 @@ pub struct AuthArgs {
     /// Environment variable to read the access token from
     #[arg(long, default_value = "NYXID_ACCESS_TOKEN")]
     pub access_token_env: String,
+    /// Agent profile name (isolates tokens and config)
+    #[arg(long, env = "NYXID_PROFILE")]
+    pub profile: Option<String>,
     /// Output format: table or json
     #[arg(long, default_value = "table")]
     pub output: OutputFormat,
 }
 
 impl AuthArgs {
-    /// Resolve base_url: flag > env > saved from login
+    /// Resolve base_url: flag > env > saved from login (profile-aware)
     pub fn resolved_base_url(&self) -> anyhow::Result<String> {
         if let Some(url) = &self.base_url {
             return Ok(url.clone());
         }
-        if let Some(url) = crate::auth::read_saved_base_url() {
+        if let Some(url) = crate::auth::read_saved_base_url_for(self.profile.as_deref()) {
             return Ok(url);
         }
         anyhow::bail!(
@@ -149,6 +152,9 @@ pub struct BaseUrlArgs {
     /// NyxID base URL (saved from login)
     #[arg(long, env = "NYXID_URL")]
     pub base_url: Option<String>,
+    /// Agent profile name
+    #[arg(long, env = "NYXID_PROFILE")]
+    pub profile: Option<String>,
 }
 
 impl BaseUrlArgs {
@@ -156,7 +162,7 @@ impl BaseUrlArgs {
         if let Some(url) = &self.base_url {
             return Ok(url.clone());
         }
-        if let Some(url) = crate::auth::read_saved_base_url() {
+        if let Some(url) = crate::auth::read_saved_base_url_for(self.profile.as_deref()) {
             return Ok(url);
         }
         anyhow::bail!(
@@ -185,6 +191,9 @@ pub struct LoginArgs {
     /// Email address (only used with --password)
     #[arg(long)]
     pub email: Option<String>,
+    /// Agent profile name (isolates tokens)
+    #[arg(long, env = "NYXID_PROFILE")]
+    pub profile: Option<String>,
 }
 
 // ---- Register (C1) ----
@@ -522,6 +531,9 @@ pub enum ApiKeyCommands {
         /// Allow access to all nodes
         #[arg(long)]
         allow_all_nodes: bool,
+        /// Platform label (claude-code, codex, openclaw, cursor, generic)
+        #[arg(long)]
+        platform: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -565,6 +577,19 @@ pub enum ApiKeyCommands {
         allow_all_services: Option<bool>,
         #[arg(long)]
         allow_all_nodes: Option<bool>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Bind a credential to an API key for a specific service
+    Bind {
+        /// API key ID or name
+        id: String,
+        /// Service slug
+        #[arg(long)]
+        service: String,
+        /// External credential label
+        #[arg(long)]
+        credential: String,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -624,6 +649,9 @@ pub enum NodeCommands {
         /// Store secrets in the OS keychain instead of encrypted file
         #[arg(long)]
         keychain: bool,
+        /// Agent profile name for multi-instance support
+        #[arg(long, env = "NYXID_PROFILE")]
+        profile: Option<String>,
     },
     /// Start the node agent (connect and serve)
     Start {
@@ -633,6 +661,9 @@ pub enum NodeCommands {
         /// Log level (trace, debug, info, warn, error)
         #[arg(long)]
         log_level: Option<String>,
+        /// Agent profile name
+        #[arg(long, env = "NYXID_PROFILE")]
+        profile: Option<String>,
     },
     /// Show node connection status (local)
     #[command(name = "agent-status")]
@@ -640,6 +671,9 @@ pub enum NodeCommands {
         /// Path to config directory
         #[arg(long)]
         config: Option<String>,
+        /// Agent profile name
+        #[arg(long, env = "NYXID_PROFILE")]
+        profile: Option<String>,
     },
     /// Update the node's auth token and signing secret after a server-side rotation
     Rekey {
@@ -652,6 +686,9 @@ pub enum NodeCommands {
         /// Path to config directory
         #[arg(long)]
         config: Option<String>,
+        /// Agent profile name
+        #[arg(long, env = "NYXID_PROFILE")]
+        profile: Option<String>,
     },
     /// Manage local credentials
     Credentials {
@@ -660,6 +697,9 @@ pub enum NodeCommands {
         /// Path to config directory
         #[arg(long)]
         config: Option<String>,
+        /// Agent profile name
+        #[arg(long, env = "NYXID_PROFILE")]
+        profile: Option<String>,
     },
     /// Migrate secret storage from file to OS keychain (or vice versa)
     Migrate {
@@ -669,6 +709,9 @@ pub enum NodeCommands {
         /// Path to config directory
         #[arg(long)]
         config: Option<String>,
+        /// Agent profile name
+        #[arg(long, env = "NYXID_PROFILE")]
+        profile: Option<String>,
     },
     /// Manage OpenClaw integration (connect, status, disconnect)
     #[command(name = "openclaw")]
@@ -678,6 +721,9 @@ pub enum NodeCommands {
         /// Path to config directory
         #[arg(long)]
         config: Option<String>,
+        /// Agent profile name
+        #[arg(long, env = "NYXID_PROFILE")]
+        profile: Option<String>,
     },
     /// Show node agent version
     #[command(name = "agent-version")]
@@ -688,6 +734,55 @@ pub enum NodeCommands {
         #[command(subcommand)]
         command: NodeDaemonCommands,
     },
+
+    /// Run the node agent as a Docker container
+    Docker {
+        #[command(subcommand)]
+        command: NodeDockerCommands,
+    },
+}
+
+// ---- Node Docker subcommands ----
+
+#[derive(Args, Clone)]
+pub struct NodeDockerArgs {
+    /// Agent profile name (each profile runs as a separate container)
+    #[arg(long, env = "NYXID_PROFILE")]
+    pub profile: Option<String>,
+}
+
+#[derive(Subcommand)]
+pub enum NodeDockerCommands {
+    /// Build the node agent Docker image
+    Build,
+    /// Start a node agent container (mounts the profile's config directory)
+    Start {
+        #[command(flatten)]
+        args: NodeDockerArgs,
+    },
+    /// Stop and remove the node agent container
+    Stop {
+        #[command(flatten)]
+        args: NodeDockerArgs,
+    },
+    /// Restart the node agent container
+    Restart {
+        #[command(flatten)]
+        args: NodeDockerArgs,
+    },
+    /// Show Docker container status
+    Status {
+        #[command(flatten)]
+        args: NodeDockerArgs,
+    },
+    /// Tail Docker container logs
+    Logs {
+        #[command(flatten)]
+        args: NodeDockerArgs,
+        /// Follow log output (like tail -f)
+        #[arg(long, short)]
+        follow: bool,
+    },
 }
 
 // ---- Node Daemon subcommands ----
@@ -697,6 +792,9 @@ pub struct NodeDaemonArgs {
     /// Path to config directory
     #[arg(long)]
     pub config: Option<String>,
+    /// Agent profile name for multi-instance support
+    #[arg(long, env = "NYXID_PROFILE")]
+    pub profile: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -766,7 +864,7 @@ mod tests {
                     NodeCommands::Daemon {
                         command:
                             NodeDaemonCommands::Install {
-                                args: NodeDaemonArgs { config },
+                                args: NodeDaemonArgs { config, .. },
                                 ..
                             },
                     },
@@ -1242,6 +1340,8 @@ pub enum AiToolTarget {
     Codex,
     /// OpenClaw AI gateway
     Openclaw,
+    /// Generic / other AI tool
+    Generic,
 }
 
 impl std::fmt::Display for AiToolTarget {
@@ -1251,6 +1351,7 @@ impl std::fmt::Display for AiToolTarget {
             Self::Cursor => write!(f, "cursor"),
             Self::Codex => write!(f, "codex"),
             Self::Openclaw => write!(f, "openclaw"),
+            Self::Generic => write!(f, "generic"),
         }
     }
 }

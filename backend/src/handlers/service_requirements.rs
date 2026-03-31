@@ -297,6 +297,8 @@ pub async fn add_requirement(
         })),
         None,
         None,
+        None,
+        None,
     );
 
     Ok(Json(RequirementResponse {
@@ -346,6 +348,8 @@ pub async fn remove_requirement(
             "service_id": &service_id,
             "requirement_id": &requirement_id,
         })),
+        None,
+        None,
         None,
         None,
     );

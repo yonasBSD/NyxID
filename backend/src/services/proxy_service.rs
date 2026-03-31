@@ -21,7 +21,9 @@ use crate::models::user_service_connection::{
 };
 use crate::services::delegation_service::DelegatedCredential;
 use crate::services::node_ws_manager::NodeWsManager;
-use crate::services::{user_api_key_service, user_service_service, user_token_service};
+use crate::services::{
+    agent_binding_service, user_api_key_service, user_service_service, user_token_service,
+};
 
 /// Request body for proxy forwarding.
 pub enum ProxyBody {
@@ -623,6 +625,66 @@ pub async fn resolve_proxy_target_from_user_service(
         user_service_id: user_service.id.clone(),
         has_server_credential: true,
     }))
+}
+
+/// Resolve a per-agent credential override for the given API key + service.
+///
+/// If an `AgentServiceBinding` exists that maps this agent (API key) to a
+/// different `UserApiKey` for the given service, loads and decrypts that
+/// credential. Returns `None` if no override exists.
+pub async fn resolve_agent_credential_override(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    api_key_id: &str,
+    user_service_id: &str,
+) -> AppResult<Option<String>> {
+    let override_key_id = agent_binding_service::resolve_credential_override(
+        db,
+        api_key_id,
+        user_service_id,
+        user_id,
+    )
+    .await?;
+
+    let Some(override_key_id) = override_key_id else {
+        return Ok(None);
+    };
+
+    let api_key = db
+        .collection::<UserApiKey>(USER_API_KEYS)
+        .find_one(doc! { "_id": &override_key_id, "user_id": user_id })
+        .await?
+        .ok_or_else(|| {
+            tracing::error!(
+                override_key_id = %override_key_id,
+                "Agent binding references missing UserApiKey"
+            );
+            AppError::Internal("Bound credential not found".to_string())
+        })?;
+
+    let api_key =
+        maybe_refresh_provider_backed_api_key(db, encryption_keys, user_id, api_key).await?;
+
+    if api_key.status != "active" {
+        return Err(AppError::BadRequest(format!(
+            "Override credential is {}",
+            api_key.status
+        )));
+    }
+
+    let credential = resolve_user_api_key_credential(&api_key, encryption_keys).await?;
+
+    // Fire-and-forget: update last_used_at on the override key
+    if credential.is_some() {
+        let db_clone = db.clone();
+        let key_id = api_key.id.clone();
+        tokio::spawn(async move {
+            user_api_key_service::touch_last_used(&db_clone, &key_id).await;
+        });
+    }
+
+    Ok(credential)
 }
 
 async fn maybe_refresh_provider_backed_api_key(

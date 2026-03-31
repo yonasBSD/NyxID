@@ -1,6 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
-import type { ApiKey, ApiKeyCreateResponse } from "@/types/api";
+import type {
+  ApiKey,
+  ApiKeyCreateResponse,
+  ApiKeyUsage,
+  ApiKeyUsageListResponse,
+} from "@/types/api";
 import type { CreateApiKeyFormData } from "@/schemas/api-keys";
 
 export function useApiKeys() {
@@ -20,6 +25,26 @@ export function useApiKey(keyId: string) {
     queryKey: ["api-keys", keyId],
     queryFn: async (): Promise<ApiKey> => {
       return api.get<ApiKey>(`/api-keys/${keyId}`);
+    },
+    enabled: Boolean(keyId),
+  });
+}
+
+export function useApiKeysUsage(days = 7) {
+  return useQuery({
+    queryKey: ["api-keys", "usage", days],
+    queryFn: async (): Promise<readonly ApiKeyUsage[]> => {
+      const res = await api.get<ApiKeyUsageListResponse>(`/api-keys/usage?days=${String(days)}`);
+      return res.usage;
+    },
+  });
+}
+
+export function useApiKeyUsage(keyId: string, days = 7) {
+  return useQuery({
+    queryKey: ["api-keys", keyId, "usage", days],
+    queryFn: async (): Promise<ApiKeyUsage> => {
+      return api.get<ApiKeyUsage>(`/api-keys/${keyId}/usage?days=${String(days)}`);
     },
     enabled: Boolean(keyId),
   });
@@ -67,6 +92,7 @@ export function useCreateApiKey() {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["api-keys"] });
+      void queryClient.invalidateQueries({ queryKey: ["api-keys", "usage"] });
     },
   });
 }
@@ -80,6 +106,9 @@ interface UpdateApiKeyParams {
   readonly allowed_node_ids?: readonly string[];
   readonly allow_all_services?: boolean;
   readonly allow_all_nodes?: boolean;
+  readonly platform?: string | null;
+  readonly rate_limit_per_second?: number | null;
+  readonly rate_limit_burst?: number | null;
 }
 
 export function useUpdateApiKey() {
@@ -92,8 +121,12 @@ export function useUpdateApiKey() {
     },
     onSuccess: (_data, variables) => {
       void queryClient.invalidateQueries({ queryKey: ["api-keys"] });
+      void queryClient.invalidateQueries({ queryKey: ["api-keys", "usage"] });
       void queryClient.invalidateQueries({
         queryKey: ["api-keys", variables.keyId],
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["api-keys", variables.keyId, "usage"],
       });
     },
   });
@@ -108,6 +141,7 @@ export function useDeleteApiKey() {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["api-keys"] });
+      void queryClient.invalidateQueries({ queryKey: ["api-keys", "usage"] });
     },
   });
 }
@@ -121,6 +155,7 @@ export function useRotateApiKey() {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["api-keys"] });
+      void queryClient.invalidateQueries({ queryKey: ["api-keys", "usage"] });
     },
   });
 }

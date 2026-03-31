@@ -22,7 +22,9 @@ async fn run() -> Result<()> {
 
     match cli.command {
         Commands::Login(args) => auth::run_login(args).await,
-        Commands::Logout(args) => auth::run_logout(&args.resolved_base_url()?).await,
+        Commands::Logout(args) => {
+            auth::run_logout(&args.resolved_base_url()?, args.profile.as_deref()).await
+        }
 
         // C1-C4: Auth flows (unauthenticated)
         Commands::Register(args) => commands::auth_flows::run_register(args).await,

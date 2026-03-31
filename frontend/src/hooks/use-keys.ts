@@ -5,6 +5,8 @@ import type {
   KeyListResponse,
   CatalogEntry,
   CatalogListResponse,
+  ExternalApiKeyInfo,
+  ExternalApiKeyListResponse,
 } from "@/types/keys";
 
 // -- Queries --
@@ -35,6 +37,16 @@ export function useCatalog() {
     queryFn: async (): Promise<readonly CatalogEntry[]> => {
       const res = await api.get<CatalogListResponse>("/catalog");
       return res.entries;
+    },
+  });
+}
+
+export function useExternalApiKeys() {
+  return useQuery({
+    queryKey: ["external-api-keys"],
+    queryFn: async (): Promise<readonly ExternalApiKeyInfo[]> => {
+      const res = await api.get<ExternalApiKeyListResponse>("/api-keys/external");
+      return res.api_keys;
     },
   });
 }
@@ -131,6 +143,7 @@ export function useUpdateEndpoint() {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["keys"] });
+      void queryClient.invalidateQueries({ queryKey: ["external-api-keys"] });
     },
   });
 }
@@ -177,6 +190,7 @@ export function useUpdateExternalApiKey() {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["keys"] });
+      void queryClient.invalidateQueries({ queryKey: ["external-api-keys"] });
     },
   });
 }

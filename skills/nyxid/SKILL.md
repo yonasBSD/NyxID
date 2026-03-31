@@ -238,17 +238,45 @@ nyxid service delete <id> --yes                                # remove service 
 
 ## Managing API Keys
 
+Each AI agent or integration should use its own NyxID API key. This gives each caller independent scope, audit trail, and optional credential bindings.
+
 ```bash
+# CRUD
 nyxid api-key create --name "My Key" --scopes "proxy read"
-nyxid api-key list --output json                       # Shows: ID, name, scopes, service/node scope
-nyxid api-key show <ID> --output json                  # Full details
-nyxid api-key rotate <ID>
-nyxid api-key delete <ID> --yes
+nyxid api-key create --name "coding-agent" --platform claude-code  # optional platform label
+nyxid api-key list --output json
+nyxid api-key show <ID_OR_NAME> --output json
+nyxid api-key rotate <ID_OR_NAME>
+nyxid api-key delete <ID_OR_NAME> --yes
 
 # Scope management (restrict which services/nodes a key can access)
 nyxid api-key update <ID> --allowed-services "svc-id-1,svc-id-2" --allow-all-services false
 nyxid api-key update <ID> --allow-all-services true    # unrestrict
+
+# Credential bindings (override which credential a key uses for a service)
+nyxid api-key bind <ID_OR_NAME> --service <SERVICE_SLUG> --credential <CREDENTIAL_LABEL>
+
+# Per-key rate limits
+nyxid api-key update <ID> --rate-limit-per-second 10 --rate-limit-burst 30
 ```
+
+Set `NYXID_ACCESS_TOKEN` in your agent's environment to authenticate:
+
+```bash
+export NYXID_ACCESS_TOKEN="nyxid_ag_..."
+```
+
+### CLI profiles
+
+For running multiple identities on one machine, the CLI supports `--profile`:
+
+```bash
+nyxid login --base-url https://nyx-api.chrono-ai.fun --profile coding-agent
+nyxid proxy request llm-openai /chat/completions --profile coding-agent -m POST -d '...'
+NYXID_PROFILE=coding-agent nyxid proxy request ...  # or via env var
+```
+
+Profiles store tokens under `~/.nyxid/profiles/{name}/`. Without `--profile`, the default `~/.nyxid/` path is used.
 
 ## Node Management
 
@@ -284,11 +312,27 @@ nyxid node credentials add --service my-api --header Authorization --secret-form
 
 # Or run in foreground (for debugging)
 nyxid node start
+
+# Or run via Docker
+docker build -f cli/Dockerfile.node -t nyxid-node .    # build image (once)
+
+# Option A: auto-register + start (no host setup needed)
+docker run --user "$(id -u):$(id -g)" \
+  -v ~/.nyxid-node:/app/config \
+  -e NYXID_NODE_TOKEN=nyx_nreg_... \
+  -e NYXID_NODE_URL=wss://<server>/api/v1/nodes/ws \
+  nyxid-node
+
+# Option B: mount existing config (registered on host)
+docker run --user "$(id -u):$(id -g)" \
+  -v ~/.nyxid-node:/app/config \
+  nyxid-node
 ```
 
 > `credentials setup` works for **catalog services only** -- it fetches config from the catalog and automatically registers the service in the backend with the node's ID.
 > For **custom endpoints**, use `nyxid service add --custom --via-node <node-name>` first to create the backend record, then `nyxid node credentials add` to store the credential locally on the node.
-> Credentials can be added, updated, or removed while the agent is running. The agent watches the config file and reloads credentials automatically (no restart needed).
+> Credentials can be added, updated, or removed while the agent is running. The agent watches the config file and reloads credentials automatically (no restart needed). This works for both native daemons and Docker containers (config is mounted as a volume).
+> Docker containers use the file backend (AES-GCM encrypted) -- OS keychain is not available in containers.
 
 ### Managing the node service
 
@@ -452,6 +496,7 @@ nyxid mcp config --tool vscode                         # generate MCP config for
 - Use exact downstream API paths. Do not guess undocumented endpoints.
 - Keep request bodies minimal and service-correct.
 - Never try to extract or display the user's stored provider credentials.
+- If multiple AI agents share a machine, each should have its own `NYXID_ACCESS_TOKEN`. Never share a single API key across multiple agents -- it defeats audit isolation and makes revocation impossible without disrupting all agents.
 
 ## External Endpoints
 

@@ -230,11 +230,9 @@ pub struct TranslatedRequest {
     pub extra_headers: Vec<(String, String)>,
 }
 
-/// A parsed SSE event from an upstream provider stream.
-pub struct SseEvent {
-    pub event_type: Option<String>,
-    pub data: String,
-}
+/// Re-export the shared SSE event type so existing callers that import
+/// `llm_gateway_service::SseEvent` continue to compile.
+pub use super::sse_parser::SseEvent;
 
 /// Mutable state carried across SSE events during stream translation.
 pub struct StreamTranslationState {

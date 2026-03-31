@@ -734,6 +734,8 @@ async fn issue_authorization_code(
         })),
         None,
         None,
+        None,
+        None,
     );
 
     Ok(code)
@@ -898,6 +900,8 @@ async fn token_inner(
                     })),
                     None,
                     None,
+                    None,
+                    None,
                 );
 
                 Ok(Json(TokenResponse {
@@ -949,6 +953,8 @@ async fn token_inner(
                         })),
                         extract_ip(headers),
                         extract_user_agent(headers),
+                        None,
+                        None,
                     );
 
                     Ok(Json(TokenResponse {
@@ -969,6 +975,8 @@ async fn token_inner(
                         Some(serde_json::json!({ "client_id": client_id })),
                         extract_ip(headers),
                         extract_user_agent(headers),
+                        None,
+                        None,
                     );
                     Err(e)
                 }

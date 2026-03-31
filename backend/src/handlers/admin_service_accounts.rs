@@ -151,6 +151,8 @@ pub async fn create_service_account(
         })),
         extract_ip(&headers),
         extract_user_agent(&headers),
+        None,
+        None,
     );
 
     Ok(Json(CreateServiceAccountResponse {
@@ -241,6 +243,8 @@ pub async fn update_service_account(
         })),
         extract_ip(&headers),
         extract_user_agent(&headers),
+        None,
+        None,
     );
 
     Ok(Json(sa_to_item(updated)))
@@ -266,6 +270,8 @@ pub async fn delete_service_account(
         })),
         extract_ip(&headers),
         extract_user_agent(&headers),
+        None,
+        None,
     );
 
     Ok(Json(AdminActionResponse {
@@ -294,6 +300,8 @@ pub async fn rotate_secret(
         })),
         extract_ip(&headers),
         extract_user_agent(&headers),
+        None,
+        None,
     );
 
     Ok(Json(RotateSecretResponse {
@@ -329,6 +337,8 @@ pub async fn revoke_tokens(
         })),
         extract_ip(&headers),
         extract_user_agent(&headers),
+        None,
+        None,
     );
 
     Ok(Json(RevokeTokensResponse {
