@@ -2,15 +2,17 @@ use std::collections::HashMap;
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
 };
-use serde::Serialize;
-use utoipa::ToSchema;
+use serde::{Deserialize, Serialize};
+use utoipa::{IntoParams, ToSchema};
 
 use crate::AppState;
-use crate::errors::AppResult;
+use crate::errors::{AppError, AppResult};
+use crate::handlers::services_helpers::validate_optional_spec_url;
+use crate::models::downstream_service::ServiceCapabilities;
 use crate::mw::auth::AuthUser;
-use crate::services::catalog_service;
+use crate::services::{catalog_service, openapi_parser};
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct CatalogEntryResponse {
@@ -75,6 +77,25 @@ pub struct CatalogEntryResponse {
     pub client_id_param_name: Option<String>,
     /// Whether this catalog entry needs credential setup before it can be used
     pub requires_credential: bool,
+    // --- Rich metadata for AI agent discovery ---
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub openapi_spec_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asyncapi_spec_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub homepage_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issues_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<ServiceCapabilities>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_notes: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub known_limitations: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required_permissions: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -82,9 +103,42 @@ pub struct CatalogListResponse {
     pub entries: Vec<CatalogEntryResponse>,
 }
 
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CatalogEndpointResponse {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub method: String,
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parameters: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_body_schema: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_content_type: Option<String>,
+    pub request_body_required: bool,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CatalogEndpointsListResponse {
+    pub slug: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub openapi_spec_url: Option<String>,
+    pub endpoints: Vec<CatalogEndpointResponse>,
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
+pub struct CatalogListQuery {
+    /// Include all active services (including system services without auth).
+    /// Default: false (only shows services requiring user credential setup).
+    #[serde(default)]
+    pub include_all: bool,
+}
+
 #[utoipa::path(
     get,
     path = "/api/v1/catalog",
+    params(CatalogListQuery),
     responses(
         (status = 200, description = "List of available service catalog entries", body = CatalogListResponse),
         (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse)
@@ -95,8 +149,13 @@ pub struct CatalogListResponse {
 pub async fn list_catalog(
     State(state): State<AppState>,
     _auth_user: AuthUser,
+    Query(query): Query<CatalogListQuery>,
 ) -> AppResult<Json<CatalogListResponse>> {
-    let entries = catalog_service::list_catalog(&state.db, &state.encryption_keys).await?;
+    let entries = if query.include_all {
+        catalog_service::list_catalog_all(&state.db, &state.encryption_keys).await?
+    } else {
+        catalog_service::list_catalog(&state.db, &state.encryption_keys).await?
+    };
     let items = entries.into_iter().map(catalog_entry_response).collect();
     Ok(Json(CatalogListResponse { entries: items }))
 }
@@ -166,5 +225,73 @@ fn catalog_entry_response(entry: catalog_service::CatalogEntry) -> CatalogEntryR
         oauth_client_id: entry.oauth_client_id,
         client_id_param_name: entry.client_id_param_name,
         requires_credential: entry.requires_credential,
+        openapi_spec_url: entry.openapi_spec_url,
+        asyncapi_spec_url: entry.asyncapi_spec_url,
+        homepage_url: entry.homepage_url,
+        repository_url: entry.repository_url,
+        issues_url: entry.issues_url,
+        capabilities: entry.capabilities,
+        auth_notes: entry.auth_notes,
+        known_limitations: entry.known_limitations,
+        required_permissions: entry.required_permissions,
     }
+}
+
+fn parsed_endpoint_to_response(p: openapi_parser::ParsedEndpoint) -> CatalogEndpointResponse {
+    CatalogEndpointResponse {
+        name: p.name,
+        description: p.description,
+        method: p.method,
+        path: p.path,
+        parameters: p.parameters,
+        request_body_schema: p.request_body_schema,
+        request_content_type: p.request_content_type,
+        request_body_required: p.request_body_required,
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/catalog/{slug}/endpoints",
+    params(
+        ("slug" = String, Path, description = "Catalog service slug")
+    ),
+    responses(
+        (status = 200, description = "Parsed API endpoints from the service's OpenAPI spec", body = CatalogEndpointsListResponse),
+        (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse),
+        (status = 404, description = "Catalog entry not found", body = crate::errors::ErrorResponse)
+    ),
+    tag = "Catalog"
+)]
+/// GET /api/v1/catalog/{slug}/endpoints
+pub async fn list_catalog_endpoints(
+    State(state): State<AppState>,
+    _auth_user: AuthUser,
+    Path(slug): Path<String>,
+) -> AppResult<Json<CatalogEndpointsListResponse>> {
+    let svc = catalog_service::get_downstream_service_by_slug(&state.db, &slug).await?;
+
+    let Some(ref spec_url) = svc.openapi_spec_url else {
+        return Ok(Json(CatalogEndpointsListResponse {
+            slug,
+            openapi_spec_url: None,
+            endpoints: vec![],
+        }));
+    };
+
+    // Defense-in-depth: re-validate the stored URL before making an outbound fetch
+    validate_optional_spec_url(spec_url)
+        .map_err(|_| AppError::BadRequest("Service has an invalid OpenAPI spec URL".to_string()))?;
+
+    let parsed = openapi_parser::parse_openapi_spec(&state.http_client, spec_url).await?;
+    let endpoints = parsed
+        .into_iter()
+        .map(parsed_endpoint_to_response)
+        .collect();
+
+    Ok(Json(CatalogEndpointsListResponse {
+        slug,
+        openapi_spec_url: Some(spec_url.clone()),
+        endpoints,
+    }))
 }

@@ -1,8 +1,29 @@
 use chrono::{DateTime, Utc};
 use mongodb::bson::{Document, doc};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 pub const COLLECTION_NAME: &str = "downstream_services";
+
+/// Structured capability flags describing what a service supports through NyxID proxy.
+/// These help AI agents understand the supported interaction patterns without guessing.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
+pub struct ServiceCapabilities {
+    #[serde(default)]
+    pub supports_proxy_read: bool,
+    #[serde(default)]
+    pub supports_proxy_write: bool,
+    #[serde(default)]
+    pub supports_proxy_binary_upload: bool,
+    #[serde(default)]
+    pub supports_direct_downstream_auth: bool,
+    #[serde(default)]
+    pub supports_authoring_via_nyx: bool,
+    #[serde(default)]
+    pub supports_websocket: bool,
+    #[serde(default)]
+    pub supports_streaming: bool,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SshServiceConfig {
@@ -114,6 +135,29 @@ pub struct DownstreamService {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_config_id: Option<String>,
 
+    // --- Rich metadata for AI agent discovery (issue #148) ---
+    /// Public product or docs landing page
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub homepage_url: Option<String>,
+    /// Canonical GitHub/source repository URL
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_url: Option<String>,
+    /// Issue tracker URL
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issues_url: Option<String>,
+    /// Structured capability flags for proxy interaction patterns
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<ServiceCapabilities>,
+    /// Freeform notes on downstream auth expectations
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_notes: Option<String>,
+    /// Important caveats or limitations for agents and CLI users
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub known_limitations: Option<String>,
+    /// Downstream permissions required for key actions (e.g., "ornn:skill:create")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_permissions: Option<Vec<String>>,
+
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -195,6 +239,13 @@ pub mod test_helpers {
             inject_delegation_token: false,
             delegation_token_scope: String::new(),
             provider_config_id: None,
+            homepage_url: None,
+            repository_url: None,
+            issues_url: None,
+            capabilities: None,
+            auth_notes: None,
+            known_limitations: None,
+            required_permissions: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -275,6 +326,17 @@ mod tests {
             inject_delegation_token: false,
             delegation_token_scope: "llm:proxy".to_string(),
             provider_config_id: None,
+            homepage_url: Some("https://docs.example.com".to_string()),
+            repository_url: Some("https://github.com/example/repo".to_string()),
+            issues_url: None,
+            capabilities: Some(ServiceCapabilities {
+                supports_proxy_read: true,
+                supports_proxy_write: true,
+                ..Default::default()
+            }),
+            auth_notes: Some("Bearer token required".to_string()),
+            known_limitations: None,
+            required_permissions: Some(vec!["read:api".to_string()]),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -284,6 +346,10 @@ mod tests {
         assert_eq!(svc.slug, restored.slug);
         assert_eq!(svc.service_type, restored.service_type);
         assert_eq!(svc.service_category, restored.service_category);
+        assert_eq!(svc.homepage_url, restored.homepage_url);
+        assert_eq!(svc.repository_url, restored.repository_url);
+        assert!(restored.capabilities.unwrap().supports_proxy_read);
+        assert_eq!(svc.required_permissions, restored.required_permissions);
     }
 
     #[test]
@@ -319,6 +385,13 @@ mod tests {
             inject_delegation_token: false,
             delegation_token_scope: "llm:proxy".to_string(),
             provider_config_id: None,
+            homepage_url: None,
+            repository_url: None,
+            issues_url: None,
+            capabilities: None,
+            auth_notes: None,
+            known_limitations: None,
+            required_permissions: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

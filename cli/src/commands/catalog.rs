@@ -7,9 +7,14 @@ use crate::cli::{CatalogCommands, OutputFormat};
 
 pub async fn run(command: CatalogCommands) -> Result<()> {
     match command {
-        CatalogCommands::List { auth } => {
+        CatalogCommands::List { all, auth } => {
             let mut api = ApiClient::from_auth(&auth)?;
-            let catalog: Value = api.get("/catalog").await?;
+            let path = if all {
+                "/catalog?include_all=true"
+            } else {
+                "/catalog"
+            };
+            let catalog: Value = api.get(path).await?;
 
             match auth.output {
                 OutputFormat::Json => {
@@ -112,6 +117,80 @@ pub async fn run(command: CatalogCommands) -> Result<()> {
                         eprintln!("Requires URL:   yes (you must provide your instance URL)");
                     }
 
+                    if let Some(desc) = item["description"].as_str()
+                        && !desc.is_empty()
+                    {
+                        eprintln!();
+                        eprintln!("Description:");
+                        eprintln!("  {desc}");
+                    }
+
+                    // Rich metadata
+                    let has_metadata = item["homepage_url"].is_string()
+                        || item["repository_url"].is_string()
+                        || item["issues_url"].is_string()
+                        || item["openapi_spec_url"].is_string()
+                        || item["asyncapi_spec_url"].is_string();
+
+                    if has_metadata {
+                        eprintln!();
+                        eprintln!("Links:");
+                        if let Some(v) = item["homepage_url"].as_str() {
+                            eprintln!("  Homepage:     {v}");
+                        }
+                        if let Some(v) = item["repository_url"].as_str() {
+                            eprintln!("  Repository:   {v}");
+                        }
+                        if let Some(v) = item["issues_url"].as_str() {
+                            eprintln!("  Issues:       {v}");
+                        }
+                        if let Some(v) = item["openapi_spec_url"].as_str() {
+                            eprintln!("  OpenAPI Spec: {v}");
+                        }
+                        if let Some(v) = item["asyncapi_spec_url"].as_str() {
+                            eprintln!("  AsyncAPI:     {v}");
+                        }
+                    }
+
+                    if let Some(caps) = item["capabilities"].as_object() {
+                        let enabled: Vec<&str> = caps
+                            .iter()
+                            .filter(|(_, v)| v.as_bool() == Some(true))
+                            .map(|(k, _)| k.as_str())
+                            .collect();
+                        if !enabled.is_empty() {
+                            eprintln!();
+                            eprintln!("Capabilities:");
+                            for cap in &enabled {
+                                eprintln!("  - {cap}");
+                            }
+                        }
+                    }
+
+                    if let Some(notes) = item["auth_notes"].as_str() {
+                        eprintln!();
+                        eprintln!("Auth Notes:");
+                        eprintln!("  {notes}");
+                    }
+
+                    if let Some(lim) = item["known_limitations"].as_str() {
+                        eprintln!();
+                        eprintln!("Known Limitations:");
+                        eprintln!("  {lim}");
+                    }
+
+                    if let Some(perms) = item["required_permissions"].as_array()
+                        && !perms.is_empty()
+                    {
+                        eprintln!();
+                        eprintln!("Required Permissions:");
+                        for p in perms {
+                            if let Some(s) = p.as_str() {
+                                eprintln!("  - {s}");
+                            }
+                        }
+                    }
+
                     if let Some(instructions) = item["api_key_instructions"].as_str() {
                         eprintln!();
                         eprintln!("How to get credentials:");
@@ -157,9 +236,75 @@ pub async fn run(command: CatalogCommands) -> Result<()> {
                     eprintln!();
                     eprintln!("  # Or route through a node (credentials stay local):");
                     eprintln!("  nyxid service add {item_slug} --via-node <NODE_NAME>");
+
+                    if item["openapi_spec_url"].is_string() {
+                        eprintln!();
+                        eprintln!("  # Discover available API endpoints:");
+                        eprintln!("  nyxid catalog endpoints {item_slug}");
+                    }
                 }
             }
             Ok(())
         }
+        CatalogCommands::Endpoints { slug, auth } => {
+            let mut api = ApiClient::from_auth(&auth)?;
+            let result: Value = api.get(&format!("/catalog/{slug}/endpoints")).await?;
+
+            match auth.output {
+                OutputFormat::Json => {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                }
+                OutputFormat::Table => {
+                    let spec_url = result["openapi_spec_url"].as_str();
+                    let endpoints = result["endpoints"].as_array();
+
+                    if let Some(url) = spec_url {
+                        eprintln!("OpenAPI Spec: {url}");
+                        eprintln!();
+                    }
+
+                    if let Some(eps) = endpoints {
+                        if eps.is_empty() {
+                            eprintln!(
+                                "No endpoints found. This service may not have an OpenAPI spec."
+                            );
+                        } else {
+                            eprintln!("{} endpoints found:", eps.len());
+                            eprintln!();
+
+                            let mut table = Table::new();
+                            table.load_preset(UTF8_FULL_CONDENSED);
+                            table.set_header(["Method", "Path", "Name", "Description"]);
+
+                            for ep in eps {
+                                let method = ep["method"].as_str().unwrap_or("-");
+                                let path = ep["path"].as_str().unwrap_or("-");
+                                let name = ep["name"].as_str().unwrap_or("-");
+                                let desc = ep["description"]
+                                    .as_str()
+                                    .map(|d| truncate_line(d, 60))
+                                    .unwrap_or_else(|| "-".to_string());
+
+                                table.add_row([method, path, name, &desc]);
+                            }
+                            eprintln!("{table}");
+                        }
+                    } else {
+                        eprintln!("No endpoints data in response.");
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+fn truncate_line(s: &str, max: usize) -> String {
+    let first_line = s.lines().next().unwrap_or(s);
+    if first_line.chars().count() > max {
+        let truncated: String = first_line.chars().take(max - 3).collect();
+        format!("{truncated}...")
+    } else {
+        first_line.to_string()
     }
 }

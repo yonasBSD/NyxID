@@ -1537,6 +1537,13 @@ pub async fn seed_default_services(
             inject_delegation_token: false,
             delegation_token_scope: delegation_scope.to_string(),
             provider_config_id: Some(provider.id.clone()),
+            homepage_url: None,
+            repository_url: None,
+            issues_url: None,
+            capabilities: None,
+            auth_notes: None,
+            known_limitations: None,
+            required_permissions: None,
             created_at: now,
             updated_at: now,
         };

@@ -1737,6 +1737,13 @@ mod tests {
             inject_delegation_token: true,
             delegation_token_scope: "proxy:* llm:status".to_string(),
             provider_config_id: None,
+            homepage_url: None,
+            repository_url: None,
+            issues_url: None,
+            capabilities: None,
+            auth_notes: None,
+            known_limitations: None,
+            required_permissions: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

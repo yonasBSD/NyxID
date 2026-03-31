@@ -6,7 +6,7 @@ use mongodb::bson::doc;
 use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
-    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, ServiceCapabilities,
 };
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
 use crate::models::service_provider_requirement::{
@@ -51,6 +51,16 @@ pub struct CatalogEntry {
     pub client_id_param_name: Option<String>,
     /// Whether this catalog entry needs credential setup instead of direct no-auth access.
     pub requires_credential: bool,
+    // --- Rich metadata for AI agent discovery ---
+    pub openapi_spec_url: Option<String>,
+    pub asyncapi_spec_url: Option<String>,
+    pub homepage_url: Option<String>,
+    pub repository_url: Option<String>,
+    pub issues_url: Option<String>,
+    pub capabilities: Option<ServiceCapabilities>,
+    pub auth_notes: Option<String>,
+    pub known_limitations: Option<String>,
+    pub required_permissions: Option<Vec<String>>,
 }
 
 fn build_catalog_entry(
@@ -118,6 +128,15 @@ fn build_catalog_entry(
         oauth_client_id,
         client_id_param_name: provider.and_then(|p| p.client_id_param_name.clone()),
         requires_credential,
+        openapi_spec_url: svc.openapi_spec_url,
+        asyncapi_spec_url: svc.asyncapi_spec_url,
+        homepage_url: svc.homepage_url,
+        repository_url: svc.repository_url,
+        issues_url: svc.issues_url,
+        capabilities: svc.capabilities,
+        auth_notes: svc.auth_notes,
+        known_limitations: svc.known_limitations,
+        required_permissions: svc.required_permissions,
     }
 }
 
@@ -145,9 +164,10 @@ pub async fn list_catalog(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
 ) -> AppResult<Vec<CatalogEntry>> {
-    let services: Vec<DownstreamService> = db
-        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .find(doc! {
+    list_catalog_filtered(
+        db,
+        encryption_keys,
+        doc! {
             "service_type": "http",
             "is_active": true,
             "$or": [
@@ -155,7 +175,35 @@ pub async fn list_catalog(
                 { "provider_config_id": { "$ne": null } },
             ],
             "service_category": { "$in": ["connection", "internal"] },
-        })
+        },
+    )
+    .await
+}
+
+/// List ALL active catalog entries for discovery (includes system services without auth).
+pub async fn list_catalog_all(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+) -> AppResult<Vec<CatalogEntry>> {
+    list_catalog_filtered(
+        db,
+        encryption_keys,
+        doc! {
+            "is_active": true,
+            "service_category": { "$in": ["connection", "internal"] },
+        },
+    )
+    .await
+}
+
+async fn list_catalog_filtered(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    filter: mongodb::bson::Document,
+) -> AppResult<Vec<CatalogEntry>> {
+    let services: Vec<DownstreamService> = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find(filter)
         .sort(doc! { "name": 1 })
         .await?
         .try_collect()
@@ -209,6 +257,21 @@ pub async fn list_catalog(
     }
 
     Ok(resolved_entries)
+}
+
+/// Get the raw DownstreamService by slug (lightweight, no provider/encryption lookup).
+pub async fn get_downstream_service_by_slug(
+    db: &mongodb::Database,
+    slug: &str,
+) -> AppResult<DownstreamService> {
+    db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find_one(doc! {
+            "slug": slug,
+            "is_active": true,
+            "service_category": { "$in": ["connection", "internal"] },
+        })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Catalog entry not found".to_string()))
 }
 
 /// Get single catalog entry by slug.

@@ -13,7 +13,7 @@ use crate::AppState;
 use crate::crypto::token::{generate_random_token, hash_token};
 use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
-    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, ServiceCapabilities,
 };
 use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
@@ -44,6 +44,14 @@ pub struct CreateServiceRequest {
     /// "public" or "private". Defaults to "public" for HTTP, "private" for SSH.
     pub visibility: Option<String>,
     pub ssh_config: Option<SshServiceConfigRequest>,
+    // Rich metadata for AI agent discovery
+    pub homepage_url: Option<String>,
+    pub repository_url: Option<String>,
+    pub issues_url: Option<String>,
+    pub capabilities: Option<ServiceCapabilities>,
+    pub auth_notes: Option<String>,
+    pub known_limitations: Option<String>,
+    pub required_permissions: Option<Vec<String>>,
 }
 
 impl std::fmt::Debug for CreateServiceRequest {
@@ -117,6 +125,21 @@ pub struct ServiceResponse {
     pub identity_jwt_audience: Option<String>,
     pub inject_delegation_token: bool,
     pub delegation_token_scope: String,
+    // Rich metadata
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub homepage_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issues_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<ServiceCapabilities>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_notes: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub known_limitations: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required_permissions: Option<Vec<String>>,
     pub created_by: String,
     pub created_at: String,
     pub updated_at: String,
@@ -146,6 +169,14 @@ pub struct UpdateServiceRequest {
     pub inject_delegation_token: Option<bool>,
     pub delegation_token_scope: Option<String>,
     pub ssh_config: Option<SshServiceConfigRequest>,
+    // Rich metadata for AI agent discovery
+    pub homepage_url: Option<String>,
+    pub repository_url: Option<String>,
+    pub issues_url: Option<String>,
+    pub capabilities: Option<ServiceCapabilities>,
+    pub auth_notes: Option<String>,
+    pub known_limitations: Option<String>,
+    pub required_permissions: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -592,6 +623,47 @@ pub async fn create_service(
         )
     };
 
+    // Validate metadata URL fields
+    for (label, url_opt) in [
+        ("homepage_url", &body.homepage_url),
+        ("repository_url", &body.repository_url),
+        ("issues_url", &body.issues_url),
+    ] {
+        if let Some(url) = url_opt.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+            validate_optional_spec_url(url).map_err(|_| {
+                AppError::ValidationError(format!("{label} must be a valid HTTP(S) URL"))
+            })?;
+        }
+    }
+    if let Some(ref notes) = body.auth_notes
+        && notes.len() > 4096
+    {
+        return Err(AppError::ValidationError(
+            "auth_notes must not exceed 4096 characters".to_string(),
+        ));
+    }
+    if let Some(ref lim) = body.known_limitations
+        && lim.len() > 4096
+    {
+        return Err(AppError::ValidationError(
+            "known_limitations must not exceed 4096 characters".to_string(),
+        ));
+    }
+    if let Some(ref perms) = body.required_permissions {
+        if perms.len() > 100 {
+            return Err(AppError::ValidationError(
+                "required_permissions must not exceed 100 entries".to_string(),
+            ));
+        }
+        for p in perms {
+            if p.len() > 256 {
+                return Err(AppError::ValidationError(
+                    "Each permission must not exceed 256 characters".to_string(),
+                ));
+            }
+        }
+    }
+
     let new_service = DownstreamService {
         id: id.clone(),
         name: body.name.clone(),
@@ -621,6 +693,13 @@ pub async fn create_service(
         inject_delegation_token: false,
         delegation_token_scope: "llm:proxy".to_string(),
         provider_config_id: None,
+        homepage_url: body.homepage_url.clone(),
+        repository_url: body.repository_url.clone(),
+        issues_url: body.issues_url.clone(),
+        capabilities: body.capabilities.clone(),
+        auth_notes: body.auth_notes.clone(),
+        known_limitations: body.known_limitations.clone(),
+        required_permissions: body.required_permissions.clone(),
         created_at: now,
         updated_at: now,
     };
@@ -994,6 +1073,104 @@ pub async fn update_service(
                 "Unsupported service type: {other}"
             )));
         }
+    }
+
+    // Rich metadata fields (apply to all service types).
+    // Empty strings clear the field (set to null), matching openapi_spec_url pattern.
+    if body.homepage_url.is_some() {
+        let val = body
+            .homepage_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+        if let Some(url) = val {
+            validate_optional_spec_url(url)?;
+            set_doc.insert("homepage_url", url);
+        } else {
+            set_doc.insert("homepage_url", bson::Bson::Null);
+        }
+    }
+    if body.repository_url.is_some() {
+        let val = body
+            .repository_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+        if let Some(url) = val {
+            validate_optional_spec_url(url)?;
+            set_doc.insert("repository_url", url);
+        } else {
+            set_doc.insert("repository_url", bson::Bson::Null);
+        }
+    }
+    if body.issues_url.is_some() {
+        let val = body
+            .issues_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+        if let Some(url) = val {
+            validate_optional_spec_url(url)?;
+            set_doc.insert("issues_url", url);
+        } else {
+            set_doc.insert("issues_url", bson::Bson::Null);
+        }
+    }
+    if let Some(ref caps) = body.capabilities {
+        let bson_caps = bson::to_bson(caps)
+            .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?;
+        set_doc.insert("capabilities", bson_caps);
+    }
+    if body.auth_notes.is_some() {
+        let val = body
+            .auth_notes
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+        if let Some(notes) = val {
+            if notes.len() > 4096 {
+                return Err(AppError::ValidationError(
+                    "auth_notes must not exceed 4096 characters".to_string(),
+                ));
+            }
+            set_doc.insert("auth_notes", notes);
+        } else {
+            set_doc.insert("auth_notes", bson::Bson::Null);
+        }
+    }
+    if body.known_limitations.is_some() {
+        let val = body
+            .known_limitations
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+        if let Some(lim) = val {
+            if lim.len() > 4096 {
+                return Err(AppError::ValidationError(
+                    "known_limitations must not exceed 4096 characters".to_string(),
+                ));
+            }
+            set_doc.insert("known_limitations", lim);
+        } else {
+            set_doc.insert("known_limitations", bson::Bson::Null);
+        }
+    }
+    if let Some(ref perms) = body.required_permissions {
+        if perms.len() > 100 {
+            return Err(AppError::ValidationError(
+                "required_permissions must not exceed 100 entries".to_string(),
+            ));
+        }
+        for p in perms {
+            if p.len() > 256 {
+                return Err(AppError::ValidationError(
+                    "Each permission must not exceed 256 characters".to_string(),
+                ));
+            }
+        }
+        let bson_perms = bson::to_bson(perms)
+            .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?;
+        set_doc.insert("required_permissions", bson_perms);
     }
 
     if set_doc.is_empty() {
