@@ -62,6 +62,11 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
     "if-none-match",
     "if-modified-since",
     "content-length",
+    // OpenClaw gateway session and routing headers
+    "x-openclaw-session-key",
+    "x-openclaw-agent-id",
+    "x-openclaw-model",
+    "x-openclaw-message-channel",
 ];
 
 /// Headers worth preserving on proxied WebSocket handshakes.

@@ -61,6 +61,11 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
     "if-range",
     "if-none-match",
     "if-modified-since",
+    // OpenClaw gateway session and routing headers
+    "x-openclaw-session-key",
+    "x-openclaw-agent-id",
+    "x-openclaw-model",
+    "x-openclaw-message-channel",
 ];
 
 fn validate_path_injection_prefix(value: &str) -> AppResult<()> {
