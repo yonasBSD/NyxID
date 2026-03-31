@@ -140,7 +140,7 @@ Per-agent credential binding, rate limiting, and audit attribution for AI agents
 - Profile-aware token storage: `~/.nyxid/profiles/{name}/` (default profile uses `~/.nyxid/`)
 - Profile name validation: 1-64 chars, alphanumeric + hyphens + underscores only
 - Node multi-instance: profile-aware service labels (`dev.nyxid.node.{profile}` / `nyxid-node-{profile}.service`)
-- `nyxid ai-setup agent create/list/show/bind/rotate/delete` commands for managing agent identities
+- `nyxid api-key create --platform`, `nyxid api-key bind` commands for managing agent identities (consolidated from former `ai-setup agent` subcommands)
 
 **Frontend:**
 - API key detail page shows platform selector, rate limit editor, and credential bindings CRUD
@@ -151,7 +151,7 @@ Key files:
 - `services/agent_binding_service.rs` -- binding CRUD + credential override lookup
 - `handlers/agent_bindings.rs` -- REST endpoints under `/api/v1/api-keys/{id}/bindings`
 - `services/proxy_service.rs` -- `resolve_agent_credential_override()` for proxy-time binding lookup
-- `cli/src/commands/ai_setup.rs` -- agent identity management commands
+- `cli/src/commands/api_key.rs` -- API key management + credential binding commands
 - `frontend/src/hooks/use-agent-bindings.ts` -- TanStack Query hooks for bindings CRUD
 - `frontend/src/schemas/agent-bindings.ts` -- Zod schemas for bindings and rate limits
 
@@ -366,13 +366,13 @@ nyxid node docker stop [--profile <name>]              # Stop container
 nyxid node docker status [--profile <name>]            # Check container status
 nyxid node docker logs [--profile <name>]              # Tail container logs
 
-# Agent isolation (ai-setup agent subcommands)
-nyxid ai-setup agent create --name "coding-agent" --platform claude-code --services llm-openai
-nyxid ai-setup agent list               # List agent identities (keys with platform)
-nyxid ai-setup agent show <NAME>        # Show agent details + bindings
-nyxid ai-setup agent bind <NAME> --service <SLUG> --credential <NAME>  # Credential override
-nyxid ai-setup agent rotate <NAME>      # Rotate agent API key
-nyxid ai-setup agent delete <NAME>      # Delete agent identity
+# Agent isolation (api-key subcommands)
+nyxid api-key create --name "coding-agent" --platform claude-code
+nyxid api-key list                      # List API keys
+nyxid api-key show <ID_OR_NAME>         # Show key details + bindings
+nyxid api-key bind <ID_OR_NAME> --service <SLUG> --credential <LABEL>  # Credential override
+nyxid api-key rotate <ID_OR_NAME>       # Rotate API key
+nyxid api-key delete <ID_OR_NAME>       # Delete API key
 
 # Frontend (from frontend/)
 npm run dev                             # Dev server (port 3000)

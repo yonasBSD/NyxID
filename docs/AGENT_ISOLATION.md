@@ -10,7 +10,7 @@ All core phases are implemented on the `feat/agent-isolation` branch.
 | **2:** Per-agent credential override | Complete | `agent_service_bindings` collection, REST API, proxy integration |
 | **3:** CLI profile system | Complete | `--profile` flag, `NYXID_PROFILE` env var, profile-aware token storage |
 | **4:** Node multi-instance | Complete | Profile-aware service labels and config directories |
-| **5:** Platform integration | Complete | `nyxid ai-setup agent` commands, `platform` field on `ApiKey`, per-platform setup instructions |
+| **5:** Platform integration | Complete | `nyxid api-key` commands, `platform` field on `ApiKey`, per-platform setup instructions |
 | **6:** Per-agent rate limiting | Complete | `PerAgentRateLimiter` with per-API-key buckets, `rate_limit_per_second`/`burst` on `ApiKey` |
 | **7a:** API key detail page | Complete | Platform selector, rate limit editor, credential bindings CRUD, usage stats, bindings count in table |
 | **7b:** Agent usage dashboard | Complete | `/keys` page shows per-agent request counts, error rates, top services, 7-day activity bars, provider-reported token totals, and reported cost when the upstream response includes a cost field. |
@@ -425,7 +425,7 @@ New command to create a complete agent identity in one step:
 
 ```bash
 # Create a scoped API key + optional credential bindings for an agent
-nyxid ai-setup agent create \
+nyxid api-key create \
   --name "coding-agent" \
   --platform claude-code \
   --services llm-openai,api-github \
@@ -453,7 +453,7 @@ Output example:
 #### Claude Code
 
 ```bash
-nyxid ai-setup agent create --name "coding-agent" --platform claude-code --services llm-openai
+nyxid api-key create --name "coding-agent" --platform claude-code --services llm-openai
 ```
 
 Generates MCP server config for `.claude/settings.json`:
@@ -477,7 +477,7 @@ Each Claude Code project can have a different `NYXID_ACCESS_TOKEN`, isolating wh
 #### OpenAI Codex
 
 ```bash
-nyxid ai-setup agent create --name "research-agent" --platform codex --services llm-openai
+nyxid api-key create --name "research-agent" --platform codex --services llm-openai
 ```
 
 Generates environment setup:
@@ -492,7 +492,7 @@ Codex calls `nyxid proxy request` which reads `NYXID_ACCESS_TOKEN` automatically
 #### OpenClaw (per-workspace)
 
 ```bash
-nyxid ai-setup agent create --name "support-bot" --platform openclaw --services llm-openai,llm-anthropic
+nyxid api-key create --name "support-bot" --platform openclaw --services llm-openai,llm-anthropic
 ```
 
 Generates OpenClaw workspace config:
@@ -510,7 +510,7 @@ Each OpenClaw workspace gets its own NyxID API key. When the skill calls `nyxid 
 #### Generic (any platform)
 
 ```bash
-nyxid ai-setup agent create --name "my-agent" --platform generic --services llm-openai
+nyxid api-key create --name "my-agent" --platform generic --services llm-openai
 ```
 
 Returns the API key and universal instructions:
@@ -526,21 +526,21 @@ Direct API: curl -H "X-API-Key: nyxid_ag_..." https://nyx-api.../api/v1/proxy/s/
 
 ```bash
 # List all agent identities
-nyxid ai-setup agent list --output json
+nyxid api-key list --output json
 
 # Show agent details (services, bindings, usage)
-nyxid ai-setup agent show coding-agent --output json
+nyxid api-key show coding-agent --output json
 
 # Bind a specific credential to an agent for a service
-nyxid ai-setup agent bind coding-agent \
+nyxid api-key bind coding-agent \
   --service llm-openai \
   --credential openai-premium-key
 
 # Rotate an agent's API key
-nyxid ai-setup agent rotate coding-agent
+nyxid api-key rotate coding-agent
 
 # Delete an agent identity
-nyxid ai-setup agent delete coding-agent --yes
+nyxid api-key delete coding-agent --yes
 ```
 
 ### 5d. Update NyxID skill (SKILL.md)
@@ -629,20 +629,20 @@ nyxid service list --output json
 # -> api-github (OAuth connected)
 
 # Create three agent identities
-nyxid ai-setup agent create --name "claude-coding" \
+nyxid api-key create --name "claude-coding" \
   --platform claude-code \
   --services llm-openai,api-github
 
-nyxid ai-setup agent create --name "codex-research" \
+nyxid api-key create --name "codex-research" \
   --platform codex \
   --services llm-openai
 
-nyxid ai-setup agent create --name "openclaw-support" \
+nyxid api-key create --name "openclaw-support" \
   --platform openclaw \
   --services llm-openai,llm-anthropic
 
 # Bind premium OpenAI key to the research agent
-nyxid ai-setup agent bind codex-research \
+nyxid api-key bind codex-research \
   --service llm-openai \
   --credential openai-premium
 
@@ -754,12 +754,12 @@ nyxid node daemon start --profile codex-research
 
 | Command | Description | Phase |
 |---|---|---|
-| `nyxid ai-setup agent create` | Create agent identity with scoped key | 5 |
-| `nyxid ai-setup agent list` | List agent identities | 5 |
-| `nyxid ai-setup agent show <name>` | Show agent details + bindings | 5 |
-| `nyxid ai-setup agent bind <name>` | Bind credential to agent for a service | 5 |
-| `nyxid ai-setup agent rotate <name>` | Rotate agent's API key | 5 |
-| `nyxid ai-setup agent delete <name>` | Delete agent identity | 5 |
+| `nyxid api-key create` | Create agent identity with scoped key | 5 |
+| `nyxid api-key list` | List agent identities | 5 |
+| `nyxid api-key show <name>` | Show agent details + bindings | 5 |
+| `nyxid api-key bind <name>` | Bind credential to agent for a service | 5 |
+| `nyxid api-key rotate <name>` | Rotate agent's API key | 5 |
+| `nyxid api-key delete <name>` | Delete agent identity | 5 |
 
 ### Modified commands
 
@@ -782,7 +782,7 @@ Document that each agent/workspace should use its own `NYXID_ACCESS_TOKEN` for i
 
 Add agent provisioning flow:
 ```bash
-nyxid ai-setup agent create --name "my-agent" --platform <platform> --services <slugs>
+nyxid api-key create --name "my-agent" --platform <platform> --services <slugs>
 ```
 
 ### Updated: Working Rules
@@ -869,8 +869,8 @@ Phases 3 (CLI profiles) can ship independently and provides immediate value: age
 
 3. **Should bindings support endpoint overrides?** e.g., Agent A uses a different base URL. Proposal: no. Different URL = create a separate UserService. Keeps bindings credential-only.
 
-4. **Naming: "Agent" vs "Scoped Key"?** The UI currently says "API Keys". Proposal: keep "API Keys" in the generic UI but use "Agent" in the `ai-setup agent` CLI commands and skill docs, since that's the mental model for AI platform users.
+4. **Naming: "Agent" vs "Scoped Key"?** The UI currently says "API Keys". Proposal: keep "API Keys" in the generic UI but use "Agent" in the `api-key` CLI commands and skill docs, since that's the mental model for AI platform users.
 
-5. **Should `nyxid ai-setup agent create` auto-login the profile?** Proposal: no. The command creates a scoped API key server-side and returns it. The agent platform uses it via `NYXID_ACCESS_TOKEN` env var. Interactive login is only needed for human CLI use.
+5. **Should `nyxid api-key create` auto-login the profile?** Proposal: no. The command creates a scoped API key server-side and returns it. The agent platform uses it via `NYXID_ACCESS_TOKEN` env var. Interactive login is only needed for human CLI use.
 
 6. **Node profile vs CLI profile -- same namespace?** Proposal: yes, `--profile coding-agent` resolves to `~/.nyxid/profiles/coding-agent/` for CLI tokens and `~/.nyxid-node/profiles/coding-agent/` for node config. Same name, different directories.

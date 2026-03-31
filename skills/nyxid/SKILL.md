@@ -276,22 +276,22 @@ Each AI agent (Claude Code, Codex, OpenClaw, etc.) should use its own NyxID API 
 
 ```bash
 # Create a scoped API key for a specific agent
-nyxid ai-setup agent create --name "coding-agent" --platform claude-code --services llm-openai,api-github
+nyxid api-key create --name "coding-agent" --platform claude-code
 
-# List agent identities
-nyxid ai-setup agent list --output json
+# List API keys
+nyxid api-key list --output json
 
-# Show agent details including credential bindings
-nyxid ai-setup agent show coding-agent --output json
+# Show key details including credential bindings
+nyxid api-key show coding-agent --output json
 
-# Bind a specific credential to an agent for a service
-nyxid ai-setup agent bind coding-agent --service llm-openai --credential openai-premium
+# Bind a specific credential to an API key for a service
+nyxid api-key bind coding-agent --service llm-openai --credential openai-premium
 
-# Rotate an agent's API key
-nyxid ai-setup agent rotate coding-agent
+# Rotate an API key
+nyxid api-key rotate coding-agent
 
-# Delete an agent identity
-nyxid ai-setup agent delete coding-agent --yes
+# Delete an API key
+nyxid api-key delete coding-agent --yes
 ```
 
 ### Using the key

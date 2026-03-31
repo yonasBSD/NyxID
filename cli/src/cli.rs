@@ -531,6 +531,9 @@ pub enum ApiKeyCommands {
         /// Allow access to all nodes
         #[arg(long)]
         allow_all_nodes: bool,
+        /// Platform label (claude-code, codex, openclaw, cursor, generic)
+        #[arg(long)]
+        platform: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -574,6 +577,19 @@ pub enum ApiKeyCommands {
         allow_all_services: Option<bool>,
         #[arg(long)]
         allow_all_nodes: Option<bool>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Bind a credential to an API key for a specific service
+    Bind {
+        /// API key ID or name
+        id: String,
+        /// Service slug
+        #[arg(long)]
+        service: String,
+        /// External credential label
+        #[arg(long)]
+        credential: String,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -1362,72 +1378,4 @@ pub enum AiSetupCommands {
     },
     /// Show which AI skills are currently installed
     Status,
-    /// Manage agent identities (scoped API keys for AI platforms)
-    Agent {
-        #[command(subcommand)]
-        command: AgentCommands,
-    },
-}
-
-#[derive(Subcommand)]
-pub enum AgentCommands {
-    /// Create a new agent identity with a scoped API key
-    Create {
-        /// Agent name (used as key name)
-        #[arg(long)]
-        name: String,
-        /// Target platform
-        #[arg(long, value_enum)]
-        platform: AiToolTarget,
-        /// Comma-separated service slugs to allow
-        #[arg(long)]
-        services: Option<String>,
-        /// Scopes for the API key
-        #[arg(long, default_value = "read proxy")]
-        scopes: String,
-        #[command(flatten)]
-        auth: AuthArgs,
-    },
-    /// List all agent identities
-    List {
-        #[command(flatten)]
-        auth: AuthArgs,
-    },
-    /// Show agent details including bindings
-    Show {
-        /// Agent name (matches API key name)
-        name: String,
-        #[command(flatten)]
-        auth: AuthArgs,
-    },
-    /// Bind a credential to an agent for a specific service
-    Bind {
-        /// Agent name
-        name: String,
-        /// Service slug
-        #[arg(long)]
-        service: String,
-        /// External credential label
-        #[arg(long)]
-        credential: String,
-        #[command(flatten)]
-        auth: AuthArgs,
-    },
-    /// Rotate an agent's API key
-    Rotate {
-        /// Agent name
-        name: String,
-        #[command(flatten)]
-        auth: AuthArgs,
-    },
-    /// Delete an agent identity
-    Delete {
-        /// Agent name
-        name: String,
-        /// Skip confirmation
-        #[arg(long)]
-        yes: bool,
-        #[command(flatten)]
-        auth: AuthArgs,
-    },
 }
