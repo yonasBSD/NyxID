@@ -537,8 +537,6 @@ async fn credential_reload_loop(
             continue;
         }
 
-        last_modified = Some(current_modified);
-
         let node_config = match NodeConfig::load(&config_file) {
             Ok(c) => c,
             Err(e) => {
@@ -555,12 +553,16 @@ async fn credential_reload_loop(
 
         match CredentialStore::from_config_with_backend(&node_config, &backend) {
             Ok(new_store) => {
+                // Only mark as processed after successful reload so that a
+                // transient failure (e.g. keychain vault not yet flushed by
+                // another process) retries on the next tick.
+                last_modified = Some(current_modified);
                 let count = new_store.count();
                 sender.update(new_store);
                 tracing::info!(credentials = count, "Credentials reloaded from config");
             }
             Err(e) => {
-                tracing::error!(error = %e, "Failed to reload credentials, keeping existing");
+                tracing::error!(error = %e, "Failed to reload credentials, will retry");
             }
         }
     }
