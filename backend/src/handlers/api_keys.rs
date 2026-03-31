@@ -464,7 +464,7 @@ async fn load_user_service_info_map(
             .collect()
     };
 
-    Ok(services
+    let mut map: HashMap<String, (String, String)> = services
         .into_iter()
         .map(|service| {
             let label = endpoint_label_map
@@ -473,7 +473,22 @@ async fn load_user_service_info_map(
                 .unwrap_or_else(|| service.slug.clone());
             (service.id, (service.slug, label))
         })
-        .collect())
+        .collect();
+
+    // Include DownstreamService (catalog) records as fallback for audit logs
+    // that reference old-path service IDs not in the user's UserService collection.
+    let catalog_services: Vec<DownstreamService> = state
+        .db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find(doc! {})
+        .await?
+        .try_collect()
+        .await?;
+    for ds in catalog_services {
+        map.entry(ds.id).or_insert_with(|| (ds.slug, ds.name));
+    }
+
+    Ok(map)
 }
 
 fn extract_response_status(event_data: Option<&serde_json::Value>) -> Option<u16> {
