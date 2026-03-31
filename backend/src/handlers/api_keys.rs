@@ -128,7 +128,12 @@ pub struct ApiKeyResponse {
     pub rate_limit_burst: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub bindings_count: u64,
+}
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
 }
 
 #[derive(Debug, Serialize, ToSchema)]
