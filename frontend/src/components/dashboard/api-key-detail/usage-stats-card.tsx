@@ -11,8 +11,8 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Activity } from "lucide-react";
 
-function formatReportedCost(cost: number | null) {
-  if (cost === null) return "N/A";
+function formatReportedCost(cost: number | null | undefined) {
+  if (cost == null) return "N/A";
   return `$${cost.toFixed(cost >= 1 ? 2 : 4)}`;
 }
 
