@@ -301,9 +301,22 @@ pub async fn process_decision(
         }
     };
 
-    // On approval: create a grant ONLY in grant mode.
-    // In per_request mode, the approved ApprovalRequest is the only record.
-    if approved && updated.approval_mode == ApprovalMode::Grant {
+    // On approval: create a grant ONLY when the request was originally created
+    // in grant mode AND the service is still in grant mode. This prevents:
+    // - Stale grant-mode requests from minting grants after a switch to per_request (#146)
+    // - Per-request requests from being upgraded to grants if the service switches to grant
+    // The current-mode lookup is gated behind `approved` so rejections don't
+    // gain a new failure path.
+    //
+    // Note: a TOCTOU race exists if a concurrent request switches the service to
+    // per_request between this check and the insert_one below. If that happens,
+    // the grant is inert: the proxy handler skips grants in per_request mode, and
+    // list_grants() filters them out at read time. The grant will expire naturally.
+    if approved
+        && updated.approval_mode == ApprovalMode::Grant
+        && resolve_approval_mode(db, &updated.user_id, &updated.service_id).await?
+            == ApprovalMode::Grant
+    {
         let channel = notification_service::get_or_create_channel(db, &updated.user_id).await?;
         let grant_expiry = resolve_grant_expiry(now, duration_sec, channel.grant_expiry_days);
 
@@ -643,6 +656,12 @@ pub async fn get_request(db: &Database, request_id: &str) -> AppResult<ApprovalR
 }
 
 /// List active approval grants for a user.
+///
+/// Only returns grants for services currently in `Grant` mode. Grants for
+/// services in `PerRequest` mode (or with no config, which defaults to
+/// `PerRequest`) are excluded even if they haven't been revoked yet. This
+/// read-time filter acts as a safety net for any write-time race conditions
+/// or partial failures during mode switches (see #146).
 pub async fn list_grants(
     db: &Database,
     user_id: &str,
@@ -650,10 +669,24 @@ pub async fn list_grants(
     per_page: u64,
 ) -> AppResult<(Vec<ApprovalGrant>, u64)> {
     let now = bson::DateTime::from_chrono(Utc::now());
+
+    // Collect service IDs that are explicitly in grant mode for this user.
+    // Services with no config default to per_request, so their grants are excluded.
+    let grant_mode_service_ids: Vec<String> = db
+        .collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
+        .find(doc! { "user_id": user_id, "approval_mode": "grant" })
+        .await?
+        .try_collect::<Vec<ServiceApprovalConfig>>()
+        .await?
+        .into_iter()
+        .map(|c| c.service_id)
+        .collect();
+
     let filter = doc! {
         "user_id": user_id,
         "revoked": false,
         "expires_at": { "$gt": now },
+        "service_id": { "$in": &grant_mode_service_ids },
     };
 
     let total = db
@@ -775,7 +808,15 @@ pub async fn set_service_approval_config(
             .await;
 
         match config {
-            Ok(Some(cfg)) => return Ok(cfg),
+            Ok(Some(cfg)) => {
+                // Revoke stale grants when the persisted mode is per_request.
+                // Idempotent: re-revoking already-revoked grants is a no-op,
+                // so retries after a partial failure still clean up (see #146).
+                if cfg.approval_mode == ApprovalMode::PerRequest {
+                    revoke_grants_for_service(db, user_id, service_id).await?;
+                }
+                return Ok(cfg);
+            }
             Ok(None) => {
                 return Err(AppError::Internal(
                     "Upsert returned no document".to_string(),
@@ -785,6 +826,9 @@ pub async fn set_service_approval_config(
                 // Concurrent upserts can race on the unique (user_id, service_id) index.
                 // Read-after-write resolves to the winning document.
                 if let Some(existing) = collection.find_one(filter.clone()).await? {
+                    if existing.approval_mode == ApprovalMode::PerRequest {
+                        revoke_grants_for_service(db, user_id, service_id).await?;
+                    }
                     return Ok(existing);
                 }
                 continue;
@@ -799,6 +843,10 @@ pub async fn set_service_approval_config(
 }
 
 /// Delete a per-service approval config (revert to global default).
+/// Because the global default mode is `PerRequest`, deleting any override
+/// effectively switches the service to `per_request`. Active grants are
+/// revoked unconditionally so they don't linger (see #146). The revoke is
+/// idempotent, so retries after partial failure still clean up.
 pub async fn delete_service_approval_config(
     db: &Database,
     user_id: &str,
@@ -808,6 +856,11 @@ pub async fn delete_service_approval_config(
         .collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
         .delete_one(doc! { "user_id": user_id, "service_id": service_id })
         .await?;
+
+    // Always revoke grants regardless of deleted_count. If a previous attempt
+    // deleted the config but failed on revoke, this retry still cleans up.
+    // The revoke is a no-op when no active grants exist.
+    revoke_grants_for_service(db, user_id, service_id).await?;
 
     if result.deleted_count == 0 {
         return Err(AppError::NotFound(
@@ -870,6 +923,27 @@ fn resolve_service_config_update(
         .unwrap_or_default();
 
     Ok((resolved_required, resolved_mode))
+}
+
+/// Revoke all active (non-revoked) grants for a (user, service) pair.
+/// Called after switching a service to `per_request` mode so stale grants
+/// no longer appear in the UI (see #146).
+async fn revoke_grants_for_service(
+    db: &Database,
+    user_id: &str,
+    service_id: &str,
+) -> AppResult<()> {
+    db.collection::<ApprovalGrant>(GRANTS)
+        .update_many(
+            doc! {
+                "user_id": user_id,
+                "service_id": service_id,
+                "revoked": false,
+            },
+            doc! { "$set": { "revoked": true } },
+        )
+        .await?;
+    Ok(())
 }
 
 fn is_duplicate_key_error(e: &mongodb::error::Error) -> bool {
