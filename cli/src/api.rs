@@ -18,6 +18,7 @@ pub struct ApiClient {
     client: Client,
     base_url: String,
     access_token: String,
+    profile: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -28,19 +29,28 @@ struct RefreshResponse {
 
 impl ApiClient {
     pub fn new(base_url: &str, access_token: String) -> Result<Self> {
+        Self::new_with_profile(base_url, access_token, None)
+    }
+
+    pub fn new_with_profile(
+        base_url: &str,
+        access_token: String,
+        profile: Option<String>,
+    ) -> Result<Self> {
         let client = build_cli_http_client()?;
 
         Ok(Self {
             client,
             base_url: format!("{}/api/v1", base_url.trim_end_matches('/')),
             access_token,
+            profile,
         })
     }
 
     pub fn from_auth(auth: &crate::cli::AuthArgs) -> Result<Self> {
         let base_url = auth.resolved_base_url()?;
         let token = crate::auth::resolve_access_token(auth)?;
-        Self::new(&base_url, token)
+        Self::new_with_profile(&base_url, token, auth.profile.clone())
     }
 
     pub fn base_url_root(&self) -> &str {
@@ -52,7 +62,8 @@ impl ApiClient {
     /// Attempt to refresh the access token using the saved refresh token.
     /// Returns `true` if the token was refreshed successfully.
     async fn try_refresh_token(&mut self) -> bool {
-        let refresh_token = match crate::auth::read_saved_refresh_token() {
+        let profile = self.profile.as_deref();
+        let refresh_token = match crate::auth::read_saved_refresh_token_for(profile) {
             Some(rt) => rt,
             None => return false,
         };
@@ -75,7 +86,9 @@ impl ApiClient {
             Err(_) => return false,
         };
 
-        if crate::auth::save_tokens(&tokens.access_token, Some(&tokens.refresh_token)).is_err() {
+        if crate::auth::save_tokens_for(profile, &tokens.access_token, Some(&tokens.refresh_token))
+            .is_err()
+        {
             return false;
         }
 

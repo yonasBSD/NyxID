@@ -84,6 +84,7 @@ pub fn read_saved_refresh_token_for(profile: Option<&str>) -> Option<String> {
         .filter(|t| !t.is_empty())
 }
 
+#[cfg(test)]
 pub fn read_saved_refresh_token() -> Option<String> {
     read_saved_refresh_token_for(None)
 }
@@ -138,6 +139,7 @@ pub fn save_tokens_for(
 }
 
 /// Save a new access token (and optionally a new refresh token).
+#[cfg(test)]
 pub fn save_tokens(access_token: &str, refresh_token: Option<&str>) -> Result<()> {
     save_tokens_for(None, access_token, refresh_token)
 }

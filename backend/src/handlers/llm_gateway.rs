@@ -247,6 +247,9 @@ pub async fn gateway_request(
 ) -> AppResult<Response> {
     auth_user.ensure_llm_proxy_access()?;
 
+    // Per-agent rate limit check
+    crate::mw::rate_limit::check_agent_rate_limit(&state.per_agent_limiter, &auth_user)?;
+
     let user_id_str = auth_user.user_id.to_string();
 
     let method = request.method().clone();

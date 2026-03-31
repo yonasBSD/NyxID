@@ -121,13 +121,13 @@ export function RateLimitCard({
             <div className="grid grid-cols-2 gap-2 text-xs">
               <div>
                 <span className="text-muted-foreground">Per second: </span>
-                {rateLimitPerSecond !== null
+                {rateLimitPerSecond != null
                   ? String(rateLimitPerSecond)
                   : "User default"}
               </div>
               <div>
                 <span className="text-muted-foreground">Burst: </span>
-                {rateLimitBurst !== null
+                {rateLimitBurst != null
                   ? String(rateLimitBurst)
                   : "User default"}
               </div>

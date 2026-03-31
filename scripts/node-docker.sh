@@ -73,6 +73,7 @@ cmd_start() {
     docker run -d \
         --name "$name" \
         --restart unless-stopped \
+        --user "$(id -u):$(id -g)" \
         -v "$config_dir:/app/config:rw" \
         "$IMAGE"
 
