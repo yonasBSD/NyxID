@@ -14,9 +14,11 @@ use crate::services::{
     audit_service, node_service,
     node_ws_manager::{
         NodeOutboundMessage, NodeProxyResponse, NodeSshExecResult, NodeWsManager,
+        WsProxyBinaryInbound, WsProxyClosedInbound, WsProxyErrorInbound, WsProxyOpenedInbound,
         WsProxyResponseChunkMsg, WsProxyResponseEndMsg, WsProxyResponseStartMsg,
-        WsSshExecResultMsg, WsSshTunnelClosedMsg, WsSshTunnelDataMsg, WsSshTunnelOpenedMsg,
-        WsWebTerminalClosedMsg, WsWebTerminalDataMsg, WsWebTerminalStartedMsg,
+        WsProxyTextInbound, WsSshExecResultMsg, WsSshTunnelClosedMsg, WsSshTunnelDataMsg,
+        WsSshTunnelOpenedMsg, WsWebTerminalClosedMsg, WsWebTerminalDataMsg,
+        WsWebTerminalStartedMsg,
     },
 };
 
@@ -92,6 +94,16 @@ enum NodeMessage {
         #[serde(default)]
         error: Option<String>,
     },
+    #[serde(rename = "ws_proxy_opened")]
+    WsProxyOpened(WsProxyOpenedInbound),
+    #[serde(rename = "ws_proxy_text")]
+    WsProxyText(WsProxyTextInbound),
+    #[serde(rename = "ws_proxy_binary")]
+    WsProxyBinary(WsProxyBinaryInbound),
+    #[serde(rename = "ws_proxy_closed")]
+    WsProxyClosed(WsProxyClosedInbound),
+    #[serde(rename = "ws_proxy_error")]
+    WsProxyError(WsProxyErrorInbound),
 }
 
 fn decode_base64_payload(
@@ -651,6 +663,47 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
                         "Node failed to apply credential update"
                     );
                 }
+            }
+            NodeMessage::WsProxyOpened(msg) => {
+                if !ws_manager.deliver_ws_proxy_opened(
+                    &node_id_reader,
+                    &msg.session_id,
+                    msg.selected_protocol,
+                ) {
+                    tracing::debug!(
+                        node_id = %node_id_reader,
+                        session_id = %msg.session_id,
+                        "ws_proxy_opened for unknown session"
+                    );
+                }
+            }
+            NodeMessage::WsProxyText(msg) => {
+                ws_manager.deliver_ws_proxy_text(&node_id_reader, &msg.session_id, msg.data);
+            }
+            NodeMessage::WsProxyBinary(msg) => {
+                if let Some(bytes) =
+                    decode_base64_payload(Some(&msg.data), "ws_proxy_binary", &msg.session_id)
+                {
+                    ws_manager.deliver_ws_proxy_binary(&node_id_reader, &msg.session_id, bytes);
+                } else {
+                    ws_manager.deliver_ws_proxy_closed(
+                        &node_id_reader,
+                        &msg.session_id,
+                        None,
+                        Some("Invalid base64 in ws_proxy_binary".to_string()),
+                    );
+                }
+            }
+            NodeMessage::WsProxyClosed(msg) => {
+                ws_manager.deliver_ws_proxy_closed(
+                    &node_id_reader,
+                    &msg.session_id,
+                    msg.code,
+                    msg.reason,
+                );
+            }
+            NodeMessage::WsProxyError(msg) => {
+                ws_manager.deliver_ws_proxy_error(&node_id_reader, &msg.session_id, &msg.error);
             }
             NodeMessage::Register { .. } | NodeMessage::Auth { .. } => {
                 // Already authenticated, ignore duplicate auth messages

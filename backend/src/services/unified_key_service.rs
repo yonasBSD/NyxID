@@ -148,6 +148,7 @@ pub struct KeyView {
     pub auth_key_name: String,
     pub status: String,
     pub catalog_service_id: Option<String>,
+    pub catalog_service_slug: Option<String>,
     pub catalog_service_name: Option<String>,
     pub node_id: Option<String>,
     pub node_priority: i32,
@@ -1110,6 +1111,7 @@ fn build_key_view(
             .map(|k| k.status.clone())
             .unwrap_or_else(|| "active".to_string()),
         catalog_service_id: svc.catalog_service_id.clone(),
+        catalog_service_slug: catalog_ds.map(|ds| ds.slug.clone()),
         catalog_service_name: catalog_ds.map(|ds| ds.name.clone()),
         node_id: svc.node_id.clone(),
         node_priority: svc.node_priority,

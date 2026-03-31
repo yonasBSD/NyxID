@@ -59,6 +59,8 @@ pub struct AppState {
     pub ssh_session_manager: Arc<SshSessionManager>,
     /// Per-agent rate limiter keyed by API key ID
     pub per_agent_limiter: mw::rate_limit::SharedPerAgentRateLimiter,
+    /// Active WebSocket passthrough connection count (for resource limiting)
+    pub ws_passthrough_count: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// NyxID authentication and SSO platform.
@@ -314,6 +316,7 @@ async fn main() {
         node_ws_manager,
         ssh_session_manager,
         per_agent_limiter: Arc::new(mw::rate_limit::PerAgentRateLimiter::new()),
+        ws_passthrough_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     };
 
     // Create rate limiters
