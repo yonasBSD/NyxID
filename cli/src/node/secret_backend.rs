@@ -176,4 +176,14 @@ impl SecretBackend {
             Self::Keychain(vault) => vault.delete_signing_secret(),
         }
     }
+
+    /// Re-read secrets from the backing store into memory.
+    /// No-op for file backend (values are decrypted on each load).
+    /// For keychain: refreshes the in-memory vault cache from the OS keychain.
+    pub fn refresh(&self) -> Result<()> {
+        match self {
+            Self::File(_) => Ok(()),
+            Self::Keychain(vault) => vault.refresh(),
+        }
+    }
 }
