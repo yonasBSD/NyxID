@@ -382,6 +382,17 @@ impl KeychainVault {
         self.flush()
     }
 
+    /// Re-read the vault JSON from the keychain into memory.
+    /// Called before credential reload so newly-added secrets are visible.
+    pub fn refresh(&self) -> Result<()> {
+        if let Some(json) = self.backend.get_optional(VAULT_KEY)? {
+            let fresh: VaultData = serde_json::from_str(&json)
+                .map_err(|e| Error::Keychain(format!("Corrupt vault data: {e}")))?;
+            *self.vault.lock().unwrap() = fresh;
+        }
+        Ok(())
+    }
+
     /// Delete the entire vault entry from the keychain.
     #[allow(dead_code)]
     pub fn delete_all(&self) -> Result<()> {
@@ -484,5 +495,34 @@ mod tests {
             Some("nyx_nauth_test")
         );
         assert_eq!(backend.get_optional(VAULT_KEY).unwrap(), None);
+    }
+
+    #[test]
+    fn refresh_picks_up_externally_added_credentials() {
+        let backend = KeychainBackend::new_mock("node-1");
+        let config = keychain_config();
+
+        // Start with an empty vault
+        backend.set(KEY_AUTH_TOKEN, "nyx_nauth_test").unwrap();
+        let vault = KeychainVault::load_with_backend(backend.clone(), &config).unwrap();
+        assert!(vault.get_credential("testing-gh4t").is_err());
+
+        // Simulate another process adding a credential to the keychain vault
+        let raw = backend.get_optional(VAULT_KEY).unwrap().unwrap();
+        let mut data: VaultData = serde_json::from_str(&raw).unwrap();
+        data.credentials
+            .insert("testing-gh4t".to_string(), "Bearer 123456".to_string());
+        let updated = serde_json::to_string(&data).unwrap();
+        backend.set(VAULT_KEY, &updated).unwrap();
+
+        // Before refresh: still stale
+        assert!(vault.get_credential("testing-gh4t").is_err());
+
+        // After refresh: picks up the new credential
+        vault.refresh().unwrap();
+        assert_eq!(
+            vault.get_credential("testing-gh4t").unwrap(),
+            "Bearer 123456"
+        );
     }
 }

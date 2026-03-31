@@ -547,6 +547,12 @@ async fn credential_reload_loop(
             }
         };
 
+        // Refresh in-memory vault cache so newly-added keychain secrets are visible.
+        if let Err(e) = backend.refresh() {
+            tracing::error!(error = %e, "Failed to refresh secret backend, keeping existing");
+            continue;
+        }
+
         match CredentialStore::from_config_with_backend(&node_config, &backend) {
             Ok(new_store) => {
                 let count = new_store.count();

@@ -555,8 +555,16 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
             axum::routing::any(handlers::proxy::proxy_request_by_slug),
         )
         .route(
+            "/proxy/s/{slug}",
+            axum::routing::any(handlers::proxy::proxy_request_by_slug_root),
+        )
+        .route(
             "/proxy/{service_id}/{*path}",
             axum::routing::any(handlers::proxy::proxy_request),
+        )
+        .route(
+            "/proxy/{service_id}",
+            axum::routing::any(handlers::proxy::proxy_request_root),
         )
         .layer(RequestBodyLimitLayer::new(proxy_max_body_size));
 

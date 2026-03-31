@@ -246,6 +246,26 @@ pub async fn proxy_request_by_slug(
     execute_proxy(&state, &auth_user, &service.id, &path, request).await
 }
 
+/// ANY /api/v1/proxy/:service_id (no trailing path)
+pub async fn proxy_request_root(
+    state: State<AppState>,
+    auth_user: AuthUser,
+    Path(service_id): Path<String>,
+    request: Request<Body>,
+) -> AppResult<Response> {
+    proxy_request(state, auth_user, Path((service_id, String::new())), request).await
+}
+
+/// ANY /api/v1/proxy/s/:slug (no trailing path)
+pub async fn proxy_request_by_slug_root(
+    state: State<AppState>,
+    auth_user: AuthUser,
+    Path(slug): Path<String>,
+    request: Request<Body>,
+) -> AppResult<Response> {
+    proxy_request_by_slug(state, auth_user, Path((slug, String::new())), request).await
+}
+
 /// Core proxy execution logic shared by UUID and slug handlers (old path).
 async fn execute_proxy(
     state: &AppState,
