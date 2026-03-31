@@ -11,11 +11,6 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Activity } from "lucide-react";
 
-function formatReportedCost(cost: number | null | undefined) {
-  if (cost == null) return "N/A";
-  return `$${cost.toFixed(cost >= 1 ? 2 : 4)}`;
-}
-
 function ActivityBars({
   buckets,
 }: {
@@ -107,32 +102,6 @@ export function UsageStatsCard({
                 </p>
                 <p className="mt-1 text-lg font-semibold">
                   {(data.error_rate * 100).toFixed(1)}%
-                </p>
-              </div>
-              <div className="rounded-lg border border-border p-3">
-                <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                  Prompt Tokens
-                </p>
-                <p className="mt-1 text-lg font-semibold">{data.prompt_tokens}</p>
-              </div>
-              <div className="rounded-lg border border-border p-3">
-                <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                  Completion Tokens
-                </p>
-                <p className="mt-1 text-lg font-semibold">{data.completion_tokens}</p>
-              </div>
-              <div className="rounded-lg border border-border p-3">
-                <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                  Total Tokens
-                </p>
-                <p className="mt-1 text-lg font-semibold">{data.total_tokens}</p>
-              </div>
-              <div className="rounded-lg border border-border p-3">
-                <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                  Reported Cost
-                </p>
-                <p className="mt-1 text-lg font-semibold">
-                  {formatReportedCost(data.reported_cost)}
                 </p>
               </div>
             </div>

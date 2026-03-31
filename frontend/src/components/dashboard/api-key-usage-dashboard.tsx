@@ -12,11 +12,6 @@ import {
 } from "@/components/ui/card";
 import { Activity } from "lucide-react";
 
-function formatReportedCost(cost: number | null | undefined) {
-  if (cost == null) return "N/A";
-  return `$${cost.toFixed(cost >= 1 ? 2 : 4)}`;
-}
-
 function UsageBars({
   buckets,
 }: {
@@ -105,7 +100,7 @@ export function ApiKeyUsageDashboard() {
                       </Badge>
                     </div>
 
-                    <div className="grid grid-cols-2 gap-2 text-xs xl:grid-cols-5">
+                    <div className="grid grid-cols-3 gap-2 text-xs">
                       <div className="rounded-lg border border-border p-2">
                         <p className="text-muted-foreground">Requests</p>
                         <p className="mt-1 text-sm font-semibold">{usage.request_count}</p>
@@ -118,16 +113,6 @@ export function ApiKeyUsageDashboard() {
                         <p className="text-muted-foreground">Error Rate</p>
                         <p className="mt-1 text-sm font-semibold">
                           {(usage.error_rate * 100).toFixed(1)}%
-                        </p>
-                      </div>
-                      <div className="rounded-lg border border-border p-2">
-                        <p className="text-muted-foreground">Tokens</p>
-                        <p className="mt-1 text-sm font-semibold">{usage.total_tokens}</p>
-                      </div>
-                      <div className="rounded-lg border border-border p-2">
-                        <p className="text-muted-foreground">Reported Cost</p>
-                        <p className="mt-1 text-sm font-semibold">
-                          {formatReportedCost(usage.reported_cost)}
                         </p>
                       </div>
                     </div>
