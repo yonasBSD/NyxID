@@ -3,7 +3,7 @@
 # Environment variables accessed: HOME, SHELL, PATH, CARGO_HOME
 # External endpoints called: sh.rustup.rs (Rust installer), github.com (cargo install)
 # Local files read: shell RC files (~/.zshrc, ~/.bashrc, etc.)
-# Local files written: shell RC files (appends cargo PATH if missing)
+# Local files written: shell RC files (appends cargo PATH if missing), ~/.local/bin/nyxid (symlink)
 #
 # NyxID CLI installer -- handles Rust toolchain, CLI binary, and PATH setup.
 # Designed for non-technical users who may not have ~/.cargo/bin in PATH.
@@ -97,7 +97,21 @@ cargo install --git "$REPO" nyxid-cli --force
 info "NyxID CLI installed at $CARGO_BIN/nyxid"
 
 # ---------------------------------------------------------------------------
-# Step 3: Ensure cargo bin is in PATH for future shell sessions
+# Step 3: Symlink into ~/.local/bin (required by OpenClaw and XDG-aware tools)
+# ---------------------------------------------------------------------------
+
+LOCAL_BIN="$HOME/.local/bin"
+
+if [ -x "$CARGO_BIN/nyxid" ]; then
+  mkdir -p "$LOCAL_BIN"
+  ln -sf "$CARGO_BIN/nyxid" "$LOCAL_BIN/nyxid"
+  info "Symlinked $LOCAL_BIN/nyxid -> $CARGO_BIN/nyxid"
+else
+  warn "nyxid binary not found in $CARGO_BIN -- skipping ~/.local/bin symlink"
+fi
+
+# ---------------------------------------------------------------------------
+# Step 4: Ensure cargo bin is in PATH for future shell sessions
 # ---------------------------------------------------------------------------
 
 RC_FILE="$(detect_shell_rc)"
@@ -126,7 +140,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Step 4: Verify
+# Step 5: Verify
 # ---------------------------------------------------------------------------
 
 if command -v nyxid &>/dev/null; then
