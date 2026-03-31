@@ -559,7 +559,6 @@ async fn build_api_key_usage(
                     "proxy_request_denied",
                     "llm_proxy_request",
                     "llm_gateway_request",
-                    "llm_usage_reported"
                 ]
             },
             "created_at": { "$gte": since_bson },
@@ -581,11 +580,6 @@ async fn build_api_key_usage(
         let Some(accumulator) = usage_map.get_mut(api_key_id) else {
             continue;
         };
-
-        // Skip LLM usage events -- token/cost tracking is not part of agent isolation.
-        if entry.event_type == "llm_usage_reported" {
-            continue;
-        }
 
         let is_error = matches!(entry.event_type.as_str(), "proxy_request_denied")
             || extract_response_status(entry.event_data.as_ref())
