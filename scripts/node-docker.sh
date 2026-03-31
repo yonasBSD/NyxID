@@ -53,21 +53,28 @@ cmd_start() {
     local name
     name="$(container_name "$profile")"
 
-    if [ ! -f "$config_dir/config.toml" ]; then
-        echo "Error: $config_dir/config.toml not found."
-        echo "Register the node first:"
-        if [ -n "$profile" ] && [ "$profile" != "default" ]; then
-            echo "  nyxid node register --token <token> --url <ws-url> --profile $profile"
-        else
-            echo "  nyxid node register --token <token> --url <ws-url>"
-        fi
-        exit 1
-    fi
-
     # Check if image exists, build if not
     if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
         cmd_build
     fi
+
+    # Build env args for auto-registration (entrypoint handles the logic)
+    local env_args=()
+    if [ -n "${NYXID_NODE_TOKEN:-}" ]; then
+        env_args+=(-e "NYXID_NODE_TOKEN=$NYXID_NODE_TOKEN")
+    fi
+    if [ -n "${NYXID_NODE_URL:-}" ]; then
+        env_args+=(-e "NYXID_NODE_URL=$NYXID_NODE_URL")
+    fi
+
+    if [ ! -f "$config_dir/config.toml" ] && [ -z "${NYXID_NODE_TOKEN:-}" ]; then
+        echo "Error: $config_dir/config.toml not found."
+        echo "Either register the node first or pass NYXID_NODE_TOKEN:"
+        echo "  NYXID_NODE_TOKEN=nyx_nreg_... NYXID_NODE_URL=wss://... $0 start ${profile:-}"
+        exit 1
+    fi
+
+    mkdir -p "$config_dir"
 
     echo "Starting node agent: $name (config: $config_dir)"
     docker run -d \
@@ -75,6 +82,7 @@ cmd_start() {
         --restart unless-stopped \
         --user "$(id -u):$(id -g)" \
         -v "$config_dir:/app/config:rw" \
+        "${env_args[@]}" \
         "$IMAGE"
 
     echo "Container $name started."
