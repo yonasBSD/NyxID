@@ -23,7 +23,7 @@ use crate::models::node::{COLLECTION_NAME as NODES, Node};
 use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::mw::auth::AuthUser;
-use crate::services::{key_service, llm_usage_service};
+use crate::services::key_service;
 
 // --- Request / Response types ---
 
@@ -180,11 +180,6 @@ pub struct ApiKeyUsageResponse {
     pub error_rate: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_used_at: Option<String>,
-    pub prompt_tokens: u64,
-    pub completion_tokens: u64,
-    pub total_tokens: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reported_cost: Option<f64>,
     pub top_services: Vec<ApiKeyServiceUsage>,
     pub daily_buckets: Vec<ApiKeyUsageBucket>,
 }
@@ -402,10 +397,6 @@ struct ApiKeyUsageAccumulator {
     request_count: u64,
     error_count: u64,
     last_used_at: Option<DateTime<Utc>>,
-    prompt_tokens: u64,
-    completion_tokens: u64,
-    total_tokens: u64,
-    reported_cost: Option<f64>,
     top_services: HashMap<String, ServiceUsageAccumulator>,
     daily_buckets: BTreeMap<String, (u64, u64)>,
 }
@@ -419,10 +410,6 @@ impl ApiKeyUsageAccumulator {
             request_count: 0,
             error_count: 0,
             last_used_at: key.last_used_at,
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            total_tokens: 0,
-            reported_cost: None,
             top_services: HashMap::new(),
             daily_buckets: BTreeMap::new(),
         }
@@ -595,24 +582,8 @@ async fn build_api_key_usage(
             continue;
         };
 
+        // Skip LLM usage events -- token/cost tracking is not part of agent isolation.
         if entry.event_type == "llm_usage_reported" {
-            if let Some(usage) = entry
-                .event_data
-                .as_ref()
-                .and_then(llm_usage_service::extract_reported_usage)
-            {
-                accumulator.prompt_tokens += usage.prompt_tokens;
-                accumulator.completion_tokens += usage.completion_tokens;
-                accumulator.total_tokens += usage.total_tokens;
-                if let Some(cost) = usage.reported_cost {
-                    accumulator.reported_cost = Some(
-                        accumulator
-                            .reported_cost
-                            .map(|current| current + cost)
-                            .unwrap_or(cost),
-                    );
-                }
-            }
             continue;
         }
 
@@ -706,10 +677,6 @@ async fn build_api_key_usage(
                 error_count: accumulator.error_count,
                 error_rate,
                 last_used_at: accumulator.last_used_at.map(|dt| dt.to_rfc3339()),
-                prompt_tokens: accumulator.prompt_tokens,
-                completion_tokens: accumulator.completion_tokens,
-                total_tokens: accumulator.total_tokens,
-                reported_cost: accumulator.reported_cost,
                 top_services,
                 daily_buckets,
             }
