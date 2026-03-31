@@ -574,14 +574,33 @@ async fn execute_proxy_inner(
     // Resolve delegated credentials before the node/standard branch split so that
     // node-routed requests also get path-injection prefixes (e.g. Telegram Bot API
     // `/bot<TOKEN>/method`) and header/query credential injection.
-    let delegated = delegation_service::resolve_delegated_credentials(
+    //
+    // For node-routed services the node agent injects credentials locally, so
+    // a missing server-side provider token is not fatal.
+    let delegated_result = delegation_service::resolve_delegated_credentials(
         &state.db,
         &state.encryption_keys,
         &user_id_str,
         service_id,
     )
-    .await
-    .map_err(|e| AppError::BadRequest(format!("Provider credentials not available: {e}")))?;
+    .await;
+
+    let delegated = match delegated_result {
+        Ok(creds) => creds,
+        Err(e) if node_route.is_some() => {
+            tracing::debug!(
+                service_id = %service_id,
+                error = %e,
+                "Server-side provider credentials unavailable; node agent will inject credentials"
+            );
+            vec![]
+        }
+        Err(e) => {
+            return Err(AppError::BadRequest(format!(
+                "Provider credentials not available: {e}"
+            )));
+        }
+    };
 
     // Build identity headers before the node/direct split so both proxy paths
     // preserve the same downstream identity and delegation context.
