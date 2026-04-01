@@ -340,10 +340,10 @@ function AddRouteDialog({
             {keysWithCallback.length === 0 && activeApiKeys.length > 0 ? (
               <div className="rounded-md border border-border bg-muted/50 p-3">
                 <p className="text-sm text-muted-foreground">
-                  None of your API keys have a callback URL set.
+                  None of your agent keys have a callback URL set.
                   Go to{" "}
                   <a href="/keys?tab=nyxid" className="text-primary underline">
-                    API Keys
+                    Agent Keys
                   </a>
                   {" "}and set a Callback URL on the key you want to use as an agent.
                 </p>

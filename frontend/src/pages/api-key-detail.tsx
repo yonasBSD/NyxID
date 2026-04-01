@@ -45,7 +45,7 @@ export function ApiKeyDetailPage() {
           title="Key Not Found"
           breadcrumbs={[
             { label: "AI Services", to: "/keys" },
-            { label: "API Keys", to: "/keys?tab=nyxid" },
+            { label: "Agent Keys", to: "/keys?tab=nyxid" },
             { label: "Not Found" },
           ]}
         />
@@ -69,7 +69,7 @@ export function ApiKeyDetailPage() {
         }
         breadcrumbs={[
           { label: "AI Services", to: "/keys" },
-          { label: "API Keys", to: "/keys?tab=nyxid" },
+          { label: "Agent Keys", to: "/keys?tab=nyxid" },
           { label: apiKey.name },
         ]}
         actions={
