@@ -8,11 +8,10 @@ use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
 use crate::AppState;
-use crate::errors::{AppError, AppResult};
-use crate::handlers::services_helpers::validate_optional_spec_url;
+use crate::errors::AppResult;
 use crate::models::downstream_service::ServiceCapabilities;
 use crate::mw::auth::AuthUser;
-use crate::services::{catalog_service, openapi_parser};
+use crate::services::{api_docs_service, catalog_service, openapi_parser};
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct CatalogEntryResponse {
@@ -279,11 +278,10 @@ pub async fn list_catalog_endpoints(
         }));
     };
 
-    // Defense-in-depth: re-validate the stored URL before making an outbound fetch
-    validate_optional_spec_url(spec_url)
-        .map_err(|_| AppError::BadRequest("Service has an invalid OpenAPI spec URL".to_string()))?;
-
-    let parsed = openapi_parser::parse_openapi_spec(&state.http_client, spec_url).await?;
+    // Use the hardened fetch path (DNS pinning, 5MB size limit, redirect policy, 60s cache)
+    // instead of raw reqwest to prevent SSRF and resource exhaustion.
+    let spec = api_docs_service::fetch_spec_json(spec_url).await?;
+    let parsed = openapi_parser::parse_openapi_spec_value(&spec)?;
     let endpoints = parsed
         .into_iter()
         .map(parsed_endpoint_to_response)

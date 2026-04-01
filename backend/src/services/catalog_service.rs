@@ -260,16 +260,14 @@ async fn list_catalog_filtered(
 }
 
 /// Get the raw DownstreamService by slug (lightweight, no provider/encryption lookup).
+/// Uses the same filter as `get_catalog_entry` (slug + is_active) so provider-category
+/// services are not excluded from endpoint discovery.
 pub async fn get_downstream_service_by_slug(
     db: &mongodb::Database,
     slug: &str,
 ) -> AppResult<DownstreamService> {
     db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .find_one(doc! {
-            "slug": slug,
-            "is_active": true,
-            "service_category": { "$in": ["connection", "internal"] },
-        })
+        .find_one(doc! { "slug": slug, "is_active": true })
         .await?
         .ok_or_else(|| AppError::NotFound("Catalog entry not found".to_string()))
 }

@@ -110,6 +110,12 @@ pub fn is_auto_discovered_asyncapi_spec_url(base_url: &str, spec_url: &str) -> b
     is_probe_url(base_url, spec_url, ASYNCAPI_PROBE_PATHS)
 }
 
+/// Fetch a JSON spec from a URL using the hardened fetch path (DNS pinning,
+/// response-size limit, redirect policy, 60s cache). Returns the cached Arc.
+pub async fn fetch_spec_json(url: &str) -> AppResult<Arc<serde_json::Value>> {
+    fetch_json_spec(url).await
+}
+
 pub async fn fetch_downstream_openapi_spec(
     service: &DownstreamService,
     proxy_base_url: &str,
