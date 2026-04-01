@@ -158,23 +158,40 @@ async fn decrypt_provider_client_id(
     }
 }
 
+/// MongoDB filter for service_category that handles legacy documents
+/// created before the field was added (defaults to "connection").
+fn legacy_service_category_filter(categories: &[&str]) -> mongodb::bson::Document {
+    doc! {
+        "$or": categories.iter().map(|c| doc! { "service_category": c }).chain(
+            std::iter::once(doc! { "service_category": { "$exists": false } })
+        ).collect::<Vec<_>>(),
+    }
+}
+
 /// List catalog entries available for user key creation.
 /// Filters to connection-category + provider-linked services.
 pub async fn list_catalog(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
 ) -> AppResult<Vec<CatalogEntry>> {
+    // Legacy documents may lack requires_user_credential (defaults to true)
+    // and service_category (defaults to "connection").
     list_catalog_filtered(
         db,
         encryption_keys,
         doc! {
             "service_type": "http",
             "is_active": true,
-            "$or": [
-                { "requires_user_credential": true },
-                { "provider_config_id": { "$ne": null } },
+            "$and": [
+                {
+                    "$or": [
+                        { "requires_user_credential": true },
+                        { "requires_user_credential": { "$exists": false } },
+                        { "provider_config_id": { "$ne": null } },
+                    ],
+                },
+                legacy_service_category_filter(&["connection", "internal"]),
             ],
-            "service_category": { "$in": ["connection", "internal"] },
         },
     )
     .await
@@ -185,15 +202,9 @@ pub async fn list_catalog_all(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
 ) -> AppResult<Vec<CatalogEntry>> {
-    list_catalog_filtered(
-        db,
-        encryption_keys,
-        doc! {
-            "is_active": true,
-            "service_category": { "$in": ["connection", "internal"] },
-        },
-    )
-    .await
+    let mut filter = doc! { "is_active": true };
+    filter.extend(legacy_service_category_filter(&["connection", "internal"]));
+    list_catalog_filtered(db, encryption_keys, filter).await
 }
 
 async fn list_catalog_filtered(
