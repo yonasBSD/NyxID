@@ -1,3 +1,4 @@
+import { BlurView } from "expo-blur";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { radius, spacing } from "../theme/designTokens";
 import { mobileTheme } from "../theme/mobileTheme";
@@ -54,7 +55,13 @@ export function HistoryCard({ item, onPress }: HistoryCardProps) {
 }
 
 export function HistorySectionHeader({ title }: { title: string }) {
-  return <Text style={styles.sectionHeader}>{title}</Text>;
+  return (
+    <View style={styles.sectionHeaderRow}>
+      <BlurView intensity={60} tint="dark" style={styles.sectionHeaderBlur}>
+        <Text style={styles.sectionHeader}>{title}</Text>
+      </BlurView>
+    </View>
+  );
 }
 
 const styles = StyleSheet.create({
@@ -87,13 +94,23 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: mobileTheme.textMuted,
   },
+  sectionHeaderRow: {
+    flexDirection: "row",
+    marginBottom: spacing.sm,
+    marginTop: spacing.xs,
+  },
+  sectionHeaderBlur: {
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
+    borderRadius: 6,
+    overflow: "hidden",
+    backgroundColor: "rgba(15,10,30,0.5)",
+  },
   sectionHeader: {
     fontSize: 11,
     fontWeight: "600",
     color: mobileTheme.textMuted,
     textTransform: "uppercase",
     letterSpacing: 0.4,
-    marginBottom: spacing.sm,
-    marginTop: spacing.xs,
   },
 });

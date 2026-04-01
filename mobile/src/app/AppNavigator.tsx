@@ -1,5 +1,6 @@
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { StyleSheet, View } from "react-native";
+import { LinearGradient } from "expo-linear-gradient";
 import { AuthHomeScreen } from "../features/auth/AuthHomeScreen";
 import { useAuthSession } from "../features/auth/AuthSessionContext";
 import { AccountSettingsScreen } from "../features/account/AccountSettingsScreen";
@@ -97,11 +98,18 @@ export function AppNavigator({ currentRouteName, onMainTabPress, onNyxPress }: A
         </Stack.Navigator>
       </View>
       {showGlobalBottomNav ? (
-        <View style={styles.bottomWrap}>
-          <View style={styles.navContainer}>
-            <BottomNavV2 active={activeMainTab} onTabPress={(tab) => onMainTabPress?.(tab)} />
-            <View style={styles.fabPosition}>
-              <NyxFAB onPress={onNyxPress} />
+        <View style={styles.bottomOverlay} pointerEvents="box-none">
+          <LinearGradient
+            colors={["transparent", mobileTheme.bg]}
+            style={styles.fadeGradient}
+            pointerEvents="none"
+          />
+          <View style={styles.bottomWrap}>
+            <View style={styles.navContainer}>
+              <BottomNavV2 active={activeMainTab} onTabPress={(tab) => onMainTabPress?.(tab)} />
+              <View style={styles.fabPosition}>
+                <NyxFAB onPress={onNyxPress} />
+              </View>
             </View>
           </View>
         </View>
@@ -118,9 +126,19 @@ const styles = StyleSheet.create({
   stackWrap: {
     flex: 1,
   },
+  bottomOverlay: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 0,
+  },
+  fadeGradient: {
+    height: 40,
+  },
   bottomWrap: {
     paddingHorizontal: spacing.xxl,
     paddingBottom: spacing.xxxl,
+    backgroundColor: mobileTheme.bg,
   },
   navContainer: {
     position: "relative",

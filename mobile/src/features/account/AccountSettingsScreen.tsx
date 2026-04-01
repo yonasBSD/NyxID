@@ -11,6 +11,8 @@ import { ToastKind, ToastOverlay, ToastState } from "../../components/ToastOverl
 import { useAuthSession } from "../auth/AuthSessionContext";
 import { useNetworkStatus } from "../../hooks/useNetworkStatus";
 import { mobileApi } from "../../lib/api/mobileApi";
+import { isApiError } from "../../lib/api/ApiError";
+import { resolveErrorMessage } from "../../lib/api/errorMessages";
 import { mobileTheme } from "../../theme/mobileTheme";
 import { flowStyles } from "../../theme/flowStyles";
 import { radius, spacing, typeScale } from "../../theme/designTokens";
@@ -22,24 +24,25 @@ function resolveDeleteAccountError(error: unknown): {
   message: string;
   shouldForceSignOut: boolean;
 } {
-  const raw = error instanceof Error ? error.message : "";
-  const code = raw.toLowerCase();
+  // Use errorKey for reliable matching when available (machine-readable, stable)
+  if (isApiError(error)) {
+    const key = error.errorKey;
+    if (key === "unauthorized" || key === "authentication_failed" || key === "token_expired") {
+      return { message: "Session expired. Please sign in again.", shouldForceSignOut: true };
+    }
+    if (key === "not_found" || error.statusCode === 404) {
+      return { message: "Account not found or already deleted.", shouldForceSignOut: true };
+    }
+  }
 
-  if (
-    code.includes("auth_session_missing") ||
-    code.includes("unauthorized") ||
-    code.includes("invalid_token") ||
-    code.includes("token_expired") ||
-    code.includes("request_failed_401")
-  ) {
+  const raw = error instanceof Error ? error.message : "";
+  const lower = raw.toLowerCase();
+
+  if (lower.includes("auth_session_missing") || lower.includes("request_failed_401")) {
     return { message: "Session expired. Please sign in again.", shouldForceSignOut: true };
   }
 
-  if (code.includes("user_not_found") || code.includes("not found") || code.includes("request_failed_404")) {
-    return { message: "Account not found or already deleted.", shouldForceSignOut: true };
-  }
-
-  if (code.includes("network request failed") || code.includes("failed to fetch")) {
+  if (lower.includes("network request failed") || lower.includes("failed to fetch")) {
     return { message: "Network error. Check API server and try again.", shouldForceSignOut: false };
   }
 
@@ -120,15 +123,14 @@ export function AccountSettingsScreen({ navigation }: Props) {
   });
 
   const notifMutation = useMutation({
-    mutationFn: (payload: { telegram_enabled?: boolean; push_enabled?: boolean }) =>
+    mutationFn: (payload: Parameters<typeof mobileApi.updateNotificationSettings>[0]) =>
       mobileApi.updateNotificationSettings(payload),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["account", "notificationSettings"] });
       showToast("Notification settings updated", "success");
     },
     onError: (error) => {
-      const msg = error instanceof Error ? error.message : "Failed to update settings";
-      showToast(msg, "error");
+      showToast(resolveErrorMessage(error), "error");
       void refetchNotifSettings();
     },
   });
@@ -142,27 +144,17 @@ export function AccountSettingsScreen({ navigation }: Props) {
       showToast("Telegram disconnected", "success");
     },
     onError: (error) => {
-      showToast(error instanceof Error ? error.message : "Failed to disconnect", "error");
+      showToast(resolveErrorMessage(error), "error");
     },
   });
 
-  const handleTelegramRowPress = () => {
-    if (notifSettings?.telegram_connected) {
-      Alert.alert(
-        "Disconnect Telegram",
-        `Disconnect @${notifSettings.telegram_username ?? "Telegram"}? You will no longer receive Telegram notifications.`,
-        [
-          { text: "Cancel", style: "cancel" },
-          {
-            text: "Disconnect",
-            style: "destructive",
-            onPress: () => telegramDisconnectMutation.mutate(),
-          },
-        ]
-      );
-    } else {
-      setIsTelegramLinkVisible(true);
+  /** True when the other channel can't receive notifications */
+  const isLastChannel = (turning: "push" | "telegram"): boolean => {
+    if (!notifSettings) return false;
+    if (turning === "push") {
+      return !(notifSettings.telegram_connected && notifSettings.telegram_enabled);
     }
+    return !(notifSettings.push_enabled && notifSettings.push_device_count > 0);
   };
 
   const handleTelegramConnected = () => {
@@ -176,18 +168,24 @@ export function AccountSettingsScreen({ navigation }: Props) {
       notifMutation.mutate({ push_enabled: true });
       return;
     }
-    Alert.alert(
-      "Disable Push Notifications",
-      "You will no longer receive push notifications for approval requests. Are you sure?",
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Disable",
-          style: "destructive",
-          onPress: () => notifMutation.mutate({ push_enabled: false }),
+    const willDisableApproval = isLastChannel("push") && notifSettings?.approval_required;
+    const message = willDisableApproval
+      ? "This is your only notification channel. Disabling it will also turn off approval protection."
+      : "You will no longer receive push notifications for approval requests.";
+
+    Alert.alert("Disable Push Notifications", message, [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Disable",
+        style: "destructive",
+        onPress: () => {
+          notifMutation.mutate({
+            push_enabled: false,
+            ...(willDisableApproval && { approval_required: false }),
+          });
         },
-      ]
-    );
+      },
+    ]);
   };
 
   const handleToggleTelegram = (newValue: boolean) => {
@@ -195,18 +193,31 @@ export function AccountSettingsScreen({ navigation }: Props) {
       notifMutation.mutate({ telegram_enabled: true });
       return;
     }
-    Alert.alert(
-      "Disable Telegram Notifications",
-      "You will no longer receive Telegram notifications for approval requests. Are you sure?",
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Disable",
-          style: "destructive",
-          onPress: () => notifMutation.mutate({ telegram_enabled: false }),
+    const willDisableApproval = isLastChannel("telegram") && notifSettings?.approval_required;
+    const willDisconnect = true; // disabling always disconnects
+    const message = willDisableApproval
+      ? "This is your only notification channel. Disabling it will disconnect Telegram and turn off approval protection."
+      : "This will disconnect your Telegram account and stop all Telegram notifications.";
+
+    Alert.alert("Disable Telegram", message, [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Disable",
+        style: "destructive",
+        onPress: async () => {
+          // Disable notifications + approval in one call, then disconnect
+          try {
+            await mobileApi.updateNotificationSettings({
+              telegram_enabled: false,
+              ...(willDisableApproval && { approval_required: false }),
+            });
+          } catch {
+            // disconnect will cascade anyway
+          }
+          telegramDisconnectMutation.mutate();
         },
-      ]
-    );
+      },
+    ]);
   };
 
   const deleteAccountMutation = useMutation({
@@ -329,37 +340,35 @@ export function AccountSettingsScreen({ navigation }: Props) {
                   )}
                 </View>
               </View>
-              {notifSettings?.telegram_connected ? (
-                <>
-                  <Pressable onPress={handleTelegramRowPress}>
-                    <View style={styles.accountRow}>
-                      <Text style={styles.accountRowLabel}>Telegram</Text>
-                      <View style={styles.accountRowRight}>
-                        <Text style={styles.accountRowValue}>@{notifSettings.telegram_username ?? "Connected"}</Text>
-                        <Text style={styles.accountRowArrow}>→</Text>
-                      </View>
+              <View style={[styles.accountRow, styles.accountRowLast]}>
+                {notifSettings?.telegram_connected ? (
+                  <View style={styles.channelRowLeft}>
+                    <Text style={styles.accountRowLabel}>Telegram</Text>
+                    <View style={styles.connectedPill}>
+                      <Text style={styles.connectedPillText}>@{notifSettings.telegram_username ?? "linked"}</Text>
+                    </View>
+                  </View>
+                ) : (
+                  <Pressable onPress={() => setIsTelegramLinkVisible(true)} style={styles.channelRowLeft}>
+                    <Text style={styles.accountRowLabel}>Telegram</Text>
+                    <View style={styles.linkPill}>
+                      <Text style={styles.linkPillText}>Link account</Text>
                     </View>
                   </Pressable>
-                  <View style={[styles.accountRow, styles.accountRowLast]}>
-                    <Text style={styles.accountRowLabel}>Telegram Alerts</Text>
-                    <Switch
-                      value={notifSettings.telegram_enabled}
-                      onValueChange={handleToggleTelegram}
-                      disabled={notifMutation.isPending}
-                      trackColor={{ false: mobileTheme.borderSoft, true: mobileTheme.success }}
-                    />
-                  </View>
-                </>
-              ) : (
-                <Pressable onPress={handleTelegramRowPress}>
-                  <View style={[styles.accountRow, styles.accountRowLast]}>
-                    <Text style={styles.accountRowLabel}>Telegram</Text>
-                    <View style={styles.accountRowRight}>
-                      <Text style={styles.accountRowValue}>Not linked</Text>
-                      <Text style={styles.accountRowArrow}>→</Text>
-                    </View>
-                  </View>
-                </Pressable>
+                )}
+                {notifSettings?.telegram_connected && (
+                  <Switch
+                    value={notifSettings.telegram_enabled}
+                    onValueChange={handleToggleTelegram}
+                    disabled={notifMutation.isPending}
+                    trackColor={{ false: mobileTheme.borderSoft, true: mobileTheme.success }}
+                  />
+                )}
+              </View>
+              {notifSettings && (
+                <Text style={styles.channelHint}>
+                  Either Push or Telegram must stay enabled to receive approval requests.
+                </Text>
               )}
             </>
           )}
@@ -503,6 +512,47 @@ const styles = StyleSheet.create({
   accountRowArrow: {
     fontSize: 14,
     color: mobileTheme.textMuted,
+  },
+  channelRowLeft: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    flex: 1,
+  },
+  connectedPill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: "rgba(139, 92, 246, 0.1)",
+    borderWidth: 1,
+    borderColor: "rgba(139, 92, 246, 0.2)",
+    borderRadius: radius.pill,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+  },
+  connectedPillText: {
+    fontSize: 11,
+    fontWeight: "600",
+    color: mobileTheme.primary,
+  },
+  linkPill: {
+    backgroundColor: "rgba(139, 92, 246, 0.08)",
+    borderWidth: 1,
+    borderColor: "rgba(139, 92, 246, 0.15)",
+    borderRadius: radius.pill,
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+  },
+  linkPillText: {
+    fontSize: 11,
+    fontWeight: "600",
+    color: mobileTheme.primary,
+  },
+  channelHint: {
+    fontSize: 11,
+    color: mobileTheme.textMuted,
+    marginTop: 6,
+    lineHeight: 15,
   },
   actionsWrap: {
     gap: spacing.md,

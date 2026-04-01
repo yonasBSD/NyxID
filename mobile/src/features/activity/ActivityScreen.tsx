@@ -1,13 +1,28 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
+  Dimensions,
   FlatList,
+  Modal,
+  Pressable,
   RefreshControl,
   SectionList,
   StyleSheet,
   Text,
   View,
 } from "react-native";
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  withSpring,
+  withTiming,
+  runOnJS,
+} from "react-native-reanimated";
+import {
+  GestureHandlerRootView,
+  Gesture,
+  GestureDetector,
+} from "react-native-gesture-handler";
 import { useNavigation } from "@react-navigation/native";
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -24,9 +39,12 @@ import { FullScreenLoading } from "../../components/FullScreenLoading";
 import { useNetworkStatus } from "../../hooks/useNetworkStatus";
 import { mobileApi } from "../../lib/api/mobileApi";
 import { createIdempotencyKey } from "../../lib/api/idempotency";
-import { getDecisionErrorMessage, formatGrantDuration } from "./challengeUiState";
+import { getDecisionErrorMessage, formatGrantDuration, getChallengeActionState } from "./challengeUiState";
+import { StatusBadge } from "../../components/StatusBadge";
+import { PrimaryButton } from "../../components/PrimaryButton";
 import { mobileTheme } from "../../theme/mobileTheme";
-import { spacing, typeScale } from "../../theme/designTokens";
+import { flowStyles } from "../../theme/flowStyles";
+import { radius, spacing, typeScale } from "../../theme/designTokens";
 import type { RootStackParamList } from "../../app/AppNavigator";
 import type { ActivitySegment } from "./activityTypes";
 import type { ChallengeDetail, ApprovalItem } from "../../lib/api/types";
@@ -56,6 +74,162 @@ function groupHistoryByDate(items: ChallengeDetail[]) {
   return Object.entries(groups).map(([title, data]) => ({ title, data }));
 }
 
+const SCREEN_HEIGHT = Dimensions.get("window").height;
+const SHEET_TOP = 120;
+const SHEET_HEIGHT = SCREEN_HEIGHT - SHEET_TOP;
+const CLOSE_THRESHOLD = 60;
+
+function DetailRow({ label, value, isLast, valueColor }: {
+  label: string;
+  value: string;
+  isLast?: boolean;
+  valueColor?: string;
+}) {
+  return (
+    <View style={isLast ? flowStyles.rowLast : flowStyles.row}>
+      <Text style={flowStyles.rowLabel}>{label}</Text>
+      <Text style={[flowStyles.rowValue, valueColor ? { color: valueColor } : undefined]}>
+        {value}
+      </Text>
+    </View>
+  );
+}
+
+function ChallengeDetailSheet({
+  challenge,
+  grantDurationLabel,
+  onClose,
+}: {
+  challenge: ChallengeDetail | null;
+  grantDurationLabel: string;
+  onClose: () => void;
+}) {
+  const [modalVisible, setModalVisible] = useState(false);
+  const isDismissing = useRef(false);
+  // Keep a snapshot of the challenge so we can render during the dismiss animation
+  const displayChallenge = useRef<ChallengeDetail | null>(null);
+  const translateY = useSharedValue(SHEET_HEIGHT);
+
+  if (challenge) {
+    displayChallenge.current = challenge;
+  }
+
+  useEffect(() => {
+    if (challenge) {
+      isDismissing.current = false;
+      translateY.value = SHEET_HEIGHT;
+      setModalVisible(true);
+      requestAnimationFrame(() => {
+        translateY.value = withSpring(0, { damping: 28, stiffness: 300 });
+      });
+    } else if (modalVisible) {
+      // Animate out, then hide the modal
+      isDismissing.current = true;
+      translateY.value = withTiming(SHEET_HEIGHT, { duration: 280 }, (finished) => {
+        if (finished) {
+          runOnJS(setModalVisible)(false);
+        }
+      });
+    }
+  }, [challenge, translateY]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleClose = useCallback(() => {
+    if (isDismissing.current) return;
+    isDismissing.current = true;
+    translateY.value = withTiming(SHEET_HEIGHT, { duration: 280 }, (finished) => {
+      if (finished) {
+        runOnJS(onClose)();
+        runOnJS(setModalVisible)(false);
+      }
+    });
+  }, [onClose, translateY]);
+
+  const panGesture = useMemo(
+    () =>
+      Gesture.Pan()
+        .onUpdate((e) => {
+          "worklet";
+          if (e.translationY > 0) {
+            translateY.value = e.translationY;
+          }
+        })
+        .onEnd((e) => {
+          "worklet";
+          if (e.translationY > CLOSE_THRESHOLD) {
+            translateY.value = withTiming(SHEET_HEIGHT, { duration: 250 }, (finished) => {
+              if (finished) {
+                runOnJS(onClose)();
+                runOnJS(setModalVisible)(false);
+              }
+            });
+          } else {
+            translateY.value = withSpring(0, { damping: 28, stiffness: 300 });
+          }
+        }),
+    [onClose, translateY]
+  );
+
+  const sheetAnimatedStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: translateY.value }],
+  }));
+
+  const backdropAnimatedStyle = useAnimatedStyle(() => ({
+    opacity: 0.55 * Math.max(0, 1 - translateY.value / SHEET_HEIGHT),
+  }));
+
+  const shown = displayChallenge.current;
+  if (!shown) return null;
+
+  const actionState = getChallengeActionState(shown);
+  const riskColor = shown.risk_level === "high" ? "#FCA5A5" : "#FCD34D";
+  const isGrantMode = shown.approval_mode === "grant";
+
+  return (
+    <Modal
+      visible={modalVisible}
+      transparent
+      animationType="none"
+      statusBarTranslucent
+      onRequestClose={handleClose}
+    >
+      <GestureHandlerRootView style={sheetStyles.modalRoot}>
+        <Animated.View style={[sheetStyles.backdrop, backdropAnimatedStyle]} pointerEvents="auto">
+          <Pressable style={StyleSheet.absoluteFill} onPress={handleClose} />
+        </Animated.View>
+
+        <Animated.View style={[sheetStyles.sheet, sheetAnimatedStyle]}>
+          <GestureDetector gesture={panGesture}>
+            <Animated.View style={sheetStyles.handleArea}>
+              <View style={sheetStyles.handle} />
+            </Animated.View>
+          </GestureDetector>
+
+          <View style={sheetStyles.sheetHeader}>
+            <Text style={sheetStyles.sheetTitle}>Challenge Detail</Text>
+            <Pressable style={sheetStyles.closeBtn} onPress={handleClose}>
+              <Text style={sheetStyles.closeBtnText}>✕</Text>
+            </Pressable>
+          </View>
+
+          <View style={sheetStyles.sheetBody}>
+            <View style={sheetStyles.detailCard}>
+              <Text style={flowStyles.cardTitle}>Request Context</Text>
+              <DetailRow label="Action" value={shown.action} />
+              <DetailRow label="Resource" value={shown.resource} />
+              <DetailRow label="Service" value={shown.title} />
+              <DetailRow label="Client" value={shown.request_context.client} />
+              <DetailRow label="Risk Level" value={shown.risk_level.toUpperCase()} valueColor={riskColor} />
+              <DetailRow label="Status" value={actionState.statusLabel} />
+              {isGrantMode && <DetailRow label="Grant Duration" value={grantDurationLabel} />}
+              <DetailRow label="Location" value={shown.request_context.location} isLast />
+            </View>
+          </View>
+        </Animated.View>
+      </GestureHandlerRootView>
+    </Modal>
+  );
+}
+
 export function ActivityScreen() {
   const navigation = useNavigation<Nav>();
   const queryClient = useQueryClient();
@@ -63,6 +237,7 @@ export function ActivityScreen() {
   const [activeSegment, setActiveSegment] = useState<ActivitySegment>("pending");
   const [toast, setToast] = useState<ToastState | null>(null);
   const [mutatingIds, setMutatingIds] = useState<Set<string>>(new Set());
+  const [detailChallenge, setDetailChallenge] = useState<ChallengeDetail | null>(null);
 
   useEffect(() => {
     if (!toast) return;
@@ -226,7 +401,7 @@ export function ActivityScreen() {
                 challenge={item}
                 grantDurationLabel={grantDurationLabel}
                 isMutating={mutatingIds.has(item.id)}
-                onPress={() => navigation.navigate("ActivityDetail", { challengeId: item.id })}
+                onPress={() => setDetailChallenge(item)}
                 onApprove={() => decideMutation.mutate({ id: item.id, decision: "APPROVE" })}
                 onDeny={() => decideMutation.mutate({ id: item.id, decision: "DENY" })}
               />
@@ -277,10 +452,11 @@ export function ActivityScreen() {
             renderItem={({ item }) => (
               <HistoryCard
                 item={item}
-                onPress={() => navigation.navigate("ActivityDetail", { challengeId: item.id })}
+                onPress={() => setDetailChallenge(item)}
               />
             )}
             renderSectionHeader={({ section }) => <HistorySectionHeader title={section.title} />}
+            stickySectionHeadersEnabled
             contentContainerStyle={styles.listContent}
             ItemSeparatorComponent={() => <View style={styles.separator} />}
             SectionSeparatorComponent={() => <View style={styles.sectionSep} />}
@@ -291,6 +467,11 @@ export function ActivityScreen() {
         )
       )}
 
+      <ChallengeDetailSheet
+        challenge={detailChallenge}
+        grantDurationLabel={grantDurationLabel}
+        onClose={() => setDetailChallenge(null)}
+      />
       <ToastOverlay toast={toast} bottom={64} />
     </ScreenContainer>
   );
@@ -330,5 +511,88 @@ const styles = StyleSheet.create({
   emptyWrap: {
     paddingHorizontal: spacing.xxl,
     paddingTop: spacing.xxl,
+  },
+});
+
+const sheetStyles = StyleSheet.create({
+  modalRoot: {
+    flex: 1,
+  },
+  backdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "#000",
+  },
+  sheet: {
+    position: "absolute",
+    top: SHEET_TOP,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: mobileTheme.bg,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    borderWidth: 1,
+    borderBottomWidth: 0,
+    borderColor: mobileTheme.border,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: -10 },
+    shadowOpacity: 0.4,
+    shadowRadius: 40,
+    elevation: 24,
+    overflow: "hidden",
+  },
+  handleArea: {
+    alignItems: "center",
+    paddingTop: 10,
+    paddingBottom: 6,
+  },
+  handle: {
+    width: 36,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: "rgba(255,255,255,0.15)",
+  },
+  sheetHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: spacing.xxl,
+    paddingBottom: spacing.lg,
+    borderBottomWidth: 1,
+    borderBottomColor: mobileTheme.borderSoft,
+  },
+  sheetTitle: {
+    fontSize: 18,
+    fontWeight: "700",
+    color: mobileTheme.textPrimary,
+    fontFamily: "SpaceGrotesk_700Bold",
+  },
+  closeBtn: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: "rgba(255,255,255,0.06)",
+    borderWidth: 1,
+    borderColor: mobileTheme.borderSoft,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  closeBtnText: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: mobileTheme.textMuted,
+  },
+  sheetBody: {
+    flex: 1,
+    paddingHorizontal: spacing.xxl,
+    paddingTop: spacing.xl,
+  },
+  detailCard: {
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: mobileTheme.border,
+    backgroundColor: mobileTheme.cardSoft,
+    padding: spacing.lg,
+    gap: spacing.md,
   },
 });

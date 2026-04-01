@@ -1,3 +1,4 @@
+import { ApiError } from "./ApiError";
 import {
   clearStoredAuthSession,
   loadStoredAuthSession,
@@ -170,21 +171,24 @@ async function readJsonSafely(response: Response): Promise<unknown> {
   }
 }
 
-function stringifyErrorPayload(payload: unknown, status: number): string {
+function buildApiError(payload: unknown, status: number): ApiError | Error {
   if (payload && typeof payload === "object") {
-    if ("error" in payload && typeof payload.error === "string") {
-      return payload.error;
-    }
-    if ("message" in payload && typeof payload.message === "string") {
-      return payload.message;
-    }
+    const obj = payload as Record<string, unknown>;
+    const errorKey = typeof obj.error === "string" ? obj.error : `request_failed_${status}`;
+    const errorCode = typeof obj.error_code === "number" ? obj.error_code : 0;
+    const message =
+      typeof obj.message === "string" && obj.message.length > 0
+        ? obj.message
+        : errorKey;
+
+    return new ApiError({ errorKey, errorCode, statusCode: status, message });
   }
 
   if (typeof payload === "string" && payload.length > 0) {
-    return payload;
+    return new Error(payload);
   }
 
-  return `request_failed_${status}`;
+  return new Error(`request_failed_${status}`);
 }
 
 function computeAccessTokenExpiresAt(expiresInSec: number): number | undefined {
@@ -516,7 +520,7 @@ export async function requestJson<T>(path: string, options: RequestOptions = {})
         await clearStoredAuthSession();
       }
     }
-    throw new Error(stringifyErrorPayload(payload, response.status));
+    throw buildApiError(payload, response.status);
   }
 
   return payload as T;
@@ -613,7 +617,8 @@ export async function getChallengeRequest(challengeId: string): Promise<Challeng
     );
     return mapBackendRequestToChallenge(item);
   } catch (error) {
-    if (error instanceof Error && error.message === "not_found") {
+    if ((error instanceof ApiError && error.errorKey === "not_found") ||
+        (error instanceof Error && error.message === "not_found")) {
       throw new Error("challenge_not_found");
     }
     throw error;
