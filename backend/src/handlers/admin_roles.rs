@@ -155,6 +155,8 @@ pub async fn create_role(
         })),
         extract_ip(&headers),
         extract_user_agent(&headers),
+        None,
+        None,
     );
 
     Ok(Json(role_to_response(role)))
@@ -203,6 +205,8 @@ pub async fn update_role(
         })),
         extract_ip(&headers),
         extract_user_agent(&headers),
+        None,
+        None,
     );
 
     Ok(Json(role_to_response(role)))
@@ -226,6 +230,8 @@ pub async fn delete_role(
         Some(serde_json::json!({ "role_id": &role_id })),
         extract_ip(&headers),
         extract_user_agent(&headers),
+        None,
+        None,
     );
 
     Ok(Json(RoleAssignmentResponse {
@@ -297,6 +303,8 @@ pub async fn assign_role(
         })),
         extract_ip(&headers),
         extract_user_agent(&headers),
+        None,
+        None,
     );
 
     Ok(Json(RoleAssignmentResponse {
@@ -325,6 +333,8 @@ pub async fn revoke_role(
         })),
         extract_ip(&headers),
         extract_user_agent(&headers),
+        None,
+        None,
     );
 
     Ok(Json(RoleAssignmentResponse {
@@ -374,6 +384,8 @@ pub async fn bulk_assign_role(
         })),
         extract_ip(&headers),
         extract_user_agent(&headers),
+        None,
+        None,
     );
 
     Ok(Json(BulkAssignResponse {

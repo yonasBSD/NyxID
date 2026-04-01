@@ -13,6 +13,7 @@ import { Label } from "@/components/ui/label";
 import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
 import { ApiKeyTable } from "@/components/dashboard/api-key-table";
 import { ApiKeyCreateDialog } from "@/components/dashboard/api-key-create-dialog";
+import { ApiKeyUsageDashboard } from "@/components/dashboard/api-key-usage-dashboard";
 import type { KeyInfo } from "@/types/keys";
 
 type TabValue = "services" | "nyxid";
@@ -188,6 +189,7 @@ function ExternalServicesTab({
 function NyxIdApiKeysTab() {
   return (
     <div className="space-y-4">
+      <ApiKeyUsageDashboard />
       <div className="flex justify-end">
         <ApiKeyCreateDialog />
       </div>

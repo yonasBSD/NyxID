@@ -133,6 +133,8 @@ pub async fn handle_channel_message(
         })),
         None,
         None,
+        None,
+        None,
     );
 
     Ok(Json(ChannelWebhookResponse {
@@ -193,6 +195,8 @@ pub async fn create_mapping(
             "channel": &body.channel,
             "channel_user_id": &body.channel_user_id,
         })),
+        None,
+        None,
         None,
         None,
     );

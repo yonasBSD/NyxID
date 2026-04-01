@@ -383,6 +383,8 @@ pub async fn callback(
                 })),
                 ip,
                 ua,
+                None,
+                None,
             );
 
             build_web_auth_redirect(
@@ -419,6 +421,8 @@ pub async fn callback(
                 })),
                 ip,
                 ua,
+                None,
+                None,
             );
 
             build_mobile_auth_redirect(
@@ -652,6 +656,8 @@ pub async fn apple_callback(
                 })),
                 ip,
                 ua,
+                None,
+                None,
             );
 
             build_web_auth_redirect(
@@ -688,6 +694,8 @@ pub async fn apple_callback(
                 })),
                 ip,
                 ua,
+                None,
+                None,
             );
 
             build_mobile_auth_redirect(&tokens, &redirect_target, "apple", &user.id, secure, domain)

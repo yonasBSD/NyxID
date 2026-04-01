@@ -14,7 +14,7 @@ use crate::errors::{AppError, AppResult};
 use crate::mw::auth::AuthUser;
 use crate::services::{
     action_description, approval_service, audit_service, chatgpt_translator, delegation_service,
-    llm_gateway_service, notification_service, proxy_service,
+    llm_gateway_service, llm_usage_service, notification_service, proxy_service, sse_parser,
 };
 
 /// Maximum size for upstream response bodies (50 MB).
@@ -68,6 +68,9 @@ pub async fn llm_proxy_request(
     request: Request<Body>,
 ) -> AppResult<Response> {
     auth_user.ensure_llm_proxy_access()?;
+
+    // Per-agent rate limit check
+    crate::mw::rate_limit::check_agent_rate_limit(&state.per_agent_limiter, &auth_user)?;
 
     let user_id_str = auth_user.user_id.to_string();
 
@@ -132,6 +135,19 @@ pub async fn llm_proxy_request(
     let response = if provider_slug == "openai-codex" && !body_bytes.is_empty() {
         let body_json: serde_json::Value = serde_json::from_slice(&body_bytes)
             .map_err(|e| AppError::BadRequest(format!("Invalid JSON body: {e}")))?;
+        let usage_context = llm_usage_service::UsageAuditContext {
+            db: state.db.clone(),
+            user_id: user_id_str.clone(),
+            provider_slug: Some(provider_slug.clone()),
+            service_id: Some(service_id.clone()),
+            model: body_json
+                .get("model")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            path: path.clone(),
+            api_key_id: auth_user.api_key_id.clone(),
+            api_key_name: auth_user.api_key_name.clone(),
+        };
 
         // Path determines response format: chat/completions → Chat Completions,
         // responses → Responses API passthrough
@@ -152,6 +168,7 @@ pub async fn llm_proxy_request(
             is_streaming,
             is_chat_completions_path,
             query.as_deref(),
+            Some(usage_context),
         )
         .await?
     } else {
@@ -177,7 +194,23 @@ pub async fn llm_proxy_request(
         )
         .await?;
 
-        build_filtered_response(downstream_response).await?
+        let usage_context = llm_usage_service::UsageAuditContext {
+            db: state.db.clone(),
+            user_id: user_id_str.clone(),
+            provider_slug: Some(provider_slug.clone()),
+            service_id: Some(service_id.clone()),
+            model: None,
+            path: path.clone(),
+            api_key_id: auth_user.api_key_id.clone(),
+            api_key_name: auth_user.api_key_name.clone(),
+        };
+
+        build_filtered_response(
+            downstream_response,
+            Some(usage_context),
+            state.config.proxy_stream_idle_timeout_secs,
+        )
+        .await?
     };
 
     audit_service::log_async(
@@ -188,9 +221,14 @@ pub async fn llm_proxy_request(
             "provider_slug": &provider_slug,
             "method": method.as_str(),
             "path": &path,
+            "response_status": response.status().as_u16(),
+            "api_key_id": &auth_user.api_key_id,
+            "api_key_name": &auth_user.api_key_name,
         })),
         None,
         None,
+        auth_user.api_key_id.clone(),
+        auth_user.api_key_name.clone(),
     );
 
     Ok(response)
@@ -208,6 +246,9 @@ pub async fn gateway_request(
     request: Request<Body>,
 ) -> AppResult<Response> {
     auth_user.ensure_llm_proxy_access()?;
+
+    // Per-agent rate limit check
+    crate::mw::rate_limit::check_agent_rate_limit(&state.per_agent_limiter, &auth_user)?;
 
     let user_id_str = auth_user.user_id.to_string();
 
@@ -357,6 +398,19 @@ pub async fn gateway_request(
             }))
             .collect();
 
+    // Construct usage context once -- all branches share the same fields.
+    let usage_context = llm_usage_service::UsageAuditContext {
+        db: state.db.clone(),
+        user_id: user_id_str.clone(),
+        provider_slug: Some(provider_slug.clone()),
+        service_id: Some(service_id.clone()),
+        model: Some(model.to_string()),
+        path: path.clone(),
+        api_key_id: auth_user.api_key_id.clone(),
+        api_key_name: auth_user.api_key_name.clone(),
+    };
+    let idle_timeout_secs = state.config.proxy_stream_idle_timeout_secs;
+
     // OpenAI Codex: use the specialized HTTP SSE transport and preserve query
     // parameters on the translated request.
     let response = if provider_slug == "openai-codex" {
@@ -376,6 +430,7 @@ pub async fn gateway_request(
             is_streaming,
             is_chat_completions_path,
             query.as_deref(),
+            Some(usage_context),
         )
         .await?
     } else {
@@ -396,13 +451,25 @@ pub async fn gateway_request(
         if translator.needs_translation() {
             if is_streaming {
                 // Streaming: translate SSE events on the fly
-                build_translated_sse_response(downstream_response, translator).await?
+                build_translated_sse_response(
+                    downstream_response,
+                    translator,
+                    Some(usage_context),
+                    idle_timeout_secs,
+                )
+                .await?
             } else {
                 // Non-streaming: buffer and translate the full response
-                build_translated_json_response(downstream_response, translator.as_ref()).await?
+                build_translated_json_response(
+                    downstream_response,
+                    translator.as_ref(),
+                    Some(usage_context),
+                )
+                .await?
             }
         } else {
-            build_filtered_response(downstream_response).await?
+            build_filtered_response(downstream_response, Some(usage_context), idle_timeout_secs)
+                .await?
         }
     };
 
@@ -415,9 +482,14 @@ pub async fn gateway_request(
             "provider_slug": &provider_slug,
             "method": method.as_str(),
             "path": &path,
+            "response_status": response.status().as_u16(),
+            "api_key_id": &auth_user.api_key_id,
+            "api_key_name": &auth_user.api_key_name,
         })),
         None,
         None,
+        auth_user.api_key_id.clone(),
+        auth_user.api_key_name.clone(),
     );
 
     Ok(response)
@@ -546,7 +618,11 @@ async fn read_response_with_limit(response: reqwest::Response) -> AppResult<byte
     Ok(resp_bytes)
 }
 
-async fn build_filtered_response(downstream_response: reqwest::Response) -> AppResult<Response> {
+async fn build_filtered_response(
+    downstream_response: reqwest::Response,
+    usage_context: Option<llm_usage_service::UsageAuditContext>,
+    idle_timeout_secs: u64,
+) -> AppResult<Response> {
     let status = StatusCode::from_u16(downstream_response.status().as_u16())
         .unwrap_or(StatusCode::BAD_GATEWAY);
 
@@ -574,6 +650,61 @@ async fn build_filtered_response(downstream_response: reqwest::Response) -> AppR
     }
 
     if is_sse {
+        if let Some(context) = usage_context {
+            let idle_timeout = std::time::Duration::from_secs(idle_timeout_secs);
+            let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(32);
+
+            tokio::spawn(async move {
+                let mut buffer = String::new();
+                let mut stream = downstream_response.bytes_stream();
+                let mut accumulator = llm_usage_service::ReportedLlmUsageAccumulator::default();
+
+                loop {
+                    match tokio::time::timeout(idle_timeout, stream.next()).await {
+                        Ok(Some(Ok(bytes))) => {
+                            buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+                            while let Some(event) = parse_next_sse_event(&mut buffer) {
+                                if let Some((usage, mode)) =
+                                    llm_usage_service::extract_reported_usage_from_sse_event(
+                                        event.event_type.as_deref(),
+                                        &event.data,
+                                    )
+                                {
+                                    accumulator.observe(usage, mode);
+                                }
+                            }
+
+                            if tx.send(Ok(bytes)).await.is_err() {
+                                break;
+                            }
+                        }
+                        Ok(Some(Err(error))) => {
+                            let _ = tx.send(Err(std::io::Error::other(error))).await;
+                            break;
+                        }
+                        Ok(None) => break,
+                        Err(_) => {
+                            tracing::warn!(
+                                idle_timeout_secs,
+                                "LLM gateway SSE stream idle timeout reached"
+                            );
+                            break;
+                        }
+                    }
+                }
+
+                if let Some(usage) = accumulator.finalize() {
+                    llm_usage_service::log_reported_usage_async(context, usage);
+                }
+            });
+
+            let body = Body::from_stream(ReceiverStream::new(rx));
+            return response_builder
+                .body(body)
+                .map_err(|e| AppError::Internal(format!("Failed to build response: {e}")));
+        }
+
         // Stream SSE responses directly without buffering
         let body = Body::from_stream(downstream_response.bytes_stream());
         response_builder
@@ -582,6 +713,14 @@ async fn build_filtered_response(downstream_response: reqwest::Response) -> AppR
     } else {
         // H-3: Buffer non-streaming responses with size limit
         let response_body = read_response_with_limit(downstream_response).await?;
+
+        if let Some(context) = usage_context
+            && let Ok(json) = serde_json::from_slice::<serde_json::Value>(&response_body)
+            && let Some(usage) = llm_usage_service::extract_reported_usage(&json)
+        {
+            llm_usage_service::log_reported_usage_async(context, usage);
+        }
+
         response_builder
             .body(Body::from(response_body))
             .map_err(|e| AppError::Internal(format!("Failed to build response: {e}")))
@@ -593,6 +732,7 @@ async fn build_filtered_response(downstream_response: reqwest::Response) -> AppR
 async fn build_translated_json_response(
     downstream_response: reqwest::Response,
     translator: &dyn llm_gateway_service::LlmTranslator,
+    usage_context: Option<llm_usage_service::UsageAuditContext>,
 ) -> AppResult<Response> {
     let status = downstream_response.status();
     let resp_headers = downstream_response.headers().clone();
@@ -604,6 +744,11 @@ async fn build_translated_json_response(
         })?;
 
         let translated = translator.translate_response(resp_json)?;
+        if let Some(context) = usage_context
+            && let Some(usage) = llm_usage_service::extract_reported_usage(&translated)
+        {
+            llm_usage_service::log_reported_usage_async(context, usage);
+        }
         let translated_bytes = serde_json::to_vec(&translated).map_err(|e| {
             AppError::Internal(format!("Failed to serialize translated response: {e}"))
         })?;
@@ -669,15 +814,23 @@ async fn build_translated_json_response(
 async fn build_translated_sse_response(
     downstream_response: reqwest::Response,
     translator: Box<dyn llm_gateway_service::LlmTranslator>,
+    usage_context: Option<llm_usage_service::UsageAuditContext>,
+    idle_timeout_secs: u64,
 ) -> AppResult<Response> {
     let status = downstream_response.status();
 
     // If the upstream returned an error, buffer and return as translated JSON error
     if !status.is_success() {
-        return build_translated_json_response(downstream_response, translator.as_ref()).await;
+        return build_translated_json_response(
+            downstream_response,
+            translator.as_ref(),
+            usage_context,
+        )
+        .await;
     }
 
     let axum_status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::OK);
+    let idle_timeout = std::time::Duration::from_secs(idle_timeout_secs);
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(32);
 
@@ -685,26 +838,60 @@ async fn build_translated_sse_response(
         let mut buffer = String::new();
         let mut state = llm_gateway_service::StreamTranslationState::default();
         let mut stream = downstream_response.bytes_stream();
+        let mut accumulator = llm_usage_service::ReportedLlmUsageAccumulator::default();
 
-        while let Some(chunk) = stream.next().await {
-            match chunk {
-                Ok(bytes) => {
+        loop {
+            match tokio::time::timeout(idle_timeout, stream.next()).await {
+                Ok(Some(Ok(bytes))) => {
                     buffer.push_str(&String::from_utf8_lossy(&bytes));
 
                     while let Some(event) = parse_next_sse_event(&mut buffer) {
+                        if let Some((usage, mode)) =
+                            llm_usage_service::extract_reported_usage_from_sse_event(
+                                event.event_type.as_deref(),
+                                &event.data,
+                            )
+                        {
+                            accumulator.observe(usage, mode);
+                        }
+
                         if let Some(translated) =
                             translator.translate_stream_event(&event, &mut state)
                             && tx.send(Ok(bytes::Bytes::from(translated))).await.is_err()
                         {
+                            if let Some(context) = usage_context.clone()
+                                && let Some(usage) = accumulator.clone().finalize()
+                            {
+                                llm_usage_service::log_reported_usage_async(context, usage);
+                            }
                             return; // client disconnected
                         }
                     }
                 }
-                Err(e) => {
+                Ok(Some(Err(e))) => {
+                    if let Some(context) = usage_context.clone()
+                        && let Some(usage) = accumulator.clone().finalize()
+                    {
+                        llm_usage_service::log_reported_usage_async(context, usage);
+                    }
                     let _ = tx.send(Err(std::io::Error::other(e))).await;
                     return;
                 }
+                Ok(None) => break,
+                Err(_) => {
+                    tracing::warn!(
+                        idle_timeout_secs,
+                        "LLM gateway translated SSE stream idle timeout reached"
+                    );
+                    break;
+                }
             }
+        }
+
+        if let Some(context) = usage_context
+            && let Some(usage) = accumulator.finalize()
+        {
+            llm_usage_service::log_reported_usage_async(context, usage);
         }
     });
 
@@ -718,34 +905,9 @@ async fn build_translated_sse_response(
         .map_err(|e| AppError::Internal(format!("Failed to build SSE response: {e}")))
 }
 
-/// Parse the next complete SSE event from a buffer.
-/// Returns `None` if no complete event is available yet.
-/// Consumes the parsed event text (including the `\n\n` delimiter) from the buffer.
-fn parse_next_sse_event(buffer: &mut String) -> Option<llm_gateway_service::SseEvent> {
-    let end = buffer.find("\n\n")?;
-    let event_text = buffer[..end].to_string();
-    buffer.drain(..end + 2);
-
-    let mut event_type = None;
-    let mut data_parts = Vec::new();
-
-    for line in event_text.lines() {
-        if let Some(rest) = line.strip_prefix("event:") {
-            event_type = Some(rest.trim_start().to_string());
-        } else if let Some(rest) = line.strip_prefix("data:") {
-            data_parts.push(rest.trim_start().to_string());
-        }
-        // Ignore id:, retry:, and comment lines (starting with :)
-    }
-
-    if data_parts.is_empty() {
-        return None;
-    }
-
-    Some(llm_gateway_service::SseEvent {
-        event_type,
-        data: data_parts.join("\n"),
-    })
+/// Convenience wrapper around the shared SSE parser.
+fn parse_next_sse_event(buffer: &mut String) -> Option<sse_parser::SseEvent> {
+    sse_parser::parse_next_event(buffer)
 }
 
 /// Check approval for LLM proxy request.

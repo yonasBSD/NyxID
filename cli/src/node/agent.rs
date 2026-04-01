@@ -214,13 +214,14 @@ pub async fn cmd_credentials(
 
     match command {
         NodeCredentialCommands::Add {
-            service,
+            service: raw_service,
             url,
             header,
             query_param,
             secret_format,
             value,
         } => {
+            let service = raw_service.to_lowercase();
             let mut node_config = NodeConfig::load(&config_file)?;
             let backend = SecretBackend::from_config(&node_config, &config_dir)?;
 
@@ -410,7 +411,7 @@ pub async fn cmd_credentials(
             Ok(())
         }
         NodeCredentialCommands::AddOauth {
-            service,
+            service: raw_service,
             from_catalog,
             client_id,
             client_secret,
@@ -422,6 +423,7 @@ pub async fn cmd_credentials(
             api_url,
             access_token,
         } => {
+            let service = raw_service.to_lowercase();
             cmd_credentials_add_oauth(
                 &config_file,
                 &config_dir,
@@ -439,7 +441,10 @@ pub async fn cmd_credentials(
             )
             .await
         }
-        NodeCredentialCommands::Remove { service } => {
+        NodeCredentialCommands::Remove {
+            service: raw_service,
+        } => {
+            let service = raw_service.to_lowercase();
             let mut node_config = NodeConfig::load(&config_file)?;
             let backend = SecretBackend::from_config(&node_config, &config_dir)?;
             node_config.remove_credential_via(&service, &backend)?;
@@ -532,8 +537,6 @@ async fn credential_reload_loop(
             continue;
         }
 
-        last_modified = Some(current_modified);
-
         let node_config = match NodeConfig::load(&config_file) {
             Ok(c) => c,
             Err(e) => {
@@ -542,14 +545,24 @@ async fn credential_reload_loop(
             }
         };
 
+        // Refresh in-memory vault cache so newly-added keychain secrets are visible.
+        if let Err(e) = backend.refresh() {
+            tracing::error!(error = %e, "Failed to refresh secret backend, keeping existing");
+            continue;
+        }
+
         match CredentialStore::from_config_with_backend(&node_config, &backend) {
             Ok(new_store) => {
+                // Only mark as processed after successful reload so that a
+                // transient failure (e.g. keychain vault not yet flushed by
+                // another process) retries on the next tick.
+                last_modified = Some(current_modified);
                 let count = new_store.count();
                 sender.update(new_store);
                 tracing::info!(credentials = count, "Credentials reloaded from config");
             }
             Err(e) => {
-                tracing::error!(error = %e, "Failed to reload credentials, keeping existing");
+                tracing::error!(error = %e, "Failed to reload credentials, will retry");
             }
         }
     }
@@ -1057,13 +1070,222 @@ fn cmd_openclaw_disconnect(config_file: &Path, config_dir: &Path) -> Result<()> 
 // Credential setup (auto from catalog)
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExistingServiceMatch {
+    id: String,
+    endpoint_url: String,
+    /// `true` when the service already points at the requested node.
+    already_on_node: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BackendRegistrationChange {
+    None,
+    Created {
+        id: String,
+    },
+    UpdatedEndpoint {
+        id: String,
+        previous_endpoint_url: String,
+    },
+    AssignedNode {
+        id: String,
+    },
+}
+
+/// Find an existing service that matches by slug (or catalog_service_slug).
+/// Prefers a match that is already on the requested node; falls back to an
+/// unassigned service (no node_id) so that `credentials setup` can adopt it.
+fn find_existing_service(
+    keys_response: &serde_json::Value,
+    service_slug: &str,
+    node_id: &str,
+) -> Option<ExistingServiceMatch> {
+    let keys = keys_response["keys"].as_array()?;
+
+    let matches_slug = |entry: &serde_json::Value| -> bool {
+        entry["catalog_service_slug"]
+            .as_str()
+            .map(|slug| slug == service_slug)
+            .unwrap_or_else(|| entry["slug"].as_str() == Some(service_slug))
+    };
+
+    // Prefer: same node_id
+    if let Some(entry) = keys
+        .iter()
+        .find(|e| e["node_id"].as_str() == Some(node_id) && matches_slug(e))
+    {
+        let id = entry["id"].as_str().or(entry["_id"].as_str())?;
+        return Some(ExistingServiceMatch {
+            id: id.to_string(),
+            endpoint_url: entry["endpoint_url"].as_str().unwrap_or("").to_string(),
+            already_on_node: true,
+        });
+    }
+
+    // Fallback: slug matches but no node assigned yet
+    if let Some(entry) = keys
+        .iter()
+        .find(|e| e["node_id"].as_str().is_none_or(|n| n.is_empty()) && matches_slug(e))
+    {
+        let id = entry["id"].as_str().or(entry["_id"].as_str())?;
+        return Some(ExistingServiceMatch {
+            id: id.to_string(),
+            endpoint_url: entry["endpoint_url"].as_str().unwrap_or("").to_string(),
+            already_on_node: false,
+        });
+    }
+
+    None
+}
+
+async fn prepare_backend_service_registration(
+    api: &mut crate::api::ApiClient,
+    service_slug: &str,
+    label: &str,
+    node_id: &str,
+    target_url: Option<&str>,
+) -> Result<BackendRegistrationChange> {
+    let keys_response = api.get_value("/keys").await.map_err(|e| {
+        super::error::Error::Validation(format!(
+            "Failed to list existing services before registering '{service_slug}': {e}"
+        ))
+    })?;
+
+    if let Some(existing) = find_existing_service(&keys_response, service_slug, node_id) {
+        if existing.already_on_node {
+            println!("Service '{service_slug}' already registered in backend for node {node_id}.");
+        } else {
+            // Service exists but is not yet routed via a node -- assign it.
+            println!("Routing service '{service_slug}' through node {node_id}...");
+            api.put::<serde_json::Value, _>(
+                &format!("/keys/{}", existing.id),
+                &serde_json::json!({ "node_id": node_id }),
+            )
+            .await
+            .map_err(|e| {
+                super::error::Error::Validation(format!(
+                    "Failed to assign node to service '{service_slug}': {e}"
+                ))
+            })?;
+            println!("Service routed through node.");
+        }
+
+        if let Some(url) = target_url.filter(|url| *url != existing.endpoint_url) {
+            println!("Updating backend endpoint URL for '{service_slug}'...");
+            api.put::<serde_json::Value, _>(
+                &format!("/keys/{}", existing.id),
+                &serde_json::json!({ "endpoint_url": url }),
+            )
+            .await
+            .map_err(|e| {
+                super::error::Error::Validation(format!(
+                    "Failed to update backend endpoint URL for '{service_slug}': {e}"
+                ))
+            })?;
+            println!("Backend endpoint updated.");
+            return Ok(BackendRegistrationChange::UpdatedEndpoint {
+                id: existing.id,
+                previous_endpoint_url: existing.endpoint_url,
+            });
+        }
+
+        return if existing.already_on_node {
+            Ok(BackendRegistrationChange::None)
+        } else {
+            Ok(BackendRegistrationChange::AssignedNode { id: existing.id })
+        };
+    }
+
+    println!("Registering service '{service_slug}' in backend (node_id: {node_id})...");
+    let mut body = serde_json::json!({
+        "service_slug": service_slug,
+        "label": label,
+        "node_id": node_id,
+    });
+    if let Some(url) = target_url {
+        body["endpoint_url"] = serde_json::Value::String(url.to_string());
+    }
+
+    let response: serde_json::Value = api.post("/keys", &body).await.map_err(|e| {
+        super::error::Error::Validation(format!(
+            "Failed to register service '{service_slug}' in backend: {e}"
+        ))
+    })?;
+    let id = response["id"]
+        .as_str()
+        .or(response["_id"].as_str())
+        .ok_or_else(|| {
+            super::error::Error::Validation(format!(
+                "Backend registration for '{service_slug}' succeeded without returning a service ID"
+            ))
+        })?;
+    println!("Service registered in backend.");
+
+    Ok(BackendRegistrationChange::Created { id: id.to_string() })
+}
+
+async fn rollback_backend_service_registration(
+    api: &mut crate::api::ApiClient,
+    service_slug: &str,
+    change: &BackendRegistrationChange,
+) -> Result<()> {
+    match change {
+        BackendRegistrationChange::None => Ok(()),
+        BackendRegistrationChange::Created { id } => {
+            eprintln!("Rolling back backend service registration for '{service_slug}'...");
+            api.delete_empty(&format!("/keys/{id}"))
+                .await
+                .map_err(|e| {
+                    super::error::Error::Validation(format!(
+                        "Failed to roll back backend registration for '{service_slug}': {e}"
+                    ))
+                })?;
+            Ok(())
+        }
+        BackendRegistrationChange::AssignedNode { id } => {
+            eprintln!("Removing node assignment for '{service_slug}'...");
+            api.put::<serde_json::Value, _>(
+                &format!("/keys/{id}"),
+                &serde_json::json!({ "node_id": null }),
+            )
+            .await
+            .map_err(|e| {
+                super::error::Error::Validation(format!(
+                    "Failed to remove node assignment for '{service_slug}': {e}"
+                ))
+            })?;
+            Ok(())
+        }
+        BackendRegistrationChange::UpdatedEndpoint {
+            id,
+            previous_endpoint_url,
+        } => {
+            eprintln!("Restoring previous backend endpoint URL for '{service_slug}'...");
+            api.put::<serde_json::Value, _>(
+                &format!("/keys/{id}"),
+                &serde_json::json!({ "endpoint_url": previous_endpoint_url }),
+            )
+            .await
+            .map_err(|e| {
+                super::error::Error::Validation(format!(
+                    "Failed to restore backend endpoint URL for '{service_slug}': {e}"
+                ))
+            })?;
+            Ok(())
+        }
+    }
+}
+
 async fn cmd_credentials_setup(
     config_file: &Path,
     config_dir: &Path,
-    service: &str,
+    raw_service: &str,
     api_url: Option<&str>,
     access_token: Option<&str>,
 ) -> Result<()> {
+    let service = raw_service.to_lowercase();
+    let service = service.as_str();
     let node_config = NodeConfig::load(config_file)?;
 
     // Resolve API URL from config
@@ -1091,26 +1313,136 @@ async fn cmd_credentials_setup(
         super::error::Error::Validation(format!("Failed to create API client: {e}"))
     })?;
 
-    let entry: serde_json::Value = api.get(&format!("/catalog/{service}")).await.map_err(|e| {
-        super::error::Error::Validation(format!(
-            "Failed to fetch catalog entry for '{service}': {e}"
-        ))
-    })?;
-    let provider_type = entry["provider_type"].as_str().unwrap_or("api_key");
+    // Try catalog first; fall back to the user's existing keys for custom
+    // endpoints or suffixed catalog slugs (e.g. "openai-2").
+    let catalog_entry: Option<serde_json::Value> = api
+        .get_optional(&format!("/catalog/{service}"))
+        .await
+        .map_err(|e| {
+            super::error::Error::Validation(format!(
+                "Failed to fetch catalog entry for '{service}': {e}"
+            ))
+        })?;
+
+    // If the slug wasn't found in the catalog, look it up in the user's keys.
+    // For suffixed slugs the keys entry may have a catalog_service_slug we can
+    // use to fetch the original catalog entry for OAuth URLs / instructions.
+    let (entry, from_catalog) = if let Some(entry) = catalog_entry {
+        (entry, true)
+    } else {
+        let keys_response: serde_json::Value = api.get_value("/keys").await.map_err(|e| {
+            super::error::Error::Validation(format!(
+                "Failed to list keys while resolving '{service}': {e}"
+            ))
+        })?;
+        let matched = keys_response["keys"]
+            .as_array()
+            .and_then(|keys| keys.iter().find(|k| k["slug"].as_str() == Some(service)))
+            .cloned();
+        match matched {
+            Some(key_entry) => {
+                // If the key was provisioned from a catalog service, try to
+                // fetch the original catalog entry for extra metadata.
+                if let Some(cat_slug) = key_entry["catalog_service_slug"].as_str() {
+                    if let Some(cat) = api
+                        .get_optional::<serde_json::Value>(&format!("/catalog/{cat_slug}"))
+                        .await
+                        .unwrap_or(None)
+                    {
+                        // Merge: catalog provides OAuth URLs / instructions,
+                        // key entry overrides auth_method, auth_key_name, etc.
+                        let mut merged = cat;
+                        for field in ["auth_method", "auth_key_name"] {
+                            if let Some(v) = key_entry[field].as_str() {
+                                merged[field] = serde_json::Value::String(v.to_string());
+                            }
+                        }
+                        (merged, true)
+                    } else {
+                        (key_entry, false)
+                    }
+                } else {
+                    (key_entry, false)
+                }
+            }
+            None => {
+                return Err(super::error::Error::Validation(format!(
+                    "Service '{service}' not found in catalog or your keys. \
+                     Create it first via the web UI or `nyxid keys create`."
+                )));
+            }
+        }
+    };
+
+    let provider_type = entry["provider_type"]
+        .as_str()
+        .or_else(|| {
+            // Keys entries use "credential_type" instead of "provider_type"
+            match entry["credential_type"].as_str() {
+                Some("oauth2") => Some("oauth2"),
+                _ => None,
+            }
+        })
+        .unwrap_or("api_key");
     let credential_mode = entry["credential_mode"].as_str().unwrap_or("admin");
     let auth_method = entry["auth_method"].as_str().unwrap_or("bearer");
     let auth_key_name = entry["auth_key_name"].as_str().unwrap_or("Authorization");
-    let default_url = entry["base_url"].as_str().unwrap_or("");
+    let default_url = entry["base_url"]
+        .as_str()
+        .or_else(|| entry["endpoint_url"].as_str())
+        .unwrap_or("");
     let requires_gw = entry["requires_gateway_url"].as_bool().unwrap_or(false);
-    let svc_name = entry["name"].as_str().unwrap_or(service);
+    let svc_name = entry["name"]
+        .as_str()
+        .or_else(|| entry["label"].as_str())
+        .unwrap_or(service);
 
     println!("Setting up credentials for: {svc_name} ({service})");
     println!("  Provider type:   {provider_type}");
-    println!("  Credential mode: {credential_mode}");
+    if from_catalog {
+        println!("  Credential mode: {credential_mode}");
+    }
     println!("  Auth method:     {auth_method}");
     println!();
 
-    match provider_type {
+    // Resolve target URL early so it can be used for backend registration.
+    let target_url = if requires_gw {
+        println!("This service requires your instance URL.");
+        eprint!("Enter your instance URL: ");
+        std::io::Write::flush(&mut std::io::stderr())?;
+        let mut url = String::new();
+        std::io::stdin().read_line(&mut url)?;
+        let url = url.trim().to_string();
+        if url.is_empty() {
+            return Err(super::error::Error::Validation(
+                "Instance URL is required for this service".to_string(),
+            ));
+        }
+        if !url.starts_with("http://") && !url.starts_with("https://") && !url.starts_with("ssh://")
+        {
+            return Err(super::error::Error::Validation(
+                "Instance URL must start with http://, https://, or ssh://".to_string(),
+            ));
+        }
+        Some(url)
+    } else if !default_url.is_empty() && !default_url.contains(".invalid") {
+        Some(default_url.to_string())
+    } else {
+        None
+    };
+
+    let node_id = &node_config.node.id;
+    let backend_change = prepare_backend_service_registration(
+        &mut api,
+        service,
+        svc_name,
+        node_id,
+        target_url.as_deref(),
+    )
+    .await?;
+    println!();
+
+    let setup_result = match provider_type {
         "oauth2" | "device_code" => {
             println!("This service requires OAuth authentication.");
             if credential_mode == "user" || credential_mode == "both" {
@@ -1127,40 +1459,20 @@ async fn cmd_credentials_setup(
                 config_file,
                 config_dir,
                 service,
-                true, // from_catalog
+                from_catalog,
                 None, // client_id (will be prompted if needed)
                 None, // client_secret
                 None,
                 None,
                 None,
                 None, // OAuth URLs (from catalog)
-                None, // target_url
+                target_url,
                 Some(base_api_url),
                 Some(token_str.clone()),
             )
             .await
         }
         _ => {
-            // API key / bearer token
-            let target_url = if requires_gw {
-                println!("This service requires your instance URL.");
-                eprint!("Enter your instance URL: ");
-                std::io::Write::flush(&mut std::io::stderr())?;
-                let mut url = String::new();
-                std::io::stdin().read_line(&mut url)?;
-                let url = url.trim().to_string();
-                if url.is_empty() {
-                    return Err(super::error::Error::Validation(
-                        "Instance URL is required for this service".to_string(),
-                    ));
-                }
-                Some(url)
-            } else if !default_url.is_empty() && !default_url.contains(".invalid") {
-                Some(default_url.to_string())
-            } else {
-                None
-            };
-
             println!("This service requires an API key / bearer token.");
             if let Some(ref url) = entry["api_key_url"].as_str() {
                 println!("  Get your API key at: {url}");
@@ -1213,7 +1525,20 @@ async fn cmd_credentials_setup(
             println!("  Auth: {auth_method} / {auth_key_name}");
             Ok(())
         }
+    };
+
+    if let Err(error) = setup_result {
+        if let Err(rollback_error) =
+            rollback_backend_service_registration(&mut api, service, &backend_change).await
+        {
+            eprintln!(
+                "Warning: backend rollback for service '{service}' failed after local setup error: {rollback_error}"
+            );
+        }
+        return Err(error);
     }
+
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1385,9 +1710,106 @@ async fn cmd_credentials_add_oauth(
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::super::encryption::LocalEncryption;
     use super::super::error::Error;
     use super::*;
+
+    #[test]
+    fn find_existing_service_matches_catalog_slug_on_same_node() {
+        let keys_response = json!({
+            "keys": [
+                {
+                    "id": "direct-1",
+                    "slug": "llm-openai",
+                    "node_id": null,
+                    "endpoint_url": "https://api.openai.com/v1"
+                },
+                {
+                    "id": "node-1",
+                    "slug": "llm-openai-2",
+                    "catalog_service_slug": "llm-openai",
+                    "node_id": "node-a",
+                    "endpoint_url": "https://gateway.example.com/v1"
+                },
+                {
+                    "id": "node-2",
+                    "slug": "llm-openai-3",
+                    "catalog_service_slug": "llm-openai",
+                    "node_id": "node-b",
+                    "endpoint_url": "https://other.example.com/v1"
+                }
+            ]
+        });
+
+        let existing = find_existing_service(&keys_response, "llm-openai", "node-a").unwrap();
+        assert_eq!(existing.id, "node-1");
+        assert!(existing.already_on_node);
+        assert_eq!(existing.endpoint_url, "https://gateway.example.com/v1");
+    }
+
+    #[test]
+    fn find_existing_service_falls_back_to_unassigned_service() {
+        let keys_response = json!({
+            "keys": [
+                {
+                    "id": "direct-1",
+                    "slug": "llm-openai",
+                    "node_id": null,
+                    "endpoint_url": "https://api.openai.com/v1"
+                },
+                {
+                    "id": "node-2",
+                    "slug": "llm-openai-2",
+                    "catalog_service_slug": "llm-openai",
+                    "node_id": "node-b",
+                    "endpoint_url": "https://other.example.com/v1"
+                }
+            ]
+        });
+
+        // No service on node-a, but "direct-1" has no node and matches slug
+        let existing = find_existing_service(&keys_response, "llm-openai", "node-a").unwrap();
+        assert_eq!(existing.id, "direct-1");
+        assert!(!existing.already_on_node);
+    }
+
+    #[test]
+    fn find_existing_service_falls_back_to_user_slug_when_needed() {
+        let keys_response = json!({
+            "keys": [
+                {
+                    "id": "node-1",
+                    "slug": "llm-openai",
+                    "node_id": "node-a",
+                    "endpoint_url": ""
+                }
+            ]
+        });
+
+        let existing = find_existing_service(&keys_response, "llm-openai", "node-a").unwrap();
+        assert_eq!(existing.id, "node-1");
+        assert!(existing.already_on_node);
+    }
+
+    #[test]
+    fn find_existing_service_matches_custom_endpoint_by_slug() {
+        let keys_response = json!({
+            "keys": [
+                {
+                    "id": "custom-1",
+                    "slug": "testing-gh4t",
+                    "node_id": null,
+                    "endpoint_url": "https://my-api.example.com"
+                }
+            ]
+        });
+
+        let existing = find_existing_service(&keys_response, "testing-gh4t", "node-a").unwrap();
+        assert_eq!(existing.id, "custom-1");
+        assert!(!existing.already_on_node);
+    }
 
     #[test]
     fn format_secret_value_supports_raw_bearer_and_basic() {

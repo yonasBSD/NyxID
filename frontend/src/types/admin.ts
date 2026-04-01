@@ -93,3 +93,22 @@ export interface CreateUserResponse {
   readonly created_at: string;
   readonly message: string;
 }
+
+export interface AdminAuditLogEntry {
+  readonly id: string;
+  readonly user_id: string | null;
+  readonly api_key_id: string | null;
+  readonly api_key_name: string | null;
+  readonly event_type: string;
+  readonly event_data: Record<string, unknown> | null;
+  readonly ip_address: string | null;
+  readonly user_agent: string | null;
+  readonly created_at: string;
+}
+
+export interface AdminAuditLogListResponse {
+  readonly entries: readonly AdminAuditLogEntry[];
+  readonly total: number;
+  readonly page: number;
+  readonly per_page: number;
+}

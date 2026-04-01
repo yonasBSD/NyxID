@@ -28,6 +28,7 @@ pub struct AuditLogQuery {
     pub page: Option<u64>,
     pub per_page: Option<u64>,
     pub user_id: Option<String>,
+    pub api_key_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -56,6 +57,8 @@ pub struct AdminUserListResponse {
 pub struct AuditLogItem {
     pub id: String,
     pub user_id: Option<String>,
+    pub api_key_id: Option<String>,
+    pub api_key_name: Option<String>,
     pub event_type: String,
     pub event_data: Option<serde_json::Value>,
     pub ip_address: Option<String>,
@@ -265,6 +268,8 @@ pub async fn create_user(
         })),
         extract_ip(&headers),
         extract_user_agent(&headers),
+        None,
+        None,
     );
 
     Ok(Json(CreateUserResponse {
@@ -384,6 +389,8 @@ pub async fn update_user(
         })),
         extract_ip(&headers),
         extract_user_agent(&headers),
+        None,
+        None,
     );
 
     Ok(Json(user_to_admin_item(updated)))
@@ -415,6 +422,8 @@ pub async fn set_user_role(
         })),
         extract_ip(&headers),
         extract_user_agent(&headers),
+        None,
+        None,
     );
 
     Ok(Json(RoleUpdateResponse {
@@ -451,6 +460,8 @@ pub async fn set_user_status(
         })),
         extract_ip(&headers),
         extract_user_agent(&headers),
+        None,
+        None,
     );
 
     Ok(Json(StatusUpdateResponse {
@@ -485,6 +496,8 @@ pub async fn force_password_reset(
         Some(serde_json::json!({ "target_user_id": &user_id })),
         extract_ip(&headers),
         extract_user_agent(&headers),
+        None,
+        None,
     );
 
     Ok(Json(AdminActionResponse {
@@ -526,6 +539,8 @@ pub async fn delete_user(
         })),
         extract_ip(&headers),
         extract_user_agent(&headers),
+        None,
+        None,
     );
 
     Ok(Json(AdminActionResponse {
@@ -553,6 +568,8 @@ pub async fn verify_user_email(
         Some(serde_json::json!({ "target_user_id": &user_id })),
         extract_ip(&headers),
         extract_user_agent(&headers),
+        None,
+        None,
     );
 
     Ok(Json(VerifyEmailResponse {
@@ -625,6 +642,8 @@ pub async fn revoke_user_sessions(
         })),
         extract_ip(&headers),
         extract_user_agent(&headers),
+        None,
+        None,
     );
 
     Ok(Json(RevokeSessionsResponse {
@@ -651,6 +670,9 @@ pub async fn list_audit_log(
     if let Some(ref uid) = query.user_id {
         filter.insert("user_id", uid);
     }
+    if let Some(ref api_key_id) = query.api_key_id {
+        filter.insert("api_key_id", api_key_id);
+    }
 
     let total = state
         .db
@@ -674,6 +696,8 @@ pub async fn list_audit_log(
         .map(|e| AuditLogItem {
             id: e.id,
             user_id: e.user_id,
+            api_key_id: e.api_key_id,
+            api_key_name: e.api_key_name,
             event_type: e.event_type,
             event_data: e.event_data,
             ip_address: e.ip_address,

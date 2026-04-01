@@ -187,6 +187,8 @@ pub async fn connect_service(
         })),
         None,
         None,
+        None,
+        None,
     );
 
     Ok(Json(ConnectResponse {
@@ -230,6 +232,8 @@ pub async fn update_connection_credential(
         Some(serde_json::json!({ "service_id": &service_id })),
         None,
         None,
+        None,
+        None,
     );
 
     Ok(Json(UpdateCredentialResponse {
@@ -261,6 +265,8 @@ pub async fn disconnect_service(
         Some(user_id),
         "connection_removed".to_string(),
         Some(serde_json::json!({ "service_id": &service_id })),
+        None,
+        None,
         None,
         None,
     );

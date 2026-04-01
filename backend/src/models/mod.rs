@@ -1,3 +1,4 @@
+pub mod agent_service_binding;
 pub mod api_key;
 pub mod approval_grant;
 pub mod approval_request;

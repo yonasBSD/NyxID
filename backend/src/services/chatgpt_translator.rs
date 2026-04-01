@@ -15,6 +15,11 @@ use crate::errors::{AppError, AppResult};
 use crate::services::llm_gateway_service::{
     LlmTranslator, SseEvent, StreamTranslationState, TranslatedRequest,
 };
+use crate::services::llm_usage_service::{
+    ReportedLlmUsageAccumulator, UsageAuditContext, extract_reported_usage,
+    extract_reported_usage_from_sse_event, log_reported_usage_async,
+};
+use crate::services::sse_parser;
 
 /// Returns `true` if the body is in Chat Completions format (has `messages`).
 /// Returns `false` if already in Responses API format (has `input`).
@@ -633,6 +638,7 @@ pub async fn send_to_chatgpt(
     is_streaming: bool,
     translate_response: bool,
     query: Option<&str>,
+    usage_context: Option<UsageAuditContext>,
 ) -> AppResult<axum::response::Response> {
     send_to_chatgpt_with_api_url(
         translated_body,
@@ -641,6 +647,7 @@ pub async fn send_to_chatgpt(
         translate_response,
         query,
         CHATGPT_RESPONSES_API_URL,
+        usage_context,
     )
     .await
 }
@@ -652,6 +659,7 @@ async fn send_to_chatgpt_with_api_url(
     translate_response: bool,
     query: Option<&str>,
     api_url: &str,
+    usage_context: Option<UsageAuditContext>,
 ) -> AppResult<axum::response::Response> {
     use axum::body::Body;
     use axum::http::StatusCode;
@@ -716,9 +724,11 @@ async fn send_to_chatgpt_with_api_url(
 
     if is_streaming {
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(32);
+        let usage_context = usage_context.clone();
 
         tokio::spawn(async move {
             let mut received_any_event = false;
+            let mut usage_accumulator = ReportedLlmUsageAccumulator::default();
 
             if translate_response {
                 // Chat Completions mode: translate SSE events → OpenAI chunks
@@ -742,6 +752,13 @@ async fn send_to_chatgpt_with_api_url(
                     while let Some(event) = extract_next_sse_event(&mut sse_buf) {
                         received_any_event = true;
 
+                        if let Some((usage, mode)) = extract_reported_usage_from_sse_event(
+                            event.event_type.as_deref(),
+                            &event.data,
+                        ) {
+                            usage_accumulator.observe(usage, mode);
+                        }
+
                         tracing::debug!(
                             event_type = %event.event_type.as_deref().unwrap_or(""),
                             "ChatGPT SSE recv: {}",
@@ -761,12 +778,22 @@ async fn send_to_chatgpt_with_api_url(
                                 .is_err()
                             {
                                 tracing::debug!("ChatGPT SSE client disconnected");
+                                if let Some(context) = usage_context.clone()
+                                    && let Some(usage) = usage_accumulator.clone().finalize()
+                                {
+                                    log_reported_usage_async(context, usage);
+                                }
                                 return;
                             }
                         }
 
                         let etype = event.event_type.as_deref().unwrap_or("");
                         if etype == "response.completed" || etype == "response.incomplete" {
+                            if let Some(context) = usage_context.clone()
+                                && let Some(usage) = usage_accumulator.clone().finalize()
+                            {
+                                log_reported_usage_async(context, usage);
+                            }
                             return;
                         }
                     }
@@ -790,6 +817,13 @@ async fn send_to_chatgpt_with_api_url(
                     while let Some(event) = extract_next_sse_event(&mut sse_buf) {
                         received_any_event = true;
 
+                        if let Some((usage, mode)) = extract_reported_usage_from_sse_event(
+                            event.event_type.as_deref(),
+                            &event.data,
+                        ) {
+                            usage_accumulator.observe(usage, mode);
+                        }
+
                         let event_type = event.event_type.as_deref().unwrap_or("");
                         tracing::debug!(
                             event_type = %event_type,
@@ -800,11 +834,21 @@ async fn send_to_chatgpt_with_api_url(
                         let sse = format!("event: {event_type}\ndata: {}\n\n", event.data,);
                         if tx.send(Ok(bytes::Bytes::from(sse))).await.is_err() {
                             tracing::debug!("ChatGPT SSE client disconnected (passthrough)");
+                            if let Some(context) = usage_context.clone()
+                                && let Some(usage) = usage_accumulator.clone().finalize()
+                            {
+                                log_reported_usage_async(context, usage);
+                            }
                             return;
                         }
 
                         if event_type == "response.completed" || event_type == "response.incomplete"
                         {
+                            if let Some(context) = usage_context.clone()
+                                && let Some(usage) = usage_accumulator.clone().finalize()
+                            {
+                                log_reported_usage_async(context, usage);
+                            }
                             return;
                         }
                     }
@@ -844,6 +888,12 @@ async fn send_to_chatgpt_with_api_url(
             }
 
             tracing::debug!("ChatGPT SSE stream ended");
+
+            if let Some(context) = usage_context
+                && let Some(usage) = usage_accumulator.finalize()
+            {
+                log_reported_usage_async(context, usage);
+            }
         });
 
         let body = Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx));
@@ -897,7 +947,7 @@ async fn send_to_chatgpt_with_api_url(
             serde_json::json!({"error": "No response received from ChatGPT"})
         });
 
-        let body_bytes = if translate_response {
+        let output_json = if translate_response {
             let translator = ChatgptTranslator;
             let translated = translator.translate_response(resp_json)?;
             tracing::debug!(
@@ -907,15 +957,23 @@ async fn send_to_chatgpt_with_api_url(
                     2000,
                 ),
             );
-            serde_json::to_vec(&translated)
+            translated
         } else {
             tracing::debug!(
                 "ChatGPT response (passthrough): {}",
                 truncate_for_log(&serde_json::to_string(&resp_json).unwrap_or_default(), 2000,),
             );
-            serde_json::to_vec(&resp_json)
+            resp_json
+        };
+
+        if let Some(context) = usage_context
+            && let Some(usage) = extract_reported_usage(&output_json)
+        {
+            log_reported_usage_async(context, usage);
         }
-        .map_err(|e| AppError::Internal(format!("Failed to serialize response: {e}")))?;
+
+        let body_bytes = serde_json::to_vec(&output_json)
+            .map_err(|e| AppError::Internal(format!("Failed to serialize response: {e}")))?;
 
         axum::http::Response::builder()
             .status(StatusCode::OK)
@@ -925,52 +983,9 @@ async fn send_to_chatgpt_with_api_url(
     }
 }
 
-/// Extract the next complete SSE event from a buffer.
-///
-/// SSE events are delimited by double newlines (`\n\n`). Each event may have:
-/// - `event: <type>` line
-/// - `data: <payload>` line(s)
-///
-/// Returns `None` if no complete event is available yet.
+/// Convenience wrapper around the shared SSE parser.
 fn extract_next_sse_event(buf: &mut String) -> Option<SseEvent> {
-    let delimiter = "\n\n";
-    let pos = buf.find(delimiter)?;
-
-    let raw = buf[..pos].to_string();
-    *buf = buf[pos + delimiter.len()..].to_string();
-
-    let mut event_type = None;
-    let mut data_parts = Vec::new();
-
-    for line in raw.lines() {
-        if let Some(val) = line.strip_prefix("event: ") {
-            event_type = Some(val.to_string());
-        } else if let Some(val) = line.strip_prefix("data: ") {
-            data_parts.push(val.to_string());
-        } else if let Some(val) = line.strip_prefix("event:") {
-            event_type = Some(val.trim().to_string());
-        } else if let Some(val) = line.strip_prefix("data:") {
-            data_parts.push(val.trim().to_string());
-        }
-    }
-
-    if data_parts.is_empty() && event_type.is_none() {
-        return None;
-    }
-
-    let data = data_parts.join("\n");
-
-    // If no explicit event: header, try to extract type from the JSON data
-    if event_type.is_none()
-        && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&data)
-    {
-        event_type = parsed
-            .get("type")
-            .and_then(|t| t.as_str())
-            .map(String::from);
-    }
-
-    Some(SseEvent { event_type, data })
+    sse_parser::parse_next_event(buf)
 }
 
 /// Truncate a string for logging, appending "..." if cut.
@@ -1765,9 +1780,10 @@ mod tests {
     #[test]
     fn extract_sse_event_empty_lines_skipped() {
         let mut buf = "\n\nevent: test\ndata: {}\n\n".to_string();
-        // First extraction gets empty block (no event/data lines)
-        let first = extract_next_sse_event(&mut buf);
-        // Empty block has no event_type and no data -- returns None
-        assert!(first.is_none() || first.unwrap().data.is_empty());
+        // Empty frame is skipped internally; first call returns the real event
+        let event = extract_next_sse_event(&mut buf).unwrap();
+        assert_eq!(event.event_type.as_deref(), Some("test"));
+        assert_eq!(event.data, "{}");
+        assert!(buf.is_empty());
     }
 }

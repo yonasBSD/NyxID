@@ -418,7 +418,7 @@ fn proxy_error_response(request_id: &str, error: &str, status: u16, retryable: b
     .to_string()
 }
 
-fn append_query_param(url: &str, param_name: &str, param_value: &str) -> String {
+pub fn append_query_param(url: &str, param_name: &str, param_value: &str) -> String {
     let separator = if url.contains('?') { "&" } else { "?" };
     let encoded_name = urlencoding::encode(param_name);
     let encoded_value = urlencoding::encode(param_value);

@@ -31,6 +31,23 @@ export interface KeyListResponse {
   readonly keys: readonly KeyInfo[];
 }
 
+export interface ExternalApiKeyInfo {
+  readonly id: string;
+  readonly label: string;
+  readonly credential_type: string;
+  readonly status: string;
+  readonly provider_config_id: string | null;
+  readonly expires_at: string | null;
+  readonly last_used_at: string | null;
+  readonly error_message: string | null;
+  readonly created_at: string;
+  readonly updated_at: string;
+}
+
+export interface ExternalApiKeyListResponse {
+  readonly api_keys: readonly ExternalApiKeyInfo[];
+}
+
 export interface CatalogEntry {
   readonly slug: string;
   readonly name: string;
@@ -119,4 +136,24 @@ export interface NyxIdApiKeyInfo {
   readonly allow_all_nodes: boolean;
   readonly allowed_services: readonly AllowedServiceInfo[];
   readonly allowed_nodes: readonly AllowedNodeInfo[];
+  readonly platform: string | null;
+  readonly rate_limit_per_second: number | null;
+  readonly rate_limit_burst: number | null;
+  readonly bindings_count: number;
+}
+
+export interface AgentServiceBinding {
+  readonly id: string;
+  readonly api_key_id: string;
+  readonly user_service_id: string;
+  readonly user_api_key_id: string;
+  readonly service_slug: string;
+  readonly service_label: string;
+  readonly credential_label: string;
+  readonly created_at: string;
+  readonly updated_at: string;
+}
+
+export interface AgentServiceBindingListResponse {
+  readonly bindings: readonly AgentServiceBinding[];
 }

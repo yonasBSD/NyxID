@@ -53,6 +53,13 @@ pub struct AuthUser {
     pub allowed_service_ids: Vec<String>,
     /// List of Node IDs this key can route through (only checked when allow_all_nodes is false).
     pub allowed_node_ids: Vec<String>,
+    /// API key ID when auth_method == ApiKey (for agent identity tracking)
+    pub api_key_id: Option<String>,
+    /// Human-readable API key name (for audit logs)
+    pub api_key_name: Option<String>,
+    /// Per-agent rate limit (from ApiKey), None = use user-level defaults
+    pub rate_limit_per_second: Option<u32>,
+    pub rate_limit_burst: Option<u32>,
 }
 
 impl AuthUser {
@@ -215,6 +222,10 @@ impl FromRequestParts<AppState> for AuthUser {
                                         allow_all_nodes: api_key.allow_all_nodes,
                                         allowed_service_ids: api_key.allowed_service_ids.clone(),
                                         allowed_node_ids: api_key.allowed_node_ids.clone(),
+                                        api_key_id: Some(api_key.id.clone()),
+                                        api_key_name: Some(api_key.name.clone()),
+                                        rate_limit_per_second: api_key.rate_limit_per_second,
+                                        rate_limit_burst: api_key.rate_limit_burst,
                                     });
                                 }
                                 Err(_) => return Err(jwt_err),
@@ -276,6 +287,10 @@ impl FromRequestParts<AppState> for AuthUser {
                             allow_all_nodes: true,
                             allowed_service_ids: vec![],
                             allowed_node_ids: vec![],
+                            api_key_id: None,
+                            api_key_name: None,
+                            rate_limit_per_second: None,
+                            rate_limit_burst: None,
                         });
                     }
 
@@ -318,6 +333,10 @@ impl FromRequestParts<AppState> for AuthUser {
                         allow_all_nodes: true,
                         allowed_service_ids: vec![],
                         allowed_node_ids: vec![],
+                        api_key_id: None,
+                        api_key_name: None,
+                        rate_limit_per_second: None,
+                        rate_limit_burst: None,
                     });
                 }
             }
@@ -379,6 +398,10 @@ impl FromRequestParts<AppState> for AuthUser {
                                     allow_all_nodes: true,
                                     allowed_service_ids: vec![],
                                     allowed_node_ids: vec![],
+                                    api_key_id: None,
+                                    api_key_name: None,
+                                    rate_limit_per_second: None,
+                                    rate_limit_burst: None,
                                 });
                             }
                             _ => {
@@ -447,6 +470,10 @@ impl FromRequestParts<AppState> for AuthUser {
                     allow_all_nodes: key.allow_all_nodes,
                     allowed_service_ids: key.allowed_service_ids.clone(),
                     allowed_node_ids: key.allowed_node_ids.clone(),
+                    api_key_id: Some(key.id.clone()),
+                    api_key_name: Some(key.name.clone()),
+                    rate_limit_per_second: key.rate_limit_per_second,
+                    rate_limit_burst: key.rate_limit_burst,
                 });
             }
 
@@ -640,6 +667,10 @@ mod tests {
             allow_all_nodes: true,
             allowed_service_ids: vec![],
             allowed_node_ids: vec![],
+            api_key_id: None,
+            api_key_name: None,
+            rate_limit_per_second: None,
+            rate_limit_burst: None,
         }
     }
 
@@ -692,6 +723,35 @@ mod tests {
     #[test]
     fn access_token_cookie_name_constant() {
         assert_eq!(ACCESS_TOKEN_COOKIE_NAME, "nyx_access_token");
+    }
+
+    #[test]
+    fn api_key_auth_includes_key_identity() {
+        let user = AuthUser {
+            user_id: Uuid::new_v4(),
+            session_id: None,
+            scope: "read proxy".to_string(),
+            acting_client_id: None,
+            approval_owner_user_id: None,
+            auth_method: AuthMethod::ApiKey,
+            allow_all_services: false,
+            allow_all_nodes: true,
+            allowed_service_ids: vec!["svc-1".to_string()],
+            allowed_node_ids: vec![],
+            api_key_id: Some("key-uuid-123".to_string()),
+            api_key_name: Some("coding-agent".to_string()),
+            rate_limit_per_second: None,
+            rate_limit_burst: None,
+        };
+        assert_eq!(user.api_key_id.as_deref(), Some("key-uuid-123"));
+        assert_eq!(user.api_key_name.as_deref(), Some("coding-agent"));
+    }
+
+    #[test]
+    fn non_api_key_auth_has_no_key_identity() {
+        let user = test_auth_user(AuthMethod::Session, "");
+        assert!(user.api_key_id.is_none());
+        assert!(user.api_key_name.is_none());
     }
 
     #[test]

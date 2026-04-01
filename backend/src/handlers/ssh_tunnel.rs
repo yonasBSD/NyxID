@@ -107,6 +107,8 @@ pub async fn issue_ssh_certificate(
         })),
         None,
         None,
+        None,
+        None,
     );
 
     Ok(Json(IssueSshCertificateResponse {
@@ -253,6 +255,8 @@ async fn handle_ssh_socket(
                 })),
                 client_meta.ip_address,
                 client_meta.user_agent,
+                None,
+                None,
             );
             return;
         }
@@ -284,6 +288,8 @@ async fn handle_ssh_socket(
                 })),
                 client_meta.ip_address,
                 client_meta.user_agent,
+                None,
+                None,
             );
             return;
         }
@@ -321,6 +327,8 @@ async fn handle_ssh_socket(
                 })),
                 client_meta.ip_address,
                 client_meta.user_agent,
+                None,
+                None,
             );
             return;
         }
@@ -344,6 +352,8 @@ async fn handle_ssh_socket(
             })),
             client_meta.ip_address.clone(),
             client_meta.user_agent.clone(),
+            None,
+            None,
         );
         return;
     }
@@ -362,6 +372,8 @@ async fn handle_ssh_socket(
         })),
         client_meta.ip_address.clone(),
         client_meta.user_agent.clone(),
+        None,
+        None,
     );
 
     let mut read_buf = vec![0_u8; 16 * 1024];
@@ -440,6 +452,8 @@ async fn handle_ssh_socket(
         })),
         client_meta.ip_address,
         client_meta.user_agent,
+        None,
+        None,
     );
 }
 
@@ -531,6 +545,8 @@ async fn handle_node_ssh_socket(
             })),
             client_meta.ip_address,
             client_meta.user_agent,
+            None,
+            None,
         );
         return;
     };
@@ -560,6 +576,8 @@ async fn handle_node_ssh_socket(
             })),
             client_meta.ip_address,
             client_meta.user_agent,
+            None,
+            None,
         );
         return;
     };
@@ -603,6 +621,8 @@ async fn handle_node_ssh_socket(
                 })),
                 client_meta.ip_address,
                 client_meta.user_agent,
+                None,
+                None,
             );
             return;
         }
@@ -634,6 +654,8 @@ async fn handle_node_ssh_socket(
             })),
             client_meta.ip_address.clone(),
             client_meta.user_agent.clone(),
+            None,
+            None,
         );
         return;
     }
@@ -653,6 +675,8 @@ async fn handle_node_ssh_socket(
         })),
         client_meta.ip_address.clone(),
         client_meta.user_agent.clone(),
+        None,
+        None,
     );
 
     let tunnel_timeout = tokio::time::sleep(Duration::from_secs(
@@ -744,6 +768,8 @@ async fn handle_node_ssh_socket(
         })),
         client_meta.ip_address,
         client_meta.user_agent,
+        None,
+        None,
     );
 }
 

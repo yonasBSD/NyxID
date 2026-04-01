@@ -197,6 +197,8 @@ pub async fn create_group(
         })),
         extract_ip(&headers),
         extract_user_agent(&headers),
+        None,
+        None,
     );
 
     let response = build_group_response(&state.db, group).await?;
@@ -252,6 +254,8 @@ pub async fn update_group(
         })),
         extract_ip(&headers),
         extract_user_agent(&headers),
+        None,
+        None,
     );
 
     let response = build_group_response(&state.db, group).await?;
@@ -276,6 +280,8 @@ pub async fn delete_group(
         Some(serde_json::json!({ "group_id": &group_id })),
         extract_ip(&headers),
         extract_user_agent(&headers),
+        None,
+        None,
     );
 
     Ok(Json(GroupMembershipResponse {
@@ -330,6 +336,8 @@ pub async fn add_member(
         })),
         extract_ip(&headers),
         extract_user_agent(&headers),
+        None,
+        None,
     );
 
     Ok(Json(GroupMembershipResponse {
@@ -358,6 +366,8 @@ pub async fn remove_member(
         })),
         extract_ip(&headers),
         extract_user_agent(&headers),
+        None,
+        None,
     );
 
     Ok(Json(GroupMembershipResponse {

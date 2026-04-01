@@ -77,6 +77,7 @@ Error variants map to HTTP status codes and numeric error codes (1000-3002, 7000
 - WS writer channels are bounded (capacity: 256); `try_send` treats full buffers as node offline (H4)
 - Admin node endpoints (`handlers/admin_nodes.rs`) require admin role and have no ownership check
 - `nyxid node daemon` subcommands manage background service lifecycle (`cli/src/node/daemon.rs`): `install` creates a launchd LaunchAgent on macOS or systemd user unit on Linux; `start`/`stop`/`restart`/`status`/`logs`/`uninstall` wrap platform service managers
+- All node commands support `--profile` for multi-instance operation. Profile-aware service labels: `dev.nyxid.node.{profile}` (macOS) / `nyxid-node-{profile}.service` (Linux). Config stored at `~/.nyxid-node/profiles/{name}/`
 
 ### 7. OpenClaw Integration
 
@@ -121,13 +122,46 @@ Key files:
 - `handlers/catalog.rs` -- `/api/v1/catalog` read-only
 - `models/user_endpoint.rs`, `models/user_api_key.rs`, `models/user_service.rs` -- new user collections
 
+### 9. Agent Isolation
+
+Per-agent credential binding, rate limiting, and audit attribution for AI agents. Each agent (Claude Code, Codex, OpenClaw, etc.) uses its own scoped API key (`nyxid_ag_` prefix) for isolation.
+
+**Backend:**
+- `AuthUser` carries `api_key_id`, `api_key_name`, `rate_limit_per_second`, `rate_limit_burst` when auth is via API key
+- `ApiKey` model has `rate_limit_per_second`, `rate_limit_burst`, `platform` fields
+- `AuditLog` model has `api_key_id`, `api_key_name` for per-agent attribution
+- `AgentServiceBinding` collection maps `(api_key_id, user_service_id)` to an override `user_api_key_id`
+- Proxy handler checks `agent_service_bindings` before credential injection; falls back to service default if no binding exists
+- `PerAgentRateLimiter` in `mw/rate_limit.rs` provides per-API-key rate limit buckets (1-second sliding window)
+- Proxy responses include `X-NyxID-Agent-Id` header when request was made with an API key
+
+**CLI:**
+- `--profile` flag on `AuthArgs`, `LoginArgs`, `BaseUrlArgs`, and all node commands (env: `NYXID_PROFILE`)
+- Profile-aware token storage: `~/.nyxid/profiles/{name}/` (default profile uses `~/.nyxid/`)
+- Profile name validation: 1-64 chars, alphanumeric + hyphens + underscores only
+- Node multi-instance: profile-aware service labels (`dev.nyxid.node.{profile}` / `nyxid-node-{profile}.service`)
+- `nyxid api-key create --platform`, `nyxid api-key bind` commands for managing agent identities (consolidated from former `ai-setup agent` subcommands)
+
+**Frontend:**
+- API key detail page shows platform selector, rate limit editor, and credential bindings CRUD
+- API key table shows platform and bindings count columns
+
+Key files:
+- `models/agent_service_binding.rs` -- per-agent credential override model
+- `services/agent_binding_service.rs` -- binding CRUD + credential override lookup
+- `handlers/agent_bindings.rs` -- REST endpoints under `/api/v1/api-keys/{id}/bindings`
+- `services/proxy_service.rs` -- `resolve_agent_credential_override()` for proxy-time binding lookup
+- `cli/src/commands/api_key.rs` -- API key management + credential binding commands
+- `frontend/src/hooks/use-agent-bindings.ts` -- TanStack Query hooks for bindings CRUD
+- `frontend/src/schemas/agent-bindings.ts` -- Zod schemas for bindings and rate limits
+
 ## File Structure
 
 ```
 cli/src/
 |-- main.rs              # CLI entry point
 |-- cli.rs               # Clap subcommand definitions (24 top-level commands)
-|-- commands/            # Command implementations (one file per command group)
+|-- commands/            # Command implementations (one file per command group, incl. ai_setup.rs with agent subcommands)
 |-- api_client.rs        # HTTP client for NyxID API calls
 |-- auth.rs              # Token storage and retrieval (file-based session)
 |-- output.rs            # Table/JSON output formatting
@@ -152,9 +186,9 @@ backend/src/
 |-- db.rs                # MongoDB connection + ensure_indexes()
 |-- routes.rs            # All route definitions
 |-- main.rs              # Server startup
-|-- models/              # MongoDB document structs (35 models, 33 collections, incl. node, node_service_binding, mcp_session, openclaw_channel_mapping, user_endpoint, user_api_key, user_service)
-|-- services/            # Business logic (44 services, incl. node_service, node_routing_service, node_ws_manager, node_metrics_service, openclaw_channel_service, unified_key_service, catalog_service, user_endpoint_service, user_api_key_service, user_service_service, action_description)
-|-- handlers/            # HTTP handlers (45 handler modules, incl. node_admin, admin_nodes, node_ws, developer_apps, ssh_exec, llms_txt, openclaw_channel, keys, catalog, user_endpoints, user_api_keys_external, user_services_handler)
+|-- models/              # MongoDB document structs (36 models, 34 collections, incl. agent_service_binding, node, node_service_binding, mcp_session, openclaw_channel_mapping, user_endpoint, user_api_key, user_service)
+|-- services/            # Business logic (45 services, incl. agent_binding_service, node_service, node_routing_service, node_ws_manager, node_metrics_service, openclaw_channel_service, unified_key_service, catalog_service, user_endpoint_service, user_api_key_service, user_service_service, action_description)
+|-- handlers/            # HTTP handlers (46 handler modules, incl. agent_bindings, node_admin, admin_nodes, node_ws, developer_apps, ssh_exec, llms_txt, openclaw_channel, keys, catalog, user_endpoints, user_api_keys_external, user_services_handler)
 |-- crypto/              # JWT, AES, password hashing, token generation, KeyProvider trait, KMS providers, JWKS
 |-- errors/              # AppError enum, ErrorResponse, AppResult
 |-- mw/                  # Middleware: auth, rate_limit, security_headers
@@ -162,8 +196,8 @@ backend/src/
 frontend/src/
 |-- pages/               # Route pages (40 pages, incl. nodes, node-detail, admin-nodes, service-detail, providers, ai-setup, keys, key-detail)
 |-- components/          # UI components (auth/, dashboard/, layout/, shared/, ui/; incl. add-key-dialog for unified key creation)
-|-- hooks/               # TanStack Query hooks (16 hooks, incl. use-nodes, use-admin-nodes, use-providers, use-developer-apps, use-keys)
-|-- schemas/             # Zod validation schemas (8 schema files + tests, incl. nodes.ts)
+|-- hooks/               # TanStack Query hooks (17 hooks, incl. use-agent-bindings, use-nodes, use-admin-nodes, use-providers, use-developer-apps, use-keys)
+|-- schemas/             # Zod validation schemas (9 schema files + tests, incl. agent-bindings.ts, nodes.ts)
 |-- stores/              # Zustand stores (auth-store)
 |-- lib/                 # API client, constants, utils
 |-- types/               # TypeScript type definitions (7 files, incl. AdminNodeInfo, NodeMetricsInfo, approvals, keys)
@@ -188,14 +222,15 @@ All API routes under `/api/v1`:
 - `/auth` -- register, login, logout, refresh, verify-email, forgot/reset-password
 - `/users` -- get/update current user
 - `/mfa` -- setup, verify-setup
-- `/api-keys` -- CRUD + rotate. `ApiKey` model has scope fields: `allowed_service_ids`, `allowed_node_ids`, `allow_all_services`, `allow_all_nodes` (absorbed from deleted AgentGroup model)
+- `/api-keys` -- CRUD + rotate. `ApiKey` model has scope fields: `allowed_service_ids`, `allowed_node_ids`, `allow_all_services`, `allow_all_nodes` (absorbed from deleted AgentGroup model). Also has agent isolation fields: `rate_limit_per_second`, `rate_limit_burst`, `platform`
+- `/api-keys/{id}/bindings` -- agent credential binding CRUD (list, create, delete). Maps an API key (agent) to a per-service credential override via `AgentServiceBinding`
 - `/services` -- CRUD + OIDC credentials + endpoints + requirements
 - `/sessions` -- list sessions
 - `/connections` -- connect/disconnect services
 - `/providers` -- CRUD + OAuth/device-code/API-key flows + token management + per-user credentials
 - `/admin` -- user management, audit log, OAuth clients, service accounts
-- `/proxy/{service_id}/{path}` -- authenticated proxy (UUID-based)
-- `/proxy/s/{slug}/{path}` -- authenticated proxy (slug-based)
+- `/proxy/{service_id}/{path}` -- authenticated proxy (UUID-based); supports HTTP and WebSocket passthrough
+- `/proxy/s/{slug}/{path}` -- authenticated proxy (slug-based); supports HTTP and WebSocket passthrough
 - `/proxy/services` -- service discovery (paginated list of proxyable services)
 - `/llm` -- LLM gateway (provider proxy, OpenAI-compatible gateway, status)
 - `/delegation/refresh` -- refresh delegated access tokens
@@ -278,6 +313,7 @@ NODE_MAX_PER_USER=10                   # Maximum nodes per user (default: 10)
 NODE_MAX_WS_CONNECTIONS=100            # Maximum concurrent node WebSocket connections (default: 100)
 NODE_MAX_STREAM_DURATION_SECS=300      # Maximum duration for streaming proxy responses (default: 300)
 NODE_HMAC_SIGNING_ENABLED=true         # Enable HMAC request signing for node proxy (default: true)
+WS_PASSTHROUGH_MAX_CONNECTIONS=200     # Maximum concurrent WebSocket passthrough connections (default: 200)
 
 # Optional
 GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET
@@ -314,7 +350,7 @@ nyxid node openclaw connect --url http://localhost:18789  # Connect OpenClaw (us
 nyxid node openclaw status              # Show OpenClaw connection status
 nyxid node openclaw disconnect          # Remove OpenClaw credentials
 
-# Node daemon lifecycle (background service)
+# Node daemon lifecycle (background service, supports --profile for multi-instance)
 nyxid node daemon install               # Install as system service (launchd/systemd)
 nyxid node daemon start                 # Start background service
 nyxid node daemon stop                  # Stop background service
@@ -322,6 +358,21 @@ nyxid node daemon restart               # Restart background service
 nyxid node daemon status                # Check if installed and running
 nyxid node daemon logs --follow         # Tail daemon logs
 nyxid node daemon uninstall             # Remove system service
+
+# Node agent via Docker (alternative to native daemon)
+nyxid node docker build                                # Build node agent image
+nyxid node docker start [--profile <name>]             # Start container (mounts config volume)
+nyxid node docker stop [--profile <name>]              # Stop container
+nyxid node docker status [--profile <name>]            # Check container status
+nyxid node docker logs [--profile <name>]              # Tail container logs
+
+# Agent isolation (api-key subcommands)
+nyxid api-key create --name "coding-agent" --platform claude-code
+nyxid api-key list                      # List API keys
+nyxid api-key show <ID_OR_NAME>         # Show key details + bindings
+nyxid api-key bind <ID_OR_NAME> --service <SLUG> --credential <LABEL>  # Credential override
+nyxid api-key rotate <ID_OR_NAME>       # Rotate API key
+nyxid api-key delete <ID_OR_NAME>       # Delete API key
 
 # Frontend (from frontend/)
 npm run dev                             # Dev server (port 3000)

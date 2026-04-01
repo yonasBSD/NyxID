@@ -167,6 +167,8 @@ pub async fn create_registration_token(
         })),
         None,
         None,
+        None,
+        None,
     );
 
     Ok(Json(CreateRegistrationTokenResponse {
@@ -293,6 +295,8 @@ pub async fn delete_node(
         Some(serde_json::json!({ "node_id": &node_id })),
         None,
         None,
+        None,
+        None,
     );
 
     Ok(StatusCode::NO_CONTENT)
@@ -329,6 +333,8 @@ pub async fn rotate_token(
         Some(user_id_str),
         "node_token_rotated".to_string(),
         Some(serde_json::json!({ "node_id": &node_id })),
+        None,
+        None,
         None,
         None,
     );
@@ -428,6 +434,8 @@ pub async fn create_binding(
         })),
         None,
         None,
+        None,
+        None,
     );
 
     Ok(Json(CreateBindingResponse {
@@ -469,6 +477,8 @@ pub async fn update_binding(
         })),
         None,
         None,
+        None,
+        None,
     );
 
     Ok(StatusCode::NO_CONTENT)
@@ -489,6 +499,8 @@ pub async fn delete_binding(
         Some(user_id_str),
         "node_binding_deleted".to_string(),
         Some(serde_json::json!({ "binding_id": &binding_id })),
+        None,
+        None,
         None,
         None,
     );

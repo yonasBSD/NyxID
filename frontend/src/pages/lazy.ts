@@ -161,6 +161,11 @@ export const AdminNodesPage = lazy(() =>
     default: m.AdminNodesPage,
   })),
 );
+export const AdminAuditLogPage = lazy(() =>
+  import("@/pages/admin-audit-log").then((m) => ({
+    default: m.AdminAuditLogPage,
+  })),
+);
 export const SshTerminalPage = lazy(() =>
   import("@/pages/ssh-terminal").then((m) => ({
     default: m.SshTerminalPage,

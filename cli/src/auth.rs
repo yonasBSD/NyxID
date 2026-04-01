@@ -9,40 +9,88 @@ use crate::api::{CLI_USER_AGENT, build_cli_http_client};
 use crate::cli::{AuthArgs, LoginArgs};
 
 const TOKEN_DIR_NAME: &str = ".nyxid";
+const PROFILES_DIR_NAME: &str = "profiles";
 const TOKEN_FILE_NAME: &str = "access_token";
 const REFRESH_TOKEN_FILE_NAME: &str = "refresh_token";
 const BASE_URL_FILE_NAME: &str = "base_url";
 const CALLBACK_TIMEOUT_SECS: u64 = 120;
 
+// ---- Profile validation ----
+
+/// Validate a profile name: 1-64 characters, alphanumeric + hyphens + underscores only.
+/// This prevents path traversal attacks (e.g. `../evil`, `foo/bar`).
+pub fn validate_profile_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.len() > 64 {
+        bail!("Profile name must be 1-64 characters");
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        bail!(
+            "Profile name must contain only alphanumeric characters, hyphens, \
+             and underscores (got '{name}')"
+        );
+    }
+    Ok(())
+}
+
 // ---- Token storage ----
 
-fn token_dir() -> Result<PathBuf> {
+/// Resolve the token directory for a given profile.
+/// `None` = default profile (`~/.nyxid/`)
+/// `Some(name)` = named profile (`~/.nyxid/profiles/{name}/`)
+fn token_dir_for_profile(profile: Option<&str>) -> Result<PathBuf> {
     let home = dirs::home_dir().context("Could not determine home directory")?;
-    Ok(home.join(TOKEN_DIR_NAME))
+    let base = home.join(TOKEN_DIR_NAME);
+    match profile {
+        None => Ok(base),
+        Some(name) => {
+            validate_profile_name(name)?;
+            Ok(base.join(PROFILES_DIR_NAME).join(name))
+        }
+    }
 }
 
-fn token_file_path() -> Result<PathBuf> {
-    Ok(token_dir()?.join(TOKEN_FILE_NAME))
+fn token_file_path_for(profile: Option<&str>) -> Result<PathBuf> {
+    Ok(token_dir_for_profile(profile)?.join(TOKEN_FILE_NAME))
 }
 
-fn refresh_token_file_path() -> Result<PathBuf> {
-    Ok(token_dir()?.join(REFRESH_TOKEN_FILE_NAME))
+fn refresh_token_file_path_for(profile: Option<&str>) -> Result<PathBuf> {
+    Ok(token_dir_for_profile(profile)?.join(REFRESH_TOKEN_FILE_NAME))
 }
 
-fn base_url_file_path() -> Result<PathBuf> {
-    Ok(token_dir()?.join(BASE_URL_FILE_NAME))
+fn base_url_file_path_for(profile: Option<&str>) -> Result<PathBuf> {
+    Ok(token_dir_for_profile(profile)?.join(BASE_URL_FILE_NAME))
 }
 
-pub fn read_saved_token() -> Option<String> {
-    let path = token_file_path().ok()?;
+pub fn read_saved_token_for(profile: Option<&str>) -> Option<String> {
+    let path = token_file_path_for(profile).ok()?;
     std::fs::read_to_string(path)
         .ok()
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty())
 }
 
+pub fn read_saved_token() -> Option<String> {
+    read_saved_token_for(None)
+}
+
+pub fn read_saved_refresh_token_for(profile: Option<&str>) -> Option<String> {
+    let path = refresh_token_file_path_for(profile).ok()?;
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+}
+
+#[cfg(test)]
 pub fn read_saved_refresh_token() -> Option<String> {
-    let path = refresh_token_file_path().ok()?;
+    read_saved_refresh_token_for(None)
+}
+
+pub fn read_saved_base_url_for(profile: Option<&str>) -> Option<String> {
+    let path = base_url_file_path_for(profile).ok()?;
     std::fs::read_to_string(path)
         .ok()
         .map(|t| t.trim().to_string())
@@ -50,15 +98,11 @@ pub fn read_saved_refresh_token() -> Option<String> {
 }
 
 pub fn read_saved_base_url() -> Option<String> {
-    let path = base_url_file_path().ok()?;
-    std::fs::read_to_string(path)
-        .ok()
-        .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty())
+    read_saved_base_url_for(None)
 }
 
-fn save_base_url(url: &str) -> Result<()> {
-    let path = base_url_file_path()?;
+fn save_base_url_for(profile: Option<&str>, url: &str) -> Result<()> {
+    let path = base_url_file_path_for(profile)?;
     let dir = path.parent().context("Invalid token directory")?;
     std::fs::create_dir_all(dir)?;
     std::fs::write(&path, url)?;
@@ -81,30 +125,32 @@ fn write_token_file(path: &std::path::Path, token: &str) -> Result<()> {
     Ok(())
 }
 
-fn save_token(token: &str) -> Result<()> {
-    write_token_file(&token_file_path()?, token)
-}
-
-pub fn save_refresh_token(token: &str) -> Result<()> {
-    write_token_file(&refresh_token_file_path()?, token)
-}
-
-/// Save a new access token (and optionally a new refresh token).
-pub fn save_tokens(access_token: &str, refresh_token: Option<&str>) -> Result<()> {
-    save_token(access_token)?;
+/// Save a new access token (and optionally a new refresh token) for a profile.
+pub fn save_tokens_for(
+    profile: Option<&str>,
+    access_token: &str,
+    refresh_token: Option<&str>,
+) -> Result<()> {
+    write_token_file(&token_file_path_for(profile)?, access_token)?;
     if let Some(rt) = refresh_token {
-        save_refresh_token(rt)?;
+        write_token_file(&refresh_token_file_path_for(profile)?, rt)?;
     }
     Ok(())
 }
 
-fn clear_token() -> Result<()> {
-    let path = token_file_path()?;
+/// Save a new access token (and optionally a new refresh token).
+#[cfg(test)]
+pub fn save_tokens(access_token: &str, refresh_token: Option<&str>) -> Result<()> {
+    save_tokens_for(None, access_token, refresh_token)
+}
+
+fn clear_token_for(profile: Option<&str>) -> Result<()> {
+    let path = token_file_path_for(profile)?;
     if path.exists() {
         std::fs::remove_file(&path)
             .with_context(|| format!("Failed to remove {}", path.display()))?;
     }
-    let refresh_path = refresh_token_file_path()?;
+    let refresh_path = refresh_token_file_path_for(profile)?;
     if refresh_path.exists() {
         std::fs::remove_file(&refresh_path)
             .with_context(|| format!("Failed to remove {}", refresh_path.display()))?;
@@ -127,8 +173,8 @@ pub fn resolve_access_token(auth: &AuthArgs) -> Result<String> {
         return Ok(token);
     }
 
-    // 3. Saved token from `nyxid login`
-    if let Some(token) = read_saved_token() {
+    // 3. Saved token from `nyxid login` (profile-aware)
+    if let Some(token) = read_saved_token_for(auth.profile.as_deref()) {
         return Ok(token);
     }
 
@@ -142,19 +188,20 @@ pub fn resolve_access_token(auth: &AuthArgs) -> Result<String> {
 // ---- Login ----
 
 pub async fn run_login(args: LoginArgs) -> Result<()> {
+    let profile = args.profile.as_deref();
     if args.password {
-        return run_password_login(&args.base_url, args.email.as_deref()).await;
+        return run_password_login(&args.base_url, args.email.as_deref(), profile).await;
     }
-    run_browser_login(&args.base_url).await
+    run_browser_login(&args.base_url, profile).await
 }
 
 // ---- Logout ----
 
-pub async fn run_logout(base_url: &str) -> Result<()> {
+pub async fn run_logout(base_url: &str, profile: Option<&str>) -> Result<()> {
     let base_url = base_url.trim_end_matches('/');
 
     // Best-effort server-side logout
-    if let Some(token) = read_saved_token() {
+    if let Some(token) = read_saved_token_for(profile) {
         let client = build_cli_http_client()?;
 
         let _ = client
@@ -164,14 +211,14 @@ pub async fn run_logout(base_url: &str) -> Result<()> {
             .await;
     }
 
-    clear_token()?;
+    clear_token_for(profile)?;
     eprintln!("Logged out. Token cleared.");
     Ok(())
 }
 
 // ---- Browser login (ported from login_cli.rs) ----
 
-async fn run_browser_login(base_url: &str) -> Result<()> {
+async fn run_browser_login(base_url: &str, profile: Option<&str>) -> Result<()> {
     let base_url = base_url.trim_end_matches('/');
 
     let frontend_url = fetch_frontend_url(base_url).await?;
@@ -192,11 +239,15 @@ async fn run_browser_login(base_url: &str) -> Result<()> {
     let _ = open::that(&auth_url);
 
     let callback = wait_for_callback(listener, &state).await?;
-    save_tokens(&callback.access_token, callback.refresh_token.as_deref())?;
-    save_base_url(base_url)?;
+    save_tokens_for(
+        profile,
+        &callback.access_token,
+        callback.refresh_token.as_deref(),
+    )?;
+    save_base_url_for(profile, base_url)?;
 
     eprintln!("Logged in successfully.");
-    eprintln!("Token saved to {}", token_file_path()?.display());
+    eprintln!("Token saved to {}", token_file_path_for(profile)?.display());
 
     Ok(())
 }
@@ -344,7 +395,11 @@ struct LoginResponse {
     refresh_token: Option<String>,
 }
 
-async fn run_password_login(base_url: &str, email: Option<&str>) -> Result<()> {
+async fn run_password_login(
+    base_url: &str,
+    email: Option<&str>,
+    profile: Option<&str>,
+) -> Result<()> {
     let email = match email {
         Some(email) => email.to_string(),
         None => {
@@ -394,11 +449,11 @@ async fn run_password_login(base_url: &str, email: Option<&str>) -> Result<()> {
         .await
         .context("Failed to parse login response")?;
 
-    save_tokens(&login.access_token, login.refresh_token.as_deref())?;
-    save_base_url(base_url)?;
+    save_tokens_for(profile, &login.access_token, login.refresh_token.as_deref())?;
+    save_base_url_for(profile, base_url)?;
 
     eprintln!("Logged in as {email}");
-    eprintln!("Token saved to {}", token_file_path()?.display());
+    eprintln!("Token saved to {}", token_file_path_for(profile)?.display());
 
     Ok(())
 }
@@ -406,21 +461,86 @@ async fn run_password_login(base_url: &str, email: Option<&str>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_cli_auth_url, callback_success_html, parse_callback_request, refresh_token_file_path,
-        token_file_path,
+        build_cli_auth_url, callback_success_html, parse_callback_request,
+        refresh_token_file_path_for, token_dir_for_profile, token_file_path_for,
+        validate_profile_name,
     };
     use crate::api::CLI_USER_AGENT;
 
+    // ---- Profile validation ----
+
+    #[test]
+    fn profile_path_default() {
+        let path = token_dir_for_profile(None).expect("default profile");
+        assert!(path.to_string_lossy().ends_with(".nyxid"));
+    }
+
+    #[test]
+    fn profile_path_named() {
+        let path = token_dir_for_profile(Some("coding-agent")).expect("named profile");
+        assert!(path.to_string_lossy().contains("profiles/coding-agent"));
+    }
+
+    #[test]
+    fn profile_path_with_underscores() {
+        let path = token_dir_for_profile(Some("my_agent_1")).expect("underscore profile");
+        assert!(path.to_string_lossy().contains("profiles/my_agent_1"));
+    }
+
+    #[test]
+    fn profile_name_validation_rejects_empty() {
+        assert!(validate_profile_name("").is_err());
+    }
+
+    #[test]
+    fn profile_name_validation_rejects_path_traversal() {
+        assert!(validate_profile_name("../evil").is_err());
+        assert!(validate_profile_name("foo/bar").is_err());
+        assert!(validate_profile_name("..").is_err());
+    }
+
+    #[test]
+    fn profile_name_validation_rejects_spaces() {
+        assert!(validate_profile_name("my agent").is_err());
+    }
+
+    #[test]
+    fn profile_name_validation_rejects_too_long() {
+        let long_name = "a".repeat(65);
+        assert!(validate_profile_name(&long_name).is_err());
+    }
+
+    #[test]
+    fn profile_name_validation_accepts_valid() {
+        assert!(validate_profile_name("coding-agent").is_ok());
+        assert!(validate_profile_name("research_agent").is_ok());
+        assert!(validate_profile_name("a1-b2_c3").is_ok());
+        assert!(validate_profile_name("x").is_ok());
+        let max_name = "a".repeat(64);
+        assert!(validate_profile_name(&max_name).is_ok());
+    }
+
+    // ---- Token path tests ----
+
     #[test]
     fn token_path_is_under_home() {
-        let path = token_file_path().expect("token path");
+        let path = token_file_path_for(None).expect("token path");
         assert!(path.to_string_lossy().contains(".nyxid"));
         assert!(path.to_string_lossy().ends_with("access_token"));
     }
 
     #[test]
+    fn token_path_profile_is_under_profiles() {
+        let path = token_file_path_for(Some("test-agent")).expect("profile token path");
+        assert!(
+            path.to_string_lossy()
+                .contains(".nyxid/profiles/test-agent/access_token")
+        );
+    }
+
+    #[test]
     fn refresh_token_path_is_under_home() {
-        let path = refresh_token_file_path().expect("refresh token path");
+        let path = refresh_token_file_path_for(None).expect("refresh token path");
         assert!(path.to_string_lossy().contains(".nyxid"));
         assert!(path.to_string_lossy().ends_with("refresh_token"));
     }

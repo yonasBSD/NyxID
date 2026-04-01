@@ -333,6 +333,8 @@ async fn handle_node_web_terminal(
         })),
         ip_address.clone(),
         user_agent.clone(),
+        None,
+        None,
     );
 
     // ----- Bridge loop: browser WebSocket <-> node agent -----
@@ -429,6 +431,8 @@ async fn handle_node_web_terminal(
         })),
         ip_address,
         user_agent,
+        None,
+        None,
     );
 }
 

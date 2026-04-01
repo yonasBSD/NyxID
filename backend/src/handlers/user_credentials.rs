@@ -139,6 +139,8 @@ pub async fn set_my_credentials(
         })),
         None,
         None,
+        None,
+        None,
     );
 
     Ok(Json(UserCredentialsResponse {
@@ -168,6 +170,8 @@ pub async fn delete_my_credentials(
         Some(serde_json::json!({
             "provider_id": &provider_id,
         })),
+        None,
+        None,
         None,
         None,
     );

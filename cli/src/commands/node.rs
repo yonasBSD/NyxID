@@ -5,7 +5,7 @@ use comfy_table::{Table, presets::UTF8_FULL_CONDENSED};
 use serde_json::Value;
 
 use crate::api::ApiClient;
-use crate::cli::{NodeCommands, NodeDaemonCommands, OutputFormat};
+use crate::cli::{NodeCommands, NodeDaemonCommands, NodeDockerCommands, OutputFormat};
 
 pub async fn run(command: NodeCommands) -> Result<()> {
     match command {
@@ -211,39 +211,74 @@ pub async fn run(command: NodeCommands) -> Result<()> {
             url,
             config,
             keychain,
-        } => crate::node::agent::cmd_register(&token, url.as_deref(), config.as_deref(), keychain)
+            profile,
+        } => {
+            let effective_config = resolve_effective_config(config.as_deref(), profile.as_deref())?;
+            crate::node::agent::cmd_register(
+                &token,
+                url.as_deref(),
+                effective_config.as_deref(),
+                keychain,
+            )
             .await
-            .map_err(anyhow::Error::from),
+            .map_err(anyhow::Error::from)
+        }
 
-        NodeCommands::Start { config, log_level } => {
-            crate::node::agent::cmd_start(config.as_deref(), log_level.as_deref())
+        NodeCommands::Start {
+            config,
+            log_level,
+            profile,
+        } => {
+            let effective_config = resolve_effective_config(config.as_deref(), profile.as_deref())?;
+            crate::node::agent::cmd_start(effective_config.as_deref(), log_level.as_deref())
                 .await
                 .map_err(anyhow::Error::from)
         }
 
-        NodeCommands::AgentStatus { config } => {
-            crate::node::agent::cmd_status(config.as_deref()).map_err(anyhow::Error::from)
+        NodeCommands::AgentStatus { config, profile } => {
+            let effective_config = resolve_effective_config(config.as_deref(), profile.as_deref())?;
+            crate::node::agent::cmd_status(effective_config.as_deref()).map_err(anyhow::Error::from)
         }
 
         NodeCommands::Rekey {
             auth_token,
             signing_secret,
             config,
-        } => crate::node::agent::cmd_rekey(&auth_token, &signing_secret, config.as_deref())
-            .map_err(anyhow::Error::from),
+            profile,
+        } => {
+            let effective_config = resolve_effective_config(config.as_deref(), profile.as_deref())?;
+            crate::node::agent::cmd_rekey(&auth_token, &signing_secret, effective_config.as_deref())
+                .map_err(anyhow::Error::from)
+        }
 
-        NodeCommands::Credentials { command, config } => {
-            crate::node::agent::cmd_credentials(command, config.as_deref())
+        NodeCommands::Credentials {
+            command,
+            config,
+            profile,
+        } => {
+            let effective_config = resolve_effective_config(config.as_deref(), profile.as_deref())?;
+            crate::node::agent::cmd_credentials(command, effective_config.as_deref())
                 .await
                 .map_err(anyhow::Error::from)
         }
 
-        NodeCommands::Migrate { to, config } => {
-            crate::node::agent::cmd_migrate(&to, config.as_deref()).map_err(anyhow::Error::from)
+        NodeCommands::Migrate {
+            to,
+            config,
+            profile,
+        } => {
+            let effective_config = resolve_effective_config(config.as_deref(), profile.as_deref())?;
+            crate::node::agent::cmd_migrate(&to, effective_config.as_deref())
+                .map_err(anyhow::Error::from)
         }
 
-        NodeCommands::NodeOpenclaw { command, config } => {
-            crate::node::agent::cmd_openclaw(command, config.as_deref())
+        NodeCommands::NodeOpenclaw {
+            command,
+            config,
+            profile,
+        } => {
+            let effective_config = resolve_effective_config(config.as_deref(), profile.as_deref())?;
+            crate::node::agent::cmd_openclaw(command, effective_config.as_deref())
                 .await
                 .map_err(anyhow::Error::from)
         }
@@ -253,35 +288,71 @@ pub async fn run(command: NodeCommands) -> Result<()> {
             Ok(())
         }
 
+        NodeCommands::Docker { command } => run_docker_command(command),
+
         NodeCommands::Daemon { command } => match command {
             NodeDaemonCommands::Install {
                 args,
                 log_level,
                 force,
-            } => crate::node::daemon::install(args.config.as_deref(), log_level.as_deref(), force)
-                .map_err(anyhow::Error::from),
+            } => crate::node::daemon::install(
+                args.config.as_deref(),
+                args.profile.as_deref(),
+                log_level.as_deref(),
+                force,
+            )
+            .map_err(anyhow::Error::from),
             NodeDaemonCommands::Uninstall { args } => {
-                crate::node::daemon::uninstall(args.config.as_deref()).map_err(anyhow::Error::from)
+                crate::node::daemon::uninstall(args.config.as_deref(), args.profile.as_deref())
+                    .map_err(anyhow::Error::from)
             }
             NodeDaemonCommands::Start { args } => {
-                crate::node::daemon::start(args.config.as_deref()).map_err(anyhow::Error::from)
+                crate::node::daemon::start(args.config.as_deref(), args.profile.as_deref())
+                    .map_err(anyhow::Error::from)
             }
             NodeDaemonCommands::Stop { args } => {
-                crate::node::daemon::stop(args.config.as_deref()).map_err(anyhow::Error::from)
+                crate::node::daemon::stop(args.config.as_deref(), args.profile.as_deref())
+                    .map_err(anyhow::Error::from)
             }
             NodeDaemonCommands::Restart { args } => {
-                crate::node::daemon::restart(args.config.as_deref()).map_err(anyhow::Error::from)
+                crate::node::daemon::restart(args.config.as_deref(), args.profile.as_deref())
+                    .map_err(anyhow::Error::from)
             }
             NodeDaemonCommands::Status { args } => {
-                crate::node::daemon::status(args.config.as_deref()).map_err(anyhow::Error::from)
+                crate::node::daemon::status(args.config.as_deref(), args.profile.as_deref())
+                    .map_err(anyhow::Error::from)
             }
             NodeDaemonCommands::Logs {
                 args,
                 follow,
                 lines,
-            } => crate::node::daemon::logs(args.config.as_deref(), follow, lines)
-                .map_err(anyhow::Error::from),
+            } => crate::node::daemon::logs(
+                args.config.as_deref(),
+                args.profile.as_deref(),
+                follow,
+                lines,
+            )
+            .map_err(anyhow::Error::from),
         },
+    }
+}
+
+/// Resolve the effective config path, applying profile if no explicit config was given.
+fn resolve_effective_config(
+    config: Option<&str>,
+    profile: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    if config.is_some() {
+        return Ok(config.map(String::from));
+    }
+    match profile {
+        Some(p) => Ok(Some(
+            crate::node::config::resolve_config_dir_with_profile(None, Some(p))
+                .map_err(|e| anyhow::anyhow!("{e}"))?
+                .to_string_lossy()
+                .to_string(),
+        )),
+        None => Ok(None),
     }
 }
 
@@ -308,4 +379,224 @@ async fn resolve_node_id(api: &mut ApiClient, id_or_name: &str) -> Result<String
 
     // Fall back to treating it as an ID (let the server decide)
     Ok(id_or_name.to_string())
+}
+
+// ---- Docker subcommands ----
+
+const DOCKER_IMAGE: &str = "nyxid-node:latest";
+const DOCKER_CONFIG_DIR: &str = "/app/config";
+
+fn docker_container_name(profile: Option<&str>) -> String {
+    match profile {
+        None | Some("default") => "nyxid-node".to_string(),
+        Some(name) => format!("nyxid-node-{name}"),
+    }
+}
+
+fn docker_config_dir(profile: Option<&str>) -> Result<std::path::PathBuf> {
+    let home =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+    let base = home.join(".nyxid-node");
+    match profile {
+        None | Some("default") => Ok(base),
+        Some(name) => {
+            crate::auth::validate_profile_name(name)?;
+            Ok(base.join("profiles").join(name))
+        }
+    }
+}
+
+fn run_docker_command(command: NodeDockerCommands) -> Result<()> {
+    // Verify docker is available
+    let docker_check = std::process::Command::new("docker")
+        .arg("--version")
+        .output();
+    if docker_check.is_err() {
+        anyhow::bail!(
+            "Docker is not installed or not in PATH. \
+             Install Docker from https://docs.docker.com/get-docker/"
+        );
+    }
+
+    match command {
+        NodeDockerCommands::Build => docker_build(),
+        NodeDockerCommands::Start { args } => docker_start(args.profile.as_deref()),
+        NodeDockerCommands::Stop { args } => docker_stop(args.profile.as_deref()),
+        NodeDockerCommands::Restart { args } => {
+            let _ = docker_stop(args.profile.as_deref());
+            docker_start(args.profile.as_deref())
+        }
+        NodeDockerCommands::Status { args } => docker_status(args.profile.as_deref()),
+        NodeDockerCommands::Logs { args, follow } => docker_logs(args.profile.as_deref(), follow),
+    }
+}
+
+fn docker_build() -> Result<()> {
+    eprintln!("Building node agent Docker image...");
+
+    // Find the project root by looking for cli/Dockerfile.node
+    let dockerfile = find_dockerfile()?;
+    let context = dockerfile
+        .parent()
+        .and_then(|p| p.parent())
+        .ok_or_else(|| anyhow::anyhow!("Could not determine project root from Dockerfile path"))?;
+
+    let status = std::process::Command::new("docker")
+        .args(["build", "-f"])
+        .arg(&dockerfile)
+        .args(["-t", DOCKER_IMAGE])
+        .arg(context)
+        .status()?;
+
+    if !status.success() {
+        anyhow::bail!("Docker build failed");
+    }
+    eprintln!("Image built: {DOCKER_IMAGE}");
+    Ok(())
+}
+
+fn docker_start(profile: Option<&str>) -> Result<()> {
+    let config_dir = docker_config_dir(profile)?;
+    let container = docker_container_name(profile);
+
+    if !config_dir.join("config.toml").exists() {
+        let profile_hint = match profile {
+            Some(p) if p != "default" => format!(" --profile {p}"),
+            _ => String::new(),
+        };
+        anyhow::bail!(
+            "No config found at {}. Register the node first:\n  nyxid node register --token <token> --url <ws-url>{profile_hint}",
+            config_dir.display()
+        );
+    }
+
+    // Check if image exists, prompt to build if not
+    let image_check = std::process::Command::new("docker")
+        .args(["image", "inspect", DOCKER_IMAGE])
+        .output()?;
+    if !image_check.status.success() {
+        eprintln!("Image {DOCKER_IMAGE} not found. Building...");
+        docker_build()?;
+    }
+
+    // Remove existing stopped container with the same name
+    let _ = std::process::Command::new("docker")
+        .args(["rm", "-f", &container])
+        .output();
+
+    let config_dir_str = config_dir.to_string_lossy();
+    let volume = format!("{config_dir_str}:{DOCKER_CONFIG_DIR}:rw");
+
+    let status = std::process::Command::new("docker")
+        .args([
+            "run",
+            "-d",
+            "--name",
+            &container,
+            "--restart",
+            "unless-stopped",
+            "-v",
+            &volume,
+            DOCKER_IMAGE,
+        ])
+        .status()?;
+
+    if !status.success() {
+        anyhow::bail!("Failed to start container {container}");
+    }
+    eprintln!("Container {container} started.");
+    eprintln!("  Logs:   nyxid node docker logs{}", profile_flag(profile));
+    eprintln!("  Stop:   nyxid node docker stop{}", profile_flag(profile));
+    eprintln!(
+        "  Status: nyxid node docker status{}",
+        profile_flag(profile)
+    );
+    Ok(())
+}
+
+fn docker_stop(profile: Option<&str>) -> Result<()> {
+    let container = docker_container_name(profile);
+    eprintln!("Stopping {container}...");
+    let _ = std::process::Command::new("docker")
+        .args(["stop", &container])
+        .output();
+    let _ = std::process::Command::new("docker")
+        .args(["rm", &container])
+        .output();
+    eprintln!("Stopped.");
+    Ok(())
+}
+
+fn docker_status(profile: Option<&str>) -> Result<()> {
+    let container = docker_container_name(profile);
+    let output = std::process::Command::new("docker")
+        .args([
+            "ps",
+            "-a",
+            "--filter",
+            &format!("name=^{container}$"),
+            "--format",
+            "{{.Status}}",
+        ])
+        .output()?;
+    let status_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if status_str.is_empty() {
+        eprintln!("{container}: not found");
+    } else if status_str.starts_with("Up") {
+        eprintln!("{container}: running ({status_str})");
+    } else {
+        eprintln!("{container}: stopped ({status_str})");
+    }
+    Ok(())
+}
+
+fn docker_logs(profile: Option<&str>, follow: bool) -> Result<()> {
+    let container = docker_container_name(profile);
+    let mut cmd = std::process::Command::new("docker");
+    cmd.args(["logs", "--tail", "50"]);
+    if follow {
+        cmd.arg("-f");
+    }
+    cmd.arg(&container);
+    let status = cmd.status()?;
+    if !status.success() {
+        anyhow::bail!("Container {container} not found. Is it running?");
+    }
+    Ok(())
+}
+
+fn profile_flag(profile: Option<&str>) -> String {
+    match profile {
+        Some(p) if p != "default" => format!(" --profile {p}"),
+        _ => String::new(),
+    }
+}
+
+fn find_dockerfile() -> Result<std::path::PathBuf> {
+    // Try relative to current exe (installed via cargo install)
+    if let Ok(exe) = std::env::current_exe() {
+        // Walk up looking for cli/Dockerfile.node
+        let mut dir = exe.parent().map(std::path::Path::to_path_buf);
+        for _ in 0..5 {
+            if let Some(ref d) = dir {
+                let candidate = d.join("cli/Dockerfile.node");
+                if candidate.exists() {
+                    return Ok(candidate);
+                }
+                dir = d.parent().map(std::path::Path::to_path_buf);
+            }
+        }
+    }
+
+    // Try current working directory
+    let cwd = std::env::current_dir()?;
+    let candidate = cwd.join("cli/Dockerfile.node");
+    if candidate.exists() {
+        return Ok(candidate);
+    }
+
+    anyhow::bail!(
+        "Could not find cli/Dockerfile.node. Run this command from the NyxID project root, \
+         or build the image manually:\n  docker build -f cli/Dockerfile.node -t {DOCKER_IMAGE} ."
+    );
 }

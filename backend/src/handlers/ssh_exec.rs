@@ -249,6 +249,8 @@ pub async fn ssh_exec(
                     })),
                     ip_address,
                     user_agent,
+                    None,
+                    None,
                 );
 
                 return Ok(Json(response));

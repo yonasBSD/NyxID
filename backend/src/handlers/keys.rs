@@ -94,6 +94,8 @@ pub struct KeyResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub catalog_service_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog_service_slug: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub catalog_service_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
@@ -529,6 +531,7 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
             .map(|api_key| api_key.status.clone())
             .unwrap_or_else(|| "active".to_string()),
         catalog_service_id: result.service.catalog_service_id.clone(),
+        catalog_service_slug: None,
         catalog_service_name: None,
         node_id: result.service.node_id.clone(),
         node_priority: result.service.node_priority,
@@ -570,6 +573,7 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         auth_key_name: view.auth_key_name,
         status: view.status,
         catalog_service_id: view.catalog_service_id,
+        catalog_service_slug: view.catalog_service_slug,
         catalog_service_name: view.catalog_service_name,
         node_id: view.node_id,
         node_priority: view.node_priority,

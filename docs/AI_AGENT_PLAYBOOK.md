@@ -263,7 +263,7 @@ AI coding tools (Claude Code, Codex, Cursor) run commands in non-interactive she
    - **Claude Code:** Tell the user to run `! export SECRET_NAME="value"` (the `!` prefix runs it in their real terminal -- the AI never sees the value).
    - **Codex / Cursor / other tools:** Tell the user to set the env var in a separate terminal, then reference `$SECRET_NAME` in commands.
 3. **Dashboard UI** -- For entering credentials (service connections, provider keys, etc.), direct users to the relevant dashboard page where they can type secrets into form fields securely.
-4. **`nyxid node credentials add`** -- For node agent credentials, this command prompts for the secret value interactively (the user runs it themselves, not through the AI).
+4. **`nyxid node credentials setup`** (recommended) or **`nyxid node credentials add`** -- For node agent credentials, these commands prompt for the secret value interactively (the user runs them themselves, not through the AI). `credentials setup` also auto-registers the service in the backend.
 5. **Never** include secret values in commands, echo them, or ask the user to paste them into chat. Use placeholder text like `<your-api-key>` in examples.
 
 ### Alternative: Login with email/password
@@ -1154,21 +1154,32 @@ Credentials can be added before or after starting the agent. The agent watches t
 Add credentials for each service the node will handle:
 
 ```bash
-# Recommended: auto-setup (fetches requirements from catalog, prompts accordingly)
+# Recommended for catalog services: auto-setup
+# Fetches config from catalog, prompts accordingly, and auto-registers in backend.
 nyxid node credentials setup --service llm-openai
 # Auto-detects: API key service → prompts for key, shows where to get it
 # Auto-detects: OAuth service → runs device code flow from the node
 # Auto-detects: gateway URL required → prompts for instance URL first
+# Auto-registers: creates the backend UserService with node_id (no separate step needed)
 
-# Manual: header injection
+# Custom endpoints: register in backend first, then add credentials locally
+nyxid service add --custom --via-node <node-name-or-id>   # creates backend record (prompts for URL, auth, etc.)
+nyxid node credentials add --service "my-api" --header "Authorization" --secret-format Bearer
+
+# Manual for catalog services (requires separate backend registration, see Step 5)
 nyxid node credentials add --service "llm-openai" --header "Authorization" --secret-format Bearer
 
-# Manual: query parameter injection
+# Manual: query parameter injection (requires separate backend registration, see Step 5)
 nyxid node credentials add --service "llm-google-ai" --query-param "key"
 
 # OAuth: run device code flow from the node
 nyxid node credentials add-oauth --service "api-twitter" --from-catalog
 ```
+
+> **Important:** `credentials setup` works for **catalog services only** -- it auto-registers the service in the backend with the node's ID. For **custom endpoints**, use `nyxid service add --custom --via-node <node>` first to create the backend record, then `nyxid node credentials add` to store the credential locally. If using `credentials add` for a catalog service, register it manually first:
+> ```bash
+> nyxid service add <slug> --via-node <node-name-or-id>
+> ```
 
 **Manage credentials:**
 
@@ -1177,14 +1188,19 @@ nyxid node credentials list                      # List all configured credentia
 nyxid node credentials remove --service "openai"  # Remove a credential
 ```
 
-### Step 5: Route services through the node
+### Step 5: Route services through the node (manual)
 
-Node routing is now configured per-service on the AI Services page, not through separate bindings.
+> **Skip this step for catalog services if you used `credentials setup` in Step 4** -- it auto-registers with node routing. This step is required for **custom endpoints** (handled in Step 4 via `service add --custom --via-node`) and for changing routing on existing services.
+
+For services added via `credentials add` or when changing routing on an existing service:
 
 **Via CLI (preferred):**
 
 ```bash
-# Route a service through a node
+# Add a service routed through a node (creates backend record + sets node routing)
+nyxid service add <slug> --via-node <node-name-or-id>
+
+# Change routing on an existing service
 nyxid service route $SERVICE_ID --node $NODE_ID
 
 # Switch back to direct routing
@@ -1216,7 +1232,6 @@ curl -X POST http://localhost:3001/api/v1/keys \
   -H "Content-Type: application/json" \
   -d "{
     \"service_slug\": \"llm-openai\",
-    \"credential\": \"$SERVICE_CREDENTIAL\",
     \"node_id\": \"NODE_UUID\",
     \"label\": \"OpenAI via Node\"
   }"
@@ -1358,9 +1373,9 @@ nyxid node daemon restart    [--config <PATH>]
 nyxid node daemon status     [--config <PATH>]
 nyxid node daemon logs       [--config <PATH>] [--follow] [--lines <N>]
 
-# Credential management
-nyxid node credentials setup     --service <SLUG> [--api-url <URL>]  # Auto-detect and setup (recommended)
-nyxid node credentials add       --service <SLUG> [--header <NAME> | --query-param <NAME>] [--secret-format Raw|Bearer|Basic] [--target-url <URL>]
+# Credential management (setup auto-registers catalog services in the backend)
+nyxid node credentials setup     --service <SLUG> [--api-url <URL>]  # Catalog services: auto-detect, setup, and register (recommended)
+nyxid node credentials add       --service <SLUG> [--header <NAME> | --query-param <NAME>] [--secret-format Raw|Bearer|Basic] [--target-url <URL>]  # Local only; for custom endpoints run `nyxid service add --custom --via-node <NODE>` first
 nyxid node credentials add-oauth --service <SLUG> --from-catalog [--api-url <URL>]  # OAuth flow from node
 nyxid node credentials list      [--config <PATH>]
 nyxid node credentials remove    --service <SLUG> [--config <PATH>]
