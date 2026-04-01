@@ -320,7 +320,7 @@ impl ApiClient {
         method: &str,
         path: &str,
         headers: &[(String, String)],
-        body: Option<&str>,
+        body: Option<&[u8]>,
     ) -> Result<reqwest::Response> {
         let url = format!("{}{path}", self.base_url);
         let method_parsed = reqwest::Method::from_bytes(method.to_uppercase().as_bytes())
@@ -331,6 +331,7 @@ impl ApiClient {
             .any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
 
         let client = self.client.clone();
+        let body_vec = body.map(|b| b.to_vec());
         let build_req = |token: &str| {
             let mut req = client
                 .request(method_parsed.clone(), &url)
@@ -338,11 +339,13 @@ impl ApiClient {
             for (k, v) in headers {
                 req = req.header(k.as_str(), v.as_str());
             }
-            if let Some(b) = body {
+            if let Some(ref b) = body_vec {
                 if !has_content_type {
-                    req = req.header("content-type", "application/json");
+                    // Default to application/octet-stream for raw bytes;
+                    // callers sending JSON should pass -H 'Content-Type: application/json'.
+                    req = req.header("content-type", "application/octet-stream");
                 }
-                req = req.body(b.to_string());
+                req = req.body(b.clone());
             }
             req
         };

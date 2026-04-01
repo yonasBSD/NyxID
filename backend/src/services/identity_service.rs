@@ -41,6 +41,19 @@ pub fn build_identity_headers(user: &User, service: &DownstreamService) -> Vec<(
         return vec![];
     }
 
+    if !service.identity_include_user_id
+        && !service.identity_include_email
+        && !service.identity_include_name
+    {
+        tracing::warn!(
+            service_id = %service.id,
+            mode = %mode,
+            "identity_propagation_mode is '{}' but all identity_include_* flags are false; \
+             no user identity headers will be sent. Enable at least one include flag.",
+            mode,
+        );
+    }
+
     let mut headers = Vec::new();
 
     if service.identity_include_user_id {
@@ -106,4 +119,109 @@ pub fn generate_identity_assertion(
 
     encode(&header, &claims, &jwt_keys.encoding)
         .map_err(|e| AppError::Internal(format!("Failed to encode identity assertion: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::downstream_service::test_helpers::dummy_service;
+    use chrono::Utc;
+
+    fn make_user() -> User {
+        User {
+            id: "user-123".to_string(),
+            email: "alice@example.com".to_string(),
+            password_hash: None,
+            display_name: Some("Alice".to_string()),
+            avatar_url: None,
+            email_verified: true,
+            email_verification_token: None,
+            password_reset_token: None,
+            password_reset_expires_at: None,
+            is_active: true,
+            is_admin: false,
+            role_ids: vec![],
+            group_ids: vec![],
+            mfa_enabled: false,
+            social_provider: None,
+            social_provider_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_login_at: None,
+        }
+    }
+
+    #[test]
+    fn mode_none_returns_empty() {
+        let user = make_user();
+        let mut svc = dummy_service();
+        svc.identity_propagation_mode = "none".to_string();
+        let headers = build_identity_headers(&user, &svc);
+        assert!(headers.is_empty());
+    }
+
+    #[test]
+    fn mode_headers_with_explicit_flags() {
+        let user = make_user();
+        let mut svc = dummy_service();
+        svc.identity_propagation_mode = "headers".to_string();
+        svc.identity_include_email = true;
+        svc.identity_include_name = false;
+        svc.identity_include_user_id = false;
+
+        let headers = build_identity_headers(&user, &svc);
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].0, "X-NyxID-User-Email");
+        assert_eq!(headers[0].1, "alice@example.com");
+    }
+
+    #[test]
+    fn mode_headers_all_flags_off_returns_empty() {
+        let user = make_user();
+        let mut svc = dummy_service();
+        svc.identity_propagation_mode = "headers".to_string();
+        svc.identity_include_email = false;
+        svc.identity_include_name = false;
+        svc.identity_include_user_id = false;
+
+        // All flags off means no identity headers at runtime (a misconfiguration
+        // that is caught by a warning log). The provisioning layer is responsible
+        // for setting sensible defaults when copying from catalog.
+        let headers = build_identity_headers(&user, &svc);
+        assert!(headers.is_empty());
+    }
+
+    #[test]
+    fn mode_headers_selective_flags() {
+        let user = make_user();
+        let mut svc = dummy_service();
+        svc.identity_propagation_mode = "headers".to_string();
+        svc.identity_include_user_id = true;
+        svc.identity_include_email = true;
+        svc.identity_include_name = true;
+
+        let headers = build_identity_headers(&user, &svc);
+        let names: Vec<&str> = headers.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"X-NyxID-User-Id"));
+        assert!(names.contains(&"X-NyxID-User-Email"));
+        assert!(names.contains(&"X-NyxID-User-Name"));
+    }
+
+    #[test]
+    fn sanitizes_crlf_injection() {
+        let mut user = make_user();
+        user.email = "alice@example.com\r\nX-Injected: yes".to_string();
+
+        let mut svc = dummy_service();
+        svc.identity_propagation_mode = "headers".to_string();
+        svc.identity_include_email = true;
+
+        let headers = build_identity_headers(&user, &svc);
+        let email_header = headers
+            .iter()
+            .find(|(n, _)| n == "X-NyxID-User-Email")
+            .unwrap();
+        assert!(!email_header.1.contains('\r'));
+        assert!(!email_header.1.contains('\n'));
+    }
 }
