@@ -157,6 +157,12 @@ pub struct DownstreamService {
     /// Downstream permissions required for key actions (e.g., "ornn:skill:create")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub required_permissions: Option<Vec<String>>,
+    /// URL to examples, starter templates, or skill registry
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub examples_url: Option<String>,
+    /// Relevant skill names/paths for AI tools (e.g., "nyxid/ornn", "ornn/authoring")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recommended_skills: Option<Vec<String>>,
 
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
@@ -246,6 +252,8 @@ pub mod test_helpers {
             auth_notes: None,
             known_limitations: None,
             required_permissions: None,
+            examples_url: None,
+            recommended_skills: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -337,6 +345,8 @@ mod tests {
             auth_notes: Some("Bearer token required".to_string()),
             known_limitations: None,
             required_permissions: Some(vec!["read:api".to_string()]),
+            examples_url: Some("https://github.com/example/repo/tree/main/examples".to_string()),
+            recommended_skills: Some(vec!["example/skill".to_string()]),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -392,6 +402,8 @@ mod tests {
             auth_notes: None,
             known_limitations: None,
             required_permissions: None,
+            examples_url: None,
+            recommended_skills: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

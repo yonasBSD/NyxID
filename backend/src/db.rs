@@ -62,6 +62,7 @@ pub async fn create_connection(config: &AppConfig) -> Result<DbHandle, mongodb::
     tracing::info!("MongoDB indexes verified");
 
     backfill_downstream_service_types(&db).await?;
+    migrate_legacy_api_spec_url(&db).await?;
 
     Ok(db)
 }
@@ -841,6 +842,62 @@ async fn backfill_downstream_service_types(db: &Database) -> Result<(), mongodb:
         tracing::info!(
             count = migration.modified_count,
             "Backfilled missing downstream service_type to http"
+        );
+    }
+
+    Ok(())
+}
+
+/// Migrate legacy `api_spec_url` field to `openapi_spec_url` on downstream_services.
+///
+/// Documents created before the field rename may have `api_spec_url`. If a later
+/// update wrote `openapi_spec_url` without removing `api_spec_url`, the document
+/// ends up with both keys, causing a deserialization error (serde alias treats
+/// them as the same field). This migration:
+/// 1. Removes `api_spec_url` from documents that have both fields (duplicate).
+/// 2. Renames `api_spec_url` to `openapi_spec_url` on documents that only have the old field.
+async fn migrate_legacy_api_spec_url(db: &Database) -> Result<(), mongodb::error::Error> {
+    let services = db.collection::<Document>("downstream_services");
+
+    // Step 1: Remove stale api_spec_url from documents that have both fields
+    let dedup = services
+        .update_many(
+            doc! {
+                "api_spec_url": { "$exists": true },
+                "openapi_spec_url": { "$exists": true },
+            },
+            doc! { "$unset": { "api_spec_url": "" } },
+        )
+        .await?;
+    if dedup.modified_count > 0 {
+        tracing::info!(
+            count = dedup.modified_count,
+            "Removed duplicate api_spec_url from downstream services"
+        );
+    }
+
+    // Step 2: Rename api_spec_url -> openapi_spec_url for remaining legacy documents
+    let rename = services
+        .update_many(
+            doc! { "api_spec_url": { "$exists": true } },
+            doc! { "$rename": { "api_spec_url": "openapi_spec_url" } },
+        )
+        .await?;
+    if rename.modified_count > 0 {
+        tracing::info!(
+            count = rename.modified_count,
+            "Renamed api_spec_url to openapi_spec_url on downstream services"
+        );
+    }
+
+    // Step 3: Post-migration verification -- no documents should have api_spec_url
+    let remaining = services
+        .count_documents(doc! { "api_spec_url": { "$exists": true } })
+        .await?;
+    if remaining > 0 {
+        tracing::error!(
+            count = remaining,
+            "Migration incomplete: downstream_services documents still have api_spec_url"
         );
     }
 
@@ -1744,6 +1801,8 @@ mod tests {
             auth_notes: None,
             known_limitations: None,
             required_permissions: None,
+            examples_url: None,
+            recommended_skills: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

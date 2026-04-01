@@ -1544,6 +1544,8 @@ pub async fn seed_default_services(
             auth_notes: None,
             known_limitations: None,
             required_permissions: None,
+            examples_url: None,
+            recommended_skills: None,
             created_at: now,
             updated_at: now,
         };

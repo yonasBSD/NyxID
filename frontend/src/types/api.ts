@@ -133,6 +133,26 @@ export interface DownstreamService {
   readonly identity_jwt_audience?: string | null;
   readonly inject_delegation_token?: boolean;
   readonly delegation_token_scope?: string;
+  // Rich metadata for AI agent discovery
+  readonly homepage_url?: string | null;
+  readonly repository_url?: string | null;
+  readonly issues_url?: string | null;
+  readonly capabilities?: ServiceCapabilities | null;
+  readonly auth_notes?: string | null;
+  readonly known_limitations?: string | null;
+  readonly required_permissions?: readonly string[] | null;
+  readonly examples_url?: string | null;
+  readonly recommended_skills?: readonly string[] | null;
+}
+
+export interface ServiceCapabilities {
+  readonly supports_proxy_read: boolean;
+  readonly supports_proxy_write: boolean;
+  readonly supports_proxy_binary_upload: boolean;
+  readonly supports_direct_downstream_auth: boolean;
+  readonly supports_authoring_via_nyx: boolean;
+  readonly supports_websocket: boolean;
+  readonly supports_streaming: boolean;
 }
 
 export interface SshServiceConfig {
@@ -187,6 +207,15 @@ export type UpdateServicePayload =
       readonly identity_jwt_audience?: string;
       readonly inject_delegation_token?: boolean;
       readonly delegation_token_scope?: string;
+      readonly homepage_url?: string;
+      readonly repository_url?: string;
+      readonly issues_url?: string;
+      readonly capabilities?: ServiceCapabilities;
+      readonly auth_notes?: string;
+      readonly known_limitations?: string;
+      readonly required_permissions?: readonly string[];
+      readonly examples_url?: string;
+      readonly recommended_skills?: readonly string[];
     }
   | {
       readonly name?: string;

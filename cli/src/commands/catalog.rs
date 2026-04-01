@@ -129,6 +129,7 @@ pub async fn run(command: CatalogCommands) -> Result<()> {
                     let has_metadata = item["homepage_url"].is_string()
                         || item["repository_url"].is_string()
                         || item["issues_url"].is_string()
+                        || item["examples_url"].is_string()
                         || item["openapi_spec_url"].is_string()
                         || item["asyncapi_spec_url"].is_string();
 
@@ -143,6 +144,9 @@ pub async fn run(command: CatalogCommands) -> Result<()> {
                         }
                         if let Some(v) = item["issues_url"].as_str() {
                             eprintln!("  Issues:       {v}");
+                        }
+                        if let Some(v) = item["examples_url"].as_str() {
+                            eprintln!("  Skills & Examples: {v}");
                         }
                         if let Some(v) = item["openapi_spec_url"].as_str() {
                             eprintln!("  OpenAPI Spec: {v}");
@@ -187,6 +191,18 @@ pub async fn run(command: CatalogCommands) -> Result<()> {
                         for p in perms {
                             if let Some(s) = p.as_str() {
                                 eprintln!("  - {s}");
+                            }
+                        }
+                    }
+
+                    if let Some(skills) = item["recommended_skills"].as_array()
+                        && !skills.is_empty()
+                    {
+                        eprintln!();
+                        eprintln!("Recommended Skills:");
+                        for s in skills {
+                            if let Some(v) = s.as_str() {
+                                eprintln!("  - {v}");
                             }
                         }
                     }

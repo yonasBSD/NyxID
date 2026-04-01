@@ -61,6 +61,8 @@ pub struct CatalogEntry {
     pub auth_notes: Option<String>,
     pub known_limitations: Option<String>,
     pub required_permissions: Option<Vec<String>>,
+    pub examples_url: Option<String>,
+    pub recommended_skills: Option<Vec<String>>,
 }
 
 fn build_catalog_entry(
@@ -137,6 +139,8 @@ fn build_catalog_entry(
         auth_notes: svc.auth_notes,
         known_limitations: svc.known_limitations,
         required_permissions: svc.required_permissions,
+        examples_url: svc.examples_url,
+        recommended_skills: svc.recommended_skills,
     }
 }
 

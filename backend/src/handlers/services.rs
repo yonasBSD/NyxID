@@ -52,6 +52,8 @@ pub struct CreateServiceRequest {
     pub auth_notes: Option<String>,
     pub known_limitations: Option<String>,
     pub required_permissions: Option<Vec<String>>,
+    pub examples_url: Option<String>,
+    pub recommended_skills: Option<Vec<String>>,
 }
 
 impl std::fmt::Debug for CreateServiceRequest {
@@ -140,6 +142,10 @@ pub struct ServiceResponse {
     pub known_limitations: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub required_permissions: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub examples_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recommended_skills: Option<Vec<String>>,
     pub created_by: String,
     pub created_at: String,
     pub updated_at: String,
@@ -177,6 +183,8 @@ pub struct UpdateServiceRequest {
     pub auth_notes: Option<String>,
     pub known_limitations: Option<String>,
     pub required_permissions: Option<Vec<String>>,
+    pub examples_url: Option<String>,
+    pub recommended_skills: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -700,6 +708,8 @@ pub async fn create_service(
         auth_notes: body.auth_notes.clone(),
         known_limitations: body.known_limitations.clone(),
         required_permissions: body.required_permissions.clone(),
+        examples_url: body.examples_url.clone(),
+        recommended_skills: body.recommended_skills.clone(),
         created_at: now,
         updated_at: now,
     };
@@ -930,23 +940,20 @@ pub async fn update_service(
                 set_doc.insert("base_url", base_url.as_str());
             }
 
+            // Track explicit spec URL values for resolve_spec_url_update,
+            // but don't insert into set_doc here -- the http_docs_refresh block
+            // below handles the final insert to avoid duplicate BSON keys.
             if body.openapi_spec_url.is_some() {
                 explicit_openapi_spec_url = Some(openapi_spec_url.clone());
-                if let Some(ref openapi_spec_url) = openapi_spec_url {
-                    validate_optional_spec_url(openapi_spec_url)?;
-                    set_doc.insert("openapi_spec_url", openapi_spec_url.as_str());
-                } else {
-                    set_doc.insert("openapi_spec_url", bson::Bson::Null);
+                if let Some(ref url) = openapi_spec_url {
+                    validate_optional_spec_url(url)?;
                 }
             }
 
             if body.asyncapi_spec_url.is_some() {
                 explicit_asyncapi_spec_url = Some(asyncapi_spec_url.clone());
-                if let Some(ref asyncapi_spec_url) = asyncapi_spec_url {
-                    validate_optional_spec_url(asyncapi_spec_url)?;
-                    set_doc.insert("asyncapi_spec_url", asyncapi_spec_url.as_str());
-                } else {
-                    set_doc.insert("asyncapi_spec_url", bson::Bson::Null);
+                if let Some(ref url) = asyncapi_spec_url {
+                    validate_optional_spec_url(url)?;
                 }
             }
 
@@ -1172,6 +1179,29 @@ pub async fn update_service(
             .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?;
         set_doc.insert("required_permissions", bson_perms);
     }
+    if body.examples_url.is_some() {
+        let val = body
+            .examples_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+        if let Some(url) = val {
+            validate_optional_spec_url(url)?;
+            set_doc.insert("examples_url", url);
+        } else {
+            set_doc.insert("examples_url", bson::Bson::Null);
+        }
+    }
+    if let Some(ref skills) = body.recommended_skills {
+        if skills.len() > 50 {
+            return Err(AppError::ValidationError(
+                "recommended_skills must not exceed 50 entries".to_string(),
+            ));
+        }
+        let bson_skills = bson::to_bson(skills)
+            .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?;
+        set_doc.insert("recommended_skills", bson_skills);
+    }
 
     if set_doc.is_empty() {
         return Err(AppError::ValidationError(
@@ -1213,10 +1243,18 @@ pub async fn update_service(
         }
     }
 
+    // Always unset the legacy api_spec_url alias to prevent duplicate-field
+    // deserialization errors on documents created before the field was renamed.
     state
         .db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .update_one(doc! { "_id": &service_id }, doc! { "$set": &set_doc })
+        .update_one(
+            doc! { "_id": &service_id },
+            doc! {
+                "$set": &set_doc,
+                "$unset": { "api_spec_url": "" },
+            },
+        )
         .await?;
 
     // If base_url changed and service has an OIDC client, update default redirect URI

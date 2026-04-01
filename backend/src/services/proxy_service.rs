@@ -812,6 +812,8 @@ fn build_minimal_downstream_service(
         auth_notes: None,
         known_limitations: None,
         required_permissions: None,
+        examples_url: None,
+        recommended_skills: None,
         created_at: now,
         updated_at: now,
     }
@@ -1079,6 +1081,8 @@ mod tests {
                 auth_notes: None,
                 known_limitations: None,
                 required_permissions: None,
+                examples_url: None,
+                recommended_skills: None,
                 created_at: now,
                 updated_at: now,
             },

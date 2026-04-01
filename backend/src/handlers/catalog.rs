@@ -95,6 +95,10 @@ pub struct CatalogEntryResponse {
     pub known_limitations: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub required_permissions: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub examples_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recommended_skills: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -233,6 +237,8 @@ fn catalog_entry_response(entry: catalog_service::CatalogEntry) -> CatalogEntryR
         auth_notes: entry.auth_notes,
         known_limitations: entry.known_limitations,
         required_permissions: entry.required_permissions,
+        examples_url: entry.examples_url,
+        recommended_skills: entry.recommended_skills,
     }
 }
 

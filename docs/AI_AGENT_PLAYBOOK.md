@@ -623,15 +623,31 @@ curl -X POST http://localhost:3001/api/v1/providers/$PROVIDER_ID/connect/device-
 
 ```bash
 # CLI
-nyxid catalog list
-nyxid catalog show llm-openai
+nyxid catalog list                                # connectable services only
+nyxid catalog list --all                          # all services (including system/no-auth)
+nyxid catalog show llm-openai                     # full metadata: links, capabilities, auth notes, limitations
+nyxid catalog endpoints llm-openai                # parsed API endpoints from OpenAPI spec
 
 # API equivalent
 curl http://localhost:3001/api/v1/catalog \
   -H "X-API-Key: $NYXID_API_KEY"
+curl "http://localhost:3001/api/v1/catalog?include_all=true" \
+  -H "X-API-Key: $NYXID_API_KEY"
 curl http://localhost:3001/api/v1/catalog/llm-openai \
   -H "X-API-Key: $NYXID_API_KEY"
+curl http://localhost:3001/api/v1/catalog/llm-openai/endpoints \
+  -H "X-API-Key: $NYXID_API_KEY"
 ```
+
+The catalog response includes rich metadata when available:
+- `homepage_url`, `repository_url`, `issues_url` -- links to docs, source, and issue tracker
+- `openapi_spec_url`, `asyncapi_spec_url` -- spec URLs for API discovery
+- `capabilities` -- structured flags (e.g., `supports_proxy_read`, `supports_streaming`)
+- `auth_notes` -- notes on downstream auth expectations
+- `known_limitations` -- caveats for agents and users
+- `required_permissions` -- downstream permissions needed for key actions
+
+The `/endpoints` sub-resource parses the service's OpenAPI spec and returns structured endpoint data (method, path, name, description, parameters, request body schema).
 
 ### Manage existing services
 

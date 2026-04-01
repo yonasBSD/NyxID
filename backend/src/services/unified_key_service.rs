@@ -565,6 +565,8 @@ pub async fn create_key(
             auth_notes: None,
             known_limitations: None,
             required_permissions: None,
+            examples_url: None,
+            recommended_skills: None,
             created_at: now,
             updated_at: now,
         };
@@ -1261,6 +1263,8 @@ mod tests {
             auth_notes: None,
             known_limitations: None,
             required_permissions: None,
+            examples_url: None,
+            recommended_skills: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
