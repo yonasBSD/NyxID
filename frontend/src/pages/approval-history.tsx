@@ -37,7 +37,10 @@ import {
   Timer,
   ChevronLeft,
   ChevronRight,
+  Wrench,
+  AlertTriangle,
 } from "lucide-react";
+import type { ApprovalRequestItem } from "@/types/approvals";
 import { toast } from "sonner";
 
 const STATUS_OPTIONS = [
@@ -81,6 +84,10 @@ function getStatusBadge(status: string) {
     default:
       return <Badge variant="outline">{status}</Badge>;
   }
+}
+
+function isToolApproval(request: ApprovalRequestItem): boolean {
+  return request.tool_name != null;
 }
 
 export function ApprovalHistoryPage() {
@@ -195,14 +202,31 @@ export function ApprovalHistoryPage() {
                 {requests.map((request) => (
                   <TableRow key={request.id}>
                     <TableCell>
-                      <div className="flex flex-col">
-                        <span className="font-medium">
-                          {request.service_name}
-                        </span>
-                        <span className="text-xs text-muted-foreground">
-                          {request.service_slug}
-                        </span>
-                      </div>
+                      {isToolApproval(request) ? (
+                        <div className="flex flex-col gap-1">
+                          <div className="flex items-center gap-1.5">
+                            <Wrench className="h-3.5 w-3.5 text-muted-foreground" />
+                            <span className="font-medium">
+                              {request.tool_name}
+                            </span>
+                          </div>
+                          {request.is_destructive && (
+                            <Badge variant="destructive" className="w-fit gap-1 text-[10px]">
+                              <AlertTriangle className="h-2.5 w-2.5" />
+                              Destructive
+                            </Badge>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="flex flex-col">
+                          <span className="font-medium">
+                            {request.service_name}
+                          </span>
+                          <span className="text-xs text-muted-foreground">
+                            {request.service_slug}
+                          </span>
+                        </div>
+                      )}
                     </TableCell>
                     <TableCell>
                       <div className="flex flex-col">
@@ -216,14 +240,29 @@ export function ApprovalHistoryPage() {
                     </TableCell>
                     <TableCell>
                       <div className="flex flex-col gap-0.5">
-                        <span className="text-sm">
-                          {request.action_description ??
-                            request.operation_summary}
-                        </span>
-                        {request.action_description && (
-                          <span className="text-xs text-muted-foreground">
-                            {request.operation_summary}
-                          </span>
+                        {isToolApproval(request) ? (
+                          <>
+                            <span className="text-sm">
+                              Tool execution approval
+                            </span>
+                            {request.tool_arguments && (
+                              <span className="max-w-[300px] truncate text-xs font-mono text-muted-foreground">
+                                {request.tool_arguments}
+                              </span>
+                            )}
+                          </>
+                        ) : (
+                          <>
+                            <span className="text-sm">
+                              {request.action_description ??
+                                request.operation_summary}
+                            </span>
+                            {request.action_description && (
+                              <span className="text-xs text-muted-foreground">
+                                {request.operation_summary}
+                              </span>
+                            )}
+                          </>
                         )}
                       </div>
                     </TableCell>

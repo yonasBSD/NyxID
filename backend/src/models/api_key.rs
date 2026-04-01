@@ -62,6 +62,10 @@ pub struct ApiKey {
     /// Platform label for this key (e.g. "claude-code", "codex", "openclaw", "generic").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
+
+    /// Callback URL for channel bot relay: the agent receives inbound messages here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback_url: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -97,6 +101,7 @@ mod tests {
             rate_limit_per_second: None,
             rate_limit_burst: None,
             platform: None,
+            callback_url: None,
         }
     }
 
@@ -142,9 +147,23 @@ mod tests {
         doc.remove("rate_limit_per_second");
         doc.remove("rate_limit_burst");
         doc.remove("platform");
+        doc.remove("callback_url");
         let restored: ApiKey = bson::from_document(doc).expect("deserialize");
         assert_eq!(restored.rate_limit_per_second, None);
         assert_eq!(restored.rate_limit_burst, None);
         assert_eq!(restored.platform, None);
+        assert_eq!(restored.callback_url, None);
+    }
+
+    #[test]
+    fn bson_roundtrip_with_callback_url() {
+        let mut key = make_api_key();
+        key.callback_url = Some("https://agent.example.com/callback".to_string());
+        let doc = bson::to_document(&key).expect("serialize");
+        let restored: ApiKey = bson::from_document(doc).expect("deserialize");
+        assert_eq!(
+            restored.callback_url.as_deref(),
+            Some("https://agent.example.com/callback")
+        );
     }
 }

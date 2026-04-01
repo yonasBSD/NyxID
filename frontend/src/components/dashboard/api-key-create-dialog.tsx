@@ -64,6 +64,7 @@ export function ApiKeyCreateDialog() {
       allow_all_nodes: true,
       allowed_service_ids: [],
       allowed_node_ids: [],
+      callback_url: null,
     },
   });
 
@@ -228,6 +229,36 @@ export function ApiKeyCreateDialog() {
                           }
                         />
                       </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+
+                <FormField
+                  control={form.control}
+                  name="callback_url"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>
+                        Callback URL{" "}
+                        <span className="text-muted-foreground">
+                          (optional)
+                        </span>
+                      </FormLabel>
+                      <FormControl>
+                        <Input
+                          type="url"
+                          placeholder="https://my-agent.example.com/webhook"
+                          {...field}
+                          value={field.value ?? ""}
+                          onChange={(e) =>
+                            field.onChange(e.target.value || null)
+                          }
+                        />
+                      </FormControl>
+                      <p className="text-xs text-muted-foreground">
+                        Where NyxID sends channel relay messages. Required for Channel Bot routing.
+                      </p>
                       <FormMessage />
                     </FormItem>
                   )}

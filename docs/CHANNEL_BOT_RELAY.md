@@ -657,11 +657,174 @@ graph TD
 
 ---
 
+## Tool Approval API (Aevatar Integration)
+
+Aevatar agents use a **tool approval middleware** that pauses destructive tool calls and asks the user for permission before executing. The approval can be handled locally (in the chat UI) or remotely via NyxID. NyxID's `NyxIdToolApprovalHandler` creates an approval request on NyxID, then polls until the user decides (via Telegram push, mobile app, or web UI).
+
+This is a **prerequisite** for the channel relay: when an agent receives a forwarded message and invokes tools on behalf of the user, destructive tools must go through the approval flow.
+
+### Flow
+
+```mermaid
+sequenceDiagram
+    participant A as Aevatar Agent
+    participant M as Tool Approval Middleware
+    participant H as NyxIdToolApprovalHandler
+    participant N as NyxID API
+    participant U as User (Telegram / Web / Mobile)
+
+    A->>M: invoke tool (e.g. invoke_service)
+    M->>M: Check approval mode + destructive flag
+    M->>H: request_approval(tool_name, args, is_destructive)
+
+    H->>N: POST /api/v1/approvals/requests
+    Note over H,N: { tool_name, tool_call_id, arguments, is_destructive, approval_mode }
+    N-->>H: { id, status: "pending", expires_at }
+
+    N->>U: Push notification / Telegram message
+
+    loop Poll (every 2s, up to 45s)
+        H->>N: GET /api/v1/approvals/tool-requests/{id}
+        N-->>H: { status: "pending" }
+    end
+
+    U->>N: POST /api/v1/approvals/requests/{id}/decide { approved: true }
+
+    H->>N: GET /api/v1/approvals/tool-requests/{id}
+    N-->>H: { status: "approved" }
+
+    H-->>M: Approved
+    M-->>A: Execute tool
+```
+
+### New Endpoint: Create Tool Approval Request
+
+```
+POST /api/v1/approvals/requests
+Authorization: Bearer <user_access_token or api_key>
+Content-Type: application/json
+
+{
+  "tool_name": "invoke_service",
+  "tool_call_id": "call_abc123",
+  "arguments": "{\"service_id\":\"...\",\"endpoint_id\":\"...\"}",
+  "is_destructive": true,
+  "approval_mode": "alwaysrequire"
+}
+```
+
+**Response (201 Created):**
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "pending",
+  "expires_at": "2026-04-01T12:05:00Z"
+}
+```
+
+**Field Reference:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `tool_name` | string | Yes | Name of the tool requesting approval (max 256 chars) |
+| `tool_call_id` | string | No | LLM-generated tool call ID for correlation |
+| `arguments` | string | No | Serialized JSON of tool arguments (max 65536 chars) |
+| `is_destructive` | bool | No | Whether the tool performs irreversible operations (default: false) |
+| `approval_mode` | string | No | Aevatar's approval mode: `"alwaysrequire"`, `"auto"`, `"neverrequire"` (informational, stored but not enforced -- NyxID always creates the request) |
+
+### Polling: Dedicated Tool Approval Status Endpoint
+
+Aevatar polls `GET /api/v1/approvals/tool-requests/{id}` (new endpoint, separate from the existing `GET /requests/{id}`) which returns a minimal response with Aevatar-compatible status values:
+
+```
+GET /api/v1/approvals/tool-requests/{id}
+Authorization: Bearer <same token used to create>
+```
+
+**Response:**
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "denied",
+  "reason": "Denied by user",
+  "expires_at": "2026-04-01T12:05:00Z"
+}
+```
+
+**Status mapping (response layer only, storage unchanged):**
+
+| Internal Status (MongoDB) | Tool Polling Response | Reason |
+|---|---|---|
+| `"pending"` | `"pending"` | `null` |
+| `"approved"` | `"approved"` | `null` |
+| `"rejected"` | `"denied"` | `"Denied by user"` |
+| `"expired"` | `"expired"` | `"Approval request expired"` |
+
+### Rollback Compatibility
+
+This design is fully rollback-safe:
+
+| Concern | Design Decision | On Rollback |
+|---|---|---|
+| **New model fields** (`tool_name`, etc.) | Optional with `#[serde(default)]` | Old code ignores extra fields in MongoDB documents (no `deny_unknown_fields`) |
+| **New endpoints** (`POST /requests`, `GET /tool-requests/{id}`) | Additive only, no existing endpoint behavior changes | Old code returns 404; Aevatar times out (expected for new feature) |
+| **Status values** | `"rejected"` stays in MongoDB and in existing endpoint responses. `"denied"` only appears in new `tool-requests` endpoint | Old code reads `"rejected"` as before; existing frontend unchanged |
+| **Sentinel `service_id: "tool_approval"`** | Tool approval documents appear in `list_requests` with `service_name` = tool name | Old frontend renders them as normal approval entries (odd `service_name` but functional) |
+| **Frontend** | Additive: new tool approval rendering in approval list/detail pages. Guards on `tool_name != null` to distinguish tool vs proxy approvals | Old frontend ignores `tool_name` field (not in its type), renders tool approvals as normal entries with tool name as service name -- functional, just not pretty |
+
+**Key rule**: existing endpoints (`GET /requests/{id}`, `GET /requests/{id}/status`, `POST /{id}/decide`) return the same response shapes and status values as before. All new behavior is on new paths.
+
+### Model Changes
+
+Four optional fields added to `ApprovalRequest` (existing collection, no migration needed):
+
+```rust
+// On ApprovalRequest model
+pub tool_name: Option<String>,        // e.g. "invoke_service"
+pub tool_call_id: Option<String>,     // LLM correlation ID
+pub tool_arguments: Option<String>,   // serialized JSON
+pub is_destructive: Option<bool>,     // destructive flag
+```
+
+Tool approval requests use sentinel values for proxy-oriented fields:
+- `service_id: "tool_approval"`, `service_name: <tool_name>`, `service_slug: "tool"`
+- `requester_type: "api_key"` or `"access_token"` (from auth context)
+- `approval_mode: PerRequest` (tool approvals have no grant semantics)
+
+### Relationship to Existing Approval System
+
+The tool approval flow reuses the existing approval infrastructure:
+- Same `approval_requests` MongoDB collection
+- Same `process_decision` flow (web UI, Telegram, mobile push)
+- Same notification pipeline (Telegram bot, FCM, APNs)
+- Same `POST /{id}/decide` endpoint for user decisions
+
+The only new surface is `POST /requests` for external creation and the response format alignment.
+
+---
+
 ## Implementation Phases
+
+### Phase 0: Tool Approval Endpoint
+
+Prerequisite for agent tool execution. Backend + frontend changes to properly render tool approvals.
+
+**Backend (modified):**
+- `backend/src/models/approval_request.rs` -- add optional tool fields (`tool_name`, `tool_call_id`, `tool_arguments`, `is_destructive`), all `Option` with `#[serde(default)]`
+- `backend/src/services/approval_service.rs` -- add `create_tool_approval_request()` function
+- `backend/src/handlers/approvals.rs` -- add `create_request` handler (`POST /requests`), add `get_tool_request_status` handler (`GET /tool-requests/{id}`), new request/response types (`CreateToolApprovalRequest`, `CreateApprovalResponse`, `ToolApprovalStatusResponse`). Existing `get_request_by_id` adds optional `tool_name`, `tool_call_id`, `tool_arguments`, `is_destructive` fields to `ApprovalRequestItem` (additive, no behavior change -- `null` for existing proxy approvals)
+- `backend/src/routes.rs` -- add `POST /requests` to approval routes, add `GET /tool-requests/{id}` to delegated-accessible routes
+
+**Frontend (modified):**
+- `frontend/src/types/approvals.ts` -- add optional `tool_name`, `tool_call_id`, `tool_arguments`, `is_destructive` fields to approval request type
+- `frontend/src/pages/approvals.tsx` -- distinguish tool vs proxy approvals in list: show "Tool: {tool_name}" badge when `tool_name` is present, skip service link for `service_id === "tool_approval"`
+- `frontend/src/pages/approval-detail.tsx` (or equivalent decide page) -- show tool context: tool name, truncated arguments preview, destructive badge. Fall back to existing proxy display when `tool_name` is null
+
+**Rollback**: old frontend ignores new fields, renders tool approvals as normal entries with tool name as service name.
 
 ### Phase 1: Foundation
 
-Models, platform adapter trait, error codes, config.
+Models, platform adapter trait, error codes, config. Frontend types and schemas (no UI yet).
 
 ```mermaid
 gantt
@@ -685,87 +848,118 @@ gantt
     Normalized types          :c2, 0, 1
 ```
 
-**New files:**
+**Backend (new):**
 - `backend/src/models/channel_bot.rs`
 - `backend/src/models/channel_conversation.rs`
 - `backend/src/models/channel_message.rs`
 - `backend/src/services/channel_platform.rs` (trait + types)
 
-**Modified files:**
+**Backend (modified):**
 - `backend/src/models/mod.rs` -- register modules
 - `backend/src/services/mod.rs` -- register module
-- `backend/src/errors/mod.rs` -- new error variants
+- `backend/src/errors/mod.rs` -- new error variants (10000-10005)
 - `backend/src/config.rs` -- new env vars
 - `backend/src/db.rs` -- new indexes
 
+**Frontend (new):**
+- `frontend/src/types/channels.ts` -- TypeScript types for `ChannelBot`, `ChannelConversation`, `ChannelMessage`, platform enum
+- `frontend/src/schemas/channels.ts` -- Zod schemas for bot creation/update, conversation route creation/update
+
+**Rollback**: no UI references these types yet; unused exports are harmless.
+
 ### Phase 2: Telegram Adapter
 
-First platform adapter, reuses existing `telegram_service.rs`.
+First platform adapter, reuses existing `telegram_service.rs`. No frontend changes (adapter internals).
 
-**New files:**
+**Backend (new):**
 - `backend/src/services/channel_adapters/mod.rs`
 - `backend/src/services/channel_adapters/telegram.rs`
 
 ### Phase 3: Core Services
 
-Bot CRUD, conversation routing, relay orchestration.
+Bot CRUD, conversation routing, relay orchestration. No frontend changes (service internals).
 
-**New files:**
+**Backend (new):**
 - `backend/src/services/channel_bot_service.rs`
 - `backend/src/services/channel_routing_service.rs`
 - `backend/src/services/channel_relay_service.rs`
 
-### Phase 4: HTTP Handlers & Routes
+### Phase 4: Handlers, Routes & Bot Management UI
 
-Wire up all endpoints.
+Wire up all backend endpoints. Ship the core frontend: bot management page, conversation route editor.
 
-**New files:**
+**Backend (new):**
 - `backend/src/handlers/channel_bots.rs`
 - `backend/src/handlers/channel_webhooks.rs`
 - `backend/src/handlers/channel_relay.rs`
 
-**Modified files:**
+**Backend (modified):**
 - `backend/src/handlers/mod.rs`
 - `backend/src/routes.rs`
 - `backend/src/main.rs` (webhook health check background task)
 
-### Phase 5: Discord, Lark, Feishu Adapters
+**Frontend (new):**
+- `frontend/src/hooks/use-channel-bots.ts` -- TanStack Query hooks for bot CRUD
+- `frontend/src/hooks/use-channel-conversations.ts` -- TanStack Query hooks for conversation routes
+- `frontend/src/pages/channel-bots.tsx` -- bot list page: table with platform icon, bot username, status, active conversations count
+- `frontend/src/pages/channel-bot-detail.tsx` -- bot detail: status, webhook health, conversation routes list, delete action
+- `frontend/src/components/dashboard/add-channel-bot-dialog.tsx` -- create bot dialog: platform selector (Telegram only in Phase 4), bot token input, validation feedback
+- `frontend/src/components/dashboard/channel-route-editor.tsx` -- conversation route CRUD: agent selector (from user's API keys), default agent toggle
 
-Remaining platform adapters.
+**Frontend (modified):**
+- `frontend/src/router.tsx` -- add `/channel-bots` and `/channel-bots/:id` routes
+- `frontend/src/components/dashboard/sidebar.tsx` -- add "Channel Bots" nav item
 
-**New files:**
+**Rollback**: pages return 404 in router (removed routes), sidebar item disappears. No data loss -- bot records stay in MongoDB, webhook stays registered on Telegram (can be cleaned up manually or on re-deploy).
+
+### Phase 5: Multi-Platform Adapters & Frontend
+
+Discord, Lark, Feishu adapters. Frontend platform selector updated to support all platforms.
+
+**Backend (new):**
 - `backend/src/services/channel_adapters/discord.rs`
 - `backend/src/services/channel_adapters/lark.rs`
 
-**New dependencies:**
+**Backend (new dependency):**
 - `ed25519-dalek` (Discord signature verification)
+
+**Frontend (modified):**
+- `frontend/src/components/dashboard/add-channel-bot-dialog.tsx` -- platform selector expands from Telegram-only to include Discord, Lark, Feishu. Each platform shows platform-specific setup instructions (e.g., Discord: Application ID + Bot Token; Lark: App ID + App Secret)
+- `frontend/src/pages/channel-bot-detail.tsx` -- platform-specific status indicators and webhook health display
+- `frontend/src/types/channels.ts` -- add Discord/Lark/Feishu-specific fields to `ChannelBot` type
+
+**Rollback**: old frontend only shows Telegram in platform selector. Discord/Lark/Feishu bots created before rollback still appear in list (platform field renders as raw string) but can't be managed via the old create dialog.
 
 ### Phase 6: OpenClaw Bridge Migration
 
 Migrate existing `openclaw_channel_mappings` to the generic relay. Backward-compatible dual-path lookup.
 
-**New files:**
+**Backend (new):**
 - `backend/src/services/channel_adapters/openclaw.rs`
 
-**Modified files:**
-- `backend/src/handlers/openclaw_channel.rs` (dual-path lookup)
+**Backend (modified):**
+- `backend/src/handlers/openclaw_channel.rs` (dual-path lookup: check new `channel_conversations` first, fall back to legacy `openclaw_channel_mappings`)
 
-### Phase 7: Frontend
+**Frontend (modified):**
+- `frontend/src/pages/channel-bots.tsx` -- show migrated OpenClaw bots alongside user-registered bots (read-only badge for auto-migrated entries)
+- `frontend/src/hooks/use-channel-bots.ts` -- filter/display logic for `platform: "openclaw"` entries
 
-Bot management UI, conversation route editor, message log.
+**Rollback**: dual-path lookup means old code still reads from `openclaw_channel_mappings` directly. New entries written to `channel_conversations` won't be visible to old code, but old entries continue to work. No data loss.
 
-**New files:**
-- `frontend/src/types/channels.ts`
-- `frontend/src/hooks/use-channels.ts`
-- `frontend/src/schemas/channels.ts`
-- `frontend/src/pages/channel-bots.tsx`
-- `frontend/src/pages/channel-bot-detail.tsx`
-- `frontend/src/components/dashboard/add-channel-bot-dialog.tsx`
-- `frontend/src/components/dashboard/channel-route-editor.tsx`
+### Phase 7: Message Log & Polish
 
-**Modified files:**
-- `frontend/src/router.tsx`
-- `frontend/src/components/dashboard/sidebar.tsx`
+Conversation message history viewer, delivery status dashboard, and UX polish.
+
+**Frontend (new):**
+- `frontend/src/pages/channel-conversation-detail.tsx` -- message log: inbound/outbound messages with timestamps, delivery status, sender info, content preview
+- `frontend/src/hooks/use-channel-messages.ts` -- TanStack Query hooks for message history (paginated)
+- `frontend/src/components/dashboard/channel-message-list.tsx` -- chat-style message list component with direction indicators
+
+**Frontend (modified):**
+- `frontend/src/pages/channel-bot-detail.tsx` -- add "View Messages" link per conversation route, delivery stats summary (delivered/failed/timeout counts)
+- `frontend/src/router.tsx` -- add `/channel-conversations/:id/messages` route
+
+**Rollback**: message log pages return 404. Bot management from Phase 4 continues to work.
 
 ---
 
@@ -773,14 +967,16 @@ Bot management UI, conversation route editor, message log.
 
 ```mermaid
 graph LR
-    P1[Phase 1<br/>Foundation] --> P2[Phase 2<br/>Telegram Adapter]
-    P1 --> P3[Phase 3<br/>Core Services]
+    P0[Phase 0<br/>Tool Approval<br/>BE + FE] --> P1[Phase 1<br/>Foundation<br/>BE + FE types]
+    P1 --> P2[Phase 2<br/>Telegram Adapter<br/>BE only]
+    P1 --> P3[Phase 3<br/>Core Services<br/>BE only]
     P2 --> P3
-    P3 --> P4[Phase 4<br/>Handlers & Routes]
-    P4 --> P5[Phase 5<br/>Discord / Lark / Feishu]
-    P4 --> P6[Phase 6<br/>OpenClaw Migration]
-    P4 --> P7[Phase 7<br/>Frontend]
+    P3 --> P4[Phase 4<br/>Handlers + Bot UI<br/>BE + FE]
+    P4 --> P5[Phase 5<br/>Multi-Platform<br/>BE + FE]
+    P4 --> P6[Phase 6<br/>OpenClaw Migration<br/>BE + FE]
+    P4 --> P7[Phase 7<br/>Message Log<br/>FE only]
 
+    style P0 fill:#fce4ec
     style P1 fill:#e1f5fe
     style P2 fill:#e1f5fe
     style P3 fill:#fff3e0
@@ -811,6 +1007,7 @@ graph LR
 | **OpenClaw channel bridge** | Superseded. The new relay is a generalized version. | Phase 6: dual-path lookup, gradual migration |
 | **Agent isolation** (PR #132) | Complementary. `ApiKey.id` is the `agent_api_key_id` reference. Proxy scope enforcement applies when agents make proxy calls. | Already integrated via shared `ApiKey` model |
 | **Proxy gateway** | Parallel path. Relay forwards messages; proxy forwards API calls. Agents may use both. | None needed |
+| **Approval system** | Extended. Tool approval creation endpoint (`POST /requests`) added for Aevatar agent tool execution. Reuses existing approval infrastructure. | Phase 0: add creation endpoint + response format alignment |
 
 ---
 

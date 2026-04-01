@@ -49,6 +49,7 @@ pub struct CreateApiKeyRequest {
     pub rate_limit_per_second: Option<u32>,
     pub rate_limit_burst: Option<u32>,
     pub platform: Option<String>,
+    pub callback_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -63,6 +64,7 @@ pub struct UpdateApiKeyRequest {
     pub rate_limit_per_second: Option<Option<u32>>,
     pub rate_limit_burst: Option<Option<u32>>,
     pub platform: Option<Option<String>>,
+    pub callback_url: Option<Option<String>>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -128,6 +130,8 @@ pub struct ApiKeyResponse {
     pub rate_limit_burst: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub callback_url: Option<String>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub bindings_count: u64,
 }
@@ -373,6 +377,7 @@ async fn enrich_api_keys_batch(
                 rate_limit_per_second: key.rate_limit_per_second,
                 rate_limit_burst: key.rate_limit_burst,
                 platform: key.platform.clone(),
+                callback_url: key.callback_url.clone(),
                 bindings_count: binding_counts.get(&key.id).copied().unwrap_or(0),
             }
         })
@@ -857,6 +862,7 @@ pub async fn create_key(
         body.rate_limit_per_second,
         body.rate_limit_burst,
         body.platform.as_deref(),
+        body.callback_url.as_deref(),
     )
     .await?;
 
@@ -915,6 +921,7 @@ pub async fn update_key(
         body.rate_limit_per_second,
         body.rate_limit_burst,
         body.platform.as_ref().map(|platform| platform.as_deref()),
+        body.callback_url.as_ref().map(|url| url.as_deref()),
     )
     .await?;
 

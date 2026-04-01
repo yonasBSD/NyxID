@@ -824,6 +824,80 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
         .await?;
 
+    // ── channel_bots ──
+    let channel_bots = db.collection::<mongodb::bson::Document>("channel_bots");
+    channel_bots
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1, "platform": 1 })
+                .build(),
+        )
+        .await?;
+    channel_bots
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "platform": 1, "platform_bot_id": 1 })
+                .build(),
+        )
+        .await?;
+
+    // ── channel_conversations ──
+    let channel_convos = db.collection::<mongodb::bson::Document>("channel_conversations");
+    channel_convos
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "channel_bot_id": 1, "platform_conversation_id": 1, "platform_sender_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .partial_filter_expression(doc! { "is_active": true })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    channel_convos
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1, "platform": 1 })
+                .build(),
+        )
+        .await?;
+    channel_convos
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "agent_api_key_id": 1 })
+                .build(),
+        )
+        .await?;
+
+    // ── channel_messages ──
+    let channel_msgs = db.collection::<mongodb::bson::Document>("channel_messages");
+    channel_msgs
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "conversation_id": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+    channel_msgs
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "created_at": 1 })
+                // NOTE: To honor CHANNEL_RELAY_MESSAGE_TTL_DAYS, use collMod
+                // after startup: db.runCommand({ collMod: "channel_messages",
+                // index: { keyPattern: { created_at: 1 }, expireAfterSeconds: N } })
+                // ensure_indexes only takes &Database, so the config value
+                // cannot be injected here at compile time.
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Duration::from_secs(30 * 24 * 60 * 60))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
     backfill_downstream_service_types(db).await?;
 
     Ok(())

@@ -32,6 +32,11 @@ export const createApiKeySchema = z.object({
   allow_all_nodes: z.boolean().optional(),
   allowed_service_ids: z.array(z.string()).optional(),
   allowed_node_ids: z.array(z.string()).optional(),
+  callback_url: z
+    .string()
+    .url("Must be a valid URL")
+    .nullable()
+    .optional(),
 });
 
 export type CreateApiKeyFormData = z.infer<typeof createApiKeySchema>;

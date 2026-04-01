@@ -59,6 +59,7 @@ interface CreateApiKeyPayload {
   readonly allowed_node_ids?: readonly string[];
   readonly allow_all_services?: boolean;
   readonly allow_all_nodes?: boolean;
+  readonly callback_url?: string;
 }
 
 export function useCreateApiKey() {
@@ -87,6 +88,7 @@ export function useCreateApiKey() {
           : (data.allowed_node_ids ?? []),
         allow_all_services: allowAllServices,
         allow_all_nodes: allowAllNodes,
+        callback_url: data.callback_url ?? undefined,
       };
       return api.post<ApiKeyCreateResponse>("/api-keys", payload);
     },
@@ -107,6 +109,7 @@ interface UpdateApiKeyParams {
   readonly allow_all_services?: boolean;
   readonly allow_all_nodes?: boolean;
   readonly platform?: string | null;
+  readonly callback_url?: string | null;
   readonly rate_limit_per_second?: number | null;
   readonly rate_limit_burst?: number | null;
 }

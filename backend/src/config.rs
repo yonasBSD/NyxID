@@ -161,6 +161,14 @@ pub struct AppConfig {
     pub ssh_max_tunnel_duration_secs: u64,
     /// Maximum concurrent WebSocket passthrough connections (default: 200)
     pub ws_passthrough_max_connections: usize,
+
+    // Channel Bot Relay
+    /// Timeout in seconds for delivering inbound messages to agent callback URLs (default: 30)
+    pub channel_relay_callback_timeout_secs: u32,
+    /// Maximum number of channel bots a single user can register (default: 5)
+    pub channel_relay_max_bots_per_user: u32,
+    /// TTL in days for channel messages before automatic expiry (default: 30)
+    pub channel_relay_message_ttl_days: u32,
 }
 
 impl std::fmt::Debug for AppConfig {
@@ -292,6 +300,18 @@ impl std::fmt::Debug for AppConfig {
             .field(
                 "ws_passthrough_max_connections",
                 &self.ws_passthrough_max_connections,
+            )
+            .field(
+                "channel_relay_callback_timeout_secs",
+                &self.channel_relay_callback_timeout_secs,
+            )
+            .field(
+                "channel_relay_max_bots_per_user",
+                &self.channel_relay_max_bots_per_user,
+            )
+            .field(
+                "channel_relay_message_ttl_days",
+                &self.channel_relay_message_ttl_days,
             )
             .finish()
     }
@@ -482,6 +502,18 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(200),
+            channel_relay_callback_timeout_secs: env::var("CHANNEL_RELAY_CALLBACK_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30),
+            channel_relay_max_bots_per_user: env::var("CHANNEL_RELAY_MAX_BOTS_PER_USER")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(5),
+            channel_relay_message_ttl_days: env::var("CHANNEL_RELAY_MESSAGE_TTL_DAYS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30),
         }
     }
 
@@ -772,6 +804,9 @@ mod tests {
             ssh_connect_timeout_secs: 10,
             ssh_max_tunnel_duration_secs: 3600,
             ws_passthrough_max_connections: 200,
+            channel_relay_callback_timeout_secs: 30,
+            channel_relay_max_bots_per_user: 5,
+            channel_relay_message_ttl_days: 30,
         }
     }
 

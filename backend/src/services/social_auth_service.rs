@@ -762,6 +762,9 @@ mod tests {
             ssh_connect_timeout_secs: 10,
             ssh_max_tunnel_duration_secs: 3600,
             ws_passthrough_max_connections: 200,
+            channel_relay_callback_timeout_secs: 30,
+            channel_relay_max_bots_per_user: 5,
+            channel_relay_message_ttl_days: 30,
         }
     }
 

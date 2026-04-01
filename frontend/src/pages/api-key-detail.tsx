@@ -14,6 +14,7 @@ import { NodeScopeCard } from "@/components/dashboard/api-key-detail/node-scope-
 import { RotateKeyDialog } from "@/components/dashboard/api-key-detail/rotate-key-dialog";
 import { DeleteKeyDialog } from "@/components/dashboard/api-key-detail/delete-key-dialog";
 import { PlatformCard } from "@/components/dashboard/api-key-detail/platform-card";
+import { CallbackUrlCard } from "@/components/dashboard/api-key-detail/callback-url-card";
 import { RateLimitCard } from "@/components/dashboard/api-key-detail/rate-limit-card";
 import { BindingsCard } from "@/components/dashboard/api-key-detail/bindings-card";
 import { UsageStatsCard } from "@/components/dashboard/api-key-detail/usage-stats-card";
@@ -108,6 +109,7 @@ export function ApiKeyDetailPage() {
         />
 
         <PlatformCard keyId={apiKey.id} platform={apiKey.platform} />
+        <CallbackUrlCard keyId={apiKey.id} callbackUrl={apiKey.callback_url} />
 
         <ServiceScopeCard
           keyId={apiKey.id}

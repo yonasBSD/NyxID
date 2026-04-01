@@ -110,6 +110,11 @@ pub enum Commands {
     },
     /// Update the CLI and installed skills
     Update(UpdateArgs),
+    /// Manage channel bot relay (messaging platform bots)
+    ChannelBot {
+        #[command(subcommand)]
+        command: ChannelBotCommands,
+    },
 }
 
 // ---- Shared auth args ----
@@ -1400,4 +1405,134 @@ pub enum AiSetupCommands {
     },
     /// Show which AI skills are currently installed
     Status,
+}
+
+// ---- Channel Bot Relay ----
+
+#[derive(Subcommand)]
+pub enum ChannelBotCommands {
+    /// Register a new messaging platform bot
+    Register {
+        /// Platform: telegram, discord, lark, feishu, openclaw
+        #[arg(long)]
+        platform: String,
+        /// Bot token (hidden from help -- use --token-env instead)
+        #[arg(long, hide = true)]
+        bot_token: Option<String>,
+        /// Read bot token from this environment variable
+        #[arg(long)]
+        token_env: Option<String>,
+        /// Label for this bot
+        #[arg(long)]
+        label: String,
+        /// Platform app ID (required for some platforms, e.g. Discord, Lark)
+        #[arg(long)]
+        app_id: Option<String>,
+        /// Platform app secret (hidden from help -- use --app-secret-env instead)
+        #[arg(long, hide = true)]
+        app_secret: Option<String>,
+        /// Read app secret from this environment variable
+        #[arg(long)]
+        app_secret_env: Option<String>,
+        /// Platform public key (required for some platforms, e.g. Discord)
+        #[arg(long)]
+        public_key: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// List registered bots
+    List {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Show bot details
+    Show {
+        /// Bot ID
+        id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Delete a bot
+    Delete {
+        /// Bot ID
+        id: String,
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Verify bot token and re-register webhook
+    Verify {
+        /// Bot ID
+        id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Manage conversation routes
+    Route {
+        #[command(subcommand)]
+        command: ChannelRouteCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ChannelRouteCommands {
+    /// Create a conversation route
+    Create {
+        /// Bot ID to route from
+        #[arg(long)]
+        bot_id: String,
+        /// NyxID API key ID to relay messages to
+        #[arg(long)]
+        agent_key_id: String,
+        /// Platform conversation ID (omit for catch-all default route)
+        #[arg(long)]
+        conversation_id: Option<String>,
+        /// Conversation type: private, group, channel (default: private)
+        #[arg(long)]
+        conversation_type: Option<String>,
+        /// Platform sender ID filter
+        #[arg(long)]
+        sender_id: Option<String>,
+        /// Mark as the default agent for unmatched conversations
+        #[arg(long)]
+        default_agent: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// List conversation routes
+    List {
+        /// Filter by bot ID
+        #[arg(long)]
+        bot_id: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Update a conversation route
+    Update {
+        /// Route ID
+        id: String,
+        /// New agent API key ID
+        #[arg(long)]
+        agent_key_id: Option<String>,
+        /// Set as default agent
+        #[arg(long)]
+        default_agent: Option<bool>,
+        /// Set route active/inactive
+        #[arg(long)]
+        active: Option<bool>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Delete a conversation route
+    Delete {
+        /// Route ID
+        id: String,
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
 }

@@ -56,6 +56,9 @@ import {
   SshTerminalPage,
   KeysPage,
   KeyDetailPage,
+  ChannelBotsPage,
+  ChannelBotDetailPage,
+  ChannelConversationDetailPage,
 } from "@/pages/lazy";
 
 // ── Route tree ──
@@ -363,6 +366,24 @@ const apiKeyDetailRoute = createRoute({
   component: ApiKeyDetailPage,
 });
 
+const channelBotsRoute = createRoute({
+  path: "/channel-bots",
+  getParentRoute: () => dashboardLayout,
+  component: ChannelBotsPage,
+});
+
+const channelBotDetailRoute = createRoute({
+  path: "/channel-bots/$botId",
+  getParentRoute: () => dashboardLayout,
+  component: ChannelBotDetailPage,
+});
+
+const channelConversationDetailRoute = createRoute({
+  path: "/channel-bots/$botId/conversations/$conversationId",
+  getParentRoute: () => dashboardLayout,
+  component: ChannelConversationDetailPage,
+});
+
 const adminLayout = createRoute({
   path: "/admin",
   getParentRoute: () => dashboardLayout,
@@ -476,6 +497,9 @@ const routeTree = rootRoute.addChildren([
     apiKeyDetailRoute,
     nodesRoute,
     nodeDetailRoute,
+    channelBotsRoute,
+    channelBotDetailRoute,
+    channelConversationDetailRoute,
     adminLayout.addChildren([
       adminUsersRoute,
       adminUserDetailRoute,

@@ -79,5 +79,8 @@ async fn run() -> Result<()> {
 
         // Self-update CLI + skills
         Commands::Update(args) => commands::update::run(args).await,
+
+        // Channel bot relay
+        Commands::ChannelBot { command } => commands::channel_bot::run(command).await,
     }
 }
