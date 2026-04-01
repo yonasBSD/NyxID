@@ -1,7 +1,7 @@
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { ScrollView, StyleSheet, Text, View } from "react-native";
 import { RootStackParamList } from "../../app/AppNavigator";
-import { MobileStatusBar } from "../../components/MobileStatusBar";
+
 import { PrimaryButton } from "../../components/PrimaryButton";
 import { ScreenContainer } from "../../components/ScreenContainer";
 import { SectionBadge } from "../../components/SectionBadge";
@@ -127,10 +127,9 @@ const PRIVACY_SECTIONS: LegalSection[] = [
 export function PrivacyPolicyScreen({ navigation }: Props) {
   return (
     <ScreenContainer>
-      <MobileStatusBar />
       <ScrollView
         style={flowStyles.content}
-        contentContainerStyle={[flowStyles.scrollContent, styles.scrollContentExtra]}
+        contentContainerStyle={[flowStyles.scrollContent, styles.scrollContentExtra, { paddingHorizontal: spacing.xxl }]}
         showsVerticalScrollIndicator={false}
       >
         <SectionBadge label="LEGAL" tone="info" />

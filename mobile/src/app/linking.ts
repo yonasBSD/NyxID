@@ -154,15 +154,9 @@ export const appLinking: LinkingOptions<RootStackParamList> = {
   config: {
     screens: {
       Auth: "auth",
-      Dashboard: "dashboard",
+      Activity: "activity",
+      ActivityDetail: "challenge/:challengeId",
       AccountSettings: "account",
-      Inbox: "inbox",
-      ChallengeMinimal: "challenge/:challengeId/minimal",
-      ChallengeOptions: "challenge/:challengeId/options",
-      ChallengeDetail: "challenge/:challengeId",
-      Approvals: "approvals",
-      RevokeConfirm: "approvals/:approvalId/revoke",
-      RevokeSuccess: "approvals/revoke-success",
       TermsOfService: "terms",
       PrivacyPolicy: "privacy",
     },

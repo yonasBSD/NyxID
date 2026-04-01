@@ -50,3 +50,4 @@ mobile/screenshots
 docs/IMPLEMENTATION_SPEC*.md
 docs/CLI_AUDIT_GAPS.md
 docs/STREAMLINE_SERVICES_PROPOSAL.md
+.gstack/

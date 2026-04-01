@@ -1,0 +1,115 @@
+import { Pressable, StyleSheet, Text, View } from "react-native";
+import { radius, spacing } from "../theme/designTokens";
+import { mobileTheme } from "../theme/mobileTheme";
+import { StatusBadge } from "./StatusBadge";
+import type { ApprovalItem } from "../lib/api/types";
+
+type GrantCardProps = {
+  grant: ApprovalItem;
+  onRevoke?: () => void;
+  isMutating?: boolean;
+};
+
+function formatDate(dateStr: string): string {
+  const d = new Date(dateStr);
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+function daysUntilExpiry(expiresAt: string): number {
+  return Math.round((new Date(expiresAt).getTime() - Date.now()) / (24 * 60 * 60 * 1000));
+}
+
+function formatExpiry(expiresAt: string): string {
+  const days = daysUntilExpiry(expiresAt);
+  if (days < 0) return "Expired";
+  if (days === 0) return "Today";
+  if (days === 1) return "Tomorrow";
+  return `${days}d left`;
+}
+
+export function GrantCard({ grant, onRevoke, isMutating = false }: GrantCardProps) {
+  const days = daysUntilExpiry(grant.expires_at);
+  const expiryVariant = days < 3 ? "expiryUrgent" : "expiryNormal";
+  const expiryLabel = formatExpiry(grant.expires_at);
+  const grantedLabel = `Approved ${formatDate(grant.granted_at)}`;
+  const expiresLabel = `Expires ${formatDate(grant.expires_at)}`;
+  const requesterLabel = grant.requester_label ?? grant.requester_type;
+
+  return (
+    <View style={styles.card}>
+      <View style={styles.header}>
+        <Text style={styles.title} numberOfLines={1}>
+          {grant.service_name}
+        </Text>
+        <Pressable
+          style={[styles.revokeBtn, isMutating && styles.btnDisabled]}
+          onPress={onRevoke}
+          disabled={isMutating}
+        >
+          <Text style={styles.revokeBtnText}>Revoke</Text>
+        </Pressable>
+      </View>
+      <Text style={styles.secondary} numberOfLines={1}>
+        {grant.requester_type} \u00B7 {requesterLabel}
+      </Text>
+      <View style={styles.expiryRow}>
+        <Text style={styles.meta}>{grantedLabel} \u00B7 {expiresLabel}</Text>
+        <StatusBadge variant={expiryVariant} label={expiryLabel} />
+      </View>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  card: {
+    borderRadius: radius.md,
+    backgroundColor: mobileTheme.cardSoft,
+    borderWidth: 1,
+    borderColor: mobileTheme.border,
+    padding: spacing.lg,
+    gap: spacing.sm,
+  },
+  header: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: spacing.sm,
+  },
+  title: {
+    flex: 1,
+    fontSize: 14,
+    fontWeight: "700",
+    color: mobileTheme.textPrimary,
+  },
+  secondary: {
+    fontSize: 13,
+    color: mobileTheme.textSecondary,
+  },
+  expiryRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: spacing.sm,
+  },
+  meta: {
+    fontSize: 12,
+    color: mobileTheme.textMuted,
+    flex: 1,
+  },
+  revokeBtn: {
+    paddingHorizontal: spacing.xxl,
+    paddingVertical: spacing.sm,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: mobileTheme.danger,
+    backgroundColor: "transparent",
+  },
+  revokeBtnText: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: mobileTheme.danger,
+  },
+  btnDisabled: {
+    opacity: 0.5,
+  },
+});

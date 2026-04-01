@@ -373,7 +373,6 @@ async function requestRefreshAccessToken(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ refresh_token: refreshToken, client: "mobile" }),
-      credentials: "include",
     });
 
     const payload = await readJsonSafely(response);
@@ -467,7 +466,7 @@ export async function refreshAccessTokenIfNeeded(): Promise<boolean> {
   return Boolean(refreshed);
 }
 
-async function requestJson<T>(path: string, options: RequestOptions = {}): Promise<T> {
+export async function requestJson<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const method = options.method ?? "GET";
   const requiresAuth = options.requiresAuth ?? true;
   const retryOnAuthFailure = options.retryOnAuthFailure ?? true;
@@ -495,7 +494,6 @@ async function requestJson<T>(path: string, options: RequestOptions = {}): Promi
       method,
       headers,
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
-      credentials: "include",
     });
 
   let response = await send();
@@ -563,6 +561,27 @@ export async function registerWithPasswordRequest(
 
 export async function listChallengesRequest(): Promise<PageResponse<ChallengeDetail>> {
   const response = await listPendingApprovalRequests(1, CHALLENGE_PAGE_SIZE);
+  return {
+    items: response.requests.map(mapBackendRequestToChallenge),
+    total: response.total,
+    page: response.page,
+    per_page: response.per_page,
+  };
+}
+
+export async function listApprovalRequestsRequest(params?: {
+  status?: string;
+  page?: number;
+  per_page?: number;
+}): Promise<PageResponse<ChallengeDetail>> {
+  const qs = new URLSearchParams();
+  if (params?.status) qs.set("status", params.status);
+  qs.set("page", String(params?.page ?? 1));
+  qs.set("per_page", String(params?.per_page ?? 20));
+
+  const response = await requestJson<BackendApprovalRequestsResponse>(
+    `/approvals/requests?${qs.toString()}`
+  );
   return {
     items: response.requests.map(mapBackendRequestToChallenge),
     total: response.total,

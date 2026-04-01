@@ -12,5 +12,8 @@ export const mobileTheme = {
   warning: "#F59E0B",
   danger: "#EF4444",
   primary: "#8B5CF6",
+  primaryDim: "#6D42D9",
+  primaryGlow: "rgba(139, 92, 246, 0.12)",
+  navActive: "#232136",
 };
 

@@ -1,3 +1,4 @@
+import "react-native-gesture-handler";
 import { StatusBar } from "expo-status-bar";
 import * as Notifications from "expo-notifications";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -30,7 +31,9 @@ import {
   setPushSyncHandler,
 } from "../lib/notifications/pushNotifications";
 import { AuthSessionProvider } from "../features/auth/AuthSessionContext";
-import { BottomNavTab } from "../components/BottomNav";
+import { GestureHandlerRootView } from "react-native-gesture-handler";
+import type { BottomNavV2Tab } from "../components/BottomNavV2";
+import { NyxSheet } from "../features/nyx/NyxSheet";
 
 const queryClient = new QueryClient();
 
@@ -59,6 +62,7 @@ function getActiveRouteName(
 export default function App() {
   const navigationRef = useNavigationContainerRef<RootStackParamList>();
   const [currentRouteName, setCurrentRouteName] = useState<string | undefined>(undefined);
+  const [isNyxOpen, setIsNyxOpen] = useState(false);
   const pendingChallengeFromTapRef = useRef<string | null>(null);
   const lastAppStateRef = useRef(AppState.currentState);
 
@@ -69,12 +73,12 @@ export default function App() {
     if (!pendingChallengeId) return;
 
     const rootState = navigationRef.getRootState();
-    if (!rootState?.routeNames?.includes("ChallengeDetail")) {
+    if (!rootState?.routeNames?.includes("ActivityDetail")) {
       return;
     }
 
     pendingChallengeFromTapRef.current = null;
-    navigationRef.navigate("ChallengeDetail", { challengeId: pendingChallengeId });
+    navigationRef.navigate("ActivityDetail", { challengeId: pendingChallengeId });
   }, [navigationRef]);
 
   const [fontsLoaded] = useFonts({
@@ -190,7 +194,7 @@ export default function App() {
 
   return (
     <AppErrorBoundary>
-      <View style={appRootStyles.fill}>
+      <GestureHandlerRootView style={appRootStyles.fill}>
         <SafeAreaProvider>
           <QueryClientProvider client={queryClient}>
             <AuthSessionProvider>
@@ -211,19 +215,19 @@ export default function App() {
                 <StatusBar style="light" />
                 <AppNavigator
                   currentRouteName={currentRouteName}
-                  onMainTabPress={(tab: BottomNavTab) => {
+                  onMainTabPress={(tab: BottomNavV2Tab) => {
                     if (!navigationRef.isReady()) return;
-                    if (tab === "dashboard") navigationRef.navigate("Dashboard");
-                    if (tab === "inbox") navigationRef.navigate("Inbox");
-                    if (tab === "approvals") navigationRef.navigate("Approvals");
+                    if (tab === "activity") navigationRef.navigate("Activity");
                     if (tab === "account") navigationRef.navigate("AccountSettings");
                   }}
+                  onNyxPress={() => setIsNyxOpen(true)}
                 />
               </NavigationContainer>
+              <NyxSheet isOpen={isNyxOpen} onClose={() => setIsNyxOpen(false)} />
             </AuthSessionProvider>
           </QueryClientProvider>
         </SafeAreaProvider>
-      </View>
+      </GestureHandlerRootView>
     </AppErrorBoundary>
   );
 }

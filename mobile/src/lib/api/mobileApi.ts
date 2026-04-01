@@ -5,6 +5,7 @@ import {
   getChallengeRequest,
   getNotificationSettingsRequest,
   listApprovalsRequest,
+  listApprovalRequestsRequest,
   listChallengesRequest,
   loginWithPasswordRequest,
   registerWithPasswordRequest,
@@ -117,6 +118,13 @@ export const mobileApi = {
   },
   async getApprovals(): Promise<PageResponse<ApprovalItem>> {
     return listApprovalsRequest();
+  },
+  async getHistory(page = 1, perPage = 20): Promise<PageResponse<ChallengeDetail>> {
+    const response = await listApprovalRequestsRequest({ page, per_page: perPage });
+    return {
+      ...response,
+      items: response.items.filter((item) => item.status !== "PENDING"),
+    };
   },
   async revoke(approvalId: string): Promise<{ message: string }> {
     return revokeApprovalRequest(approvalId);

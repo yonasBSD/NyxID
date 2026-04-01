@@ -633,6 +633,7 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
             post(handlers::openclaw_channel::create_mapping),
         )
         .route("/public/config", get(handlers::health::public_config))
+        .route("/chat", post(handlers::chat::post_chat))
         .layer(middleware::from_fn(reject_delegated_tokens))
         .layer(middleware::from_fn(reject_service_account_tokens));
 

@@ -1,17 +1,18 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
-import { Alert, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { RootStackParamList } from "../../app/AppNavigator";
-import { MobileStatusBar } from "../../components/MobileStatusBar";
+
 import { PrimaryButton } from "../../components/PrimaryButton";
 import { ScreenContainer } from "../../components/ScreenContainer";
-import { SectionBadge } from "../../components/SectionBadge";
+import { OfflineBanner } from "../../components/OfflineBanner";
 import { ToastKind, ToastOverlay, ToastState } from "../../components/ToastOverlay";
 import { useAuthSession } from "../auth/AuthSessionContext";
+import { useNetworkStatus } from "../../hooks/useNetworkStatus";
 import { mobileApi } from "../../lib/api/mobileApi";
 import { mobileTheme } from "../../theme/mobileTheme";
 import { flowStyles } from "../../theme/flowStyles";
-import { typeScale } from "../../theme/designTokens";
+import { radius, spacing, typeScale } from "../../theme/designTokens";
 import { useEffect, useState } from "react";
 
 type Props = NativeStackScreenProps<RootStackParamList, "AccountSettings">;
@@ -30,59 +31,65 @@ function resolveDeleteAccountError(error: unknown): {
     code.includes("token_expired") ||
     code.includes("request_failed_401")
   ) {
-    return {
-      message: "Session expired. Please sign in again.",
-      shouldForceSignOut: true,
-    };
+    return { message: "Session expired. Please sign in again.", shouldForceSignOut: true };
   }
 
   if (code.includes("user_not_found") || code.includes("not found") || code.includes("request_failed_404")) {
-    return {
-      message: "Account not found or already deleted.",
-      shouldForceSignOut: true,
-    };
+    return { message: "Account not found or already deleted.", shouldForceSignOut: true };
   }
 
   if (code.includes("network request failed") || code.includes("failed to fetch")) {
-    return {
-      message: "Network error. Check API server and try again.",
-      shouldForceSignOut: false,
-    };
+    return { message: "Network error. Check API server and try again.", shouldForceSignOut: false };
   }
 
-  // In dev, surface backend message to debug
   const fallback = __DEV__ && raw ? raw : "Failed to delete account. Please try again.";
-  return {
-    message: fallback,
-    shouldForceSignOut: false,
-  };
+  return { message: fallback, shouldForceSignOut: false };
 }
 
-function resolveLoadProfileError(error: unknown): string {
-  const raw = error instanceof Error ? error.message : "";
-  const code = raw.toLowerCase();
-
-  if (
-    code.includes("auth_session_missing") ||
-    code.includes("unauthorized") ||
-    code.includes("invalid_token") ||
-    code.includes("token_expired") ||
-    code.includes("request_failed_401")
-  ) {
-    return "Session expired. Please sign in again.";
+function AccountRow({
+  label,
+  value,
+  isLast,
+  onPress,
+}: {
+  label: string;
+  value?: string;
+  isLast?: boolean;
+  onPress?: () => void;
+}) {
+  const content = (
+    <View style={[styles.accountRow, isLast && styles.accountRowLast]}>
+      <Text style={styles.accountRowLabel}>{label}</Text>
+      <View style={styles.accountRowRight}>
+        {value ? <Text style={styles.accountRowValue}>{value}</Text> : null}
+        {onPress ? <Text style={styles.accountRowArrow}>→</Text> : null}
+      </View>
+    </View>
+  );
+  if (onPress) {
+    return <Pressable onPress={onPress}>{content}</Pressable>;
   }
+  return content;
+}
 
-  if (code.includes("network request failed") || code.includes("failed to fetch")) {
-    return "Network error. Check API server and try again.";
+function getInitials(name?: string | null, email?: string): string {
+  if (name) {
+    return name
+      .split(" ")
+      .map((w) => w[0])
+      .join("")
+      .toUpperCase()
+      .slice(0, 2);
   }
-
-  return __DEV__ && raw ? raw : "Failed to load account profile.";
+  return (email?.[0] ?? "?").toUpperCase();
 }
 
 export function AccountSettingsScreen({ navigation }: Props) {
   const [toast, setToast] = useState<ToastState | null>(null);
   const queryClient = useQueryClient();
   const { signOut } = useAuthSession();
+  const { isConnected } = useNetworkStatus();
+
   const {
     data: profile,
     isLoading: isProfileLoading,
@@ -94,9 +101,7 @@ export function AccountSettingsScreen({ navigation }: Props) {
     queryFn: () => mobileApi.getAccountProfile(),
   });
 
-  const showToast = (message: string, kind: ToastKind) => {
-    setToast({ message, kind });
-  };
+  const showToast = (message: string, kind: ToastKind) => setToast({ message, kind });
 
   useEffect(() => {
     if (!toast) return;
@@ -107,28 +112,16 @@ export function AccountSettingsScreen({ navigation }: Props) {
   const deleteAccountMutation = useMutation({
     mutationFn: () => mobileApi.deleteAccount(),
     onSuccess: async () => {
-      showToast("Account and server-side data deleted. You have been signed out.", "success");
-      try {
-        await signOut();
-      } catch (error) {
-        if (__DEV__) console.warn("[auth] sign out after delete failed", error);
-      }
+      showToast("Account deleted. You have been signed out.", "success");
+      try { await signOut(); } catch {}
       queryClient.clear();
     },
     onError: (error) => {
       const resolved = resolveDeleteAccountError(error);
       showToast(resolved.message, "error");
-      if (!resolved.shouldForceSignOut) {
-        return;
+      if (resolved.shouldForceSignOut) {
+        void signOut().then(() => queryClient.clear()).catch(() => {});
       }
-
-      void signOut()
-        .then(() => {
-          queryClient.clear();
-        })
-        .catch((signOutError) => {
-          if (__DEV__) console.warn("[auth] forced sign out after delete error failed", signOutError);
-        });
     },
   });
 
@@ -140,13 +133,7 @@ export function AccountSettingsScreen({ navigation }: Props) {
         style: "destructive",
         onPress: () => {
           showToast("You are signed out.", "info");
-          void signOut()
-            .then(() => {
-              queryClient.clear();
-            })
-            .catch((error) => {
-              if (__DEV__) console.warn("[auth] sign out failed", error);
-            });
+          void signOut().then(() => queryClient.clear()).catch(() => {});
         },
       },
     ]);
@@ -170,71 +157,88 @@ export function AccountSettingsScreen({ navigation }: Props) {
     );
   };
 
+  const initials = getInitials(profile?.display_name, profile?.email);
+  const isOffline = !isConnected;
+  const profileOpacity = isOffline ? 0.5 : 1;
+
   return (
     <ScreenContainer>
-      <MobileStatusBar />
       <ScrollView
         style={flowStyles.content}
-        contentContainerStyle={flowStyles.scrollContent}
+        contentContainerStyle={[flowStyles.scrollContent, { paddingHorizontal: spacing.xxl }]}
         showsVerticalScrollIndicator={false}
       >
-        <SectionBadge label="ACCOUNT" tone="info" />
-        <Text style={flowStyles.title}>Account & Security</Text>
-        <Text style={flowStyles.subtitle}>
-          Manage current device session and account lifecycle operations.
-        </Text>
+        {isOffline && <OfflineBanner subtitle="Some features unavailable" onRetry={() => refetchProfile()} />}
 
-        <View style={flowStyles.card}>
-          <Text style={flowStyles.cardTitle}>Account Information</Text>
+        {/* User identity header */}
+        <View style={styles.identityHeader}>
+          <View style={styles.avatarCircle}>
+            <Text style={styles.avatarText}>{initials}</Text>
+          </View>
+          <View style={styles.identityInfo}>
+            <Text style={styles.identityName}>{profile?.display_name ?? "User"}</Text>
+            <Text style={styles.identityEmail}>{profile?.email ?? "..."}</Text>
+          </View>
+          <View style={[styles.statusBadge, isOffline && styles.statusBadgeOffline]}>
+            <Text style={[styles.statusBadgeText, isOffline && styles.statusBadgeTextOffline]}>
+              {isOffline ? "OFFLINE" : "ACTIVE"}
+            </Text>
+          </View>
+        </View>
+
+        {/* Profile card */}
+        <View style={[styles.card, { opacity: profileOpacity }]}>
+          <Text style={styles.cardTitle}>Profile</Text>
           {isProfileLoading ? (
-            <Text style={styles.metaText}>Loading account profile...</Text>
+            <Text style={styles.metaText}>Loading...</Text>
           ) : isProfileError || !profile ? (
             <>
-              <Text style={styles.errorText}>{resolveLoadProfileError(profileError)}</Text>
-              <PrimaryButton
-                label="Retry Profile Load"
-                kind="ghost"
-                disabled={deleteAccountMutation.isPending}
-                onPress={() => {
-                  void refetchProfile();
-                }}
-              />
+              <Text style={styles.errorText}>Failed to load profile</Text>
+              <PrimaryButton label="Retry" kind="ghost" onPress={() => refetchProfile()} />
             </>
           ) : (
             <>
-              <View style={flowStyles.row}>
-                <Text style={flowStyles.rowLabel}>Email</Text>
-                <Text style={flowStyles.rowValue}>{profile.email}</Text>
-              </View>
-              <View style={flowStyles.rowLast}>
-                <Text style={flowStyles.rowLabel}>Display Name</Text>
-                <Text style={flowStyles.rowValue}>{profile.display_name || "Not set"}</Text>
-              </View>
+              <AccountRow label="Display Name" value={profile.display_name ?? "Not set"} />
+              <AccountRow label="Email" value={profile.email} />
+              <AccountRow label="Sign-in Method" value="GitHub" isLast />
             </>
           )}
         </View>
 
-        <View style={flowStyles.card}>
-          <Text style={flowStyles.cardTitle}>Session</Text>
+        {/* Notifications card */}
+        <View style={[styles.card, isOffline && { opacity: 0.35 }]}>
+          <Text style={styles.cardTitle}>Notifications</Text>
+          {isOffline ? (
+            <Text style={styles.offlineNote}>Requires network connection</Text>
+          ) : (
+            <>
+              <AccountRow label="Push Notifications" value="Enabled" />
+              <AccountRow label="Telegram" value="Not linked" isLast onPress={() => {}} />
+            </>
+          )}
+        </View>
+
+        {/* Legal card */}
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>Legal</Text>
+          <AccountRow label="Terms of Service" onPress={() => navigation.navigate("TermsOfService")} />
+          <AccountRow label="Privacy Policy" isLast onPress={() => navigation.navigate("PrivacyPolicy")} />
+        </View>
+
+        {/* Actions */}
+        <View style={styles.actionsWrap}>
           <PrimaryButton
             label="Sign Out"
             kind="ghost"
-            disabled={deleteAccountMutation.isPending}
+            disabled={deleteAccountMutation.isPending || isOffline}
             onPress={handleSignOut}
           />
-        </View>
-
-        <View style={flowStyles.card}>
-          <Text style={flowStyles.cardTitle}>Danger Zone</Text>
           <PrimaryButton
             label={deleteAccountMutation.isPending ? "Deleting..." : "Delete Account"}
             kind="danger"
-            disabled={deleteAccountMutation.isPending}
+            disabled={deleteAccountMutation.isPending || isOffline}
             onPress={handleDeleteAccount}
           />
-          <Text style={styles.warningText}>
-            Deleting your account is permanent and removes your account plus server-side data.
-          </Text>
         </View>
       </ScrollView>
       <ToastOverlay toast={toast} />
@@ -243,16 +247,125 @@ export function AccountSettingsScreen({ navigation }: Props) {
 }
 
 const styles = StyleSheet.create({
+  identityHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    marginBottom: spacing.xxl,
+  },
+  avatarCircle: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    // RN doesn't support linear-gradient natively on View bg.
+    // Use two overlapping halves to approximate gradient(135deg, #8B5CF6, #6D42D9).
+    backgroundColor: "#7A4FE3",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  avatarText: {
+    fontSize: 18,
+    fontWeight: "700",
+    color: "#FFFFFF",
+    fontFamily: "SpaceGrotesk_700Bold",
+  },
+  identityInfo: {
+    flex: 1,
+    minWidth: 0,
+  },
+  identityName: {
+    fontSize: 18,
+    fontWeight: "700",
+    color: mobileTheme.textPrimary,
+    fontFamily: "SpaceGrotesk_700Bold",
+  },
+  identityEmail: {
+    fontSize: 12,
+    color: mobileTheme.textMuted,
+    marginTop: 1,
+  },
+  statusBadge: {
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+    borderRadius: 20,
+    backgroundColor: "rgba(52,211,153,0.1)",
+    borderWidth: 1,
+    borderColor: "rgba(52,211,153,0.2)",
+  },
+  statusBadgeOffline: {
+    backgroundColor: "rgba(239,68,68,0.1)",
+    borderColor: "rgba(239,68,68,0.2)",
+  },
+  statusBadgeText: {
+    fontSize: 10,
+    fontWeight: "700",
+    color: mobileTheme.success,
+  },
+  statusBadgeTextOffline: {
+    color: "#FCA5A5",
+  },
+  card: {
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: mobileTheme.borderSoft,
+    backgroundColor: mobileTheme.card,
+    padding: spacing.xl,
+    gap: 0,
+    marginBottom: spacing.xl,
+  },
+  cardTitle: {
+    ...typeScale.title,
+    color: mobileTheme.textPrimary,
+    marginBottom: 0,
+  },
+  accountRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingVertical: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: mobileTheme.borderSoft,
+  },
+  accountRowLast: {
+    borderBottomWidth: 0,
+  },
+  accountRowLabel: {
+    fontSize: 14,
+    fontWeight: "500",
+    color: mobileTheme.textSecondary,
+  },
+  accountRowRight: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  accountRowValue: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: mobileTheme.textPrimary,
+  },
+  accountRowArrow: {
+    fontSize: 14,
+    color: mobileTheme.textMuted,
+  },
+  actionsWrap: {
+    gap: spacing.md,
+    marginTop: spacing.xs,
+  },
   metaText: {
     color: mobileTheme.textSecondary,
     ...typeScale.body,
+    paddingVertical: spacing.md,
   },
   errorText: {
     color: "#FCA5A5",
     ...typeScale.caption,
+    paddingVertical: spacing.md,
   },
-  warningText: {
+  offlineNote: {
+    fontSize: 12,
     color: mobileTheme.textMuted,
-    ...typeScale.caption,
+    textAlign: "center",
+    paddingVertical: spacing.md,
   },
 });

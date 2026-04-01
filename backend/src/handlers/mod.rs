@@ -10,6 +10,7 @@ pub mod api_keys;
 pub mod approvals;
 pub mod auth;
 pub mod catalog;
+pub mod chat;
 pub mod connections;
 pub mod consent;
 pub mod delegation;

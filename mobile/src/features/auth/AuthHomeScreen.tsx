@@ -2,14 +2,15 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import FontAwesome from "@expo/vector-icons/FontAwesome";
 import * as WebBrowser from "expo-web-browser";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
-import { ActivityIndicator, Linking, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Linking, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import type { RootStackParamList } from "../../app/AppNavigator";
-import { MobileStatusBar } from "../../components/MobileStatusBar";
+
 import { ScreenContainer } from "../../components/ScreenContainer";
 import { SectionBadge } from "../../components/SectionBadge";
 import { ToastKind, ToastOverlay, ToastState } from "../../components/ToastOverlay";
 import { mobileApi } from "../../lib/api/mobileApi";
 import { useAuthSession } from "./AuthSessionContext";
+import { IS_DEV_BUILD } from "../../lib/env";
 import { mobileTheme } from "../../theme/mobileTheme";
 import { flowStyles } from "../../theme/flowStyles";
 import { radius, spacing, typeScale } from "../../theme/designTokens";
@@ -127,6 +128,9 @@ export function AuthHomeScreen({ navigation }: Props) {
   const [isSocialAuthPending, setIsSocialAuthPending] = useState(false);
   const [pendingSocialProvider, setPendingSocialProvider] = useState<SocialProvider | null>(null);
   const [toast, setToast] = useState<ToastState | null>(null);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [isEmailAuthPending, setIsEmailAuthPending] = useState(false);
   const { signInWithSession } = useAuthSession();
   const isMountedRef = useRef(true);
   const lastHandledSocialUrlRef = useRef<string | null>(null);
@@ -260,15 +264,34 @@ export function AuthHomeScreen({ navigation }: Props) {
     }
   };
 
+  const handleEmailLogin = async () => {
+    if (isEmailAuthPending || !email.trim() || !password) return;
+    setIsEmailAuthPending(true);
+    setToast(null);
+    try {
+      const result = await mobileApi.loginWithPassword({ email: email.trim(), password });
+      await signInWithSession({
+        accessToken: result.accessToken,
+        refreshToken: result.refreshToken,
+        accessTokenExpiresAt: Date.now() + Math.floor(result.expiresIn * 1000),
+      });
+    } catch (error) {
+      showToast(resolveAuthError(error), "error");
+    } finally {
+      if (isMountedRef.current) {
+        setIsEmailAuthPending(false);
+      }
+    }
+  };
+
   return (
     <ScreenContainer>
-      <MobileStatusBar />
       <ScrollView
         style={flowStyles.content}
-        contentContainerStyle={[flowStyles.scrollContent, styles.scrollContentExtra]}
+        contentContainerStyle={[flowStyles.scrollContent, styles.scrollContentExtra, { paddingHorizontal: spacing.xxl }]}
         showsVerticalScrollIndicator={false}
       >
-        <SectionBadge label="SOCIAL ONLY" tone="info" />
+        <SectionBadge label={IS_DEV_BUILD ? "DEV MODE" : "SOCIAL ONLY"} tone="info" />
         <Text style={flowStyles.title}>Continue to NyxID</Text>
         <Text style={flowStyles.subtitle}>Use Google, GitHub, or Apple to continue.</Text>
 
@@ -294,6 +317,48 @@ export function AuthHomeScreen({ navigation }: Props) {
             loading={isSocialAuthPending && pendingSocialProvider === "apple"}
             onPress={() => void startSocialLogin("apple")}
           />
+
+          {IS_DEV_BUILD && (
+            <>
+              <View style={styles.dividerRow}>
+                <View style={styles.dividerLine} />
+                <Text style={styles.dividerText}>OR</Text>
+                <View style={styles.dividerLine} />
+              </View>
+              <TextInput
+                style={styles.devInput}
+                placeholder="Email"
+                placeholderTextColor={mobileTheme.textMuted}
+                value={email}
+                onChangeText={setEmail}
+                keyboardType="email-address"
+                autoCapitalize="none"
+                autoComplete="email"
+                editable={!isEmailAuthPending}
+              />
+              <TextInput
+                style={styles.devInput}
+                placeholder="Password"
+                placeholderTextColor={mobileTheme.textMuted}
+                value={password}
+                onChangeText={setPassword}
+                secureTextEntry
+                editable={!isEmailAuthPending}
+              />
+              <Pressable
+                onPress={() => void handleEmailLogin()}
+                disabled={isEmailAuthPending || !email.trim() || !password}
+                style={[styles.devSignInButton, (isEmailAuthPending || !email.trim() || !password) && styles.socialAuthButtonDisabled]}
+              >
+                <View style={styles.socialAuthContent}>
+                  {isEmailAuthPending ? (
+                    <ActivityIndicator size="small" color="#F9FAFB" />
+                  ) : null}
+                  <Text style={styles.socialAuthText}>{isEmailAuthPending ? "Signing in..." : "Sign In"}</Text>
+                </View>
+              </Pressable>
+            </>
+          )}
 
           <Text style={styles.legal}>
             By continuing, you agree to{" "}
@@ -337,6 +402,41 @@ const styles = StyleSheet.create({
     ...typeScale.caption,
     fontSize: 11,
     textDecorationLine: "underline",
+  },
+  dividerRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginVertical: spacing.sm,
+  },
+  dividerLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: mobileTheme.border,
+  },
+  dividerText: {
+    color: mobileTheme.textMuted,
+    ...typeScale.caption,
+    fontSize: 11,
+    marginHorizontal: spacing.sm,
+  },
+  devInput: {
+    backgroundColor: mobileTheme.cardSoft,
+    borderColor: mobileTheme.border,
+    borderWidth: 1,
+    borderRadius: radius.md,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.lg,
+    color: mobileTheme.textPrimary,
+    ...typeScale.caption,
+    fontSize: 13,
+  },
+  devSignInButton: {
+    backgroundColor: mobileTheme.primary,
+    borderRadius: radius.md,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.lg,
+    alignItems: "center",
+    justifyContent: "center",
   },
   socialAuthButton: {
     backgroundColor: "#0F1422",

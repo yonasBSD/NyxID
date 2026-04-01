@@ -13,5 +13,5 @@ export function ScreenContainer({ children }: PropsWithChildren) {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: mobileTheme.bg },
-  content: { flex: 1, paddingHorizontal: spacing.xxl, paddingBottom: spacing.xxxl },
+  content: { flex: 1 },
 });
