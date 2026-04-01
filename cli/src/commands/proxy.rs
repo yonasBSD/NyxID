@@ -90,22 +90,22 @@ pub async fn run(command: ProxyCommands) -> Result<()> {
                 })
                 .collect();
 
-            // Resolve request body
-            let body = match data.as_deref() {
+            // Resolve request body (supports binary via @file or stdin)
+            let body: Option<Vec<u8>> = match data.as_deref() {
                 Some("-") => {
-                    let mut buf = String::new();
-                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
+                    let mut buf = Vec::new();
+                    std::io::Read::read_to_end(&mut std::io::stdin(), &mut buf)
                         .context("Failed to read stdin")?;
                     Some(buf)
                 }
                 Some(d) if d.starts_with('@') => {
                     let path = &d[1..];
                     Some(
-                        std::fs::read_to_string(path)
+                        std::fs::read(path)
                             .with_context(|| format!("Failed to read file: {path}"))?,
                     )
                 }
-                Some(d) => Some(d.to_string()),
+                Some(d) => Some(d.as_bytes().to_vec()),
                 None => None,
             };
 

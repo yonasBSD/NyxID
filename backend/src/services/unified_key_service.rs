@@ -103,11 +103,23 @@ fn is_duplicate_key_error(error: &mongodb::error::Error) -> bool {
 fn identity_config_from_downstream_service(
     service: &DownstreamService,
 ) -> user_service_service::IdentityConfig {
+    // When the catalog entry enables identity propagation but has all include
+    // flags off (a common misconfiguration when seeding services), default to
+    // including user_id and email so the mode is not a silent no-op.
+    let has_active_mode = matches!(
+        service.identity_propagation_mode.as_str(),
+        "headers" | "jwt" | "both"
+    );
+    let all_flags_off = !service.identity_include_user_id
+        && !service.identity_include_email
+        && !service.identity_include_name;
+    let apply_defaults = has_active_mode && all_flags_off;
+
     user_service_service::IdentityConfig {
         identity_propagation_mode: service.identity_propagation_mode.clone(),
-        identity_include_user_id: service.identity_include_user_id,
-        identity_include_email: service.identity_include_email,
-        identity_include_name: service.identity_include_name,
+        identity_include_user_id: service.identity_include_user_id || apply_defaults,
+        identity_include_email: service.identity_include_email || apply_defaults,
+        identity_include_name: service.identity_include_name || apply_defaults,
         identity_jwt_audience: service.identity_jwt_audience.clone(),
         inject_delegation_token: service.inject_delegation_token,
         delegation_token_scope: service.delegation_token_scope.clone(),
@@ -1316,5 +1328,63 @@ mod tests {
         );
         assert!(identity.inject_delegation_token);
         assert_eq!(identity.delegation_token_scope, "proxy:* llm:status");
+    }
+
+    #[test]
+    fn identity_config_defaults_include_flags_when_mode_active_but_all_flags_off() {
+        let mut service = sample_catalog_service();
+        service.identity_propagation_mode = "headers".to_string();
+        service.identity_include_user_id = false;
+        service.identity_include_email = false;
+        service.identity_include_name = false;
+
+        let identity = identity_config_from_downstream_service(&service);
+        assert_eq!(identity.identity_propagation_mode, "headers");
+        assert!(
+            identity.identity_include_user_id,
+            "should default to true when mode is active but all flags off"
+        );
+        assert!(
+            identity.identity_include_email,
+            "should default to true when mode is active but all flags off"
+        );
+        assert!(
+            identity.identity_include_name,
+            "should default to true when mode is active but all flags off"
+        );
+    }
+
+    #[test]
+    fn identity_config_respects_explicit_flags_when_some_are_set() {
+        let mut service = sample_catalog_service();
+        service.identity_propagation_mode = "headers".to_string();
+        service.identity_include_user_id = false;
+        service.identity_include_email = true;
+        service.identity_include_name = false;
+
+        let identity = identity_config_from_downstream_service(&service);
+        assert!(
+            !identity.identity_include_user_id,
+            "explicit false should be preserved"
+        );
+        assert!(identity.identity_include_email);
+        assert!(
+            !identity.identity_include_name,
+            "explicit false should be preserved"
+        );
+    }
+
+    #[test]
+    fn identity_config_no_default_for_mode_none() {
+        let mut service = sample_catalog_service();
+        service.identity_propagation_mode = "none".to_string();
+        service.identity_include_user_id = false;
+        service.identity_include_email = false;
+        service.identity_include_name = false;
+
+        let identity = identity_config_from_downstream_service(&service);
+        assert!(!identity.identity_include_user_id);
+        assert!(!identity.identity_include_email);
+        assert!(!identity.identity_include_name);
     }
 }
