@@ -214,6 +214,22 @@ export const updateServiceSchema = z
       .max(200, "Scope must be at most 200 characters")
       .optional()
       .or(z.literal("")),
+    // Rich metadata
+    homepage_url: z.string().url("Must be a valid URL").optional().or(z.literal("")),
+    repository_url: z.string().url("Must be a valid URL").optional().or(z.literal("")),
+    issues_url: z.string().url("Must be a valid URL").optional().or(z.literal("")),
+    auth_notes: z.string().max(4096, "Must be at most 4096 characters").optional().or(z.literal("")),
+    known_limitations: z.string().max(4096, "Must be at most 4096 characters").optional().or(z.literal("")),
+    required_permissions: z.string().max(2000, "Must be at most 2000 characters").optional().or(z.literal("")),
+    examples_url: z.string().url("Must be a valid URL").optional().or(z.literal("")),
+    recommended_skills: z.string().max(2000, "Must be at most 2000 characters").optional().or(z.literal("")),
+    supports_proxy_read: z.boolean().optional(),
+    supports_proxy_write: z.boolean().optional(),
+    supports_proxy_binary_upload: z.boolean().optional(),
+    supports_direct_downstream_auth: z.boolean().optional(),
+    supports_authoring_via_nyx: z.boolean().optional(),
+    supports_websocket: z.boolean().optional(),
+    supports_streaming: z.boolean().optional(),
     host: optionalString,
     port: optionalString,
     certificate_auth_enabled: z.boolean().optional(),

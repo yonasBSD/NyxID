@@ -115,10 +115,65 @@ This behavior is reflected in:
 
 ---
 
+## Catalog Endpoint Discovery
+
+The catalog API exposes parsed OpenAPI endpoint metadata for any service that has an `openapi_spec_url`:
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/v1/catalog` | List catalog entries (add `?include_all=true` for system services) |
+| `GET /api/v1/catalog/{slug}` | Full catalog entry with rich metadata |
+| `GET /api/v1/catalog/{slug}/endpoints` | Parsed API endpoints from the service's OpenAPI spec |
+
+The `/endpoints` response includes structured endpoint data:
+
+```json
+{
+  "slug": "llm-openai",
+  "openapi_spec_url": "https://api.openai.com/v1/openapi.json",
+  "endpoints": [
+    {
+      "name": "create_chat_completion",
+      "description": "Creates a model response for the given chat conversation.",
+      "method": "POST",
+      "path": "/chat/completions",
+      "parameters": null,
+      "request_body_schema": { ... },
+      "request_content_type": "application/json",
+      "request_body_required": true
+    }
+  ]
+}
+```
+
+The spec is fetched through a hardened path with DNS pinning, 5MB response size limit, redirect policy, and 60-second caching.
+
+### Rich catalog metadata
+
+Catalog entries can include metadata to help AI agents understand what a service is and how it works:
+
+- `homepage_url`, `repository_url`, `issues_url` -- links to docs, source code, and issue tracker
+- `openapi_spec_url`, `asyncapi_spec_url` -- spec URLs for API discovery
+- `capabilities` -- structured flags: `supports_proxy_read`, `supports_proxy_write`, `supports_proxy_binary_upload`, `supports_direct_downstream_auth`, `supports_authoring_via_nyx`, `supports_websocket`, `supports_streaming`
+- `auth_notes` -- freeform notes on downstream auth expectations
+- `known_limitations` -- important caveats for agents and CLI users
+- `required_permissions` -- downstream permissions required for key actions
+
+CLI access:
+
+```bash
+nyxid catalog list --all                # include system services
+nyxid catalog show <slug>               # full metadata display
+nyxid catalog endpoints <slug>          # parsed OpenAPI endpoints
+```
+
+---
+
 ## Recommended Operator Flow
 
 1. Register the downstream service with its `base_url`.
 2. Check `GET /api/v1/proxy/services` to confirm docs discovery and streaming flags.
 3. If discovery missed the real spec location, update `openapi_spec_url` and `asyncapi_spec_url`.
-4. Share `GET /api/v1/proxy/services/{service_id}/docs` with internal consumers so they test through NyxID instead of bypassing it.
+4. Enrich the service with metadata: `homepage_url`, `repository_url`, `capabilities`, `auth_notes`, `known_limitations`, `required_permissions` so AI agents can discover the service fully.
+5. Share `GET /api/v1/proxy/services/{service_id}/docs` with internal consumers so they test through NyxID instead of bypassing it.
 

@@ -539,7 +539,11 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
 
     let catalog_routes = Router::new()
         .route("/", get(handlers::catalog::list_catalog))
-        .route("/{slug}", get(handlers::catalog::get_catalog_entry));
+        .route("/{slug}", get(handlers::catalog::get_catalog_entry))
+        .route(
+            "/{slug}/endpoints",
+            get(handlers::catalog::list_catalog_endpoints),
+        );
 
     let developer_routes = Router::new()
         .route(

@@ -77,7 +77,9 @@ If the target service is missing, help the user add it:
 
 ```bash
 nyxid catalog list --output json                          # browse available services
-nyxid catalog show <slug> --output json                   # show auth requirements for a service
+nyxid catalog list --all --output json                    # include system services without auth
+nyxid catalog show <slug> --output json                   # full metadata: links, capabilities, auth notes
+nyxid catalog endpoints <slug>                            # list API endpoints from OpenAPI spec
 nyxid service add <slug> --oauth                          # OAuth flow (opens browser -- easiest)
 nyxid service add <slug> --device-code                    # device code flow (enter code on website)
 nyxid service add <slug>                                  # API key (CLI prompts securely)
@@ -153,12 +155,16 @@ know the correct API paths, methods, and body formats for each service.
 NyxID is just a proxy. The paths, methods, and request bodies are the same as calling
 the downstream service directly. To figure out what to send:
 
-1. Check the catalog for documentation: `nyxid catalog show <slug> --output json`
-   - Look for `documentation_url` -- this links to the provider's API docs
-2. If no documentation URL is available, **search the web** for "<service name> API documentation"
+1. Check catalog for endpoints: `nyxid catalog endpoints <slug>`
+   - If the service has an OpenAPI spec, this returns all available endpoints (method, path, description)
+2. Check the catalog for documentation: `nyxid catalog show <slug> --output json`
+   - Look for `homepage_url`, `repository_url`, `documentation_url` -- links to docs and source
+   - Check `capabilities` to understand supported interaction patterns
+   - Check `auth_notes` and `known_limitations` for caveats
+3. If no documentation URL is available, **search the web** for "<service name> API documentation"
    (e.g., "OpenAI API documentation", "Twitter API v2 documentation")
-3. Use the provider's docs to determine the correct path, method, headers, and body format
-4. Use `-H "Content-Type: ..."` if the service expects something other than JSON
+4. Use the provider's docs to determine the correct path, method, headers, and body format
+5. Use `-H "Content-Type: ..."` if the service expects something other than JSON
 
 ### Important: paths are relative to the service's base URL
 
@@ -222,7 +228,9 @@ NyxID injects the user's credentials automatically. Do not ask for or log raw do
 ## Managing Services
 
 ```bash
-nyxid catalog list                                             # browse catalog
+nyxid catalog list                                             # browse catalog (connectable services)
+nyxid catalog list --all                                       # all services (including system/no-auth)
+nyxid catalog endpoints <slug>                                 # list API endpoints from OpenAPI spec
 nyxid service add <slug>                                       # add from catalog (CLI prompts for credential)
 nyxid service add <slug> --oauth                               # add with OAuth (opens browser)
 nyxid service add <slug> --device-code                         # add with device code flow

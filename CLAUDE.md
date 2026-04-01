@@ -117,9 +117,9 @@ The services/connections/providers system was unified into 3 user-managed collec
 
 Key files:
 - `services/unified_key_service.rs` -- orchestration: auto-provision endpoint + key + service
-- `services/catalog_service.rs` -- read-only catalog from DownstreamService
+- `services/catalog_service.rs` -- read-only catalog from DownstreamService, `list_catalog_all` for full discovery
 - `handlers/keys.rs` -- `/api/v1/keys` CRUD
-- `handlers/catalog.rs` -- `/api/v1/catalog` read-only
+- `handlers/catalog.rs` -- `/api/v1/catalog` read-only, `/api/v1/catalog/{slug}/endpoints` for OpenAPI endpoint discovery
 - `models/user_endpoint.rs`, `models/user_api_key.rs`, `models/user_service.rs` -- new user collections
 
 ### 9. Agent Isolation
@@ -154,6 +154,32 @@ Key files:
 - `cli/src/commands/api_key.rs` -- API key management + credential binding commands
 - `frontend/src/hooks/use-agent-bindings.ts` -- TanStack Query hooks for bindings CRUD
 - `frontend/src/schemas/agent-bindings.ts` -- Zod schemas for bindings and rate limits
+
+### 10. Catalog Metadata and Endpoint Discovery
+
+Rich metadata on `DownstreamService` for AI agent discovery (issue #148). Agents can discover service docs, repos, capabilities, and API endpoints from the catalog without guessing.
+
+**Model fields** (on `DownstreamService`):
+- `homepage_url`, `repository_url`, `issues_url` -- validated URLs for docs/source/issues
+- `capabilities` -- `ServiceCapabilities` struct with boolean flags: `supports_proxy_read`, `supports_proxy_write`, `supports_proxy_binary_upload`, `supports_direct_downstream_auth`, `supports_authoring_via_nyx`, `supports_websocket`, `supports_streaming`
+- `auth_notes`, `known_limitations` -- freeform text (max 4096 chars)
+- `required_permissions` -- array of permission strings (max 100 entries, 256 chars each)
+
+**API:**
+- `GET /api/v1/catalog?include_all=true` -- includes system services without auth (default filters to connectable services only)
+- `GET /api/v1/catalog/{slug}/endpoints` -- fetches and parses OpenAPI spec via hardened `api_docs_service::fetch_spec_json` (DNS pinning, 5MB limit, 60s cache), returns structured endpoint list
+- Admin `POST/PUT /services` accepts all metadata fields with URL validation and length limits
+
+**CLI:**
+- `nyxid catalog list --all` -- includes system services
+- `nyxid catalog show <slug>` -- displays links, capabilities, auth notes, limitations, permissions
+- `nyxid catalog endpoints <slug>` -- lists parsed OpenAPI endpoints in table format
+
+**Frontend:**
+- Service edit page: "Service Metadata" section with URL inputs, auth notes, limitations, permissions, and capability toggle switches
+- Service detail page: "Service Metadata" section with links, notes, permissions, and capability badges
+
+**Legacy migration:** `migrate_legacy_api_spec_url()` runs at startup to rename `api_spec_url` -> `openapi_spec_url` and remove duplicates. Update handler includes `$unset: { api_spec_url: "" }` as belt-and-suspenders.
 
 ## File Structure
 
@@ -246,7 +272,7 @@ All API routes under `/api/v1`:
 - `/endpoints` -- user-managed target URLs (list, update, delete)
 - `/api-keys/external` -- user's external API keys / credentials (list, update, delete)
 - `/user-services` -- user's proxy routing config (list, update, delete)
-- `/catalog` -- read-only service catalog for users (list templates, get template by slug)
+- `/catalog` -- read-only service catalog for users (list templates, get template by slug, `?include_all=true` for full discovery including system services). Supports `/{slug}/endpoints` for OpenAPI endpoint discovery via hardened spec fetch.
 - `/ssh/{service_id}/certificate` -- issue short-lived SSH user certificate (POST)
 - `/ssh/{service_id}` -- SSH-over-WebSocket tunnel (GET, upgrade)
 - `/ssh/{service_id}/terminal` -- SSH web terminal (GET, upgrade)

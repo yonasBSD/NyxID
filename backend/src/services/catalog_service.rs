@@ -6,7 +6,7 @@ use mongodb::bson::doc;
 use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
-    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, ServiceCapabilities,
 };
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
 use crate::models::service_provider_requirement::{
@@ -51,6 +51,18 @@ pub struct CatalogEntry {
     pub client_id_param_name: Option<String>,
     /// Whether this catalog entry needs credential setup instead of direct no-auth access.
     pub requires_credential: bool,
+    // --- Rich metadata for AI agent discovery ---
+    pub openapi_spec_url: Option<String>,
+    pub asyncapi_spec_url: Option<String>,
+    pub homepage_url: Option<String>,
+    pub repository_url: Option<String>,
+    pub issues_url: Option<String>,
+    pub capabilities: Option<ServiceCapabilities>,
+    pub auth_notes: Option<String>,
+    pub known_limitations: Option<String>,
+    pub required_permissions: Option<Vec<String>>,
+    pub examples_url: Option<String>,
+    pub recommended_skills: Option<Vec<String>>,
 }
 
 fn build_catalog_entry(
@@ -118,6 +130,17 @@ fn build_catalog_entry(
         oauth_client_id,
         client_id_param_name: provider.and_then(|p| p.client_id_param_name.clone()),
         requires_credential,
+        openapi_spec_url: svc.openapi_spec_url,
+        asyncapi_spec_url: svc.asyncapi_spec_url,
+        homepage_url: svc.homepage_url,
+        repository_url: svc.repository_url,
+        issues_url: svc.issues_url,
+        capabilities: svc.capabilities,
+        auth_notes: svc.auth_notes,
+        known_limitations: svc.known_limitations,
+        required_permissions: svc.required_permissions,
+        examples_url: svc.examples_url,
+        recommended_skills: svc.recommended_skills,
     }
 }
 
@@ -139,23 +162,82 @@ async fn decrypt_provider_client_id(
     }
 }
 
+/// MongoDB filter for visibility that hides private services from non-owners.
+/// Public services and legacy documents without a visibility field are visible to all.
+fn visibility_filter(user_id: &str) -> mongodb::bson::Document {
+    doc! {
+        "$or": [
+            { "visibility": { "$ne": "private" } },
+            { "visibility": { "$exists": false } },
+            { "visibility": "private", "created_by": user_id },
+        ],
+    }
+}
+
+/// MongoDB filter for service_category that handles legacy documents
+/// created before the field was added (defaults to "connection").
+fn legacy_service_category_filter(categories: &[&str]) -> mongodb::bson::Document {
+    doc! {
+        "$or": categories.iter().map(|c| doc! { "service_category": c }).chain(
+            std::iter::once(doc! { "service_category": { "$exists": false } })
+        ).collect::<Vec<_>>(),
+    }
+}
+
 /// List catalog entries available for user key creation.
 /// Filters to connection-category + provider-linked services.
 pub async fn list_catalog(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
 ) -> AppResult<Vec<CatalogEntry>> {
-    let services: Vec<DownstreamService> = db
-        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .find(doc! {
+    // Legacy documents may lack requires_user_credential (defaults to true)
+    // and service_category (defaults to "connection").
+    list_catalog_filtered(
+        db,
+        encryption_keys,
+        doc! {
             "service_type": "http",
             "is_active": true,
-            "$or": [
-                { "requires_user_credential": true },
-                { "provider_config_id": { "$ne": null } },
+            "$and": [
+                {
+                    "$or": [
+                        { "requires_user_credential": true },
+                        { "requires_user_credential": { "$exists": false } },
+                        { "provider_config_id": { "$ne": null } },
+                    ],
+                },
+                legacy_service_category_filter(&["connection", "internal"]),
             ],
-            "service_category": { "$in": ["connection", "internal"] },
-        })
+        },
+    )
+    .await
+}
+
+/// List ALL active catalog entries for discovery (includes system services without auth).
+/// Enforces visibility: private services only visible to their creator.
+pub async fn list_catalog_all(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+) -> AppResult<Vec<CatalogEntry>> {
+    let filter = doc! {
+        "is_active": true,
+        "$and": [
+            legacy_service_category_filter(&["connection", "internal"]),
+            visibility_filter(user_id),
+        ],
+    };
+    list_catalog_filtered(db, encryption_keys, filter).await
+}
+
+async fn list_catalog_filtered(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    filter: mongodb::bson::Document,
+) -> AppResult<Vec<CatalogEntry>> {
+    let services: Vec<DownstreamService> = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find(filter)
         .sort(doc! { "name": 1 })
         .await?
         .try_collect()
@@ -209,6 +291,21 @@ pub async fn list_catalog(
     }
 
     Ok(resolved_entries)
+}
+
+/// Get the raw DownstreamService by slug (lightweight, no provider/encryption lookup).
+/// Enforces visibility: private services only visible to their creator.
+pub async fn get_downstream_service_by_slug(
+    db: &mongodb::Database,
+    slug: &str,
+    user_id: &str,
+) -> AppResult<DownstreamService> {
+    let mut filter = doc! { "slug": slug, "is_active": true };
+    filter.extend(visibility_filter(user_id));
+    db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find_one(filter)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Catalog entry not found".to_string()))
 }
 
 /// Get single catalog entry by slug.

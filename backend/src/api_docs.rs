@@ -30,6 +30,7 @@
         // Catalog
         crate::handlers::catalog::list_catalog,
         crate::handlers::catalog::get_catalog_entry,
+        crate::handlers::catalog::list_catalog_endpoints,
         // Endpoints
         crate::handlers::user_endpoints::list_endpoints,
         crate::handlers::user_endpoints::update_endpoint,
@@ -77,6 +78,9 @@
             // Catalog
             crate::handlers::catalog::CatalogEntryResponse,
             crate::handlers::catalog::CatalogListResponse,
+            crate::handlers::catalog::CatalogEndpointResponse,
+            crate::handlers::catalog::CatalogEndpointsListResponse,
+            crate::models::downstream_service::ServiceCapabilities,
             // Endpoints
             crate::handlers::user_endpoints::UpdateEndpointRequest,
             crate::handlers::user_endpoints::EndpointResponse,

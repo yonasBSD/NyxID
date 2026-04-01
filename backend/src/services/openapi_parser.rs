@@ -31,6 +31,23 @@ enum Swagger2FormBodyKind {
     FormFields,
 }
 
+/// Parse endpoints from a pre-fetched OpenAPI/Swagger spec JSON value.
+///
+/// Use this when the spec has already been fetched through a hardened path
+/// (e.g., `api_docs_service::fetch_spec_json`).
+pub fn parse_openapi_spec_value(spec: &serde_json::Value) -> AppResult<Vec<ParsedEndpoint>> {
+    let is_openapi3 = spec.get("openapi").is_some();
+    let is_swagger2 = spec.get("swagger").is_some();
+
+    if !is_openapi3 && !is_swagger2 {
+        return Err(AppError::BadRequest(
+            "Spec must contain an 'openapi' or 'swagger' key".to_string(),
+        ));
+    }
+
+    parse_endpoints_from_spec(spec, is_openapi3)
+}
+
 /// Fetch and parse an OpenAPI 3.x or Swagger 2.0 spec from a URL.
 ///
 /// For each path+operation, extracts the operationId (or generates one from
@@ -78,6 +95,13 @@ pub async fn parse_openapi_spec(
         ));
     }
 
+    parse_endpoints_from_spec(&spec, is_openapi3)
+}
+
+fn parse_endpoints_from_spec(
+    spec: &serde_json::Value,
+    is_openapi3: bool,
+) -> AppResult<Vec<ParsedEndpoint>> {
     let paths = spec
         .get("paths")
         .and_then(|p| p.as_object())
@@ -98,11 +122,11 @@ pub async fn parse_openapi_spec(
 
             let name = extract_name(operation, method, path);
             let description = extract_description(operation);
-            let parameters = extract_parameters_with_spec(operation, path_obj, &spec);
+            let parameters = extract_parameters_with_spec(operation, path_obj, spec);
             let request_body = if is_openapi3 {
-                extract_request_body_openapi3_with_spec(operation, &spec)
+                extract_request_body_openapi3_with_spec(operation, spec)
             } else {
-                extract_request_body_swagger2(operation, path_obj, &spec)
+                extract_request_body_swagger2(operation, path_obj, spec)
             };
 
             endpoints.push(ParsedEndpoint {

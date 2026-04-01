@@ -67,6 +67,21 @@ export function ServiceEditPage() {
       identity_jwt_audience: "",
       inject_delegation_token: false,
       delegation_token_scope: "",
+      homepage_url: "",
+      repository_url: "",
+      issues_url: "",
+      auth_notes: "",
+      known_limitations: "",
+      required_permissions: "",
+      examples_url: "",
+      recommended_skills: "",
+      supports_proxy_read: false,
+      supports_proxy_write: false,
+      supports_proxy_binary_upload: false,
+      supports_direct_downstream_auth: false,
+      supports_authoring_via_nyx: false,
+      supports_websocket: false,
+      supports_streaming: false,
       host: "",
       port: "22",
       certificate_auth_enabled: false,
@@ -95,6 +110,21 @@ export function ServiceEditPage() {
         identity_jwt_audience: service.identity_jwt_audience ?? "",
         inject_delegation_token: service.inject_delegation_token ?? false,
         delegation_token_scope: service.delegation_token_scope || "llm:proxy",
+        homepage_url: service.homepage_url ?? "",
+        repository_url: service.repository_url ?? "",
+        issues_url: service.issues_url ?? "",
+        auth_notes: service.auth_notes ?? "",
+        known_limitations: service.known_limitations ?? "",
+        required_permissions: service.required_permissions?.join(", ") ?? "",
+        examples_url: service.examples_url ?? "",
+        recommended_skills: service.recommended_skills?.join(", ") ?? "",
+        supports_proxy_read: service.capabilities?.supports_proxy_read ?? false,
+        supports_proxy_write: service.capabilities?.supports_proxy_write ?? false,
+        supports_proxy_binary_upload: service.capabilities?.supports_proxy_binary_upload ?? false,
+        supports_direct_downstream_auth: service.capabilities?.supports_direct_downstream_auth ?? false,
+        supports_authoring_via_nyx: service.capabilities?.supports_authoring_via_nyx ?? false,
+        supports_websocket: service.capabilities?.supports_websocket ?? false,
+        supports_streaming: service.capabilities?.supports_streaming ?? false,
         host: service.ssh_config?.host ?? "",
         port: service.ssh_config ? String(service.ssh_config.port) : "22",
         certificate_auth_enabled:
@@ -147,6 +177,29 @@ export function ServiceEditPage() {
                 identity_jwt_audience: data.identity_jwt_audience || "",
                 inject_delegation_token: data.inject_delegation_token,
                 delegation_token_scope: data.delegation_token_scope || "",
+                homepage_url: data.homepage_url || "",
+                repository_url: data.repository_url || "",
+                issues_url: data.issues_url || "",
+                auth_notes: data.auth_notes || "",
+                known_limitations: data.known_limitations || "",
+                required_permissions: (data.required_permissions || "")
+                  .split(/[,\n]/)
+                  .map((s) => s.trim())
+                  .filter(Boolean),
+                examples_url: data.examples_url || "",
+                recommended_skills: (data.recommended_skills || "")
+                  .split(/[,\n]/)
+                  .map((s) => s.trim())
+                  .filter(Boolean),
+                capabilities: {
+                  supports_proxy_read: data.supports_proxy_read ?? false,
+                  supports_proxy_write: data.supports_proxy_write ?? false,
+                  supports_proxy_binary_upload: data.supports_proxy_binary_upload ?? false,
+                  supports_direct_downstream_auth: data.supports_direct_downstream_auth ?? false,
+                  supports_authoring_via_nyx: data.supports_authoring_via_nyx ?? false,
+                  supports_websocket: data.supports_websocket ?? false,
+                  supports_streaming: data.supports_streaming ?? false,
+                },
               },
       });
       toast.success("Service updated");
@@ -157,6 +210,7 @@ export function ServiceEditPage() {
     } catch (err) {
       if (err instanceof ApiError) {
         form.setError("root", { message: err.message });
+        toast.error(err.message);
       } else {
         toast.error("Failed to update service");
       }
@@ -488,6 +542,203 @@ export function ServiceEditPage() {
                           form.setValue("identity_jwt_audience", v)
                         }
                       />
+                    </div>
+
+                    <Separator className="my-2" />
+                    <div className="space-y-4">
+                      <div className="space-y-1">
+                        <h3 className="text-sm font-semibold">
+                          Service Metadata
+                        </h3>
+                        <p className="text-xs text-muted-foreground">
+                          Rich metadata for AI agent discovery. Helps agents
+                          understand what this service is, where to find docs,
+                          and what it supports.
+                        </p>
+                      </div>
+
+                      <div className="grid gap-4 sm:grid-cols-2">
+                        <FormField
+                          control={form.control}
+                          name="homepage_url"
+                          render={({ field }) => (
+                            <FormItem>
+                              <FormLabel>Homepage URL</FormLabel>
+                              <FormControl>
+                                <Input
+                                  placeholder="https://docs.example.com"
+                                  {...field}
+                                />
+                              </FormControl>
+                              <FormMessage />
+                            </FormItem>
+                          )}
+                        />
+                        <FormField
+                          control={form.control}
+                          name="repository_url"
+                          render={({ field }) => (
+                            <FormItem>
+                              <FormLabel>Repository URL</FormLabel>
+                              <FormControl>
+                                <Input
+                                  placeholder="https://github.com/org/repo"
+                                  {...field}
+                                />
+                              </FormControl>
+                              <FormMessage />
+                            </FormItem>
+                          )}
+                        />
+                        <FormField
+                          control={form.control}
+                          name="issues_url"
+                          render={({ field }) => (
+                            <FormItem>
+                              <FormLabel>Issues URL</FormLabel>
+                              <FormControl>
+                                <Input
+                                  placeholder="https://github.com/org/repo/issues"
+                                  {...field}
+                                />
+                              </FormControl>
+                              <FormMessage />
+                            </FormItem>
+                          )}
+                        />
+                        <FormField
+                          control={form.control}
+                          name="examples_url"
+                          render={({ field }) => (
+                            <FormItem>
+                              <FormLabel>Skills & Examples URL</FormLabel>
+                              <FormControl>
+                                <Input
+                                  placeholder="https://github.com/org/repo/tree/main/examples"
+                                  {...field}
+                                />
+                              </FormControl>
+                              <FormMessage />
+                            </FormItem>
+                          )}
+                        />
+                      </div>
+
+                      <FormField
+                        control={form.control}
+                        name="auth_notes"
+                        render={({ field }) => (
+                          <FormItem>
+                            <FormLabel>Auth Notes</FormLabel>
+                            <FormControl>
+                              <Input
+                                placeholder="Notes on downstream auth expectations..."
+                                {...field}
+                              />
+                            </FormControl>
+                            <FormMessage />
+                          </FormItem>
+                        )}
+                      />
+
+                      <FormField
+                        control={form.control}
+                        name="known_limitations"
+                        render={({ field }) => (
+                          <FormItem>
+                            <FormLabel>Known Limitations</FormLabel>
+                            <FormControl>
+                              <Input
+                                placeholder="Important caveats for agents and users..."
+                                {...field}
+                              />
+                            </FormControl>
+                            <FormMessage />
+                          </FormItem>
+                        )}
+                      />
+
+                      <FormField
+                        control={form.control}
+                        name="required_permissions"
+                        render={({ field }) => (
+                          <FormItem>
+                            <FormLabel>Required Permissions</FormLabel>
+                            <FormControl>
+                              <Input
+                                placeholder="read:api, write:data"
+                                {...field}
+                              />
+                            </FormControl>
+                            <p className="text-xs text-muted-foreground">
+                              Comma-separated downstream permissions required
+                              for key actions.
+                            </p>
+                            <FormMessage />
+                          </FormItem>
+                        )}
+                      />
+
+                      <FormField
+                        control={form.control}
+                        name="recommended_skills"
+                        render={({ field }) => (
+                          <FormItem>
+                            <FormLabel>Recommended Skills</FormLabel>
+                            <FormControl>
+                              <Input
+                                placeholder="nyxid/ornn, ornn/authoring"
+                                {...field}
+                              />
+                            </FormControl>
+                            <p className="text-xs text-muted-foreground">
+                              Comma-separated skill names/paths relevant for AI
+                              tools.
+                            </p>
+                            <FormMessage />
+                          </FormItem>
+                        )}
+                      />
+
+                      <div className="space-y-2">
+                        <p className="text-sm font-medium">Capabilities</p>
+                        <p className="text-xs text-muted-foreground">
+                          Flags describing what this service supports through
+                          NyxID proxy.
+                        </p>
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          {(
+                            [
+                              ["supports_proxy_read", "Proxy Read"],
+                              ["supports_proxy_write", "Proxy Write"],
+                              ["supports_proxy_binary_upload", "Binary Upload"],
+                              ["supports_direct_downstream_auth", "Direct Downstream Auth"],
+                              ["supports_authoring_via_nyx", "Authoring via NyxID"],
+                              ["supports_websocket", "WebSocket"],
+                              ["supports_streaming", "Streaming"],
+                            ] as const
+                          ).map(([key, label]) => (
+                            <div
+                              key={key}
+                              className="flex items-center justify-between rounded-[10px] border border-border p-2"
+                            >
+                              <Label
+                                htmlFor={`cap-${key}`}
+                                className="text-xs font-normal"
+                              >
+                                {label}
+                              </Label>
+                              <Switch
+                                id={`cap-${key}`}
+                                checked={form.watch(key) ?? false}
+                                onCheckedChange={(v) =>
+                                  form.setValue(key, v)
+                                }
+                              />
+                            </div>
+                          ))}
+                        </div>
+                      </div>
                     </div>
 
                     <Separator className="my-2" />

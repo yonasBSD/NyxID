@@ -331,11 +331,21 @@ pub enum SessionCommands {
 pub enum CatalogCommands {
     /// List available services from the catalog
     List {
+        /// Include all active services (including system services without auth)
+        #[arg(long)]
+        all: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
     /// Show details for a catalog entry
     Show {
+        /// Service slug (e.g., llm-openai)
+        slug: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// List API endpoints from a service's OpenAPI spec
+    Endpoints {
         /// Service slug (e.g., llm-openai)
         slug: String,
         #[command(flatten)]

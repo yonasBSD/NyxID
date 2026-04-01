@@ -21,6 +21,7 @@ import { useMyProviderTokens } from "@/hooks/use-providers";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Pencil, Trash2, AlertCircle, Terminal } from "lucide-react";
 import { toast } from "sonner";
 
@@ -352,6 +353,98 @@ export function ServiceDetailPage() {
                   value={service.delegation_token_scope || "llm:proxy"}
                   mono
                 />
+              </DetailSection>
+            </>
+          )}
+
+          {(service.homepage_url ||
+            service.repository_url ||
+            service.issues_url ||
+            service.examples_url ||
+            service.auth_notes ||
+            service.known_limitations ||
+            (service.required_permissions && service.required_permissions.length > 0) ||
+            (service.recommended_skills && service.recommended_skills.length > 0) ||
+            service.capabilities) && (
+            <>
+              <Separator />
+              <DetailSection title="Service Metadata">
+                {service.homepage_url && (
+                  <DetailRow
+                    label="Homepage"
+                    value={service.homepage_url}
+                    copyable
+                  />
+                )}
+                {service.repository_url && (
+                  <DetailRow
+                    label="Repository"
+                    value={service.repository_url}
+                    copyable
+                  />
+                )}
+                {service.issues_url && (
+                  <DetailRow
+                    label="Issues"
+                    value={service.issues_url}
+                    copyable
+                  />
+                )}
+                {service.examples_url && (
+                  <DetailRow
+                    label="Skills & Examples"
+                    value={service.examples_url}
+                    copyable
+                  />
+                )}
+                {service.auth_notes && (
+                  <DetailRow label="Auth Notes" value={service.auth_notes} />
+                )}
+                {service.known_limitations && (
+                  <DetailRow
+                    label="Known Limitations"
+                    value={service.known_limitations}
+                  />
+                )}
+                {service.required_permissions &&
+                  service.required_permissions.length > 0 && (
+                    <DetailRow
+                      label="Required Permissions"
+                      value={service.required_permissions.join(", ")}
+                      mono
+                    />
+                  )}
+                {service.recommended_skills &&
+                  service.recommended_skills.length > 0 && (
+                    <DetailRow
+                      label="Recommended Skills"
+                      value={service.recommended_skills.join(", ")}
+                      mono
+                    />
+                  )}
+                {service.capabilities && (
+                  <div className="space-y-1 py-2">
+                    <p className="text-sm text-muted-foreground">
+                      Capabilities
+                    </p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {Object.entries(service.capabilities)
+                        .filter(([, v]) => v === true)
+                        .map(([k]) => (
+                          <Badge key={k} variant="secondary">
+                            {k.replace(/^supports_/, "").replaceAll("_", " ")}
+                          </Badge>
+                        ))}
+                      {Object.entries(service.capabilities).every(
+                        ([, v]) => v !== true,
+                      ) && (
+                        <span className="text-xs text-muted-foreground">
+                          None configured
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
               </DetailSection>
             </>
           )}
