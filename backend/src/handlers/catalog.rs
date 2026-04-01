@@ -151,11 +151,12 @@ pub struct CatalogListQuery {
 /// GET /api/v1/catalog
 pub async fn list_catalog(
     State(state): State<AppState>,
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     Query(query): Query<CatalogListQuery>,
 ) -> AppResult<Json<CatalogListResponse>> {
+    let user_id = auth_user.user_id.to_string();
     let entries = if query.include_all {
-        catalog_service::list_catalog_all(&state.db, &state.encryption_keys).await?
+        catalog_service::list_catalog_all(&state.db, &state.encryption_keys, &user_id).await?
     } else {
         catalog_service::list_catalog(&state.db, &state.encryption_keys).await?
     };
@@ -271,10 +272,11 @@ fn parsed_endpoint_to_response(p: openapi_parser::ParsedEndpoint) -> CatalogEndp
 /// GET /api/v1/catalog/{slug}/endpoints
 pub async fn list_catalog_endpoints(
     State(state): State<AppState>,
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     Path(slug): Path<String>,
 ) -> AppResult<Json<CatalogEndpointsListResponse>> {
-    let svc = catalog_service::get_downstream_service_by_slug(&state.db, &slug).await?;
+    let user_id = auth_user.user_id.to_string();
+    let svc = catalog_service::get_downstream_service_by_slug(&state.db, &slug, &user_id).await?;
 
     let Some(ref spec_url) = svc.openapi_spec_url else {
         return Ok(Json(CatalogEndpointsListResponse {

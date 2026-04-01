@@ -364,6 +364,7 @@ export function ServiceDetailPage() {
             service.auth_notes ||
             service.known_limitations ||
             (service.required_permissions && service.required_permissions.length > 0) ||
+            (service.recommended_skills && service.recommended_skills.length > 0) ||
             service.capabilities) && (
             <>
               <Separator />

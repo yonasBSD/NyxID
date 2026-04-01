@@ -54,7 +54,7 @@ pub async fn run(command: CatalogCommands) -> Result<()> {
                             };
 
                             let how_to_add = if svc_type == "ssh" {
-                                "nyxid service add-ssh --via-node <NODE>".to_string()
+                                format!("nyxid service add {} --via-node <NODE>", slug)
                             } else if provider_type == "oauth2" {
                                 if credential_mode == "user" || credential_mode == "both" {
                                     format!(
@@ -223,9 +223,7 @@ pub async fn run(command: CatalogCommands) -> Result<()> {
                     eprintln!("How to add:");
 
                     if svc_type == "ssh" {
-                        eprintln!(
-                            "  nyxid service add-ssh --label \"{name}\" --host <HOST> --via-node <NODE>"
-                        );
+                        eprintln!("  nyxid service add {item_slug} --via-node <NODE_NAME>");
                     } else if provider_type == "oauth2" {
                         if credential_mode == "user" || credential_mode == "both" {
                             eprintln!("  # Step 1: Set your OAuth app credentials");

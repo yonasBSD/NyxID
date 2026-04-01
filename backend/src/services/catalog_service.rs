@@ -162,6 +162,18 @@ async fn decrypt_provider_client_id(
     }
 }
 
+/// MongoDB filter for visibility that hides private services from non-owners.
+/// Public services and legacy documents without a visibility field are visible to all.
+fn visibility_filter(user_id: &str) -> mongodb::bson::Document {
+    doc! {
+        "$or": [
+            { "visibility": { "$ne": "private" } },
+            { "visibility": { "$exists": false } },
+            { "visibility": "private", "created_by": user_id },
+        ],
+    }
+}
+
 /// MongoDB filter for service_category that handles legacy documents
 /// created before the field was added (defaults to "connection").
 fn legacy_service_category_filter(categories: &[&str]) -> mongodb::bson::Document {
@@ -202,12 +214,19 @@ pub async fn list_catalog(
 }
 
 /// List ALL active catalog entries for discovery (includes system services without auth).
+/// Enforces visibility: private services only visible to their creator.
 pub async fn list_catalog_all(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
+    user_id: &str,
 ) -> AppResult<Vec<CatalogEntry>> {
-    let mut filter = doc! { "is_active": true };
-    filter.extend(legacy_service_category_filter(&["connection", "internal"]));
+    let filter = doc! {
+        "is_active": true,
+        "$and": [
+            legacy_service_category_filter(&["connection", "internal"]),
+            visibility_filter(user_id),
+        ],
+    };
     list_catalog_filtered(db, encryption_keys, filter).await
 }
 
@@ -275,14 +294,16 @@ async fn list_catalog_filtered(
 }
 
 /// Get the raw DownstreamService by slug (lightweight, no provider/encryption lookup).
-/// Uses the same filter as `get_catalog_entry` (slug + is_active) so provider-category
-/// services are not excluded from endpoint discovery.
+/// Enforces visibility: private services only visible to their creator.
 pub async fn get_downstream_service_by_slug(
     db: &mongodb::Database,
     slug: &str,
+    user_id: &str,
 ) -> AppResult<DownstreamService> {
+    let mut filter = doc! { "slug": slug, "is_active": true };
+    filter.extend(visibility_filter(user_id));
     db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .find_one(doc! { "slug": slug, "is_active": true })
+        .find_one(filter)
         .await?
         .ok_or_else(|| AppError::NotFound("Catalog entry not found".to_string()))
 }
