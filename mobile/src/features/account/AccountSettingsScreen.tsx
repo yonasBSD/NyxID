@@ -1,11 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
-import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Alert, Pressable, ScrollView, StyleSheet, Switch, Text, View } from "react-native";
 import { RootStackParamList } from "../../app/AppNavigator";
 
 import { PrimaryButton } from "../../components/PrimaryButton";
 import { ScreenContainer } from "../../components/ScreenContainer";
 import { OfflineBanner } from "../../components/OfflineBanner";
+import { TelegramLinkModal } from "../../components/TelegramLinkModal";
 import { ToastKind, ToastOverlay, ToastState } from "../../components/ToastOverlay";
 import { useAuthSession } from "../auth/AuthSessionContext";
 import { useNetworkStatus } from "../../hooks/useNetworkStatus";
@@ -109,6 +110,105 @@ export function AccountSettingsScreen({ navigation }: Props) {
     return () => clearTimeout(timer);
   }, [toast]);
 
+  const {
+    data: notifSettings,
+    isLoading: isNotifLoading,
+    refetch: refetchNotifSettings,
+  } = useQuery({
+    queryKey: ["account", "notificationSettings"],
+    queryFn: () => mobileApi.getNotificationSettings(),
+  });
+
+  const notifMutation = useMutation({
+    mutationFn: (payload: { telegram_enabled?: boolean; push_enabled?: boolean }) =>
+      mobileApi.updateNotificationSettings(payload),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["account", "notificationSettings"] });
+      showToast("Notification settings updated", "success");
+    },
+    onError: (error) => {
+      const msg = error instanceof Error ? error.message : "Failed to update settings";
+      showToast(msg, "error");
+      void refetchNotifSettings();
+    },
+  });
+
+  const [isTelegramLinkVisible, setIsTelegramLinkVisible] = useState(false);
+
+  const telegramDisconnectMutation = useMutation({
+    mutationFn: () => mobileApi.telegramDisconnect(),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["account", "notificationSettings"] });
+      showToast("Telegram disconnected", "success");
+    },
+    onError: (error) => {
+      showToast(error instanceof Error ? error.message : "Failed to disconnect", "error");
+    },
+  });
+
+  const handleTelegramRowPress = () => {
+    if (notifSettings?.telegram_connected) {
+      Alert.alert(
+        "Disconnect Telegram",
+        `Disconnect @${notifSettings.telegram_username ?? "Telegram"}? You will no longer receive Telegram notifications.`,
+        [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: "Disconnect",
+            style: "destructive",
+            onPress: () => telegramDisconnectMutation.mutate(),
+          },
+        ]
+      );
+    } else {
+      setIsTelegramLinkVisible(true);
+    }
+  };
+
+  const handleTelegramConnected = () => {
+    setIsTelegramLinkVisible(false);
+    void queryClient.invalidateQueries({ queryKey: ["account", "notificationSettings"] });
+    showToast("Telegram connected!", "success");
+  };
+
+  const handleTogglePush = (newValue: boolean) => {
+    if (newValue) {
+      notifMutation.mutate({ push_enabled: true });
+      return;
+    }
+    Alert.alert(
+      "Disable Push Notifications",
+      "You will no longer receive push notifications for approval requests. Are you sure?",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Disable",
+          style: "destructive",
+          onPress: () => notifMutation.mutate({ push_enabled: false }),
+        },
+      ]
+    );
+  };
+
+  const handleToggleTelegram = (newValue: boolean) => {
+    if (newValue) {
+      notifMutation.mutate({ telegram_enabled: true });
+      return;
+    }
+    Alert.alert(
+      "Disable Telegram Notifications",
+      "You will no longer receive Telegram notifications for approval requests. Are you sure?",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Disable",
+          style: "destructive",
+          onPress: () => notifMutation.mutate({ telegram_enabled: false }),
+        },
+      ]
+    );
+  };
+
   const deleteAccountMutation = useMutation({
     mutationFn: () => mobileApi.deleteAccount(),
     onSuccess: async () => {
@@ -210,19 +310,59 @@ export function AccountSettingsScreen({ navigation }: Props) {
           <Text style={styles.cardTitle}>Notifications</Text>
           {isOffline ? (
             <Text style={styles.offlineNote}>Requires network connection</Text>
+          ) : isNotifLoading ? (
+            <Text style={styles.metaText}>Loading...</Text>
           ) : (
             <>
-              <AccountRow label="Push Notifications" value="Enabled" />
-              <AccountRow label="Telegram" value="Not linked" isLast onPress={() => {}} />
+              <View style={styles.accountRow}>
+                <Text style={styles.accountRowLabel}>Push Notifications</Text>
+                <View style={styles.accountRowRight}>
+                  {notifSettings && notifSettings.push_device_count > 0 ? (
+                    <Switch
+                      value={notifSettings.push_enabled}
+                      onValueChange={handleTogglePush}
+                      disabled={notifMutation.isPending}
+                      trackColor={{ false: mobileTheme.borderSoft, true: mobileTheme.success }}
+                    />
+                  ) : (
+                    <Text style={styles.accountRowValue}>No device</Text>
+                  )}
+                </View>
+              </View>
+              {notifSettings?.telegram_connected ? (
+                <>
+                  <Pressable onPress={handleTelegramRowPress}>
+                    <View style={styles.accountRow}>
+                      <Text style={styles.accountRowLabel}>Telegram</Text>
+                      <View style={styles.accountRowRight}>
+                        <Text style={styles.accountRowValue}>@{notifSettings.telegram_username ?? "Connected"}</Text>
+                        <Text style={styles.accountRowArrow}>→</Text>
+                      </View>
+                    </View>
+                  </Pressable>
+                  <View style={[styles.accountRow, styles.accountRowLast]}>
+                    <Text style={styles.accountRowLabel}>Telegram Alerts</Text>
+                    <Switch
+                      value={notifSettings.telegram_enabled}
+                      onValueChange={handleToggleTelegram}
+                      disabled={notifMutation.isPending}
+                      trackColor={{ false: mobileTheme.borderSoft, true: mobileTheme.success }}
+                    />
+                  </View>
+                </>
+              ) : (
+                <Pressable onPress={handleTelegramRowPress}>
+                  <View style={[styles.accountRow, styles.accountRowLast]}>
+                    <Text style={styles.accountRowLabel}>Telegram</Text>
+                    <View style={styles.accountRowRight}>
+                      <Text style={styles.accountRowValue}>Not linked</Text>
+                      <Text style={styles.accountRowArrow}>→</Text>
+                    </View>
+                  </View>
+                </Pressable>
+              )}
             </>
           )}
-        </View>
-
-        {/* Legal card */}
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Legal</Text>
-          <AccountRow label="Terms of Service" onPress={() => navigation.navigate("TermsOfService")} />
-          <AccountRow label="Privacy Policy" isLast onPress={() => navigation.navigate("PrivacyPolicy")} />
         </View>
 
         {/* Actions */}
@@ -240,7 +380,23 @@ export function AccountSettingsScreen({ navigation }: Props) {
             onPress={handleDeleteAccount}
           />
         </View>
+
+        {/* Legal links */}
+        <View style={styles.legalRow}>
+          <Pressable onPress={() => navigation.navigate("TermsOfService")}>
+            <Text style={styles.legalLink}>Terms of Service</Text>
+          </Pressable>
+          <Text style={styles.legalDot}>·</Text>
+          <Pressable onPress={() => navigation.navigate("PrivacyPolicy")}>
+            <Text style={styles.legalLink}>Privacy Policy</Text>
+          </Pressable>
+        </View>
       </ScrollView>
+      <TelegramLinkModal
+        visible={isTelegramLinkVisible}
+        onDismiss={() => setIsTelegramLinkVisible(false)}
+        onConnected={handleTelegramConnected}
+      />
       <ToastOverlay toast={toast} />
     </ScreenContainer>
   );
@@ -367,5 +523,22 @@ const styles = StyleSheet.create({
     color: mobileTheme.textMuted,
     textAlign: "center",
     paddingVertical: spacing.md,
+  },
+  legalRow: {
+    flexDirection: "row",
+    justifyContent: "center",
+    alignItems: "center",
+    gap: 8,
+    marginTop: spacing.xxl,
+    paddingBottom: spacing.md,
+  },
+  legalLink: {
+    fontSize: 12,
+    color: mobileTheme.textMuted,
+    textDecorationLine: "underline",
+  },
+  legalDot: {
+    fontSize: 12,
+    color: mobileTheme.textMuted,
   },
 });

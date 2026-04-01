@@ -34,7 +34,7 @@ export function ChallengeCard({
 }: ChallengeCardProps) {
   const riskVariant = challenge.risk_level === "high" ? "riskHigh" : "riskMedium";
   const modeLabel = challenge.approval_mode === "grant" ? "Grant mode" : "Per-request";
-  const durationLabel = challenge.approval_mode === "grant" ? ` \u00B7 ${grantDurationLabel}` : "";
+  const durationLabel = challenge.approval_mode === "grant" ? ` · ${grantDurationLabel}` : "";
   const timeAgo = formatTimeAgo(challenge.created_at);
 
   return (
@@ -52,7 +52,7 @@ export function ChallengeCard({
         {challenge.title}
       </Text>
       <Text style={styles.meta}>
-        {modeLabel}{durationLabel} \u00B7 {timeAgo}
+        {modeLabel}{durationLabel} · {timeAgo}
       </Text>
       <View style={styles.actions}>
         <Pressable

@@ -106,12 +106,14 @@ export function NyxSheet({ isOpen, onClose }: NyxSheetProps) {
   // isOpen is the source of truth — react to it for both open and close
   useEffect(() => {
     if (isOpen) {
+      translateY.value = SHEET_HEIGHT;
       setModalVisible(true);
-      translateY.value = withSpring(0, { damping: 28, stiffness: 300 });
+      requestAnimationFrame(() => {
+        translateY.value = withSpring(0, { damping: 28, stiffness: 300 });
+      });
     } else {
-      translateY.value = withTiming(SHEET_HEIGHT, { duration: 250 });
-      // Hide modal after animation; cleanup cancels if isOpen flips back to true
-      const timer = setTimeout(() => setModalVisible(false), 300);
+      translateY.value = withTiming(SHEET_HEIGHT, { duration: 200 });
+      const timer = setTimeout(() => setModalVisible(false), 220);
       return () => clearTimeout(timer);
     }
   }, [isOpen, translateY]);

@@ -274,7 +274,12 @@ export function ActivityScreen() {
           <SectionList
             sections={historySections}
             keyExtractor={(item) => item.id}
-            renderItem={({ item }) => <HistoryCard item={item} />}
+            renderItem={({ item }) => (
+              <HistoryCard
+                item={item}
+                onPress={() => navigation.navigate("ActivityDetail", { challengeId: item.id })}
+              />
+            )}
             renderSectionHeader={({ section }) => <HistorySectionHeader title={section.title} />}
             contentContainerStyle={styles.listContent}
             ItemSeparatorComponent={() => <View style={styles.separator} />}

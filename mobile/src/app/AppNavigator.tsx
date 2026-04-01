@@ -87,12 +87,12 @@ export function AppNavigator({ currentRouteName, onMainTabPress, onNyxPress }: A
           <Stack.Screen
             name="TermsOfService"
             component={TermsOfServiceScreen}
-            options={{ title: "Terms of Service", animation: "none" }}
+            options={{ title: "Terms of Service", animation: "slide_from_left" }}
           />
           <Stack.Screen
             name="PrivacyPolicy"
             component={PrivacyPolicyScreen}
-            options={{ title: "Privacy Policy", animation: "none" }}
+            options={{ title: "Privacy Policy", animation: "slide_from_left" }}
           />
         </Stack.Navigator>
       </View>

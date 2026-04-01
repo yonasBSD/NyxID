@@ -14,6 +14,8 @@ import {
   PageResponse,
   PushTokenRegisterRequest,
   PushTokenRegisterResponse,
+  TelegramLinkInfo,
+  UpdateNotificationSettingsInput,
 } from "./types";
 
 const DEFAULT_API_BASE_URL = "http://localhost:3001/api/v1";
@@ -135,9 +137,7 @@ type MessageResponse = {
   message: string;
 };
 
-type BackendNotificationSettingsResponse = {
-  grant_expiry_days: number;
-};
+type BackendNotificationSettingsResponse = NotificationSettings;
 
 function getApiBaseUrl(): string {
   const rawBaseUrl = process.env.EXPO_PUBLIC_API_BASE_URL ?? DEFAULT_API_BASE_URL;
@@ -532,12 +532,28 @@ async function listPendingApprovalRequests(
 }
 
 export async function getNotificationSettingsRequest(): Promise<NotificationSettings> {
-  const response = await requestJson<BackendNotificationSettingsResponse>(
-    "/notifications/settings"
-  );
-  return {
-    grant_expiry_days: response.grant_expiry_days,
-  };
+  return requestJson<NotificationSettings>("/notifications/settings");
+}
+
+export async function updateNotificationSettingsRequest(
+  body: UpdateNotificationSettingsInput
+): Promise<NotificationSettings> {
+  return requestJson<NotificationSettings>("/notifications/settings", {
+    method: "PUT",
+    body,
+  });
+}
+
+export async function telegramLinkRequest(): Promise<TelegramLinkInfo> {
+  return requestJson<TelegramLinkInfo>("/notifications/telegram/link", {
+    method: "POST",
+  });
+}
+
+export async function telegramDisconnectRequest(): Promise<{ message: string }> {
+  return requestJson<{ message: string }>("/notifications/telegram", {
+    method: "DELETE",
+  });
 }
 
 export async function loginWithPasswordRequest(payload: LoginRequest): Promise<LoginResponse> {

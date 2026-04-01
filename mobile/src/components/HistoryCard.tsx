@@ -1,4 +1,4 @@
-import { StyleSheet, Text, View } from "react-native";
+import { Pressable, StyleSheet, Text, View } from "react-native";
 import { radius, spacing } from "../theme/designTokens";
 import { mobileTheme } from "../theme/mobileTheme";
 import { StatusBadge } from "./StatusBadge";
@@ -6,6 +6,7 @@ import type { ChallengeDetail, ChallengeStatus } from "../lib/api/types";
 
 type HistoryCardProps = {
   item: ChallengeDetail;
+  onPress?: () => void;
 };
 
 function decisionVariant(status: ChallengeStatus): "decisionApproved" | "decisionDenied" | "decisionExpired" {
@@ -31,11 +32,11 @@ function formatTime(dateStr: string): string {
   return d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
 }
 
-export function HistoryCard({ item }: HistoryCardProps) {
+export function HistoryCard({ item, onPress }: HistoryCardProps) {
   const modeLabel = item.approval_mode === "grant" ? "Grant" : "Per-request";
 
   return (
-    <View style={styles.card}>
+    <Pressable style={styles.card} onPress={onPress}>
       <View style={styles.header}>
         <Text style={styles.title} numberOfLines={1}>
           {item.action} {item.resource}
@@ -43,12 +44,12 @@ export function HistoryCard({ item }: HistoryCardProps) {
         <StatusBadge variant={decisionVariant(item.status)} label={decisionLabel(item.status)} />
       </View>
       <Text style={styles.secondary} numberOfLines={1}>
-        {item.title} \u00B7 {modeLabel}
+        {item.title} · {modeLabel}
       </Text>
       <Text style={styles.meta}>
-        {formatTime(item.created_at)} \u00B7 {decisionDescription(item.status)}
+        {formatTime(item.created_at)} · {decisionDescription(item.status)}
       </Text>
-    </View>
+    </Pressable>
   );
 }
 

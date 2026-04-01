@@ -1,10 +1,9 @@
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
-import { ScrollView, StyleSheet, Text, View } from "react-native";
+import { ScrollView, StyleSheet, Text, View, type ViewStyle } from "react-native";
 import { RootStackParamList } from "../../app/AppNavigator";
 
-import { PrimaryButton } from "../../components/PrimaryButton";
+import { BlurBackButton } from "../../components/BlurBackButton";
 import { ScreenContainer } from "../../components/ScreenContainer";
-import { SectionBadge } from "../../components/SectionBadge";
 import { flowStyles } from "../../theme/flowStyles";
 import { mobileTheme } from "../../theme/mobileTheme";
 import { spacing, typeScale } from "../../theme/designTokens";
@@ -127,12 +126,14 @@ const PRIVACY_SECTIONS: LegalSection[] = [
 export function PrivacyPolicyScreen({ navigation }: Props) {
   return (
     <ScreenContainer>
+      <View style={styles.stickyBack}>
+        <BlurBackButton onPress={() => navigation.goBack()} />
+      </View>
       <ScrollView
         style={flowStyles.content}
         contentContainerStyle={[flowStyles.scrollContent, styles.scrollContentExtra, { paddingHorizontal: spacing.xxl }]}
         showsVerticalScrollIndicator={false}
       >
-        <SectionBadge label="LEGAL" tone="info" />
         <Text style={flowStyles.title}>Privacy Policy</Text>
         <Text style={flowStyles.subtitle}>Effective date: {EFFECTIVE_DATE}</Text>
 
@@ -154,16 +155,20 @@ export function PrivacyPolicyScreen({ navigation }: Props) {
           ))}
         </View>
 
-        <View style={flowStyles.actionWrap}>
-          <PrimaryButton label="Back" kind="ghost" onPress={() => navigation.goBack()} />
-        </View>
       </ScrollView>
     </ScreenContainer>
   );
 }
 
 const styles = StyleSheet.create({
+  stickyBack: {
+    position: "absolute",
+    top: spacing.xxl,
+    left: spacing.xxl,
+    zIndex: 10,
+  } satisfies ViewStyle,
   scrollContentExtra: {
+    paddingTop: 64,
     paddingBottom: spacing.xxxl,
   },
   sectionWrap: {

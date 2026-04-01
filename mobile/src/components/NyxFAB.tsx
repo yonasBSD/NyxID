@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Pressable, StyleSheet, View, Text } from "react-native";
 import Svg, { Circle, Path, Defs, LinearGradient, Stop } from "react-native-svg";
 import { mobileTheme } from "../theme/mobileTheme";
@@ -11,11 +12,19 @@ const FAB_SIZE = 57;
 const GLOW_SIZE = 110;
 
 export function NyxFAB({ onPress, badgeCount = 0 }: NyxFABProps) {
+  const [tapped, setTapped] = useState(false);
+
+  const handlePress = () => {
+    setTapped(true);
+    onPress?.();
+    setTimeout(() => setTapped(false), 500);
+  };
+
   return (
     <View style={styles.wrapper}>
 
       {/* FAB button */}
-      <Pressable style={styles.fab} onPress={onPress}>
+      <Pressable style={[styles.fab, tapped && styles.fabTapped]} onPress={handlePress}>
         <Svg width={36} height={36} viewBox="0 0 130 130" fill="none">
           <Defs>
             <LinearGradient id="fo" gradientUnits="userSpaceOnUse" x1="10" y1="65" x2="120" y2="65">
@@ -71,6 +80,10 @@ const styles = StyleSheet.create({
     borderColor: "rgba(139,92,246,0.35)",
     alignItems: "center",
     justifyContent: "center",
+  },
+  fabTapped: {
+    borderColor: "#A78BFA",
+    borderWidth: 3,
   },
   badge: {
     position: "absolute",

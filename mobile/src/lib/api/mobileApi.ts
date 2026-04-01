@@ -13,7 +13,10 @@ import {
   revokeApprovalRequest,
   rotatePushTokenRequest,
   submitChallengeDecisionRequest,
+  telegramDisconnectRequest,
+  telegramLinkRequest,
   unregisterPushTokenRequest,
+  updateNotificationSettingsRequest,
 } from "./http";
 import {
   AccountProfile,
@@ -25,6 +28,8 @@ import {
   SubmitDecisionOptions,
   PushTokenRegisterRequest,
   PushTokenRegisterResponse,
+  TelegramLinkInfo,
+  UpdateNotificationSettingsInput,
 } from "./types";
 
 type LoginWithPasswordInput = {
@@ -102,6 +107,15 @@ export const mobileApi = {
   },
   async getNotificationSettings(): Promise<NotificationSettings> {
     return getNotificationSettingsRequest();
+  },
+  async updateNotificationSettings(input: UpdateNotificationSettingsInput): Promise<NotificationSettings> {
+    return updateNotificationSettingsRequest(input);
+  },
+  async telegramLink(): Promise<TelegramLinkInfo> {
+    return telegramLinkRequest();
+  },
+  async telegramDisconnect(): Promise<{ message: string }> {
+    return telegramDisconnectRequest();
   },
   async getChallengeById(challengeId: string): Promise<ChallengeDetail> {
     return getChallengeRequest(challengeId);

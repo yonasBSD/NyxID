@@ -50,10 +50,10 @@ export function GrantCard({ grant, onRevoke, isMutating = false }: GrantCardProp
         </Pressable>
       </View>
       <Text style={styles.secondary} numberOfLines={1}>
-        {grant.requester_type} \u00B7 {requesterLabel}
+        {grant.requester_type} · {requesterLabel}
       </Text>
       <View style={styles.expiryRow}>
-        <Text style={styles.meta}>{grantedLabel} \u00B7 {expiresLabel}</Text>
+        <Text style={styles.meta}>{grantedLabel} · {expiresLabel}</Text>
         <StatusBadge variant={expiryVariant} label={expiryLabel} />
       </View>
     </View>
