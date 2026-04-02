@@ -44,6 +44,9 @@ pub struct UserService {
     pub identity_include_name: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity_jwt_audience: Option<String>,
+    /// Whether to forward the caller's NyxID access token as Authorization: Bearer
+    #[serde(default)]
+    pub forward_access_token: bool,
     /// Whether to inject a delegation token (X-NyxID-Delegation-Token)
     #[serde(default)]
     pub inject_delegation_token: bool,
@@ -104,6 +107,7 @@ mod tests {
             identity_include_email: true,
             identity_include_name: false,
             identity_jwt_audience: None,
+            forward_access_token: false,
             inject_delegation_token: true,
             delegation_token_scope: "llm:proxy".to_string(),
             is_active: true,
@@ -120,6 +124,7 @@ mod tests {
         assert_eq!(restored.service_type, "http");
         assert_eq!(restored.identity_propagation_mode, "headers");
         assert!(restored.identity_include_user_id);
+        assert!(!restored.forward_access_token);
         assert!(restored.inject_delegation_token);
         assert!(restored.is_active);
     }
@@ -143,6 +148,7 @@ mod tests {
             identity_include_email: false,
             identity_include_name: false,
             identity_jwt_audience: None,
+            forward_access_token: false,
             inject_delegation_token: false,
             delegation_token_scope: "llm:proxy".to_string(),
             is_active: true,
@@ -178,6 +184,7 @@ mod tests {
             identity_include_email: true,
             identity_include_name: true,
             identity_jwt_audience: Some("https://example.com".to_string()),
+            forward_access_token: true,
             inject_delegation_token: true,
             delegation_token_scope: "custom:scope".to_string(),
             is_active: true,
@@ -193,6 +200,7 @@ mod tests {
         doc.remove("identity_include_email");
         doc.remove("identity_include_name");
         doc.remove("identity_jwt_audience");
+        doc.remove("forward_access_token");
         doc.remove("inject_delegation_token");
         doc.remove("delegation_token_scope");
         let restored: UserService = bson::from_document(doc).expect("deserialize");
@@ -201,6 +209,7 @@ mod tests {
         assert!(!restored.identity_include_email);
         assert!(!restored.identity_include_name);
         assert!(restored.identity_jwt_audience.is_none());
+        assert!(!restored.forward_access_token);
         assert!(!restored.inject_delegation_token);
         assert_eq!(restored.delegation_token_scope, "llm:proxy");
     }
@@ -224,6 +233,7 @@ mod tests {
             identity_include_email: false,
             identity_include_name: false,
             identity_jwt_audience: None,
+            forward_access_token: false,
             inject_delegation_token: false,
             delegation_token_scope: "llm:proxy".to_string(),
             is_active: true,

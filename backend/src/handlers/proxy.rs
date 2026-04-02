@@ -484,6 +484,13 @@ async fn execute_proxy_inner(
     let query = request.uri().query().map(String::from);
     let all_headers = request.headers().clone();
 
+    // Extract the caller's raw Bearer token for nyxid_token passthrough.
+    let caller_token = all_headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(String::from);
+
     // Check for WebSocket upgrade BEFORE consuming the request body.
     let is_ws = is_ws_upgrade_request(&request);
 
@@ -780,6 +787,7 @@ async fn execute_proxy_inner(
             &identity_headers,
             query.as_deref(),
             &ws_forward_headers,
+            caller_token.as_deref(),
         )
         .await;
     }
@@ -799,6 +807,13 @@ async fn execute_proxy_inner(
         let mut enriched_headers = node_forward_headers;
         enriched_headers.extend(identity_headers.iter().cloned());
         enriched_headers.extend(prepared.delegated_headers.iter().cloned());
+
+        // Forward the caller's NyxID access token when the service is configured for it.
+        if target.service.forward_access_token
+            && let Some(ref token) = caller_token
+        {
+            enriched_headers.push(("authorization".to_string(), format!("Bearer {token}")));
+        }
 
         // Build base node request (will be cloned for failover retries)
         let node_request = NodeProxyRequest {
@@ -1187,6 +1202,7 @@ async fn execute_proxy_inner(
         proxy_service::ProxyBody::Buffered(body),
         identity_headers,
         delegated,
+        caller_token.as_deref(),
     )
     .await?;
 
@@ -1603,6 +1619,7 @@ async fn connect_downstream_ws(
     delegated: &[delegation_service::DelegatedCredential],
     identity_headers: &[(String, String)],
     forward_headers: &[(String, String)],
+    caller_token: Option<&str>,
 ) -> AppResult<DownstreamWsConnection> {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
@@ -1652,6 +1669,14 @@ async fn connect_downstream_ws(
                 "Unsupported auth method for WS passthrough: {other}"
             )));
         }
+    }
+
+    // Forward the caller's NyxID access token when the service is configured for it.
+    if target.service.forward_access_token
+        && let Some(token) = caller_token
+    {
+        let (_, value) = make_header(b"authorization", &format!("Bearer {token}"))?;
+        headers.insert(reqwest::header::AUTHORIZATION, value);
     }
 
     // Inject delegated credential headers
@@ -1906,6 +1931,7 @@ async fn handle_ws_passthrough(
     identity_headers: &[(String, String)],
     query: Option<&str>,
     forward_headers: &[(String, String)],
+    caller_token: Option<&str>,
 ) -> AppResult<Response> {
     let downstream_url = build_downstream_ws_url(target, path, query, delegated)?;
 
@@ -1931,6 +1957,7 @@ async fn handle_ws_passthrough(
         delegated,
         identity_headers,
         forward_headers,
+        caller_token,
     )
     .await?;
 

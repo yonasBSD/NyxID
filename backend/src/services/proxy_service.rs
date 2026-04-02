@@ -802,6 +802,7 @@ fn build_minimal_downstream_service(
         identity_include_email: user_service.identity_include_email,
         identity_include_name: user_service.identity_include_name,
         identity_jwt_audience: user_service.identity_jwt_audience.clone(),
+        forward_access_token: user_service.forward_access_token,
         inject_delegation_token: user_service.inject_delegation_token,
         delegation_token_scope: user_service.delegation_token_scope.clone(),
         provider_config_id: None,
@@ -879,6 +880,8 @@ pub async fn forward_request(
     body: ProxyBody,
     identity_headers: Vec<(String, String)>,
     delegated_credentials: Vec<DelegatedCredential>,
+    // The caller's raw NyxID access token, used when auth_method is "nyxid_token".
+    caller_token: Option<&str>,
 ) -> AppResult<reqwest::Response> {
     let prepared = prepare_delegated_request(path, query, &delegated_credentials)?;
 
@@ -950,6 +953,14 @@ pub async fn forward_request(
                 target.auth_method
             )));
         }
+    }
+
+    // Forward the caller's NyxID access token when the service is configured for it.
+    // This is used by platform apps that trust NyxID JWTs directly.
+    if target.service.forward_access_token
+        && let Some(token) = caller_token
+    {
+        request = request.bearer_auth(token);
     }
 
     // Inject delegated provider credentials that are represented as headers.
@@ -1071,6 +1082,7 @@ mod tests {
                 identity_include_email: false,
                 identity_include_name: false,
                 identity_jwt_audience: None,
+                forward_access_token: false,
                 inject_delegation_token: false,
                 delegation_token_scope: "llm:proxy".to_string(),
                 provider_config_id: None,
@@ -1119,6 +1131,7 @@ mod tests {
             ProxyBody::Buffered(Some(bytes::Bytes::from_static(b"PK\x03\x04"))),
             vec![],
             vec![],
+            None,
         )
         .await
         .expect("proxy request should succeed");
@@ -1163,6 +1176,7 @@ mod tests {
                 injection_key: "bot".to_string(),
                 credential: "123456:ABC-DEF".to_string(),
             }],
+            None,
         )
         .await
         .expect("proxy request should succeed");
@@ -1230,6 +1244,7 @@ mod tests {
             ProxyBody::Buffered(None),
             vec![],
             vec![],
+            None,
         )
         .await
         .expect_err("backslash in requested path should be rejected");
@@ -1282,6 +1297,7 @@ mod tests {
                 ProxyBody::Buffered(None),
                 vec![],
                 vec![],
+                None,
             )
             .await
             .expect_err("percent-encoded requested path breaker should be rejected");
@@ -1318,6 +1334,7 @@ mod tests {
             ProxyBody::Buffered(None),
             vec![],
             vec![],
+            None,
         )
         .await
         .expect("non-segment dot sequences should be allowed");
@@ -1347,6 +1364,7 @@ mod tests {
                 injection_key: "bot".to_string(),
                 credential: "bad/token".to_string(),
             }],
+            None,
         )
         .await
         .expect_err("invalid path credential should be rejected");
@@ -1375,6 +1393,7 @@ mod tests {
                     injection_key: "bot".to_string(),
                     credential: credential.to_string(),
                 }],
+                None,
             )
             .await
             .expect_err("blank or whitespace path credential should be rejected");
@@ -1403,6 +1422,7 @@ mod tests {
                 injection_key: "bot/".to_string(),
                 credential: "123456:ABC-DEF".to_string(),
             }],
+            None,
         )
         .await
         .expect_err("invalid path prefix should be rejected");
@@ -1431,6 +1451,7 @@ mod tests {
                     injection_key: injection_key.to_string(),
                     credential: "123456:ABC-DEF".to_string(),
                 }],
+                None,
             )
             .await
             .expect_err("blank or whitespace path prefix should be rejected");
@@ -1459,6 +1480,7 @@ mod tests {
                 injection_key: "bot".to_string(),
                 credential: "123%2f456".to_string(),
             }],
+            None,
         )
         .await
         .expect_err("percent-encoded path credential should be rejected");
@@ -1512,6 +1534,7 @@ mod tests {
                 injection_key: "bot%2f".to_string(),
                 credential: "123456:ABC-DEF".to_string(),
             }],
+            None,
         )
         .await
         .expect_err("percent-encoded path prefix should be rejected");

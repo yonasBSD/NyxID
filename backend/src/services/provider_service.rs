@@ -1534,6 +1534,7 @@ pub async fn seed_default_services(
             identity_include_email: false,
             identity_include_name: false,
             identity_jwt_audience: None,
+            forward_access_token: false,
             inject_delegation_token: false,
             delegation_token_scope: delegation_scope.to_string(),
             provider_config_id: Some(provider.id.clone()),

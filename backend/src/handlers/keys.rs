@@ -48,6 +48,8 @@ pub struct CreateKeyRequest {
     pub identity_include_email: Option<bool>,
     pub identity_include_name: Option<bool>,
     pub identity_jwt_audience: Option<String>,
+    /// Forward the caller's NyxID access token as Authorization: Bearer
+    pub forward_access_token: Option<bool>,
     /// Inject X-NyxID-Delegation-Token for downstream user identification
     pub inject_delegation_token: Option<bool>,
     pub delegation_token_scope: Option<String>,
@@ -73,6 +75,7 @@ impl std::fmt::Debug for CreateKeyRequest {
                 &self.ssh_certificate_ttl_minutes,
             )
             .field("identity_propagation_mode", &self.identity_propagation_mode)
+            .field("forward_access_token", &self.forward_access_token)
             .field("inject_delegation_token", &self.inject_delegation_token)
             .finish()
     }
@@ -108,6 +111,7 @@ pub struct KeyResponse {
     pub identity_include_name: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identity_jwt_audience: Option<String>,
+    pub forward_access_token: bool,
     pub inject_delegation_token: bool,
     pub delegation_token_scope: String,
     pub auto_connected: bool,
@@ -156,6 +160,7 @@ pub struct UpdateKeyRequest {
     pub identity_include_email: Option<bool>,
     pub identity_include_name: Option<bool>,
     pub identity_jwt_audience: Option<String>,
+    pub forward_access_token: Option<bool>,
     pub inject_delegation_token: Option<bool>,
     pub delegation_token_scope: Option<String>,
 }
@@ -208,6 +213,7 @@ pub async fn create_key(
         || body.identity_include_email.is_some()
         || body.identity_include_name.is_some()
         || body.identity_jwt_audience.is_some()
+        || body.forward_access_token.is_some()
         || body.inject_delegation_token.is_some()
         || body.delegation_token_scope.is_some()
     {
@@ -219,6 +225,7 @@ pub async fn create_key(
             identity_include_email: body.identity_include_email.unwrap_or(false),
             identity_include_name: body.identity_include_name.unwrap_or(false),
             identity_jwt_audience: body.identity_jwt_audience,
+            forward_access_token: body.forward_access_token.unwrap_or(false),
             inject_delegation_token: body.inject_delegation_token.unwrap_or(false),
             delegation_token_scope: body
                 .delegation_token_scope
@@ -393,6 +400,7 @@ pub async fn update_key(
         || body.identity_include_email.is_some()
         || body.identity_include_name.is_some()
         || body.identity_jwt_audience.is_some()
+        || body.forward_access_token.is_some()
         || body.inject_delegation_token.is_some()
         || body.delegation_token_scope.is_some();
 
@@ -422,6 +430,9 @@ pub async fn update_key(
                 } else {
                     view.identity_jwt_audience.clone()
                 },
+                forward_access_token: body
+                    .forward_access_token
+                    .unwrap_or(view.forward_access_token),
                 inject_delegation_token: body
                     .inject_delegation_token
                     .unwrap_or(view.inject_delegation_token),
@@ -542,6 +553,7 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
         identity_include_email: result.service.identity_include_email,
         identity_include_name: result.service.identity_include_name,
         identity_jwt_audience: result.service.identity_jwt_audience.clone(),
+        forward_access_token: result.service.forward_access_token,
         inject_delegation_token: result.service.inject_delegation_token,
         delegation_token_scope: result.service.delegation_token_scope.clone(),
         auto_connected: false,
@@ -584,6 +596,7 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         identity_include_email: view.identity_include_email,
         identity_include_name: view.identity_include_name,
         identity_jwt_audience: view.identity_jwt_audience,
+        forward_access_token: view.forward_access_token,
         inject_delegation_token: view.inject_delegation_token,
         delegation_token_scope: view.delegation_token_scope,
         auto_connected: view.auto_connected,

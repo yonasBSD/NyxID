@@ -108,6 +108,8 @@ pub enum Commands {
         #[command(subcommand)]
         command: AiSetupCommands,
     },
+    /// Update the CLI and installed skills
+    Update(UpdateArgs),
 }
 
 // ---- Shared auth args ----
@@ -170,6 +172,16 @@ impl BaseUrlArgs {
              or pass --base-url, or set NYXID_URL"
         )
     }
+}
+
+#[derive(Args, Clone)]
+pub struct UpdateArgs {
+    /// Only update installed skills, skip CLI binary update
+    #[arg(long)]
+    pub skills_only: bool,
+    /// NyxID base URL for skill content (uses saved URL by default)
+    #[arg(long, env = "NYXID_URL")]
+    pub base_url: Option<String>,
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]

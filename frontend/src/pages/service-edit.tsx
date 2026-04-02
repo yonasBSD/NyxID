@@ -65,6 +65,7 @@ export function ServiceEditPage() {
       identity_include_email: false,
       identity_include_name: false,
       identity_jwt_audience: "",
+      forward_access_token: false,
       inject_delegation_token: false,
       delegation_token_scope: "",
       homepage_url: "",
@@ -108,6 +109,7 @@ export function ServiceEditPage() {
         identity_include_email: service.identity_include_email ?? false,
         identity_include_name: service.identity_include_name ?? false,
         identity_jwt_audience: service.identity_jwt_audience ?? "",
+        forward_access_token: service.forward_access_token ?? false,
         inject_delegation_token: service.inject_delegation_token ?? false,
         delegation_token_scope: service.delegation_token_scope || "llm:proxy",
         homepage_url: service.homepage_url ?? "",
@@ -175,6 +177,7 @@ export function ServiceEditPage() {
                 identity_include_email: data.identity_include_email,
                 identity_include_name: data.identity_include_name,
                 identity_jwt_audience: data.identity_jwt_audience || "",
+                forward_access_token: data.forward_access_token,
                 inject_delegation_token: data.inject_delegation_token,
                 delegation_token_scope: data.delegation_token_scope || "",
                 homepage_url: data.homepage_url || "",
@@ -738,6 +741,37 @@ export function ServiceEditPage() {
                             </div>
                           ))}
                         </div>
+                      </div>
+                    </div>
+
+                    <Separator className="my-2" />
+                    <div className="space-y-4">
+                      <div className="space-y-1">
+                        <h3 className="text-sm font-semibold">
+                          Forward Access Token
+                        </h3>
+                        <p className="text-xs text-muted-foreground">
+                          Forward the caller&apos;s NyxID access token as
+                          Authorization: Bearer to this service.
+                        </p>
+                      </div>
+
+                      <div className="flex items-center justify-between rounded-[10px] border border-border p-3">
+                        <Label
+                          htmlFor="forward-access-token"
+                          className="text-sm font-normal"
+                        >
+                          Forward Access Token
+                        </Label>
+                        <Switch
+                          id="forward-access-token"
+                          checked={
+                            form.watch("forward_access_token") ?? false
+                          }
+                          onCheckedChange={(v) =>
+                            form.setValue("forward_access_token", v)
+                          }
+                        />
                       </div>
                     </div>
 

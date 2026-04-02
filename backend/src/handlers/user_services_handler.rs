@@ -27,6 +27,7 @@ pub struct UpdateUserServiceRequest {
     pub identity_include_email: Option<bool>,
     pub identity_include_name: Option<bool>,
     pub identity_jwt_audience: Option<String>,
+    pub forward_access_token: Option<bool>,
     pub inject_delegation_token: Option<bool>,
     pub delegation_token_scope: Option<String>,
 }
@@ -52,6 +53,7 @@ pub struct UserServiceResponse {
     pub identity_include_name: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identity_jwt_audience: Option<String>,
+    pub forward_access_token: bool,
     pub inject_delegation_token: bool,
     pub delegation_token_scope: String,
     pub created_at: String,
@@ -115,6 +117,7 @@ pub async fn update_user_service(
         || body.identity_include_email.is_some()
         || body.identity_include_name.is_some()
         || body.identity_jwt_audience.is_some()
+        || body.forward_access_token.is_some()
         || body.inject_delegation_token.is_some()
         || body.delegation_token_scope.is_some()
     {
@@ -136,6 +139,9 @@ pub async fn update_user_service(
             } else {
                 current.identity_jwt_audience.clone()
             },
+            forward_access_token: body
+                .forward_access_token
+                .unwrap_or(current.forward_access_token),
             inject_delegation_token: body
                 .inject_delegation_token
                 .unwrap_or(current.inject_delegation_token),
@@ -242,6 +248,7 @@ fn user_service_response(svc: UserService) -> UserServiceResponse {
         identity_include_email: svc.identity_include_email,
         identity_include_name: svc.identity_include_name,
         identity_jwt_audience: svc.identity_jwt_audience,
+        forward_access_token: svc.forward_access_token,
         inject_delegation_token: svc.inject_delegation_token,
         delegation_token_scope: svc.delegation_token_scope,
         created_at: svc.created_at.to_rfc3339(),

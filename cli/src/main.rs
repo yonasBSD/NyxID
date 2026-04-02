@@ -76,5 +76,8 @@ async fn run() -> Result<()> {
 
         // AI skill setup
         Commands::AiSetup { command } => commands::ai_setup::run(command).await,
+
+        // Self-update CLI + skills
+        Commands::Update(args) => commands::update::run(args).await,
     }
 }
