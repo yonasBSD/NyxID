@@ -499,14 +499,25 @@ nyxid api-key create --name "my-agent" --platform claude-code --callback-url "ht
 # Route all messages from a bot to this agent (default/catch-all)
 nyxid channel-bot route create --bot <BOT_ID> --agent <API_KEY_ID_OR_NAME>
 
-# Route a specific conversation to a specific agent
-nyxid channel-bot route create --bot <BOT_ID> --conversation-id "12345678" --agent <API_KEY_ID_OR_NAME>
+# Route a specific DM or group chat to a specific agent
+nyxid channel-bot route create --bot <BOT_ID> --conversation-id "<chat_id>" --agent <API_KEY_ID_OR_NAME>
+
+# Route a specific group chat with conversation type hint
+nyxid channel-bot route create --bot <BOT_ID> --conversation-id "<group_chat_id>" --conversation-type group --agent <API_KEY_ID_OR_NAME>
+
+# Per-user routing in a group (different agents for different users)
+nyxid channel-bot route create --bot <BOT_ID> --conversation-id "<group_chat_id>" --sender-id "<user_id>" --agent <AGENT_A>
+nyxid channel-bot route create --bot <BOT_ID> --conversation-id "<group_chat_id>" --sender-id "<user_id_2>" --agent <AGENT_B>
 
 # List and manage routes
 nyxid channel-bot route list --bot-id <BOT_ID>
 nyxid channel-bot route update <ROUTE_ID> --agent <NEW_KEY>
 nyxid channel-bot route delete <ROUTE_ID> --yes
 ```
+
+Routing priority: sender-specific match > exact conversation match > default catch-all.
+
+For Telegram, `conversation_id` is the `chat.id` (a number like `-1001234567890` for groups). For Discord, it's the `channel_id`. The bot must be added to the group/channel on the platform side.
 
 ### How it works
 
