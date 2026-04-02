@@ -561,6 +561,9 @@ pub enum ApiKeyCommands {
         /// Platform label (claude-code, codex, openclaw, cursor, generic)
         #[arg(long)]
         platform: Option<String>,
+        /// Callback URL for channel bot relay (where NyxID sends forwarded messages)
+        #[arg(long)]
+        callback_url: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -604,6 +607,9 @@ pub enum ApiKeyCommands {
         allow_all_services: Option<bool>,
         #[arg(long)]
         allow_all_nodes: Option<bool>,
+        /// Callback URL for channel bot relay (set empty string to clear)
+        #[arg(long)]
+        callback_url: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },

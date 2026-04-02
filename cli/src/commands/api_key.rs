@@ -18,6 +18,7 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
             allow_all_services,
             allow_all_nodes,
             platform,
+            callback_url,
             auth,
         } => {
             let mut api = ApiClient::from_auth(&auth)?;
@@ -68,6 +69,9 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
             }
             if let Some(ref platform) = platform {
                 body["platform"] = Value::String(platform.clone());
+            }
+            if let Some(ref url) = callback_url {
+                body["callback_url"] = Value::String(url.clone());
             }
 
             let result: Value = api.post("/api-keys", &body).await?;
@@ -259,6 +263,7 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
             allowed_nodes,
             allow_all_services,
             allow_all_nodes,
+            callback_url,
             auth,
         } => {
             let mut api = ApiClient::from_auth(&auth)?;
@@ -284,6 +289,13 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
             }
             if let Some(v) = allow_all_nodes {
                 body.insert("allow_all_nodes".into(), Value::Bool(v));
+            }
+            if let Some(url) = callback_url {
+                if url.is_empty() {
+                    body.insert("callback_url".into(), Value::Null);
+                } else {
+                    body.insert("callback_url".into(), Value::String(url));
+                }
             }
 
             let _: Value = api.put(&format!("/api-keys/{id}"), &body).await?;
