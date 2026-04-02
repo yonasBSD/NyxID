@@ -113,20 +113,27 @@ pub async fn create_conversation(
     let bot = channel_bot_service::get_bot_for_user(&state.db, &body.channel_bot_id, &user_id_str)
         .await?;
 
-    // When no conversation ID is provided (or empty), treat as a default route
+    // When no conversation ID is provided (or empty), treat as a wildcard.
     let has_conversation_id = body
         .platform_conversation_id
         .as_deref()
         .is_some_and(|s| !s.is_empty() && s != "*");
+    let has_sender_id = body
+        .platform_sender_id
+        .as_deref()
+        .is_some_and(|s| !s.is_empty());
     let platform_conversation_id = if has_conversation_id {
         body.platform_conversation_id.as_deref().unwrap()
     } else {
         "*"
     };
-    let default_agent = if has_conversation_id {
+    // Only set default_agent=true for true catch-all routes (no conversation
+    // ID AND no sender ID). Sender-specific routes should NOT become catch-all
+    // even if conversation ID is omitted -- they match by sender only.
+    let default_agent = if has_conversation_id || has_sender_id {
         body.default_agent.unwrap_or(false)
     } else {
-        // No conversation ID means this IS a default/catch-all route
+        // No conversation ID and no sender ID = true catch-all
         true
     };
     let platform_conversation_type = body

@@ -218,27 +218,10 @@ async fn handle_webhook_inner(
         return Ok(());
     }
 
-    // For platforms with manual webhook setup (Discord, Lark, Feishu), the first
-    // successful webhook delivery proves the user completed platform-side config.
-    // Auto-promote from pending_webhook to active.
-    if bot.status == "pending_webhook" {
-        let now = mongodb::bson::DateTime::from_chrono(chrono::Utc::now());
-        let _ = state
-            .db
-            .collection::<crate::models::channel_bot::ChannelBot>(
-                crate::models::channel_bot::COLLECTION_NAME,
-            )
-            .update_one(
-                mongodb::bson::doc! { "_id": &bot.id },
-                mongodb::bson::doc! { "$set": {
-                    "status": "active",
-                    "webhook_registered": true,
-                    "updated_at": now,
-                }},
-            )
-            .await;
-        tracing::info!(bot_id = %bot_id, "auto-promoted pending_webhook bot to active");
-    } else if bot.status != "active" {
+    // Allow pending_webhook bots through to verification -- they'll be promoted
+    // after signature verification succeeds (not before).
+    let is_pending_webhook = bot.status == "pending_webhook";
+    if !is_pending_webhook && bot.status != "active" {
         tracing::debug!(bot_id = %bot_id, status = %bot.status, "webhook for non-active bot");
         return Ok(());
     }
@@ -276,6 +259,27 @@ async fn handle_webhook_inner(
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
             format!("webhook verification failed: {e}").into()
         })?;
+
+    // Auto-promote pending_webhook bots AFTER successful signature verification.
+    // This proves the user correctly configured the webhook URL on the platform.
+    if is_pending_webhook {
+        let now = mongodb::bson::DateTime::from_chrono(chrono::Utc::now());
+        let _ = state
+            .db
+            .collection::<crate::models::channel_bot::ChannelBot>(
+                crate::models::channel_bot::COLLECTION_NAME,
+            )
+            .update_one(
+                mongodb::bson::doc! { "_id": &bot.id },
+                mongodb::bson::doc! { "$set": {
+                    "status": "active",
+                    "webhook_registered": true,
+                    "updated_at": now,
+                }},
+            )
+            .await;
+        tracing::info!(bot_id = %bot_id, "auto-promoted pending_webhook bot to active");
+    }
 
     // Parse inbound messages
     let messages = adapter.parse_inbound(body).await.map_err(

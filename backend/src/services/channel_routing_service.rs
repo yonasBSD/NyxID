@@ -130,7 +130,10 @@ pub async fn create_conversation(
         ));
     }
 
-    // If setting as default, clear any existing default for this bot
+    // If setting as default, deactivate any existing default route for this
+    // bot. We deactivate (not just clear default_agent) because the old route
+    // with platform_conversation_id="*" would otherwise clash with the unique
+    // partial index on active routes.
     if default_agent {
         let now = bson::DateTime::from_chrono(Utc::now());
         db.collection::<ChannelConversation>(COLLECTION_NAME)
@@ -143,6 +146,7 @@ pub async fn create_conversation(
                 },
                 doc! { "$set": {
                     "default_agent": false,
+                    "is_active": false,
                     "updated_at": now,
                 }},
             )

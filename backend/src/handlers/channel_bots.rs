@@ -143,7 +143,18 @@ pub async fn create_bot(
 ) -> AppResult<(StatusCode, Json<CreateChannelBotResponse>)> {
     let user_id_str = auth_user.user_id.to_string();
 
-    // Validate platform
+    // Only platforms with working webhook routes can be registered as bots.
+    // OpenClaw uses a separate integration path (openclaw_channel handler).
+    if !matches!(
+        body.platform.as_str(),
+        "telegram" | "discord" | "lark" | "feishu"
+    ) {
+        return Err(AppError::ValidationError(format!(
+            "unsupported bot platform: {}. Supported: telegram, discord, lark, feishu",
+            body.platform
+        )));
+    }
+
     let adapter = resolve_adapter(&body.platform)?;
 
     // Validate label length (service also validates, but fail fast here)
