@@ -638,10 +638,6 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
             get(handlers::approvals::get_request_status),
         )
         .route(
-            "/approvals/tool-requests/{request_id}",
-            get(handlers::approvals::get_tool_request_status),
-        )
-        .route(
             "/proxy/services/{service_id}/docs",
             get(handlers::docs::service_docs_ui),
         )

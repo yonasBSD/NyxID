@@ -684,13 +684,13 @@ sequenceDiagram
     N->>U: Push notification / Telegram message
 
     loop Poll (every 2s, up to 45s)
-        H->>N: GET /api/v1/approvals/tool-requests/{id}
+        H->>N: GET /api/v1/approvals/requests/{id}
         N-->>H: { status: "pending" }
     end
 
     U->>N: POST /api/v1/approvals/requests/{id}/decide { approved: true }
 
-    H->>N: GET /api/v1/approvals/tool-requests/{id}
+    H->>N: GET /api/v1/approvals/requests/{id}
     N-->>H: { status: "approved" }
 
     H-->>M: Approved
@@ -732,33 +732,11 @@ Content-Type: application/json
 | `is_destructive` | bool | No | Whether the tool performs irreversible operations (default: false) |
 | `approval_mode` | string | No | Aevatar's approval mode: `"alwaysrequire"`, `"auto"`, `"neverrequire"` (informational, stored but not enforced -- NyxID always creates the request) |
 
-### Polling: Dedicated Tool Approval Status Endpoint
+### Polling
 
-Aevatar polls `GET /api/v1/approvals/tool-requests/{id}` (new endpoint, separate from the existing `GET /requests/{id}`) which returns a minimal response with Aevatar-compatible status values:
+Aevatar polls the existing `GET /api/v1/approvals/requests/{id}` endpoint. No dedicated tool-specific polling endpoint is needed — the existing endpoint returns the full `ApprovalRequestItem` which includes `status` and all tool fields.
 
-```
-GET /api/v1/approvals/tool-requests/{id}
-Authorization: Bearer <same token used to create>
-```
-
-**Response:**
-```json
-{
-  "id": "550e8400-e29b-41d4-a716-446655440000",
-  "status": "denied",
-  "reason": "Denied by user",
-  "expires_at": "2026-04-01T12:05:00Z"
-}
-```
-
-**Status mapping (response layer only, storage unchanged):**
-
-| Internal Status (MongoDB) | Tool Polling Response | Reason |
-|---|---|---|
-| `"pending"` | `"pending"` | `null` |
-| `"approved"` | `"approved"` | `null` |
-| `"rejected"` | `"denied"` | `"Denied by user"` |
-| `"expired"` | `"expired"` | `"Approval request expired"` |
+NyxID uses `"rejected"` as the status value (not `"denied"`). Aevatar should check for `"rejected"` when determining if a request was denied.
 
 ### Rollback Compatibility
 
@@ -767,8 +745,8 @@ This design is fully rollback-safe:
 | Concern | Design Decision | On Rollback |
 |---|---|---|
 | **New model fields** (`tool_name`, etc.) | Optional with `#[serde(default)]` | Old code ignores extra fields in MongoDB documents (no `deny_unknown_fields`) |
-| **New endpoints** (`POST /requests`, `GET /tool-requests/{id}`) | Additive only, no existing endpoint behavior changes | Old code returns 404; Aevatar times out (expected for new feature) |
-| **Status values** | `"rejected"` stays in MongoDB and in existing endpoint responses. `"denied"` only appears in new `tool-requests` endpoint | Old code reads `"rejected"` as before; existing frontend unchanged |
+| **New endpoint** (`POST /requests`) | Additive only, no existing endpoint behavior changes | Old code returns 404; Aevatar times out (expected for new feature) |
+| **Status values** | `"rejected"` used consistently everywhere -- no normalization layer | No change needed |
 | **Sentinel `service_id: "tool_approval"`** | Tool approval documents appear in `list_requests` with `service_name` = tool name | Old frontend renders them as normal approval entries (odd `service_name` but functional) |
 | **Frontend** | Additive: new tool approval rendering in approval list/detail pages. Guards on `tool_name != null` to distinguish tool vs proxy approvals | Old frontend ignores `tool_name` field (not in its type), renders tool approvals as normal entries with tool name as service name -- functional, just not pretty |
 
@@ -812,8 +790,8 @@ Prerequisite for agent tool execution. Backend + frontend changes to properly re
 **Backend (modified):**
 - `backend/src/models/approval_request.rs` -- add optional tool fields (`tool_name`, `tool_call_id`, `tool_arguments`, `is_destructive`), all `Option` with `#[serde(default)]`
 - `backend/src/services/approval_service.rs` -- add `create_tool_approval_request()` function
-- `backend/src/handlers/approvals.rs` -- add `create_request` handler (`POST /requests`), add `get_tool_request_status` handler (`GET /tool-requests/{id}`), new request/response types (`CreateToolApprovalRequest`, `CreateApprovalResponse`, `ToolApprovalStatusResponse`). Existing `get_request_by_id` adds optional `tool_name`, `tool_call_id`, `tool_arguments`, `is_destructive` fields to `ApprovalRequestItem` (additive, no behavior change -- `null` for existing proxy approvals)
-- `backend/src/routes.rs` -- add `POST /requests` to approval routes, add `GET /tool-requests/{id}` to delegated-accessible routes
+- `backend/src/handlers/approvals.rs` -- add `create_request` handler (`POST /requests`), new request/response types (`CreateToolApprovalRequest`, `CreateApprovalResponse`). Existing `get_request_by_id` adds optional `tool_name`, `tool_call_id`, `tool_arguments`, `is_destructive` fields to `ApprovalRequestItem` (additive, no behavior change -- `null` for existing proxy approvals). Aevatar polls the existing `GET /requests/{id}` endpoint and checks for `"rejected"` status.
+- `backend/src/routes.rs` -- add `POST /requests` to approval routes
 
 **Frontend (modified):**
 - `frontend/src/types/approvals.ts` -- add optional `tool_name`, `tool_call_id`, `tool_arguments`, `is_destructive` fields to approval request type

@@ -106,33 +106,6 @@ pub struct CreateApprovalResponse {
     pub expires_at: String,
 }
 
-/// Polling response for tool approval requests.
-/// Uses Aevatar-compatible status values ("denied" instead of "rejected").
-#[derive(Debug, Serialize)]
-pub struct ToolApprovalStatusResponse {
-    pub id: String,
-    pub status: String,
-    pub reason: Option<String>,
-    pub expires_at: String,
-}
-
-/// Map internal status to Aevatar-compatible status for the tool polling endpoint.
-fn normalize_tool_approval_status(status: &str) -> &str {
-    match status {
-        "rejected" => "denied",
-        other => other,
-    }
-}
-
-/// Derive a reason string from a terminal status.
-fn tool_approval_reason(status: &str) -> Option<String> {
-    match status {
-        "rejected" => Some("Denied by user".to_string()),
-        "expired" => Some("Approval request expired".to_string()),
-        _ => None,
-    }
-}
-
 fn to_approval_request_item(
     request: crate::models::approval_request::ApprovalRequest,
 ) -> ApprovalRequestItem {
@@ -356,51 +329,6 @@ pub async fn create_request(
             expires_at: request.expires_at.to_rfc3339(),
         }),
     ))
-}
-
-/// GET /api/v1/approvals/tool-requests/{request_id}
-///
-/// Polling endpoint for tool approval requests.
-/// Returns Aevatar-compatible status values ("denied" instead of "rejected").
-/// Accessible by the same caller that created the request.
-pub async fn get_tool_request_status(
-    State(state): State<AppState>,
-    auth_user: AuthUser,
-    Path(request_id): Path<String>,
-) -> AppResult<Json<ToolApprovalStatusResponse>> {
-    let request = approval_service::get_request(&state.db, &request_id).await?;
-
-    // Enforce the same requester binding as the existing status endpoint:
-    // owner + requester_type + requester_id must all match.
-    let user_id = auth_user.effective_approval_owner_user_id();
-    let requester_type = auth_user.approval_requester_type().unwrap_or("user");
-    let requester_id = auth_user.approval_requester_id();
-
-    if request.user_id != user_id
-        || request.requester_type != requester_type
-        || request.requester_id != requester_id
-    {
-        return Err(AppError::Forbidden(
-            "You are not authorized to view this approval request".to_string(),
-        ));
-    }
-
-    // Verify this is actually a tool approval request
-    if request.tool_name.is_none() {
-        return Err(AppError::NotFound(
-            "Tool approval request not found".to_string(),
-        ));
-    }
-
-    let reason = tool_approval_reason(&request.status);
-    let status = normalize_tool_approval_status(&request.status).to_string();
-
-    Ok(Json(ToolApprovalStatusResponse {
-        id: request.id,
-        status,
-        reason,
-        expires_at: request.expires_at.to_rfc3339(),
-    }))
 }
 
 /// POST /api/v1/approvals/requests/{request_id}/decide
@@ -754,28 +682,6 @@ mod tests {
         assert_eq!(item.tool_call_id.as_deref(), Some("call_abc"));
         assert!(item.tool_arguments.is_some());
         assert_eq!(item.is_destructive, Some(true));
-    }
-
-    #[test]
-    fn normalize_tool_approval_status_maps_rejected_to_denied() {
-        assert_eq!(normalize_tool_approval_status("rejected"), "denied");
-        assert_eq!(normalize_tool_approval_status("pending"), "pending");
-        assert_eq!(normalize_tool_approval_status("approved"), "approved");
-        assert_eq!(normalize_tool_approval_status("expired"), "expired");
-    }
-
-    #[test]
-    fn tool_approval_reason_for_terminal_states() {
-        assert!(tool_approval_reason("pending").is_none());
-        assert!(tool_approval_reason("approved").is_none());
-        assert_eq!(
-            tool_approval_reason("rejected").as_deref(),
-            Some("Denied by user")
-        );
-        assert_eq!(
-            tool_approval_reason("expired").as_deref(),
-            Some("Approval request expired")
-        );
     }
 
     #[test]
