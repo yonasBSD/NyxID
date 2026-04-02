@@ -300,14 +300,16 @@ async fn handle_webhook_inner(
         })?;
 
     // Generate a short-lived access token for the bot owner so the receiving
-    // agent can make NyxID API calls (proxy, approvals, etc.) on their behalf.
+    // agent can make NyxID API calls (proxy, LLM gateway, approvals, etc.)
+    // on their behalf. Uses the same scope as first-party sessions so agents
+    // like NyxIdChat can call the LLM gateway.
     let user_access_token = {
         let user_uuid = bot.user_id.parse::<uuid::Uuid>().map_err(
             |e| -> Box<dyn std::error::Error + Send + Sync> {
                 format!("invalid bot owner user_id: {e}").into()
             },
         )?;
-        let scope = "proxy read";
+        let scope = crate::services::token_service::FIRST_PARTY_ACCESS_SCOPES;
         let rbac_data =
             crate::services::rbac_helpers::build_rbac_claim_data(&state.db, &bot.user_id, scope)
                 .await
