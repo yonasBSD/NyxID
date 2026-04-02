@@ -121,6 +121,7 @@ fn identity_config_from_downstream_service(
         identity_include_email: service.identity_include_email || apply_defaults,
         identity_include_name: service.identity_include_name || apply_defaults,
         identity_jwt_audience: service.identity_jwt_audience.clone(),
+        forward_access_token: service.forward_access_token,
         inject_delegation_token: service.inject_delegation_token,
         delegation_token_scope: service.delegation_token_scope.clone(),
     }
@@ -171,6 +172,7 @@ pub struct KeyView {
     pub identity_include_email: bool,
     pub identity_include_name: bool,
     pub identity_jwt_audience: Option<String>,
+    pub forward_access_token: bool,
     pub inject_delegation_token: bool,
     pub delegation_token_scope: String,
     pub auto_connected: bool,
@@ -555,6 +557,7 @@ pub async fn create_key(
             identity_include_email: false,
             identity_include_name: false,
             identity_jwt_audience: None,
+            forward_access_token: false,
             inject_delegation_token: false,
             delegation_token_scope: "llm:proxy".to_string(),
             provider_config_id: None,
@@ -1143,6 +1146,7 @@ fn build_key_view(
         identity_include_email: svc.identity_include_email,
         identity_include_name: svc.identity_include_name,
         identity_jwt_audience: svc.identity_jwt_audience.clone(),
+        forward_access_token: svc.forward_access_token,
         inject_delegation_token: svc.inject_delegation_token,
         delegation_token_scope: svc.delegation_token_scope.clone(),
         auto_connected,
@@ -1216,6 +1220,7 @@ mod tests {
             identity_include_email: false,
             identity_include_name: false,
             identity_jwt_audience: None,
+            forward_access_token: false,
             inject_delegation_token: false,
             delegation_token_scope: "llm:proxy".to_string(),
             is_active: true,
@@ -1253,6 +1258,7 @@ mod tests {
             identity_include_email: true,
             identity_include_name: false,
             identity_jwt_audience: Some("https://aud.example.com".to_string()),
+            forward_access_token: false,
             inject_delegation_token: true,
             delegation_token_scope: "proxy:* llm:status".to_string(),
             provider_config_id: None,
@@ -1344,6 +1350,7 @@ mod tests {
             identity.identity_jwt_audience.as_deref(),
             Some("https://aud.example.com")
         );
+        assert!(!identity.forward_access_token);
         assert!(identity.inject_delegation_token);
         assert_eq!(identity.delegation_token_scope, "proxy:* llm:status");
     }

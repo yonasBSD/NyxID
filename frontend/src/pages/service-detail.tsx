@@ -338,6 +338,20 @@ export function ServiceDetailPage() {
               </>
             )}
 
+          {service.forward_access_token && (
+            <>
+              <Separator />
+              <DetailSection title="Forward Access Token">
+                <DetailRow
+                  label="Status"
+                  value="Enabled"
+                  badge
+                  badgeVariant="success"
+                />
+              </DetailSection>
+            </>
+          )}
+
           {service.inject_delegation_token && (
             <>
               <Separator />

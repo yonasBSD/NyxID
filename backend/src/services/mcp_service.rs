@@ -1379,6 +1379,7 @@ pub async fn execute_tool(
         proxy_service::ProxyBody::Buffered(body),
         identity_headers,
         delegated,
+        None, // MCP tool calls don't use nyxid_token passthrough
     )
     .await?;
 

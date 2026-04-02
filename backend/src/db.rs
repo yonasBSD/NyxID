@@ -1013,6 +1013,7 @@ struct InheritedIdentityFields {
     identity_include_email: bool,
     identity_include_name: bool,
     identity_jwt_audience: Option<String>,
+    forward_access_token: bool,
     inject_delegation_token: bool,
     delegation_token_scope: String,
 }
@@ -1025,6 +1026,7 @@ fn inherited_identity_fields(service: Option<&DownstreamService>) -> InheritedId
             identity_include_email: service.identity_include_email,
             identity_include_name: service.identity_include_name,
             identity_jwt_audience: service.identity_jwt_audience.clone(),
+            forward_access_token: service.forward_access_token,
             inject_delegation_token: service.inject_delegation_token,
             delegation_token_scope: service.delegation_token_scope.clone(),
         },
@@ -1034,6 +1036,7 @@ fn inherited_identity_fields(service: Option<&DownstreamService>) -> InheritedId
             identity_include_email: false,
             identity_include_name: false,
             identity_jwt_audience: None,
+            forward_access_token: false,
             inject_delegation_token: false,
             delegation_token_scope: "llm:proxy".to_string(),
         },
@@ -1300,6 +1303,7 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
             identity_include_email: inherited_identity.identity_include_email,
             identity_include_name: inherited_identity.identity_include_name,
             identity_jwt_audience: inherited_identity.identity_jwt_audience,
+            forward_access_token: inherited_identity.forward_access_token,
             inject_delegation_token: inherited_identity.inject_delegation_token,
             delegation_token_scope: inherited_identity.delegation_token_scope,
             is_active: true,
@@ -1494,6 +1498,7 @@ async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::e
             identity_include_email: inherited_identity.identity_include_email,
             identity_include_name: inherited_identity.identity_include_name,
             identity_jwt_audience: inherited_identity.identity_jwt_audience,
+            forward_access_token: inherited_identity.forward_access_token,
             inject_delegation_token: inherited_identity.inject_delegation_token,
             delegation_token_scope: inherited_identity.delegation_token_scope,
             is_active: true,
@@ -1723,6 +1728,7 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
             identity_include_email: inherited_identity.identity_include_email,
             identity_include_name: inherited_identity.identity_include_name,
             identity_jwt_audience: inherited_identity.identity_jwt_audience,
+            forward_access_token: inherited_identity.forward_access_token,
             inject_delegation_token: inherited_identity.inject_delegation_token,
             delegation_token_scope: inherited_identity.delegation_token_scope,
             is_active: true,
@@ -1791,6 +1797,7 @@ mod tests {
             identity_include_email: true,
             identity_include_name: false,
             identity_jwt_audience: Some("https://aud.example.com".to_string()),
+            forward_access_token: false,
             inject_delegation_token: true,
             delegation_token_scope: "proxy:* llm:status".to_string(),
             provider_config_id: None,
@@ -1813,6 +1820,7 @@ mod tests {
         let fields = inherited_identity_fields(None);
         assert_eq!(fields.identity_propagation_mode, "none");
         assert!(!fields.identity_include_user_id);
+        assert!(!fields.forward_access_token);
         assert!(!fields.inject_delegation_token);
         assert_eq!(fields.delegation_token_scope, "llm:proxy");
     }
@@ -1829,6 +1837,7 @@ mod tests {
             fields.identity_jwt_audience.as_deref(),
             Some("https://aud.example.com")
         );
+        assert!(!fields.forward_access_token);
         assert!(fields.inject_delegation_token);
         assert_eq!(fields.delegation_token_scope, "proxy:* llm:status");
     }

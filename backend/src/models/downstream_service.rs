@@ -121,6 +121,11 @@ pub struct DownstreamService {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity_jwt_audience: Option<String>,
 
+    /// Whether to forward the caller's NyxID access token as Authorization: Bearer
+    /// when proxying requests. Used by platform apps that trust NyxID JWTs directly.
+    #[serde(default)]
+    pub forward_access_token: bool,
+
     /// Whether to inject a delegation token (X-NyxID-Delegation-Token)
     /// when proxying requests to this service via MCP or REST proxy.
     /// The token allows the service to call NyxID APIs on behalf of the user.
@@ -242,6 +247,7 @@ pub mod test_helpers {
             identity_include_email: false,
             identity_include_name: false,
             identity_jwt_audience: None,
+            forward_access_token: false,
             inject_delegation_token: false,
             delegation_token_scope: String::new(),
             provider_config_id: None,
@@ -331,6 +337,7 @@ mod tests {
             identity_include_email: false,
             identity_include_name: false,
             identity_jwt_audience: None,
+            forward_access_token: false,
             inject_delegation_token: false,
             delegation_token_scope: "llm:proxy".to_string(),
             provider_config_id: None,
@@ -392,6 +399,7 @@ mod tests {
             identity_include_email: false,
             identity_include_name: false,
             identity_jwt_audience: None,
+            forward_access_token: false,
             inject_delegation_token: false,
             delegation_token_scope: "llm:proxy".to_string(),
             provider_config_id: None,
@@ -414,6 +422,7 @@ mod tests {
         doc.remove("service_category");
         doc.remove("requires_user_credential");
         doc.remove("identity_propagation_mode");
+        doc.remove("forward_access_token");
         doc.remove("inject_delegation_token");
         doc.remove("delegation_token_scope");
         let restored: DownstreamService = bson::from_document(doc).expect("deserialize");
@@ -422,6 +431,7 @@ mod tests {
         assert_eq!(restored.service_category, "connection");
         assert_eq!(restored.identity_propagation_mode, "none");
         assert!(restored.requires_user_credential);
+        assert!(!restored.forward_access_token);
         assert!(!restored.inject_delegation_token);
         assert_eq!(restored.delegation_token_scope, "llm:proxy");
     }

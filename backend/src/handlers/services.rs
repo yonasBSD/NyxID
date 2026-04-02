@@ -54,6 +54,9 @@ pub struct CreateServiceRequest {
     pub required_permissions: Option<Vec<String>>,
     pub examples_url: Option<String>,
     pub recommended_skills: Option<Vec<String>>,
+    /// Forward the caller's NyxID access token as Authorization: Bearer to downstream
+    #[serde(default)]
+    pub forward_access_token: bool,
 }
 
 impl std::fmt::Debug for CreateServiceRequest {
@@ -125,6 +128,7 @@ pub struct ServiceResponse {
     pub identity_include_email: bool,
     pub identity_include_name: bool,
     pub identity_jwt_audience: Option<String>,
+    pub forward_access_token: bool,
     pub inject_delegation_token: bool,
     pub delegation_token_scope: String,
     // Rich metadata
@@ -172,6 +176,7 @@ pub struct UpdateServiceRequest {
     pub identity_include_email: Option<bool>,
     pub identity_include_name: Option<bool>,
     pub identity_jwt_audience: Option<String>,
+    pub forward_access_token: Option<bool>,
     pub inject_delegation_token: Option<bool>,
     pub delegation_token_scope: Option<String>,
     pub ssh_config: Option<SshServiceConfigRequest>,
@@ -698,6 +703,7 @@ pub async fn create_service(
         identity_include_email: false,
         identity_include_name: false,
         identity_jwt_audience: None,
+        forward_access_token: body.forward_access_token,
         inject_delegation_token: false,
         delegation_token_scope: "llm:proxy".to_string(),
         provider_config_id: None,
@@ -984,6 +990,9 @@ pub async fn update_service(
                 }
                 set_doc.insert("identity_jwt_audience", audience.as_str());
             }
+            if let Some(forward) = body.forward_access_token {
+                set_doc.insert("forward_access_token", forward);
+            }
             if let Some(inject) = body.inject_delegation_token {
                 set_doc.insert("inject_delegation_token", inject);
             }
@@ -1041,6 +1050,7 @@ pub async fn update_service(
                 || body.identity_include_email.is_some()
                 || body.identity_include_name.is_some()
                 || body.identity_jwt_audience.is_some()
+                || body.forward_access_token.is_some()
                 || body.inject_delegation_token.is_some()
                 || body.delegation_token_scope.is_some();
             if has_http_only_updates {
@@ -1256,6 +1266,85 @@ pub async fn update_service(
             },
         )
         .await?;
+
+    // Propagate identity/forward_access_token changes to all UserService records
+    // that were provisioned from this catalog service (auto or manual).
+    let identity_changed = body.identity_propagation_mode.is_some()
+        || body.identity_include_user_id.is_some()
+        || body.identity_include_email.is_some()
+        || body.identity_include_name.is_some()
+        || body.identity_jwt_audience.is_some()
+        || body.forward_access_token.is_some()
+        || body.inject_delegation_token.is_some()
+        || body.delegation_token_scope.is_some();
+
+    if identity_changed {
+        let mut user_svc_set = bson::Document::new();
+        if let Some(ref mode) = body.identity_propagation_mode {
+            user_svc_set.insert("identity_propagation_mode", mode.as_str());
+        }
+        if let Some(v) = body.identity_include_user_id {
+            user_svc_set.insert("identity_include_user_id", v);
+        }
+        if let Some(v) = body.identity_include_email {
+            user_svc_set.insert("identity_include_email", v);
+        }
+        if let Some(v) = body.identity_include_name {
+            user_svc_set.insert("identity_include_name", v);
+        }
+        if let Some(ref aud) = body.identity_jwt_audience {
+            user_svc_set.insert("identity_jwt_audience", aud.as_str());
+        }
+        if let Some(v) = body.forward_access_token {
+            user_svc_set.insert("forward_access_token", v);
+        }
+        if let Some(v) = body.inject_delegation_token {
+            user_svc_set.insert("inject_delegation_token", v);
+        }
+        if let Some(ref scope) = body.delegation_token_scope {
+            let scope = if scope.is_empty() {
+                "llm:proxy"
+            } else {
+                scope.as_str()
+            };
+            user_svc_set.insert("delegation_token_scope", scope);
+        }
+
+        if !user_svc_set.is_empty() {
+            user_svc_set.insert("updated_at", bson::DateTime::from_chrono(Utc::now()));
+            let db = state.db.clone();
+            let sid = service_id.clone();
+            tokio::spawn(async move {
+                match db
+                    .collection::<crate::models::user_service::UserService>(
+                        crate::models::user_service::COLLECTION_NAME,
+                    )
+                    .update_many(
+                        doc! { "catalog_service_id": &sid },
+                        doc! { "$set": &user_svc_set },
+                    )
+                    .await
+                {
+                    Ok(result) => {
+                        if result.modified_count > 0 {
+                            tracing::info!(
+                                catalog_service_id = %sid,
+                                modified = result.modified_count,
+                                "Propagated identity config to user services"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            catalog_service_id = %sid,
+                            error = %e,
+                            "Failed to propagate identity config to user services"
+                        );
+                    }
+                }
+            });
+        }
+    }
 
     // If base_url changed and service has an OIDC client, update default redirect URI
     if service.service_type == "http"

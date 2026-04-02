@@ -98,6 +98,7 @@ pub fn service_to_response(s: DownstreamService) -> ServiceResponse {
         identity_include_email: s.identity_include_email,
         identity_include_name: s.identity_include_name,
         identity_jwt_audience: s.identity_jwt_audience,
+        forward_access_token: s.forward_access_token,
         inject_delegation_token: s.inject_delegation_token,
         delegation_token_scope: s.delegation_token_scope,
         homepage_url: s.homepage_url,

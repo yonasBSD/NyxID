@@ -16,4 +16,5 @@ pub mod service;
 pub mod session;
 pub mod ssh;
 pub mod status;
+pub mod update;
 pub mod whoami;

@@ -24,6 +24,7 @@ pub struct IdentityConfig {
     pub identity_include_email: bool,
     pub identity_include_name: bool,
     pub identity_jwt_audience: Option<String>,
+    pub forward_access_token: bool,
     pub inject_delegation_token: bool,
     pub delegation_token_scope: String,
 }
@@ -36,6 +37,7 @@ impl IdentityConfig {
             identity_include_email: false,
             identity_include_name: false,
             identity_jwt_audience: None,
+            forward_access_token: false,
             inject_delegation_token: false,
             delegation_token_scope: "llm:proxy".to_string(),
         }
@@ -90,6 +92,7 @@ fn normalize_identity_config(config: &IdentityConfig) -> AppResult<IdentityConfi
         identity_include_email: config.identity_include_email,
         identity_include_name: config.identity_include_name,
         identity_jwt_audience: config.identity_jwt_audience.clone(),
+        forward_access_token: config.forward_access_token,
         inject_delegation_token: config.inject_delegation_token,
         delegation_token_scope: normalized_scope,
     })
@@ -279,6 +282,7 @@ pub async fn create_user_service(
         identity_include_email: identity.identity_include_email,
         identity_include_name: identity.identity_include_name,
         identity_jwt_audience: identity.identity_jwt_audience,
+        forward_access_token: identity.forward_access_token,
         inject_delegation_token: identity.inject_delegation_token,
         delegation_token_scope: identity.delegation_token_scope,
         is_active: true,
@@ -361,6 +365,7 @@ pub async fn update_user_service(
                 set_doc.insert("identity_jwt_audience", bson::Bson::Null);
             }
         }
+        set_doc.insert("forward_access_token", id_config.forward_access_token);
         set_doc.insert("inject_delegation_token", id_config.inject_delegation_token);
         set_doc.insert("delegation_token_scope", &id_config.delegation_token_scope);
     }
@@ -411,6 +416,7 @@ mod tests {
             identity_include_email: true,
             identity_include_name: false,
             identity_jwt_audience: None,
+            forward_access_token: false,
             inject_delegation_token: true,
             delegation_token_scope: "llm:proxy".to_string(),
         }

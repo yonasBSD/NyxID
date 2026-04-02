@@ -208,6 +208,7 @@ export const updateServiceSchema = z
     identity_include_email: z.boolean().optional(),
     identity_include_name: z.boolean().optional(),
     identity_jwt_audience: z.string().max(500).optional().or(z.literal("")),
+    forward_access_token: z.boolean().optional(),
     inject_delegation_token: z.boolean().optional(),
     delegation_token_scope: z
       .string()

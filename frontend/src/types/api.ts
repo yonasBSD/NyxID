@@ -131,6 +131,7 @@ export interface DownstreamService {
   readonly identity_include_email?: boolean;
   readonly identity_include_name?: boolean;
   readonly identity_jwt_audience?: string | null;
+  readonly forward_access_token?: boolean;
   readonly inject_delegation_token?: boolean;
   readonly delegation_token_scope?: string;
   // Rich metadata for AI agent discovery
@@ -205,6 +206,7 @@ export type UpdateServicePayload =
       readonly identity_include_email?: boolean;
       readonly identity_include_name?: boolean;
       readonly identity_jwt_audience?: string;
+      readonly forward_access_token?: boolean;
       readonly inject_delegation_token?: boolean;
       readonly delegation_token_scope?: string;
       readonly homepage_url?: string;
