@@ -487,6 +487,7 @@ The payload normalizes messages into a common format so agents can handle all pl
 | `X-NyxID-Message-Id` | UUID of the `channel_message` record |
 | `X-NyxID-Timestamp` | ISO 8601 timestamp (for replay protection) |
 | `X-NyxID-Platform` | Platform identifier (`telegram`, `discord`, `lark`, `feishu`) |
+| `X-NyxID-User-Token` | Short-lived access token for the bot owner. The agent can use this as `Authorization: Bearer <token>` to call NyxID APIs (proxy, approvals, etc.) on behalf of the user. Scoped to `proxy read`. Absent if token generation fails. |
 
 ### Identity Resolution (optional convenience API)
 

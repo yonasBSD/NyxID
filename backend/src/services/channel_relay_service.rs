@@ -222,6 +222,7 @@ pub async fn forward_to_agent(
     callback_url: &str,
     payload: &CallbackPayload,
     api_key_hash: &str,
+    user_access_token: Option<&str>,
 ) -> AppResult<Option<AgentReplyPayload>> {
     let body_bytes = serde_json::to_vec(payload)
         .map_err(|e| AppError::Internal(format!("failed to serialize callback payload: {e}")))?;
@@ -232,14 +233,22 @@ pub async fn forward_to_agent(
     let timeout =
         std::time::Duration::from_secs(u64::from(config.channel_relay_callback_timeout_secs));
 
-    let response = http_client
+    let mut request = http_client
         .post(callback_url)
         .header("Content-Type", "application/json")
         .header("X-NyxID-Signature", &signature)
         .header("X-NyxID-Message-Id", &payload.message_id)
         .header("X-NyxID-Timestamp", &timestamp)
         .header("X-NyxID-Platform", &payload.platform)
-        .timeout(timeout)
+        .timeout(timeout);
+
+    // Include the bot owner's access token so the receiving agent can make
+    // NyxID API calls (proxy, approvals, etc.) on behalf of the user.
+    if let Some(token) = user_access_token {
+        request = request.header("X-NyxID-User-Token", token);
+    }
+
+    let response = request
         .body(body_bytes)
         .send()
         .await

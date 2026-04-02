@@ -295,6 +295,29 @@ async fn handle_webhook_inner(
             format!("failed to decrypt bot token: {e}").into()
         })?;
 
+    // Generate a short-lived access token for the bot owner so the receiving
+    // agent can make NyxID API calls (proxy, approvals, etc.) on their behalf.
+    let user_access_token = {
+        let user_uuid = bot.user_id.parse::<uuid::Uuid>().map_err(
+            |e| -> Box<dyn std::error::Error + Send + Sync> {
+                format!("invalid bot owner user_id: {e}").into()
+            },
+        )?;
+        let scope = "proxy read";
+        let rbac_data =
+            crate::services::rbac_helpers::build_rbac_claim_data(&state.db, &bot.user_id, scope)
+                .await
+                .ok();
+        crate::crypto::jwt::generate_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &user_uuid,
+            scope,
+            rbac_data.as_ref(),
+        )
+        .ok()
+    };
+
     for inbound in &messages {
         // Resolve which agent should handle this message
         let route = match channel_routing_service::resolve_agent(
@@ -382,6 +405,7 @@ async fn handle_webhook_inner(
             &route.callback_url,
             &payload,
             &api_key.key_hash,
+            user_access_token.as_deref(),
         )
         .await;
 
