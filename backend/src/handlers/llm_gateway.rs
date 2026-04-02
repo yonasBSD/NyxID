@@ -1006,7 +1006,11 @@ fn should_bypass_approval_flow(
     requires_approval: bool,
     auth_method: &crate::mw::auth::AuthMethod,
 ) -> bool {
-    !requires_approval || *auth_method == crate::mw::auth::AuthMethod::Session
+    !requires_approval
+        || matches!(
+            auth_method,
+            crate::mw::auth::AuthMethod::Session | crate::mw::auth::AuthMethod::Relay
+        )
 }
 
 #[cfg(test)]
@@ -1023,6 +1027,11 @@ mod tests {
     #[test]
     fn bypasses_for_session_when_approval_is_required() {
         assert!(should_bypass_approval_flow(true, &AuthMethod::Session));
+    }
+
+    #[test]
+    fn bypasses_for_relay_when_approval_is_required() {
+        assert!(should_bypass_approval_flow(true, &AuthMethod::Relay));
     }
 
     #[test]

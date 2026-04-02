@@ -2426,6 +2426,11 @@ mod tests {
     }
 
     #[test]
+    fn relay_auth_bypasses_even_when_required() {
+        assert!(!should_enforce_runtime_approval(true, &AuthMethod::Relay));
+    }
+
+    #[test]
     fn non_session_auth_requires_enforcement_when_required() {
         assert!(should_enforce_runtime_approval(true, &AuthMethod::ApiKey));
         assert!(should_enforce_runtime_approval(
