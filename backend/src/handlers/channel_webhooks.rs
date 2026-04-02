@@ -314,7 +314,7 @@ async fn handle_webhook_inner(
             crate::services::rbac_helpers::build_rbac_claim_data(&state.db, &bot.user_id, scope)
                 .await
                 .ok();
-        crate::crypto::jwt::generate_access_token(
+        crate::crypto::jwt::generate_relay_access_token(
             &state.jwt_keys,
             &state.config,
             &user_uuid,
