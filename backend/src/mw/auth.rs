@@ -24,6 +24,9 @@ pub enum AuthMethod {
     Session,
     /// Bearer access token (JWT)
     AccessToken,
+    /// Channel relay callback token (JWT with `relay: true`).
+    /// Bypasses approval enforcement like Session.
+    Relay,
     /// X-API-Key header
     ApiKey,
     /// Service account client credentials
@@ -78,6 +81,7 @@ impl AuthUser {
             AuthMethod::Delegated => Some("delegated"),
             AuthMethod::ServiceAccount => Some("service_account"),
             AuthMethod::AccessToken => Some("access_token"),
+            AuthMethod::Relay => None, // Relay tokens bypass approval like sessions
             AuthMethod::Session => None,
         }
     }
@@ -95,13 +99,14 @@ impl AuthUser {
     }
 
     pub fn can_use_rest_proxy(&self) -> bool {
-        matches!(self.auth_method, AuthMethod::Session)
+        matches!(self.auth_method, AuthMethod::Session | AuthMethod::Relay)
             || self.has_scope(PROXY_SCOPE)
             || self.has_scope(WIDE_PROXY_SCOPE)
     }
 
     pub fn can_use_llm_proxy(&self) -> bool {
-        matches!(self.auth_method, AuthMethod::Session) || scope_allows_llm_proxy(&self.scope)
+        matches!(self.auth_method, AuthMethod::Session | AuthMethod::Relay)
+            || scope_allows_llm_proxy(&self.scope)
     }
 
     pub fn ensure_rest_proxy_access(&self) -> Result<(), AppError> {
@@ -318,6 +323,8 @@ impl FromRequestParts<AppState> for AuthUser {
 
                     let auth_method = if claims.act.is_some() {
                         AuthMethod::Delegated
+                    } else if claims.relay == Some(true) {
+                        AuthMethod::Relay
                     } else {
                         AuthMethod::AccessToken
                     };

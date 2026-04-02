@@ -1467,7 +1467,9 @@ fn should_enforce_runtime_approval(
     requires_approval: bool,
     auth_method: &crate::mw::auth::AuthMethod,
 ) -> bool {
-    requires_approval && *auth_method != crate::mw::auth::AuthMethod::Session
+    requires_approval
+        && *auth_method != crate::mw::auth::AuthMethod::Session
+        && *auth_method != crate::mw::auth::AuthMethod::Relay
 }
 
 /// Convenience alias so existing call-sites compile without renaming.
@@ -2421,6 +2423,11 @@ mod tests {
     #[test]
     fn session_auth_bypasses_even_when_required() {
         assert!(!should_enforce_runtime_approval(true, &AuthMethod::Session));
+    }
+
+    #[test]
+    fn relay_auth_bypasses_even_when_required() {
+        assert!(!should_enforce_runtime_approval(true, &AuthMethod::Relay));
     }
 
     #[test]

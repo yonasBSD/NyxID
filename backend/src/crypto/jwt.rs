@@ -63,6 +63,11 @@ pub struct Claims {
     /// True if this token was issued to a service account.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sa: Option<bool>,
+    /// True if this token was issued for channel relay callbacks.
+    /// Relay tokens act on behalf of the bot owner and bypass approval
+    /// enforcement (same as session auth).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<bool>,
 }
 
 /// Actor claim per RFC 8693 Section 4.1.
@@ -233,6 +238,7 @@ pub fn generate_access_token(
         act: None,
         delegated: None,
         sa: None,
+        relay: None,
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -240,6 +246,46 @@ pub fn generate_access_token(
 
     encode(&header, &claims, &keys.encoding)
         .map_err(|e| AppError::Internal(format!("Failed to encode access token: {e}")))
+}
+
+/// Generate an access token for channel relay callbacks.
+///
+/// Same as [`generate_access_token`] but sets `relay: true` so the auth
+/// middleware can recognize it and bypass approval enforcement (the bot
+/// owner implicitly approved by configuring the relay route).
+pub fn generate_relay_access_token(
+    keys: &JwtKeys,
+    config: &AppConfig,
+    user_id: &Uuid,
+    scope: &str,
+    rbac: Option<&RbacClaimData>,
+) -> Result<String, AppError> {
+    let now = Utc::now().timestamp();
+
+    let claims = Claims {
+        sub: user_id.to_string(),
+        iss: config.jwt_issuer.clone(),
+        aud: config.base_url.clone(),
+        exp: now + config.jwt_access_ttl_secs,
+        iat: now,
+        jti: Uuid::new_v4().to_string(),
+        scope: scope.to_string(),
+        token_type: "access".to_string(),
+        roles: rbac.and_then(|r| r.roles.clone()),
+        groups: rbac.and_then(|r| r.groups.clone()),
+        permissions: rbac.and_then(|r| r.permissions.clone()),
+        sid: rbac.and_then(|r| r.sid.clone()),
+        act: None,
+        delegated: None,
+        sa: None,
+        relay: Some(true),
+    };
+
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some(keys.kid.clone());
+
+    encode(&header, &claims, &keys.encoding)
+        .map_err(|e| AppError::Internal(format!("Failed to encode relay access token: {e}")))
 }
 
 /// Generate a refresh token for the given user.
@@ -267,6 +313,7 @@ pub fn generate_refresh_token(
         act: None,
         delegated: None,
         sa: None,
+        relay: None,
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -306,6 +353,7 @@ pub fn reissue_refresh_token(
         act: None,
         delegated: None,
         sa: None,
+        relay: None,
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -358,6 +406,7 @@ pub fn generate_delegated_access_token(
         }),
         delegated: Some(true),
         sa: None,
+        relay: None,
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -488,6 +537,7 @@ pub fn generate_service_account_token(
         act: None,
         delegated: None,
         sa: Some(true),
+        relay: None,
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -684,6 +734,7 @@ mod tests {
             act: None,
             delegated: None,
             sa: None,
+            relay: None,
         };
 
         let mut header = Header::new(Algorithm::RS256);
@@ -781,6 +832,7 @@ mod tests {
             act: None,
             delegated: None,
             sa: None,
+            relay: None,
         };
         let json = serde_json::to_string(&claims).unwrap();
         let restored: Claims = serde_json::from_str(&json).unwrap();
