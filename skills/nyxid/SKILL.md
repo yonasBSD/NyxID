@@ -43,20 +43,24 @@ The CLI stores tokens at `~/.nyxid/` and auto-refreshes them. The base URL is sa
 
 ## Updating
 
-To update the NyxID CLI to the latest version, re-run the installer:
+Update the CLI and all installed AI skills in one command:
+
+```bash
+nyxid update                                 # update CLI binary + all installed skills
+nyxid update --skills-only                   # update only installed skills (skip CLI rebuild)
+```
+
+To update a specific tool's skill only:
+
+```bash
+nyxid ai-setup update --tool claude-code     # update a specific tool
+```
+
+If `nyxid update` is not recognized, your CLI predates this command. Update it first with:
 
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/tools/install.sh)"
 ```
-
-To update the installed AI skill (fetches latest skill + playbook from server):
-
-```bash
-nyxid ai-setup update                        # update all installed tools
-nyxid ai-setup update --tool claude-code     # update a specific tool
-```
-
-If a command fails with an unrecognized flag or missing subcommand, the CLI is likely outdated. Reinstall it first.
 
 ## Discover Services
 
