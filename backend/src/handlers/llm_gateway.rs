@@ -302,14 +302,28 @@ pub async fn gateway_request(
     // Get the translator
     let translator = llm_gateway_service::get_translator(&provider_slug);
 
-    // Resolve proxy target
-    let target = proxy_service::resolve_proxy_target(
+    // Resolve proxy target: try the new UserService path first (unified keys),
+    // then fall back to the old DownstreamService + UserServiceConnection path.
+    let target = if let Some(resolved) = proxy_service::resolve_proxy_target_from_user_service(
         &state.db,
         &state.encryption_keys,
+        &state.node_ws_manager,
         &user_id_str,
-        &service_id,
+        Some(&provider_slug),
+        Some(&service_id),
     )
-    .await?;
+    .await?
+    {
+        resolved.target
+    } else {
+        proxy_service::resolve_proxy_target(
+            &state.db,
+            &state.encryption_keys,
+            &user_id_str,
+            &service_id,
+        )
+        .await?
+    };
 
     // Check approval if user has it enabled
     check_llm_approval(
