@@ -40,7 +40,7 @@ pub async fn create_binding(
     user_api_key_id: &str,
 ) -> AppResult<AgentServiceBinding> {
     // Validate ownership: api_key must belong to user
-    let _api_key = db
+    let api_key = db
         .collection::<ApiKey>(API_KEYS)
         .find_one(doc! { "_id": api_key_id, "user_id": user_id, "is_active": true })
         .await?
@@ -90,6 +90,21 @@ pub async fn create_binding(
         .insert_one(&binding)
         .await?;
 
+    // If the key has explicit scope (allow_all_services: false), ensure the
+    // newly bound service is in allowed_service_ids so the proxy allows it.
+    if !api_key.allow_all_services
+        && !api_key
+            .allowed_service_ids
+            .contains(&user_service_id.to_string())
+    {
+        db.collection::<ApiKey>(API_KEYS)
+            .update_one(
+                doc! { "_id": api_key_id },
+                doc! { "$addToSet": { "allowed_service_ids": user_service_id } },
+            )
+            .await?;
+    }
+
     Ok(binding)
 }
 
@@ -124,8 +139,7 @@ pub async fn delete_binding(
     api_key_id: &str,
     binding_id: &str,
 ) -> AppResult<()> {
-    // Look up the binding first to get the service ID for scope sync
-    let _binding = db
+    let binding = db
         .collection::<AgentServiceBinding>(AGENT_BINDINGS)
         .find_one(doc! {
             "_id": binding_id,
@@ -142,6 +156,23 @@ pub async fn delete_binding(
 
     if result.deleted_count == 0 {
         return Err(AppError::NotFound("Binding not found".to_string()));
+    }
+
+    // If the key has explicit scope, remove the service from allowed_service_ids
+    let api_key = db
+        .collection::<ApiKey>(API_KEYS)
+        .find_one(doc! { "_id": api_key_id })
+        .await?;
+
+    if let Some(key) = api_key
+        && !key.allow_all_services
+    {
+        db.collection::<ApiKey>(API_KEYS)
+            .update_one(
+                doc! { "_id": api_key_id },
+                doc! { "$pull": { "allowed_service_ids": &binding.user_service_id } },
+            )
+            .await?;
     }
 
     Ok(())

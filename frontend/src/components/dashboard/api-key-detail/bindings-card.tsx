@@ -156,8 +156,17 @@ export function BindingsCard({
             checked={allowAllServices}
             disabled={updateApiKey.isPending}
             onCheckedChange={(checked) => {
+              // When restricting, seed allowed_service_ids from current bindings
+              // so the agent doesn't lose access to already-bound services.
+              const boundIds = checked
+                ? undefined
+                : (bindings ?? []).map((b) => b.user_service_id);
               updateApiKey.mutate(
-                { keyId, allow_all_services: checked },
+                {
+                  keyId,
+                  allow_all_services: checked,
+                  allowed_service_ids: boundIds,
+                },
                 {
                   onSuccess: () =>
                     toast.success(
