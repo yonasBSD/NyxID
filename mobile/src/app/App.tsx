@@ -30,6 +30,7 @@ import {
   PushSyncSignal,
   setPushSyncHandler,
 } from "../lib/notifications/pushNotifications";
+import { startPushPolling } from "../lib/notifications/pushPollingSignal";
 import { AuthSessionProvider } from "../features/auth/AuthSessionContext";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import type { BottomNavV2Tab } from "../components/BottomNavV2";
@@ -41,6 +42,7 @@ function refreshQueryCacheFromPushSignal(signal: PushSyncSignal) {
   void queryClient.invalidateQueries({ queryKey: ["challenges"] });
   void queryClient.invalidateQueries({ queryKey: ["approvals"] });
   void queryClient.invalidateQueries({ queryKey: ["challenge", signal.challengeId] });
+  startPushPolling();
 }
 
 function getActiveRouteName(
@@ -73,12 +75,12 @@ export default function App() {
     if (!pendingChallengeId) return;
 
     const rootState = navigationRef.getRootState();
-    if (!rootState?.routeNames?.includes("ActivityDetail")) {
+    if (!rootState?.routeNames?.includes("Activity")) {
       return;
     }
 
     pendingChallengeFromTapRef.current = null;
-    navigationRef.navigate("ActivityDetail", { challengeId: pendingChallengeId });
+    navigationRef.navigate("Activity", { challengeId: pendingChallengeId });
   }, [navigationRef]);
 
   const [fontsLoaded] = useFonts({

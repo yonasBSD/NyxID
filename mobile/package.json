@@ -7,6 +7,7 @@
     "start": "EXPO_PUBLIC_DEV_MODE=true expo start",
     "android": "EXPO_PUBLIC_DEV_MODE=true expo run:android",
     "ios": "EXPO_PUBLIC_DEV_MODE=true expo run:ios",
+    "ios:prod": "EXPO_PUBLIC_API_BASE_URL=https://nyx-api.chrono-ai.fun/api/v1 expo run:ios",
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
     "bump:android:build": "sh scripts/bump-android-build.sh",

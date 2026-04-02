@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { StyleSheet, Text, View } from "react-native";
+import { Pressable, StyleSheet, Text, View } from "react-native";
 import Animated, {
   useSharedValue,
   useAnimatedStyle,
@@ -8,14 +8,15 @@ import Animated, {
   runOnJS,
 } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import Svg, { Path, Circle } from "react-native-svg";
 import { mobileTheme } from "../theme/mobileTheme";
+import { radius } from "../theme/designTokens";
 
 export type ToastKind = "success" | "error" | "info";
 
 export type ToastState = {
   message: string;
   kind: ToastKind;
+  action?: { label: string; onPress: () => void };
 };
 
 type Props = {
@@ -29,40 +30,6 @@ const ACCENT: Record<ToastKind, string> = {
   success: "#34d399",
   error: "#f87171",
   info: "#60a5fa",
-};
-
-function SuccessIcon() {
-  return (
-    <Svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke={ACCENT.success} strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round">
-      <Path d="M20 6L9 17l-5-5" />
-    </Svg>
-  );
-}
-
-function ErrorIcon() {
-  return (
-    <Svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke={ACCENT.error} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-      <Circle cx={12} cy={12} r={10} />
-      <Path d="M15 9l-6 6" />
-      <Path d="M9 9l6 6" />
-    </Svg>
-  );
-}
-
-function InfoIcon() {
-  return (
-    <Svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke={ACCENT.info} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-      <Circle cx={12} cy={12} r={10} />
-      <Path d="M12 16v-4" />
-      <Path d="M12 8h.01" />
-    </Svg>
-  );
-}
-
-const ICONS: Record<ToastKind, () => React.JSX.Element> = {
-  success: SuccessIcon,
-  error: ErrorIcon,
-  info: InfoIcon,
 };
 
 export function ToastOverlay({ toast }: Props) {
@@ -96,19 +63,23 @@ export function ToastOverlay({ toast }: Props) {
   if (!visibleToast) return null;
 
   const kind = visibleToast.kind;
-  const Icon = ICONS[kind];
+  const action = visibleToast.action;
 
   return (
-    <View style={[styles.wrap, { top: insets.top + 8 }]} pointerEvents="none">
-      <Animated.View
-        style={[
-          styles.toast,
-          { borderLeftColor: ACCENT[kind] },
-          animatedStyle,
-        ]}
-      >
-        <Icon />
-        <Text style={styles.text}>{visibleToast.message}</Text>
+    <View style={[styles.wrap, { top: insets.top + 14 }]} pointerEvents="box-none">
+      <Animated.View style={[styles.toast, animatedStyle]}>
+        <View style={[styles.dot, { backgroundColor: ACCENT[kind] }]} />
+        <Text style={styles.text} numberOfLines={1}>
+          {visibleToast.message}
+        </Text>
+        {action && (
+          <>
+            <View style={styles.divider} />
+            <Pressable onPress={action.onPress} hitSlop={8}>
+              <Text style={styles.actionText}>{action.label}</Text>
+            </Pressable>
+          </>
+        )}
       </Animated.View>
     </View>
   );
@@ -120,27 +91,45 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     alignItems: "center",
-    paddingHorizontal: 20,
     zIndex: 10000,
   },
   toast: {
-    width: "100%",
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
-    borderRadius: 10,
+    borderRadius: radius.pill,
     backgroundColor: mobileTheme.card,
     borderWidth: 1,
-    borderColor: mobileTheme.border,
-    borderLeftWidth: 3,
-    paddingHorizontal: 14,
+    borderColor: "rgba(255,255,255,0.08)",
+    paddingHorizontal: 16,
     paddingVertical: 12,
+    maxWidth: "85%",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 12,
+    elevation: 8,
+  },
+  dot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
   },
   text: {
     flex: 1,
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: "500",
     lineHeight: 18,
+    color: mobileTheme.textPrimary,
+  },
+  divider: {
+    width: 1,
+    height: 16,
+    backgroundColor: "rgba(255,255,255,0.15)",
+  },
+  actionText: {
+    fontSize: 14,
+    fontWeight: "500",
     color: mobileTheme.textPrimary,
   },
 });

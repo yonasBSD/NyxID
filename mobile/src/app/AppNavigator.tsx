@@ -16,7 +16,7 @@ import { spacing } from "../theme/designTokens";
 
 export type RootStackParamList = {
   Auth: undefined;
-  Activity: undefined;
+  Activity: { challengeId?: string } | undefined;
   ActivityDetail: { challengeId: string };
   AccountSettings: undefined;
   TermsOfService: undefined;

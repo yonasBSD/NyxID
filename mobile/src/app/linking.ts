@@ -149,13 +149,28 @@ export function extractChallengeIdFromNotificationResponse(
   return extractChallengeIdFromUrl(url);
 }
 
+/**
+ * Transform challenge deep-link URLs (nyxid://challenge/{id}) into activity
+ * URLs with a challengeId query param so React Navigation routes to the
+ * Activity screen which opens the bottom sheet.
+ */
+function rewriteChallengeUrl(url: string): string {
+  const challengeId = extractChallengeIdFromUrl(url);
+  if (challengeId) {
+    return `nyxid://activity?challengeId=${encodeURIComponent(challengeId)}`;
+  }
+  return url;
+}
+
 export const appLinking: LinkingOptions<RootStackParamList> = {
   prefixes: ["nyxid://"],
   config: {
     screens: {
       Auth: "auth",
-      Activity: "activity",
-      ActivityDetail: "challenge/:challengeId",
+      Activity: {
+        path: "activity",
+        parse: { challengeId: String },
+      },
       AccountSettings: "account",
       TermsOfService: "terms",
       PrivacyPolicy: "privacy",
@@ -164,14 +179,15 @@ export const appLinking: LinkingOptions<RootStackParamList> = {
   async getInitialURL() {
     try {
       const directUrl = await Linking.getInitialURL();
-      if (directUrl) return directUrl;
+      if (directUrl) return rewriteChallengeUrl(directUrl);
     } catch (error) {
       if (__DEV__) console.warn("[linking] getInitialURL failed", error);
     }
 
     try {
       const lastNotificationResponse = await Notifications.getLastNotificationResponseAsync();
-      return extractUrlFromNotificationResponse(lastNotificationResponse);
+      const url = extractUrlFromNotificationResponse(lastNotificationResponse);
+      return url ? rewriteChallengeUrl(url) : null;
     } catch (error) {
       if (__DEV__) {
         console.warn("[linking] getLastNotificationResponseAsync failed", error);
@@ -185,7 +201,7 @@ export const appLinking: LinkingOptions<RootStackParamList> = {
 
     try {
       linkingSubscription = Linking.addEventListener("url", ({ url }) => {
-        listener(url);
+        listener(rewriteChallengeUrl(url));
       });
     } catch (error) {
       if (__DEV__) console.warn("[linking] url subscription failed", error);
@@ -195,7 +211,7 @@ export const appLinking: LinkingOptions<RootStackParamList> = {
       notificationSubscription =
         Notifications.addNotificationResponseReceivedListener((response) => {
           const url = extractUrlFromNotificationResponse(response);
-          if (url) listener(url);
+          if (url) listener(rewriteChallengeUrl(url));
         });
     } catch (error) {
       if (__DEV__) console.warn("[linking] notification subscription failed", error);

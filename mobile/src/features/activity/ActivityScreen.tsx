@@ -6,6 +6,7 @@ import {
   Modal,
   Pressable,
   RefreshControl,
+  ScrollView,
   SectionList,
   StyleSheet,
   Text,
@@ -23,7 +24,7 @@ import {
   Gesture,
   GestureDetector,
 } from "react-native-gesture-handler";
-import { useNavigation } from "@react-navigation/native";
+import { useNavigation, useRoute, type RouteProp } from "@react-navigation/native";
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ScreenContainer } from "../../components/ScreenContainer";
@@ -48,6 +49,7 @@ import { radius, spacing, typeScale } from "../../theme/designTokens";
 import type { RootStackParamList } from "../../app/AppNavigator";
 import type { ActivitySegment } from "./activityTypes";
 import type { ChallengeDetail, ApprovalItem } from "../../lib/api/types";
+import { usePushPollingActive } from "../../lib/notifications/pushPollingSignal";
 
 type Nav = NativeStackNavigationProp<RootStackParamList>;
 
@@ -99,10 +101,16 @@ function ChallengeDetailSheet({
   challenge,
   grantDurationLabel,
   onClose,
+  onApprove,
+  onDeny,
+  isMutating,
 }: {
   challenge: ChallengeDetail | null;
   grantDurationLabel: string;
   onClose: () => void;
+  onApprove?: (id: string) => void;
+  onDeny?: (id: string) => void;
+  isMutating?: boolean;
 }) {
   const [modalVisible, setModalVisible] = useState(false);
   const isDismissing = useRef(false);
@@ -211,7 +219,7 @@ function ChallengeDetailSheet({
             </Pressable>
           </View>
 
-          <View style={sheetStyles.sheetBody}>
+          <ScrollView style={sheetStyles.sheetBody} contentContainerStyle={sheetStyles.sheetBodyContent}>
             <View style={sheetStyles.detailCard}>
               <Text style={flowStyles.cardTitle}>Request Context</Text>
               <DetailRow label="Action" value={shown.action} />
@@ -223,7 +231,29 @@ function ChallengeDetailSheet({
               {isGrantMode && <DetailRow label="Grant Duration" value={grantDurationLabel} />}
               <DetailRow label="Location" value={shown.request_context.location} isLast />
             </View>
-          </View>
+
+            {actionState.reason ? (
+              <View style={sheetStyles.stateNotice}>
+                <Text style={sheetStyles.stateNoticeText}>{actionState.reason}</Text>
+              </View>
+            ) : null}
+
+            {actionState.canDecide && onApprove && onDeny && (
+              <View style={flowStyles.actionWrap}>
+                <PrimaryButton
+                  label="Approve"
+                  onPress={() => onApprove(shown.id)}
+                  disabled={isMutating}
+                />
+                <PrimaryButton
+                  label="Deny"
+                  kind="danger"
+                  onPress={() => onDeny(shown.id)}
+                  disabled={isMutating}
+                />
+              </View>
+            )}
+          </ScrollView>
         </Animated.View>
       </GestureHandlerRootView>
     </Modal>
@@ -232,8 +262,10 @@ function ChallengeDetailSheet({
 
 export function ActivityScreen() {
   const navigation = useNavigation<Nav>();
+  const route = useRoute<RouteProp<RootStackParamList, "Activity">>();
   const queryClient = useQueryClient();
   const { isConnected } = useNetworkStatus();
+  const isPolling = usePushPollingActive();
   const [activeSegment, setActiveSegment] = useState<ActivitySegment>("pending");
   const [toast, setToast] = useState<ToastState | null>(null);
   const [mutatingIds, setMutatingIds] = useState<Set<string>>(new Set());
@@ -249,11 +281,13 @@ export function ActivityScreen() {
   const pendingQuery = useQuery({
     queryKey: ["challenges", "pending"],
     queryFn: mobileApi.getChallenges,
+    refetchInterval: isPolling ? 3000 : false,
   });
 
   const approvalsQuery = useQuery({
     queryKey: ["approvals"],
     queryFn: mobileApi.getApprovals,
+    refetchInterval: isPolling ? 3000 : false,
   });
 
   const settingsQuery = useQuery({
@@ -274,6 +308,29 @@ export function ActivityScreen() {
   const pendingCount = pendingItems.length;
   const activeCount = activeItems.length;
 
+  // --- Deep-link / push-notification: auto-open sheet for a specific challenge ---
+  const deepLinkChallengeId = route.params?.challengeId;
+  const deepLinkConsumedRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!deepLinkChallengeId || deepLinkChallengeId === deepLinkConsumedRef.current) return;
+    deepLinkConsumedRef.current = deepLinkChallengeId;
+    navigation.setParams({ challengeId: undefined });
+
+    const found = pendingItems.find((c) => c.id === deepLinkChallengeId);
+    if (found) {
+      setDetailChallenge(found);
+      return;
+    }
+
+    // Not in local cache yet — fetch directly
+    mobileApi.getChallengeById(deepLinkChallengeId).then((challenge) => {
+      setDetailChallenge(challenge);
+    }).catch(() => {
+      setToast({ message: "Challenge not found", kind: "error" });
+    });
+  }, [deepLinkChallengeId, pendingItems, navigation]);
+
   // --- Mutations ---
   const decideMutation = useMutation({
     mutationFn: async ({ id, decision }: { id: string; decision: "APPROVE" | "DENY" }) => {
@@ -288,6 +345,7 @@ export function ActivityScreen() {
       void queryClient.invalidateQueries({ queryKey: ["challenges"] });
       void queryClient.invalidateQueries({ queryKey: ["approvals"] });
       setToast({ message: decision === "APPROVE" ? "Approved" : "Denied", kind: "success" });
+      setDetailChallenge(null);
       if (decision === "APPROVE") setActiveSegment("active");
     },
     onError: (error, { id }) => {
@@ -471,6 +529,9 @@ export function ActivityScreen() {
         challenge={detailChallenge}
         grantDurationLabel={grantDurationLabel}
         onClose={() => setDetailChallenge(null)}
+        onApprove={(id) => decideMutation.mutate({ id, decision: "APPROVE" })}
+        onDeny={(id) => decideMutation.mutate({ id, decision: "DENY" })}
+        isMutating={mutatingIds.has(detailChallenge?.id ?? "")}
       />
       <ToastOverlay toast={toast} bottom={64} />
     </ScreenContainer>
@@ -586,6 +647,22 @@ const sheetStyles = StyleSheet.create({
     flex: 1,
     paddingHorizontal: spacing.xxl,
     paddingTop: spacing.xl,
+  },
+  sheetBodyContent: {
+    paddingBottom: spacing.huge,
+    gap: spacing.lg,
+  },
+  stateNotice: {
+    borderRadius: radius.sm,
+    backgroundColor: "rgba(245,158,11,0.1)",
+    borderWidth: 1,
+    borderColor: "rgba(245,158,11,0.25)",
+    padding: spacing.lg,
+  },
+  stateNoticeText: {
+    fontSize: 13,
+    color: mobileTheme.warning,
+    lineHeight: 20,
   },
   detailCard: {
     borderRadius: radius.md,
