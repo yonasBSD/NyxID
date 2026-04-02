@@ -13,6 +13,7 @@ import { DashboardLayout } from "@/components/layout/dashboard-layout";
 import { useAuthStore } from "@/stores/auth-store";
 
 import {
+  LandingPage,
   AiSetupPage,
   LoginPage,
   RegisterPage,
@@ -87,7 +88,7 @@ const authLayout = createRoute({
         window.location.assign(returnTo);
         return;
       }
-      throw redirect({ to: "/" });
+      throw redirect({ to: "/dashboard" });
     }
   },
   component: AuthLayout,
@@ -171,8 +172,20 @@ const dashboardLayout = createRoute({
   component: DashboardLayout,
 });
 
-const dashboardIndexRoute = createRoute({
+const landingRoute = createRoute({
   path: "/",
+  getParentRoute: () => rootRoute,
+  beforeLoad: () => {
+    const { isAuthenticated, isLoading } = useAuthStore.getState();
+    if (isAuthenticated && !isLoading) {
+      throw redirect({ to: "/dashboard" });
+    }
+  },
+  component: LandingPage,
+});
+
+const dashboardIndexRoute = createRoute({
+  path: "/dashboard",
   getParentRoute: () => dashboardLayout,
   component: DashboardPage,
 });
@@ -393,7 +406,7 @@ const adminLayout = createRoute({
       throw redirect({ to: "/login" });
     }
     if (!isLoading && (!user || !user.is_admin)) {
-      throw redirect({ to: "/" });
+      throw redirect({ to: "/dashboard" });
     }
   },
   component: () => <Outlet />,
@@ -460,6 +473,7 @@ const adminAuditLogRoute = createRoute({
 });
 
 const routeTree = rootRoute.addChildren([
+  landingRoute,
   authLayout.addChildren([loginRoute, registerRoute]),
   oauthConsentRoute,
   oauthErrorRoute,

@@ -26,7 +26,7 @@ import { PortalMarkLogo } from "@/components/shared/portal-mark-logo";
 
 /* ── Navigation Config ── */
 const NAV_ITEMS = [
-  { to: "/", icon: LayoutDashboard, label: "Dashboard" },
+  { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard" },
   { to: "/keys", icon: Cable, label: "AI Services" },
   { to: "/nodes", icon: HardDrive, label: "Nodes" },
   { to: "/channel-bots", icon: Radio, label: "Channel Bots" },
