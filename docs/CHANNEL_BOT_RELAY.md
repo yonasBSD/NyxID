@@ -387,6 +387,29 @@ classDiagram
 | **Lark** | App ID + App Secret | HMAC-SHA256 on `X-Lark-Signature` header | `url_verification` event -> echo `challenge` | `POST /im/v1/messages` with tenant access token |
 | **Feishu** | App ID + App Secret (same as Lark) | Same as Lark | Same as Lark | Same as Lark, different base URL (`open.feishu.cn`) |
 
+### Adding New Platforms
+
+To add a new platform (e.g. WhatsApp, Slack, LINE), create a single adapter file implementing `PlatformAdapter`:
+
+1. `backend/src/services/channel_adapters/whatsapp.rs` (~300 lines)
+2. Register in `channel_adapters/mod.rs` and `resolve_adapter()`
+3. Add a webhook route in `routes.rs`
+
+No model changes, no callback payload changes, no frontend changes needed. The agent receives the same normalized payload regardless of platform.
+
+### Why no generic/passthrough adapter
+
+A generic adapter that skips normalization and forwards raw webhooks was considered and rejected:
+
+- **Verification**: Each platform has a unique webhook signature scheme (HMAC, Ed25519, secret header). A generic adapter can't verify unknown platforms, so webhooks would either be unauthenticated (security risk) or require the user to implement verification logic somewhere.
+- **Normalization**: With `content.text: null` and everything in `raw_platform_data`, the agent must parse every platform's JSON format itself -- defeating the purpose of the relay.
+- **Replies**: NyxID needs to know how to call each platform's send API (different URLs, auth schemes, body formats). A generic adapter can't send replies, so the agent would need direct platform API access anyway.
+- **User experience**: Setting up a "generic" bot would require the user to understand webhook verification, raw payload formats, and reply mechanics for their platform. At that point they're better off receiving webhooks directly without NyxID in the middle.
+
+The `raw_platform_data` field on the callback payload serves the advanced use case: agents that need platform-specific features (Telegram inline keyboards, Discord embeds, Lark cards) can read it alongside the normalized fields. But the adapter still handles verification, parsing, and reply delivery.
+
+**Bottom line**: Each supported platform gets a dedicated adapter (~300 lines). The cost is low, the user experience is complete (register bot, configure route, done), and agents get both normalized and raw data.
+
 ---
 
 ## Callback Contract
