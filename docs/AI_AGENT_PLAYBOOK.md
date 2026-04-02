@@ -1972,8 +1972,9 @@ nyxid api-key show <ID>                                # Full details with bindi
 nyxid api-key rotate <ID>                              # Rotate
 nyxid api-key delete <ID>                              # Delete
 
-# Service bindings (override which credential the agent uses for a service)
-nyxid api-key bind <ID> --service <SLUG> --credential <LABEL>
+# Service bindings (credential auto-resolved from service)
+nyxid api-key bind <ID> --service <SLUG>
+nyxid api-key bind <ID> --service <SLUG> --credential <LABEL>  # explicit override
 
 # By default, agents access all services with default credentials.
 # To restrict to only bound services:

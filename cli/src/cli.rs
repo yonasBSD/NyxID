@@ -613,16 +613,16 @@ pub enum ApiKeyCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
-    /// Bind a credential to an API key for a specific service
+    /// Bind a service to an agent key (uses the service's credential automatically)
     Bind {
         /// API key ID or name
         id: String,
         /// Service slug
         #[arg(long)]
         service: String,
-        /// External credential label
+        /// External credential label (auto-resolved from service if omitted)
         #[arg(long)]
-        credential: String,
+        credential: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },

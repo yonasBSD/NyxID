@@ -258,8 +258,9 @@ nyxid api-key show <ID_OR_NAME> --output json
 nyxid api-key rotate <ID_OR_NAME>
 nyxid api-key delete <ID_OR_NAME> --yes
 
-# Service bindings (override which credential the agent uses for a service)
-nyxid api-key bind <ID_OR_NAME> --service <SERVICE_SLUG> --credential <CREDENTIAL_LABEL>
+# Service bindings (credential auto-resolved from service)
+nyxid api-key bind <ID_OR_NAME> --service <SERVICE_SLUG>
+nyxid api-key bind <ID_OR_NAME> --service <SLUG> --credential <LABEL>  # explicit override
 
 # By default, agents can access all services with default credentials.
 # Bindings override which credential is used for specific services.
