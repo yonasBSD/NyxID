@@ -4,11 +4,13 @@ import {
   useCreateBinding,
   useDeleteBinding,
 } from "@/hooks/use-agent-bindings";
+import { useUpdateApiKey } from "@/hooks/use-api-keys";
 import { useKeys } from "@/hooks/use-keys";
 import { ApiError } from "@/lib/api-client";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import {
   Card,
   CardContent,
@@ -37,13 +39,16 @@ import type { AgentServiceBinding } from "@/types/keys";
 
 export function BindingsCard({
   keyId,
+  allowAllServices,
 }: {
   readonly keyId: string;
+  readonly allowAllServices: boolean;
 }) {
   const { data: bindings, isLoading } = useAgentBindings(keyId);
   const { data: allKeys } = useKeys();
   const createBinding = useCreateBinding();
   const deleteBinding = useDeleteBinding();
+  const updateApiKey = useUpdateApiKey();
   const [adding, setAdding] = useState(false);
   const [selectedServiceId, setSelectedServiceId] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<AgentServiceBinding | null>(
@@ -129,12 +134,48 @@ export function BindingsCard({
           </Button>
         </div>
         <CardDescription>
-          Override which credential this agent uses for specific services.
-          Without a binding, the service's default credential is used.
-          The agent can access all services by default.
+          {allowAllServices
+            ? "This agent can access all services. Add bindings to override credentials for specific services."
+            : "This agent can only access services listed below."}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
+        <div className="flex items-center justify-between rounded-lg border border-border p-3">
+          <div className="space-y-0.5">
+            <Label htmlFor="allow-all-toggle" className="text-sm font-medium">
+              Allow all services
+            </Label>
+            <p className="text-xs text-muted-foreground">
+              {allowAllServices
+                ? "Agent uses default credentials; bindings are overrides"
+                : "Agent can only access services with bindings below"}
+            </p>
+          </div>
+          <Switch
+            id="allow-all-toggle"
+            checked={allowAllServices}
+            disabled={updateApiKey.isPending}
+            onCheckedChange={(checked) => {
+              updateApiKey.mutate(
+                { keyId, allow_all_services: checked },
+                {
+                  onSuccess: () =>
+                    toast.success(
+                      checked
+                        ? "Agent can now access all services"
+                        : "Agent restricted to bound services only",
+                    ),
+                  onError: (err) =>
+                    toast.error(
+                      err instanceof ApiError
+                        ? err.message
+                        : "Failed to update",
+                    ),
+                },
+              );
+            }}
+          />
+        </div>
         {adding && (
           <div className="rounded-lg border border-border p-3 space-y-3">
             <div className="space-y-1.5">

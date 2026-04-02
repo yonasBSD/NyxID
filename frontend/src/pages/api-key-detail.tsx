@@ -123,7 +123,7 @@ export function ApiKeyDetailPage() {
           rateLimitBurst={apiKey.rate_limit_burst}
         />
 
-        <BindingsCard keyId={apiKey.id} />
+        <BindingsCard keyId={apiKey.id} allowAllServices={apiKey.allow_all_services} />
         <UsageStatsCard keyId={apiKey.id} />
       </div>
 
