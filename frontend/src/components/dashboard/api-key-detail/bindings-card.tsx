@@ -129,8 +129,9 @@ export function BindingsCard({
           </Button>
         </div>
         <CardDescription>
-          Choose which AI services this agent can access. The service's
-          credential is used automatically.
+          Override which credential this agent uses for specific services.
+          Without a binding, the service's default credential is used.
+          The agent can access all services by default.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -212,8 +213,8 @@ export function BindingsCard({
           </div>
         ) : (
           <p className="text-xs text-muted-foreground">
-            No service bindings. Add AI services to control which services this
-            agent can access.
+            No credential overrides. This agent uses default credentials for
+            all services.
           </p>
         )}
       </CardContent>

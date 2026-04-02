@@ -90,10 +90,6 @@ pub async fn create_binding(
         .insert_one(&binding)
         .await?;
 
-    // Auto-sync scope: add service to allowed_service_ids and switch to
-    // explicit scope if this is the first binding.
-    sync_scope_after_add(db, api_key_id, user_service_id).await?;
-
     Ok(binding)
 }
 
@@ -129,7 +125,7 @@ pub async fn delete_binding(
     binding_id: &str,
 ) -> AppResult<()> {
     // Look up the binding first to get the service ID for scope sync
-    let binding = db
+    let _binding = db
         .collection::<AgentServiceBinding>(AGENT_BINDINGS)
         .find_one(doc! {
             "_id": binding_id,
@@ -146,110 +142,6 @@ pub async fn delete_binding(
 
     if result.deleted_count == 0 {
         return Err(AppError::NotFound("Binding not found".to_string()));
-    }
-
-    // Auto-sync scope: remove service from allowed_service_ids.
-    // If no bindings remain, revert to allow_all_services.
-    sync_scope_after_remove(db, api_key_id, &binding.user_service_id).await?;
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Scope auto-sync helpers
-// ---------------------------------------------------------------------------
-
-/// After adding a binding, ensure the service is in `allowed_service_ids`
-/// and switch from `allow_all_services` to explicit scope.
-async fn sync_scope_after_add(
-    db: &mongodb::Database,
-    api_key_id: &str,
-    user_service_id: &str,
-) -> AppResult<()> {
-    let api_key = db
-        .collection::<ApiKey>(API_KEYS)
-        .find_one(doc! { "_id": api_key_id })
-        .await?;
-
-    let Some(key) = api_key else {
-        return Ok(());
-    };
-
-    if key.allow_all_services {
-        // First binding: collect all currently bound services + the new one
-        let existing_bindings: Vec<AgentServiceBinding> = db
-            .collection::<AgentServiceBinding>(AGENT_BINDINGS)
-            .find(doc! { "api_key_id": api_key_id })
-            .await?
-            .try_collect()
-            .await?;
-
-        let service_ids: Vec<&str> = existing_bindings
-            .iter()
-            .map(|b| b.user_service_id.as_str())
-            .collect();
-
-        db.collection::<ApiKey>(API_KEYS)
-            .update_one(
-                doc! { "_id": api_key_id },
-                doc! {
-                    "$set": {
-                        "allow_all_services": false,
-                        "allowed_service_ids": &service_ids,
-                    }
-                },
-            )
-            .await?;
-    } else if !key
-        .allowed_service_ids
-        .contains(&user_service_id.to_string())
-    {
-        // Explicit scope: add the new service
-        db.collection::<ApiKey>(API_KEYS)
-            .update_one(
-                doc! { "_id": api_key_id },
-                doc! { "$addToSet": { "allowed_service_ids": user_service_id } },
-            )
-            .await?;
-    }
-
-    Ok(())
-}
-
-/// After removing a binding, remove the service from `allowed_service_ids`.
-/// If no bindings remain, revert to `allow_all_services: true`.
-async fn sync_scope_after_remove(
-    db: &mongodb::Database,
-    api_key_id: &str,
-    user_service_id: &str,
-) -> AppResult<()> {
-    // Check how many bindings remain
-    let remaining = db
-        .collection::<AgentServiceBinding>(AGENT_BINDINGS)
-        .count_documents(doc! { "api_key_id": api_key_id })
-        .await?;
-
-    if remaining == 0 {
-        // No bindings left: revert to allow all
-        db.collection::<ApiKey>(API_KEYS)
-            .update_one(
-                doc! { "_id": api_key_id },
-                doc! {
-                    "$set": {
-                        "allow_all_services": true,
-                        "allowed_service_ids": [],
-                    }
-                },
-            )
-            .await?;
-    } else {
-        // Remove just this service from scope
-        db.collection::<ApiKey>(API_KEYS)
-            .update_one(
-                doc! { "_id": api_key_id },
-                doc! { "$pull": { "allowed_service_ids": user_service_id } },
-            )
-            .await?;
     }
 
     Ok(())
