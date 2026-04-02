@@ -102,8 +102,8 @@ export const mobileApi = {
     const encodedRedirectUri = encodeURIComponent(redirectUri);
     return `${getApiBaseUrl()}/auth/social/${provider}?client=mobile&redirect_uri=${encodedRedirectUri}`;
   },
-  async getChallenges(): Promise<PageResponse<ChallengeDetail>> {
-    return listChallengesRequest();
+  async getChallenges(page = 1, perPage = 20): Promise<PageResponse<ChallengeDetail>> {
+    return listChallengesRequest(page, perPage);
   },
   async getNotificationSettings(): Promise<NotificationSettings> {
     return getNotificationSettingsRequest();
@@ -130,8 +130,8 @@ export const mobileApi = {
       options?.idempotencyKey ?? createIdempotencyKey("decision", challengeId);
     return submitChallengeDecisionRequest(challengeId, decision, durationSec, idempotencyKey);
   },
-  async getApprovals(): Promise<PageResponse<ApprovalItem>> {
-    return listApprovalsRequest();
+  async getApprovals(page = 1, perPage = 20): Promise<PageResponse<ApprovalItem>> {
+    return listApprovalsRequest(page, perPage);
   },
   async getHistory(page = 1, perPage = 20): Promise<PageResponse<ChallengeDetail>> {
     const response = await listApprovalRequestsRequest({ page, per_page: perPage });

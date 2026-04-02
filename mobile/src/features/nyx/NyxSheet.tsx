@@ -27,7 +27,8 @@ import {
 import Svg, { Circle, Path, Defs, LinearGradient, Stop } from "react-native-svg";
 import { useNyxChat, type NyxMessage } from "../../hooks/useNyxChat";
 import { SecureKeyModal } from "../../components/SecureKeyModal";
-import { mobileTheme } from "../../theme/mobileTheme";
+import { useTheme } from "../../theme/ThemeContext";
+import type { ThemeColors } from "../../theme/mobileTheme";
 import { radius } from "../../theme/designTokens";
 
 const SCREEN_HEIGHT = Dimensions.get("window").height;
@@ -49,25 +50,42 @@ const WELCOME_MESSAGE: NyxMessage = {
 
 const SUGGESTED_CHIPS = ["What's pending?", "Show grants", "What is PKCE?"];
 
-function NyxAvatar() {
+function NyxAvatar({ styles }: { styles: ReturnType<typeof createStyles> }) {
   return (
     <View style={styles.avatar}>
       <Svg width={16} height={16} viewBox="0 0 130 130" fill="none">
         <Defs>
-          <LinearGradient id="nav" gradientUnits="userSpaceOnUse" x1="56" y1="62" x2="86" y2="62" gradientTransform="rotate(160 71 62)">
+          <LinearGradient id="ao" gradientUnits="userSpaceOnUse" x1="10" y1="65" x2="120" y2="65">
+            <Stop offset="0" stopColor="#A78BFA" />
+            <Stop offset="0.5" stopColor="#A78BFA" stopOpacity={0} />
+          </LinearGradient>
+          <LinearGradient id="am" gradientUnits="userSpaceOnUse" x1="10" y1="65" x2="120" y2="65" gradientTransform="rotate(120 65 65)">
+            <Stop offset="0" stopColor="#C4B5FD" />
+            <Stop offset="0.5" stopColor="#C4B5FD" stopOpacity={0} />
+          </LinearGradient>
+          <LinearGradient id="ai" gradientUnits="userSpaceOnUse" x1="10" y1="65" x2="120" y2="65" gradientTransform="rotate(240 65 65)">
+            <Stop offset="0" stopColor="#DDD6FE" />
+            <Stop offset="0.5" stopColor="#DDD6FE" stopOpacity={0} />
+          </LinearGradient>
+          <LinearGradient id="av" gradientUnits="userSpaceOnUse" x1="56" y1="62" x2="86" y2="62" gradientTransform="rotate(160 71 62)">
             <Stop offset="0" stopColor="#C4B5FD" />
             <Stop offset="1" stopColor="#7C3AED" />
           </LinearGradient>
         </Defs>
-        <Circle cx={65} cy={65} r={40} fill="none" stroke="rgba(167,139,250,0.3)" strokeWidth={1} />
-        <Path d="M24 0q6 8 6 20 0 12-6 20-14-4-20-12-4-14-2-24 4-4 22-4z" transform="translate(56 42)" fill="url(#nav)" />
+        <Circle cx={65} cy={65} r={55} fill="none" stroke="url(#ao)" strokeWidth={1} />
+        <Circle cx={65} cy={65} r={40} fill="none" stroke="url(#am)" strokeWidth={1} />
+        <Circle cx={65} cy={65} r={25} fill="none" stroke="url(#ai)" strokeWidth={0.8} />
+        <Path d="M24 0q6 8 6 20 0 12-6 20-14-4-20-12-4-14-2-24 4-4 22-4z" transform="translate(56 42)" fill="url(#av)" />
         <Circle cx={31.5} cy={49.5} r={1.5} fill="#C4B5FD" />
+        <Circle cx={39} cy={63} r={1} fill="#C4B5FD" opacity={0.5} />
+        <Circle cx={25} cy={69} r={1} fill="#C4B5FD" opacity={0.31} />
       </Svg>
     </View>
   );
 }
 
-function ChatBubble({ message, onChipPress }: { message: NyxMessage; onChipPress?: (text: string) => void }) {
+function ChatBubble({ message, onChipPress, styles }: { message: NyxMessage; onChipPress?: (text: string) => void; styles: ReturnType<typeof createStyles> }) {
+  const { colors } = useTheme();
   const isBot = message.user._id === "nyx";
   const isWelcome = message._id === "welcome";
 
@@ -78,7 +96,7 @@ function ChatBubble({ message, onChipPress }: { message: NyxMessage; onChipPress
       {isWelcome && (
         <>
           <View style={styles.scopeBadge}>
-            <Svg width={10} height={10} viewBox="0 0 12 12" fill="none" stroke={mobileTheme.primary} strokeWidth={1.5}>
+            <Svg width={10} height={10} viewBox="0 0 12 12" fill="none" stroke={colors.primary} strokeWidth={1.5}>
               <Path d="M6 11s4-2 4-5V3l-4-1.5L2 3v3c0 3 4 5 4 5z" />
             </Svg>
             <Text style={styles.scopeText}>Limited scope · No secrets handled</Text>
@@ -97,6 +115,8 @@ function ChatBubble({ message, onChipPress }: { message: NyxMessage; onChipPress
 }
 
 export function NyxSheet({ isOpen, onClose }: NyxSheetProps) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
   const [modalVisible, setModalVisible] = useState(false);
   const translateY = useSharedValue(SHEET_HEIGHT);
   const inputRef = useRef<string>("");
@@ -199,7 +219,7 @@ export function NyxSheet({ isOpen, onClose }: NyxSheetProps) {
           {/* Header */}
           <View style={styles.header}>
             <View style={styles.headerLeft}>
-              <NyxAvatar />
+              <NyxAvatar styles={styles} />
               <View>
                 <Text style={styles.headerTitle}>Nyx</Text>
                 <Text style={styles.headerStatus}>Online · FAQ & Platform Tasks</Text>
@@ -223,6 +243,7 @@ export function NyxSheet({ isOpen, onClose }: NyxSheetProps) {
                 <ChatBubble
                   message={item}
                   onChipPress={item._id === "welcome" ? handleChipPress : undefined}
+                  styles={styles}
                 />
               )}
               inverted
@@ -238,7 +259,7 @@ export function NyxSheet({ isOpen, onClose }: NyxSheetProps) {
                   ref={textInputRef}
                   style={styles.inputText}
                   placeholder="Ask about approvals, grants, or features..."
-                  placeholderTextColor={mobileTheme.textMuted}
+                  placeholderTextColor={colors.textMuted}
                   onChangeText={(t: string) => {
                     inputRef.current = t;
                   }}
@@ -270,7 +291,7 @@ export function NyxSheet({ isOpen, onClose }: NyxSheetProps) {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (c: ThemeColors) => StyleSheet.create({
   modalRoot: {
     flex: 1,
   },
@@ -284,12 +305,12 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     bottom: 0,
-    backgroundColor: mobileTheme.bg,
+    backgroundColor: c.bg,
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     borderWidth: 1,
     borderBottomWidth: 0,
-    borderColor: mobileTheme.border,
+    borderColor: c.border,
     shadowColor: "#000",
     shadowOffset: { width: 0, height: -10 },
     shadowOpacity: 0.4,
@@ -316,7 +337,7 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
     paddingBottom: 14,
     borderBottomWidth: 1,
-    borderBottomColor: mobileTheme.borderSoft,
+    borderBottomColor: c.borderSoft,
   },
   headerLeft: {
     flexDirection: "row",
@@ -327,22 +348,22 @@ const styles = StyleSheet.create({
     width: 30,
     height: 30,
     borderRadius: 15,
-    backgroundColor: mobileTheme.primaryGlow,
+    backgroundColor: c.fabBg,
     borderWidth: 1,
-    borderColor: "rgba(139,92,246,0.25)",
+    borderColor: c.fabBorder,
     alignItems: "center",
     justifyContent: "center",
   },
   headerTitle: {
     fontSize: 15,
     fontWeight: "700",
-    color: mobileTheme.textPrimary,
+    color: c.textPrimary,
     fontFamily: "SpaceGrotesk_700Bold",
   },
   headerStatus: {
     fontSize: 10,
     fontWeight: "600",
-    color: mobileTheme.success,
+    color: c.success,
   },
   closeBtn: {
     width: 30,
@@ -350,14 +371,14 @@ const styles = StyleSheet.create({
     borderRadius: 15,
     backgroundColor: "rgba(255,255,255,0.06)",
     borderWidth: 1,
-    borderColor: mobileTheme.borderSoft,
+    borderColor: c.borderSoft,
     alignItems: "center",
     justifyContent: "center",
   },
   closeBtnText: {
     fontSize: 14,
     fontWeight: "600",
-    color: mobileTheme.textMuted,
+    color: c.textMuted,
   },
   chatArea: {
     flex: 1,
@@ -379,15 +400,15 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   bubbleBot: {
-    backgroundColor: mobileTheme.card,
+    backgroundColor: c.card,
     borderWidth: 1,
-    borderColor: mobileTheme.borderSoft,
+    borderColor: c.borderSoft,
     borderRadius: 12,
     borderBottomLeftRadius: 4,
     alignSelf: "flex-start",
   },
   bubbleUser: {
-    backgroundColor: mobileTheme.primaryDim,
+    backgroundColor: c.primaryDim,
     borderRadius: 12,
     borderBottomRightRadius: 4,
     alignSelf: "flex-end",
@@ -395,14 +416,14 @@ const styles = StyleSheet.create({
   botName: {
     fontSize: 10,
     fontWeight: "700",
-    color: mobileTheme.primary,
+    color: c.primary,
     letterSpacing: 0.3,
     marginBottom: 4,
   },
   bubbleText: {
     fontSize: 13,
     lineHeight: 19.5,
-    color: mobileTheme.textPrimary,
+    color: c.textPrimary,
   },
   scopeBadge: {
     flexDirection: "row",
@@ -420,7 +441,7 @@ const styles = StyleSheet.create({
   scopeText: {
     fontSize: 9,
     fontWeight: "700",
-    color: mobileTheme.primary,
+    color: c.primary,
     letterSpacing: 0.3,
     textTransform: "uppercase",
   },
@@ -435,13 +456,13 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     borderRadius: 20,
     borderWidth: 1,
-    borderColor: mobileTheme.border,
+    borderColor: c.border,
     backgroundColor: "rgba(255,255,255,0.03)",
   },
   chipText: {
     fontSize: 11,
     fontWeight: "600",
-    color: mobileTheme.textSecondary,
+    color: c.textSecondary,
   },
   inputArea: {
     paddingHorizontal: 20,
@@ -456,19 +477,19 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     borderRadius: radius.pill,
     borderWidth: 1,
-    borderColor: mobileTheme.border,
-    backgroundColor: mobileTheme.cardSoft,
+    borderColor: c.border,
+    backgroundColor: c.cardSoft,
   },
   inputText: {
     flex: 1,
     fontSize: 13,
-    color: mobileTheme.textPrimary,
+    color: c.textPrimary,
   },
   sendBtn: {
     width: 30,
     height: 30,
     borderRadius: 15,
-    backgroundColor: mobileTheme.primary,
+    backgroundColor: c.primary,
     borderWidth: 1,
     borderColor: "rgba(139,92,246,0.5)",
     alignItems: "center",

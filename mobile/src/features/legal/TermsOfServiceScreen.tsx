@@ -1,11 +1,13 @@
+import { useMemo } from "react";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { ScrollView, StyleSheet, Text, View, type ViewStyle } from "react-native";
 import { RootStackParamList } from "../../app/AppNavigator";
 
 import { BlurBackButton } from "../../components/BlurBackButton";
 import { ScreenContainer } from "../../components/ScreenContainer";
-import { flowStyles } from "../../theme/flowStyles";
-import { mobileTheme } from "../../theme/mobileTheme";
+import { useTheme } from "../../theme/ThemeContext";
+import type { ThemeColors } from "../../theme/mobileTheme";
+import { createFlowStyles } from "../../theme/flowStyles";
 import { spacing, typeScale } from "../../theme/designTokens";
 
 type Props = NativeStackScreenProps<RootStackParamList, "TermsOfService">;
@@ -123,6 +125,10 @@ const TERMS_SECTIONS: TermsSection[] = [
 ];
 
 export function TermsOfServiceScreen({ navigation }: Props) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+  const flowStyles = useMemo(() => createFlowStyles(colors), [colors]);
+
   return (
     <ScreenContainer>
       <View style={styles.stickyBack}>
@@ -159,7 +165,7 @@ export function TermsOfServiceScreen({ navigation }: Props) {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (c: ThemeColors) => StyleSheet.create({
   stickyBack: {
     position: "absolute",
     top: spacing.xxl,
@@ -174,16 +180,16 @@ const styles = StyleSheet.create({
     gap: spacing.xs,
   },
   sectionTitle: {
-    color: mobileTheme.textPrimary,
+    color: c.textPrimary,
     ...typeScale.bodyStrong,
   },
   sectionBody: {
-    color: mobileTheme.textSecondary,
+    color: c.textSecondary,
     ...typeScale.caption,
     lineHeight: 18,
   },
   bulletBody: {
-    color: mobileTheme.textSecondary,
+    color: c.textSecondary,
     ...typeScale.caption,
     lineHeight: 18,
   },

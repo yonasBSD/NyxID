@@ -1,5 +1,7 @@
+import { useMemo } from "react";
 import { Pressable, StyleSheet, Text } from "react-native";
-import { mobileTheme } from "../theme/mobileTheme";
+import { useTheme } from "../theme/ThemeContext";
+import type { ThemeColors } from "../theme/mobileTheme";
 import { radius, spacing, typeScale } from "../theme/designTokens";
 
 type PrimaryButtonProps = {
@@ -15,6 +17,9 @@ export function PrimaryButton({
   kind = "primary",
   disabled = false,
 }: PrimaryButtonProps) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+
   return (
     <Pressable
       onPress={onPress}
@@ -26,37 +31,44 @@ export function PrimaryButton({
         disabled && styles.disabled,
       ]}
     >
-      <Text style={[styles.label, disabled && styles.labelDisabled]}>{label}</Text>
+      <Text style={[styles.label, kind === "ghost" && styles.ghostLabel, kind === "danger" && styles.dangerLabel, disabled && styles.labelDisabled]}>{label}</Text>
     </Pressable>
   );
 }
 
-const styles = StyleSheet.create({
-  base: {
-    backgroundColor: mobileTheme.primary,
-    borderRadius: radius.md,
-    paddingVertical: spacing.lg,
-    paddingHorizontal: spacing.xxl,
-    alignItems: "center",
-    borderWidth: 1,
-    borderColor: "transparent",
-  },
-  ghost: {
-    backgroundColor: "#8B5CF610",
-    borderColor: mobileTheme.borderSoft,
-  },
-  danger: {
-    backgroundColor: "#2A1217",
-    borderColor: "#7F1D1D",
-  },
-  disabled: {
-    opacity: 0.6,
-  },
-  label: {
-    color: "#F8F7FF",
-    ...typeScale.bodyStrong,
-  },
-  labelDisabled: {
-    color: "#CFCBE0",
-  },
-});
+const createStyles = (c: ThemeColors) =>
+  StyleSheet.create({
+    base: {
+      backgroundColor: c.primary,
+      borderRadius: radius.md,
+      paddingVertical: spacing.lg,
+      paddingHorizontal: spacing.xxl,
+      alignItems: "center",
+      borderWidth: 1,
+      borderColor: "transparent",
+    },
+    ghost: {
+      backgroundColor: c.ghostBg,
+      borderColor: c.borderSoft,
+    },
+    danger: {
+      backgroundColor: c.dangerSoftBg,
+      borderColor: c.danger,
+    },
+    disabled: {
+      opacity: 0.6,
+    },
+    label: {
+      color: c.onPrimary,
+      ...typeScale.bodyStrong,
+    },
+    ghostLabel: {
+      color: c.ghostText,
+    },
+    dangerLabel: {
+      color: c.dangerSoft,
+    },
+    labelDisabled: {
+      color: c.textMuted,
+    },
+  });

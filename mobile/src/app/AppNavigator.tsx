@@ -11,7 +11,7 @@ import { PrivacyPolicyScreen } from "../features/legal/PrivacyPolicyScreen";
 import { FullScreenLoading } from "../components/FullScreenLoading";
 import { BottomNavV2, type BottomNavV2Tab } from "../components/BottomNavV2";
 import { NyxFAB } from "../components/NyxFAB";
-import { mobileTheme } from "../theme/mobileTheme";
+import { useTheme } from "../theme/ThemeContext";
 import { spacing } from "../theme/designTokens";
 
 export type RootStackParamList = {
@@ -41,6 +41,7 @@ function resolveActiveMainTab(routeName?: string): BottomNavV2Tab {
 
 export function AppNavigator({ currentRouteName, onMainTabPress, onNyxPress }: AppNavigatorProps) {
   const { isAuthenticated, isRestoring } = useAuthSession();
+  const { colors } = useTheme();
   const activeMainTab = resolveActiveMainTab(currentRouteName);
   const isLegalRoute = currentRouteName === "TermsOfService" || currentRouteName === "PrivacyPolicy";
   const isDetailRoute = currentRouteName === "ActivityDetail";
@@ -51,15 +52,15 @@ export function AppNavigator({ currentRouteName, onMainTabPress, onNyxPress }: A
   }
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { backgroundColor: colors.bg }]}>
       <View style={styles.stackWrap}>
         <Stack.Navigator
           initialRouteName={isAuthenticated ? "Activity" : "Auth"}
           screenOptions={{
             headerShown: false,
-            headerStyle: { backgroundColor: "#10101A" },
-            headerTintColor: "#F0EEFF",
-            contentStyle: { backgroundColor: "#10101A" },
+            headerStyle: { backgroundColor: colors.bg },
+            headerTintColor: colors.textPrimary,
+            contentStyle: { backgroundColor: colors.bg },
           }}
         >
           {isAuthenticated ? (
@@ -100,13 +101,14 @@ export function AppNavigator({ currentRouteName, onMainTabPress, onNyxPress }: A
       {showGlobalBottomNav ? (
         <View style={styles.bottomOverlay} pointerEvents="box-none">
           <LinearGradient
-            colors={["transparent", mobileTheme.bg]}
+            colors={[colors.bg + "00", colors.bg]}
+            locations={[0, 1]}
             style={styles.fadeGradient}
             pointerEvents="none"
           />
-          <View style={styles.bottomWrap}>
+          <View style={[styles.bottomWrap, { backgroundColor: colors.bg }]}>
             <View style={styles.navContainer}>
-              <BottomNavV2 active={activeMainTab} onTabPress={(tab) => onMainTabPress?.(tab)} />
+              <BottomNavV2 active={activeMainTab} onTabPress={(tab) => onMainTabPress?.(tab)} onFabPress={onNyxPress} />
               <View style={styles.fabPosition}>
                 <NyxFAB onPress={onNyxPress} />
               </View>
@@ -121,7 +123,6 @@ export function AppNavigator({ currentRouteName, onMainTabPress, onNyxPress }: A
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: mobileTheme.bg,
   },
   stackWrap: {
     flex: 1,
@@ -138,16 +139,17 @@ const styles = StyleSheet.create({
   bottomWrap: {
     paddingHorizontal: spacing.xxl,
     paddingBottom: spacing.xxxl,
-    backgroundColor: mobileTheme.bg,
   },
   navContainer: {
     position: "relative",
   },
   fabPosition: {
     position: "absolute",
-    top: -21.5,
+    top: -41.5,
     left: "50%",
     marginLeft: -28.5,
     overflow: "visible",
-  },
+    height: 77,
+    justifyContent: "flex-end",
+  } as const,
 });

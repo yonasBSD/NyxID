@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Linking,
@@ -10,7 +10,8 @@ import {
 } from "react-native";
 import * as Clipboard from "expo-clipboard";
 import Svg, { Path } from "react-native-svg";
-import { mobileTheme } from "../theme/mobileTheme";
+import { useTheme } from "../theme/ThemeContext";
+import type { ThemeColors } from "../theme/mobileTheme";
 import { radius, spacing } from "../theme/designTokens";
 import { mobileApi } from "../lib/api/mobileApi";
 import type { TelegramLinkInfo } from "../lib/api/types";
@@ -32,9 +33,9 @@ function TelegramIcon() {
   );
 }
 
-function CopyIcon() {
+function CopyIcon({ color }: { color: string }) {
   return (
-    <Svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke={mobileTheme.textSecondary} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+    <Svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
       <Path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
       <Path d="M15 2H9a1 1 0 0 0-1 1v2a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V3a1 1 0 0 0-1-1Z" />
     </Svg>
@@ -50,6 +51,8 @@ function CheckIcon() {
 }
 
 export function TelegramLinkModal({ visible, onDismiss, onConnected }: TelegramLinkModalProps) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
   const [linkInfo, setLinkInfo] = useState<TelegramLinkInfo | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -171,7 +174,7 @@ export function TelegramLinkModal({ visible, onDismiss, onConnected }: TelegramL
           {/* Loading state */}
           {isLoading && (
             <View style={styles.centerWrap}>
-              <ActivityIndicator size="small" color={mobileTheme.primary} />
+              <ActivityIndicator size="small" color={colors.primary} />
             </View>
           )}
 
@@ -223,7 +226,7 @@ export function TelegramLinkModal({ visible, onDismiss, onConnected }: TelegramL
               <View style={styles.codeRow}>
                 <Text style={styles.codeText} selectable>/start {linkInfo.link_code}</Text>
                 <Pressable style={styles.copyBtn} onPress={() => void handleCopy()}>
-                  {copied ? <CheckIcon /> : <CopyIcon />}
+                  {copied ? <CheckIcon /> : <CopyIcon color={colors.textSecondary} />}
                 </Pressable>
               </View>
 
@@ -233,7 +236,7 @@ export function TelegramLinkModal({ visible, onDismiss, onConnected }: TelegramL
 
               {/* Polling indicator */}
               <View style={styles.waitingRow}>
-                <ActivityIndicator size="small" color={mobileTheme.textMuted} />
+                <ActivityIndicator size="small" color={colors.textMuted} />
                 <Text style={styles.waitingText}>Waiting for connection...</Text>
               </View>
             </>
@@ -251,136 +254,137 @@ export function TelegramLinkModal({ visible, onDismiss, onConnected }: TelegramL
   );
 }
 
-const styles = StyleSheet.create({
-  backdrop: {
-    flex: 1,
-    backgroundColor: "rgba(0,0,0,0.65)",
-    justifyContent: "center",
-    alignItems: "center",
-    paddingHorizontal: 28,
-  },
-  card: {
-    width: "100%",
-    maxWidth: 320,
-    backgroundColor: mobileTheme.card,
-    borderRadius: radius.lg,
-    borderWidth: 1,
-    borderColor: mobileTheme.border,
-    padding: spacing.xxl,
-    gap: spacing.lg,
-  },
-  title: {
-    fontSize: 18,
-    fontWeight: "700",
-    color: mobileTheme.textPrimary,
-    fontFamily: "SpaceGrotesk_700Bold",
-    textAlign: "center",
-  },
-  subtitle: {
-    fontSize: 13,
-    color: mobileTheme.textSecondary,
-    textAlign: "center",
-    lineHeight: 19,
-  },
-  centerWrap: {
-    alignItems: "center",
-    gap: spacing.sm,
-    paddingVertical: spacing.md,
-  },
-  errorText: {
-    fontSize: 13,
-    color: "#FCA5A5",
-    textAlign: "center",
-  },
-  successText: {
-    fontSize: 14,
-    fontWeight: "600",
-    color: "#34D399",
-    textAlign: "center",
-  },
-  retryBtn: {
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.sm,
-    borderRadius: radius.sm,
-    borderWidth: 1,
-    borderColor: mobileTheme.border,
-  },
-  retryText: {
-    fontSize: 12,
-    fontWeight: "600",
-    color: mobileTheme.textSecondary,
-  },
-  telegramBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: spacing.sm,
-    paddingVertical: 12,
-    borderRadius: radius.sm,
-    backgroundColor: "#229ED9",
-  },
-  telegramBtnText: {
-    fontSize: 14,
-    fontWeight: "700",
-    color: "#FFFFFF",
-  },
-  divider: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: spacing.sm,
-  },
-  dividerLine: {
-    flex: 1,
-    height: 1,
-    backgroundColor: mobileTheme.borderSoft,
-  },
-  dividerText: {
-    fontSize: 11,
-    color: mobileTheme.textMuted,
-  },
-  codeRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: spacing.sm,
-    paddingVertical: 10,
-    paddingHorizontal: 14,
-    borderRadius: radius.sm,
-    borderWidth: 1,
-    borderColor: mobileTheme.border,
-    backgroundColor: mobileTheme.bg,
-  },
-  codeText: {
-    flex: 1,
-    fontSize: 13,
-    fontWeight: "600",
-    color: mobileTheme.textPrimary,
-    fontFamily: "SpaceGrotesk_700Bold",
-  },
-  copyBtn: {
-    padding: spacing.xs,
-  },
-  instructionText: {
-    fontSize: 11,
-    color: mobileTheme.textMuted,
-    textAlign: "center",
-  },
-  waitingRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: spacing.sm,
-  },
-  waitingText: {
-    fontSize: 11,
-    color: mobileTheme.textMuted,
-  },
-  cancelBtn: {
-    alignItems: "center",
-    paddingVertical: spacing.sm,
-  },
-  cancelText: {
-    fontSize: 13,
-    fontWeight: "600",
-    color: mobileTheme.textMuted,
-  },
-});
+const createStyles = (c: ThemeColors) =>
+  StyleSheet.create({
+    backdrop: {
+      flex: 1,
+      backgroundColor: "rgba(0,0,0,0.65)",
+      justifyContent: "center",
+      alignItems: "center",
+      paddingHorizontal: 28,
+    },
+    card: {
+      width: "100%",
+      maxWidth: 320,
+      backgroundColor: c.card,
+      borderRadius: radius.lg,
+      borderWidth: 1,
+      borderColor: c.border,
+      padding: spacing.xxl,
+      gap: spacing.lg,
+    },
+    title: {
+      fontSize: 18,
+      fontWeight: "700",
+      color: c.textPrimary,
+      fontFamily: "SpaceGrotesk_700Bold",
+      textAlign: "center",
+    },
+    subtitle: {
+      fontSize: 13,
+      color: c.textSecondary,
+      textAlign: "center",
+      lineHeight: 19,
+    },
+    centerWrap: {
+      alignItems: "center",
+      gap: spacing.sm,
+      paddingVertical: spacing.md,
+    },
+    errorText: {
+      fontSize: 13,
+      color: c.dangerSoft,
+      textAlign: "center",
+    },
+    successText: {
+      fontSize: 14,
+      fontWeight: "600",
+      color: "#34D399",
+      textAlign: "center",
+    },
+    retryBtn: {
+      paddingHorizontal: spacing.lg,
+      paddingVertical: spacing.sm,
+      borderRadius: radius.sm,
+      borderWidth: 1,
+      borderColor: c.border,
+    },
+    retryText: {
+      fontSize: 12,
+      fontWeight: "600",
+      color: c.textSecondary,
+    },
+    telegramBtn: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: spacing.sm,
+      paddingVertical: 12,
+      borderRadius: radius.sm,
+      backgroundColor: "#229ED9",
+    },
+    telegramBtnText: {
+      fontSize: 14,
+      fontWeight: "700",
+      color: c.onPrimary,
+    },
+    divider: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: spacing.sm,
+    },
+    dividerLine: {
+      flex: 1,
+      height: 1,
+      backgroundColor: c.borderSoft,
+    },
+    dividerText: {
+      fontSize: 11,
+      color: c.textMuted,
+    },
+    codeRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: spacing.sm,
+      paddingVertical: 10,
+      paddingHorizontal: 14,
+      borderRadius: radius.sm,
+      borderWidth: 1,
+      borderColor: c.border,
+      backgroundColor: c.bg,
+    },
+    codeText: {
+      flex: 1,
+      fontSize: 13,
+      fontWeight: "600",
+      color: c.textPrimary,
+      fontFamily: "SpaceGrotesk_700Bold",
+    },
+    copyBtn: {
+      padding: spacing.xs,
+    },
+    instructionText: {
+      fontSize: 11,
+      color: c.textMuted,
+      textAlign: "center",
+    },
+    waitingRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: spacing.sm,
+    },
+    waitingText: {
+      fontSize: 11,
+      color: c.textMuted,
+    },
+    cancelBtn: {
+      alignItems: "center",
+      paddingVertical: spacing.sm,
+    },
+    cancelText: {
+      fontSize: 13,
+      fontWeight: "600",
+      color: c.textMuted,
+    },
+  });

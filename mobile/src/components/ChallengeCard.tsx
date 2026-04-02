@@ -1,6 +1,8 @@
+import { useMemo } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { radius, spacing, typeScale } from "../theme/designTokens";
-import { mobileTheme } from "../theme/mobileTheme";
+import { useTheme } from "../theme/ThemeContext";
+import type { ThemeColors } from "../theme/mobileTheme";
 import { StatusBadge } from "./StatusBadge";
 import type { ChallengeDetail } from "../lib/api/types";
 
@@ -32,7 +34,10 @@ export function ChallengeCard({
   onApprove,
   onDeny,
 }: ChallengeCardProps) {
-  const riskVariant = challenge.risk_level === "high" ? "riskHigh" : "riskMedium";
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+
+  const riskVariant = challenge.risk_level === "high" ? "riskHigh" : challenge.risk_level === "medium" ? "riskMedium" : "riskLow";
   const modeLabel = challenge.approval_mode === "grant" ? "Grant mode" : "Per-request";
   const durationLabel = challenge.approval_mode === "grant" ? ` · ${grantDurationLabel}` : "";
   const timeAgo = formatTimeAgo(challenge.created_at);
@@ -45,7 +50,7 @@ export function ChallengeCard({
         </Text>
         <StatusBadge
           variant={riskVariant}
-          label={challenge.risk_level === "high" ? "HIGH" : "MED"}
+          label={challenge.risk_level.toUpperCase()}
         />
       </View>
       <Text style={styles.resource} numberOfLines={1}>
@@ -74,67 +79,68 @@ export function ChallengeCard({
   );
 }
 
-const styles = StyleSheet.create({
-  card: {
-    borderRadius: radius.md,
-    backgroundColor: mobileTheme.cardSoft,
-    borderWidth: 1,
-    borderColor: mobileTheme.border,
-    padding: spacing.lg,
-    gap: 6,
-  },
-  header: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    gap: spacing.sm,
-  },
-  title: {
-    flex: 1,
-    fontSize: 14,
-    fontWeight: "700",
-    color: mobileTheme.textPrimary,
-  },
-  resource: {
-    fontSize: 13,
-    color: mobileTheme.textSecondary,
-  },
-  meta: {
-    fontSize: 12,
-    color: mobileTheme.textMuted,
-  },
-  actions: {
-    flexDirection: "row",
-    gap: 6,
-    marginTop: spacing.xs,
-  },
-  approveBtn: {
-    flex: 1,
-    paddingVertical: 8,
-    borderRadius: radius.sm,
-    backgroundColor: mobileTheme.primary,
-    alignItems: "center",
-  },
-  approveBtnText: {
-    fontSize: 13,
-    fontWeight: "700",
-    color: "#FFFFFF",
-  },
-  denyBtn: {
-    flex: 1,
-    paddingVertical: 8,
-    borderRadius: radius.sm,
-    borderWidth: 1,
-    borderColor: "rgba(239,68,68,0.3)",
-    backgroundColor: "transparent",
-    alignItems: "center",
-  },
-  denyBtnText: {
-    fontSize: 13,
-    fontWeight: "700",
-    color: mobileTheme.danger,
-  },
-  btnDisabled: {
-    opacity: 0.5,
-  },
-});
+const createStyles = (c: ThemeColors) =>
+  StyleSheet.create({
+    card: {
+      borderRadius: radius.md,
+      backgroundColor: c.cardSoft,
+      borderWidth: 1,
+      borderColor: c.border,
+      padding: spacing.lg,
+      gap: 6,
+    },
+    header: {
+      flexDirection: "row",
+      justifyContent: "space-between",
+      alignItems: "center",
+      gap: spacing.sm,
+    },
+    title: {
+      flex: 1,
+      fontSize: 14,
+      fontWeight: "700",
+      color: c.textPrimary,
+    },
+    resource: {
+      fontSize: 13,
+      color: c.textSecondary,
+    },
+    meta: {
+      fontSize: 12,
+      color: c.textMuted,
+    },
+    actions: {
+      flexDirection: "row",
+      gap: 6,
+      marginTop: spacing.xs,
+    },
+    approveBtn: {
+      flex: 1,
+      paddingVertical: 8,
+      borderRadius: radius.sm,
+      backgroundColor: c.primary,
+      alignItems: "center",
+    },
+    approveBtnText: {
+      fontSize: 13,
+      fontWeight: "700",
+      color: c.onPrimary,
+    },
+    denyBtn: {
+      flex: 1,
+      paddingVertical: 8,
+      borderRadius: radius.sm,
+      borderWidth: 1,
+      borderColor: c.dangerSoftBg,
+      backgroundColor: "transparent",
+      alignItems: "center",
+    },
+    denyBtnText: {
+      fontSize: 13,
+      fontWeight: "700",
+      color: c.danger,
+    },
+    btnDisabled: {
+      opacity: 0.5,
+    },
+  });

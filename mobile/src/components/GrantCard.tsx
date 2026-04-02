@@ -1,6 +1,8 @@
+import { useMemo } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { radius, spacing } from "../theme/designTokens";
-import { mobileTheme } from "../theme/mobileTheme";
+import { useTheme } from "../theme/ThemeContext";
+import type { ThemeColors } from "../theme/mobileTheme";
 import { StatusBadge } from "./StatusBadge";
 import type { ApprovalItem } from "../lib/api/types";
 
@@ -28,6 +30,9 @@ function formatExpiry(expiresAt: string): string {
 }
 
 export function GrantCard({ grant, onRevoke, isMutating = false }: GrantCardProps) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+
   const days = daysUntilExpiry(grant.expires_at);
   const expiryVariant = days < 3 ? "expiryUrgent" : "expiryNormal";
   const expiryLabel = formatExpiry(grant.expires_at);
@@ -60,56 +65,57 @@ export function GrantCard({ grant, onRevoke, isMutating = false }: GrantCardProp
   );
 }
 
-const styles = StyleSheet.create({
-  card: {
-    borderRadius: radius.md,
-    backgroundColor: mobileTheme.cardSoft,
-    borderWidth: 1,
-    borderColor: mobileTheme.border,
-    padding: spacing.lg,
-    gap: spacing.sm,
-  },
-  header: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    gap: spacing.sm,
-  },
-  title: {
-    flex: 1,
-    fontSize: 14,
-    fontWeight: "700",
-    color: mobileTheme.textPrimary,
-  },
-  secondary: {
-    fontSize: 13,
-    color: mobileTheme.textSecondary,
-  },
-  expiryRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: spacing.sm,
-  },
-  meta: {
-    fontSize: 12,
-    color: mobileTheme.textMuted,
-    flex: 1,
-  },
-  revokeBtn: {
-    paddingHorizontal: spacing.xxl,
-    paddingVertical: spacing.sm,
-    borderRadius: radius.sm,
-    borderWidth: 1,
-    borderColor: mobileTheme.danger,
-    backgroundColor: "transparent",
-  },
-  revokeBtnText: {
-    fontSize: 12,
-    fontWeight: "700",
-    color: mobileTheme.danger,
-  },
-  btnDisabled: {
-    opacity: 0.5,
-  },
-});
+const createStyles = (c: ThemeColors) =>
+  StyleSheet.create({
+    card: {
+      borderRadius: radius.md,
+      backgroundColor: c.cardSoft,
+      borderWidth: 1,
+      borderColor: c.border,
+      padding: spacing.lg,
+      gap: spacing.sm,
+    },
+    header: {
+      flexDirection: "row",
+      justifyContent: "space-between",
+      alignItems: "center",
+      gap: spacing.sm,
+    },
+    title: {
+      flex: 1,
+      fontSize: 14,
+      fontWeight: "700",
+      color: c.textPrimary,
+    },
+    secondary: {
+      fontSize: 13,
+      color: c.textSecondary,
+    },
+    expiryRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: spacing.sm,
+    },
+    meta: {
+      fontSize: 12,
+      color: c.textMuted,
+      flex: 1,
+    },
+    revokeBtn: {
+      paddingHorizontal: spacing.xxl,
+      paddingVertical: spacing.sm,
+      borderRadius: radius.sm,
+      borderWidth: 1,
+      borderColor: c.danger,
+      backgroundColor: "transparent",
+    },
+    revokeBtnText: {
+      fontSize: 12,
+      fontWeight: "700",
+      color: c.danger,
+    },
+    btnDisabled: {
+      opacity: 0.5,
+    },
+  });

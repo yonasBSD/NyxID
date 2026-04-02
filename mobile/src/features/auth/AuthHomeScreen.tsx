@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import FontAwesome from "@expo/vector-icons/FontAwesome";
 import * as WebBrowser from "expo-web-browser";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
@@ -11,8 +11,9 @@ import { ToastKind, ToastOverlay, ToastState } from "../../components/ToastOverl
 import { mobileApi } from "../../lib/api/mobileApi";
 import { useAuthSession } from "./AuthSessionContext";
 import { IS_DEV_BUILD } from "../../lib/env";
-import { mobileTheme } from "../../theme/mobileTheme";
-import { flowStyles } from "../../theme/flowStyles";
+import { useTheme } from "../../theme/ThemeContext";
+import type { ThemeColors } from "../../theme/mobileTheme";
+import { createFlowStyles } from "../../theme/flowStyles";
 import { radius, spacing, typeScale } from "../../theme/designTokens";
 
 type SocialProvider = "google" | "github" | "apple";
@@ -107,6 +108,8 @@ function SocialAuthButton({
   loading?: boolean;
   onPress: () => void;
 }) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
   const iconName = provider === "google" ? "google" : provider === "github" ? "github" : "apple";
   const iconColor = "#F9FAFB";
 
@@ -125,6 +128,9 @@ function SocialAuthButton({
 }
 
 export function AuthHomeScreen({ navigation }: Props) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+  const flowStyles = useMemo(() => createFlowStyles(colors), [colors]);
   const [isSocialAuthPending, setIsSocialAuthPending] = useState(false);
   const [pendingSocialProvider, setPendingSocialProvider] = useState<SocialProvider | null>(null);
   const [toast, setToast] = useState<ToastState | null>(null);
@@ -328,7 +334,7 @@ export function AuthHomeScreen({ navigation }: Props) {
               <TextInput
                 style={styles.devInput}
                 placeholder="Email"
-                placeholderTextColor={mobileTheme.textMuted}
+                placeholderTextColor={colors.textMuted}
                 value={email}
                 onChangeText={setEmail}
                 keyboardType="email-address"
@@ -339,7 +345,7 @@ export function AuthHomeScreen({ navigation }: Props) {
               <TextInput
                 style={styles.devInput}
                 placeholder="Password"
-                placeholderTextColor={mobileTheme.textMuted}
+                placeholderTextColor={colors.textMuted}
                 value={password}
                 onChangeText={setPassword}
                 secureTextEntry
@@ -381,7 +387,7 @@ export function AuthHomeScreen({ navigation }: Props) {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (c: ThemeColors) => StyleSheet.create({
   scrollContentExtra: {
     paddingBottom: spacing.xxxl,
   },
@@ -411,27 +417,27 @@ const styles = StyleSheet.create({
   dividerLine: {
     flex: 1,
     height: 1,
-    backgroundColor: mobileTheme.border,
+    backgroundColor: c.border,
   },
   dividerText: {
-    color: mobileTheme.textMuted,
+    color: c.textMuted,
     ...typeScale.caption,
     fontSize: 11,
     marginHorizontal: spacing.sm,
   },
   devInput: {
-    backgroundColor: mobileTheme.cardSoft,
-    borderColor: mobileTheme.border,
+    backgroundColor: c.cardSoft,
+    borderColor: c.border,
     borderWidth: 1,
     borderRadius: radius.md,
     paddingVertical: spacing.md,
     paddingHorizontal: spacing.lg,
-    color: mobileTheme.textPrimary,
+    color: c.textPrimary,
     ...typeScale.caption,
     fontSize: 13,
   },
   devSignInButton: {
-    backgroundColor: mobileTheme.primary,
+    backgroundColor: c.primary,
     borderRadius: radius.md,
     paddingVertical: spacing.md,
     paddingHorizontal: spacing.lg,

@@ -1,7 +1,9 @@
+import { useMemo } from "react";
 import { BlurView } from "expo-blur";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { radius, spacing } from "../theme/designTokens";
-import { mobileTheme } from "../theme/mobileTheme";
+import { useTheme } from "../theme/ThemeContext";
+import type { ThemeColors } from "../theme/mobileTheme";
 import { StatusBadge } from "./StatusBadge";
 import type { ChallengeDetail, ChallengeStatus } from "../lib/api/types";
 
@@ -34,6 +36,9 @@ function formatTime(dateStr: string): string {
 }
 
 export function HistoryCard({ item, onPress }: HistoryCardProps) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+
   const modeLabel = item.approval_mode === "grant" ? "Grant" : "Per-request";
 
   return (
@@ -55,6 +60,9 @@ export function HistoryCard({ item, onPress }: HistoryCardProps) {
 }
 
 export function HistorySectionHeader({ title }: { title: string }) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+
   return (
     <View style={styles.sectionHeaderRow}>
       <BlurView intensity={60} tint="dark" style={styles.sectionHeaderBlur}>
@@ -64,53 +72,54 @@ export function HistorySectionHeader({ title }: { title: string }) {
   );
 }
 
-const styles = StyleSheet.create({
-  card: {
-    borderRadius: radius.md,
-    backgroundColor: mobileTheme.cardSoft,
-    borderWidth: 1,
-    borderColor: mobileTheme.border,
-    padding: spacing.lg,
-    gap: 4,
-    opacity: 0.8,
-  },
-  header: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    gap: spacing.sm,
-  },
-  title: {
-    flex: 1,
-    fontSize: 14,
-    fontWeight: "700",
-    color: mobileTheme.textPrimary,
-  },
-  secondary: {
-    fontSize: 13,
-    color: mobileTheme.textSecondary,
-  },
-  meta: {
-    fontSize: 12,
-    color: mobileTheme.textMuted,
-  },
-  sectionHeaderRow: {
-    flexDirection: "row",
-    marginBottom: spacing.sm,
-    marginTop: spacing.xs,
-  },
-  sectionHeaderBlur: {
-    paddingHorizontal: spacing.sm,
-    paddingVertical: spacing.xs,
-    borderRadius: 6,
-    overflow: "hidden",
-    backgroundColor: "rgba(15,10,30,0.5)",
-  },
-  sectionHeader: {
-    fontSize: 11,
-    fontWeight: "600",
-    color: mobileTheme.textMuted,
-    textTransform: "uppercase",
-    letterSpacing: 0.4,
-  },
-});
+const createStyles = (c: ThemeColors) =>
+  StyleSheet.create({
+    card: {
+      borderRadius: radius.md,
+      backgroundColor: c.cardSoft,
+      borderWidth: 1,
+      borderColor: c.border,
+      padding: spacing.lg,
+      gap: 4,
+      opacity: 0.8,
+    },
+    header: {
+      flexDirection: "row",
+      justifyContent: "space-between",
+      alignItems: "center",
+      gap: spacing.sm,
+    },
+    title: {
+      flex: 1,
+      fontSize: 14,
+      fontWeight: "700",
+      color: c.textPrimary,
+    },
+    secondary: {
+      fontSize: 13,
+      color: c.textSecondary,
+    },
+    meta: {
+      fontSize: 12,
+      color: c.textMuted,
+    },
+    sectionHeaderRow: {
+      flexDirection: "row",
+      marginBottom: spacing.sm,
+      marginTop: spacing.xs,
+    },
+    sectionHeaderBlur: {
+      paddingHorizontal: spacing.sm,
+      paddingVertical: spacing.xs,
+      borderRadius: 6,
+      overflow: "hidden",
+      backgroundColor: "rgba(15,10,30,0.5)",
+    },
+    sectionHeader: {
+      fontSize: 11,
+      fontWeight: "600",
+      color: c.textMuted,
+      textTransform: "uppercase",
+      letterSpacing: 0.4,
+    },
+  });

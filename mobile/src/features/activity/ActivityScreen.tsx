@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  ActivityIndicator,
   Alert,
   Dimensions,
   FlatList,
@@ -26,7 +27,7 @@ import {
 } from "react-native-gesture-handler";
 import { useNavigation, useRoute, type RouteProp } from "@react-navigation/native";
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ScreenContainer } from "../../components/ScreenContainer";
 
 import { ToastOverlay, type ToastState } from "../../components/ToastOverlay";
@@ -43,12 +44,13 @@ import { createIdempotencyKey } from "../../lib/api/idempotency";
 import { getDecisionErrorMessage, formatGrantDuration, getChallengeActionState } from "./challengeUiState";
 import { StatusBadge } from "../../components/StatusBadge";
 import { PrimaryButton } from "../../components/PrimaryButton";
-import { mobileTheme } from "../../theme/mobileTheme";
-import { flowStyles } from "../../theme/flowStyles";
+import { useTheme } from "../../theme/ThemeContext";
+import type { ThemeColors } from "../../theme/mobileTheme";
+import { createFlowStyles } from "../../theme/flowStyles";
 import { radius, spacing, typeScale } from "../../theme/designTokens";
 import type { RootStackParamList } from "../../app/AppNavigator";
 import type { ActivitySegment } from "./activityTypes";
-import type { ChallengeDetail, ApprovalItem } from "../../lib/api/types";
+import type { ApprovalMode, ChallengeDetail, ApprovalItem } from "../../lib/api/types";
 import { usePushPollingActive } from "../../lib/notifications/pushPollingSignal";
 
 type Nav = NativeStackNavigationProp<RootStackParamList>;
@@ -81,11 +83,12 @@ const SHEET_TOP = 120;
 const SHEET_HEIGHT = SCREEN_HEIGHT - SHEET_TOP;
 const CLOSE_THRESHOLD = 60;
 
-function DetailRow({ label, value, isLast, valueColor }: {
+function DetailRow({ label, value, isLast, valueColor, flowStyles }: {
   label: string;
   value: string;
   isLast?: boolean;
   valueColor?: string;
+  flowStyles: ReturnType<typeof createFlowStyles>;
 }) {
   return (
     <View style={isLast ? flowStyles.rowLast : flowStyles.row}>
@@ -112,6 +115,9 @@ function ChallengeDetailSheet({
   onDeny?: (id: string) => void;
   isMutating?: boolean;
 }) {
+  const { colors } = useTheme();
+  const sheetStyles = useMemo(() => createSheetStyles(colors), [colors]);
+  const flowStyles = useMemo(() => createFlowStyles(colors), [colors]);
   const [modalVisible, setModalVisible] = useState(false);
   const isDismissing = useRef(false);
   // Keep a snapshot of the challenge so we can render during the dismiss animation
@@ -189,7 +195,8 @@ function ChallengeDetailSheet({
   if (!shown) return null;
 
   const actionState = getChallengeActionState(shown);
-  const riskColor = shown.risk_level === "high" ? "#FCA5A5" : "#FCD34D";
+  const riskColorMap = { high: colors.riskHigh.text, medium: colors.riskMedium.text, low: colors.riskLow.text };
+  const riskColor = riskColorMap[shown.risk_level];
   const isGrantMode = shown.approval_mode === "grant";
 
   return (
@@ -222,14 +229,14 @@ function ChallengeDetailSheet({
           <ScrollView style={sheetStyles.sheetBody} contentContainerStyle={sheetStyles.sheetBodyContent}>
             <View style={sheetStyles.detailCard}>
               <Text style={flowStyles.cardTitle}>Request Context</Text>
-              <DetailRow label="Action" value={shown.action} />
-              <DetailRow label="Resource" value={shown.resource} />
-              <DetailRow label="Service" value={shown.title} />
-              <DetailRow label="Client" value={shown.request_context.client} />
-              <DetailRow label="Risk Level" value={shown.risk_level.toUpperCase()} valueColor={riskColor} />
-              <DetailRow label="Status" value={actionState.statusLabel} />
-              {isGrantMode && <DetailRow label="Grant Duration" value={grantDurationLabel} />}
-              <DetailRow label="Location" value={shown.request_context.location} isLast />
+              <DetailRow label="Action" value={shown.action} flowStyles={flowStyles} />
+              <DetailRow label="Resource" value={shown.resource} flowStyles={flowStyles} />
+              <DetailRow label="Service" value={shown.title} flowStyles={flowStyles} />
+              <DetailRow label="Client" value={shown.request_context.client} flowStyles={flowStyles} />
+              <DetailRow label="Risk Level" value={shown.risk_level.toUpperCase()} valueColor={riskColor} flowStyles={flowStyles} />
+              <DetailRow label="Status" value={actionState.statusLabel} flowStyles={flowStyles} />
+              {isGrantMode && <DetailRow label="Grant Duration" value={grantDurationLabel} flowStyles={flowStyles} />}
+              <DetailRow label="Location" value={shown.request_context.location} isLast flowStyles={flowStyles} />
             </View>
 
             {actionState.reason ? (
@@ -261,6 +268,8 @@ function ChallengeDetailSheet({
 }
 
 export function ActivityScreen() {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
   const navigation = useNavigation<Nav>();
   const route = useRoute<RouteProp<RootStackParamList, "Activity">>();
   const queryClient = useQueryClient();
@@ -278,15 +287,26 @@ export function ActivityScreen() {
   }, [toast]);
 
   // --- Queries ---
-  const pendingQuery = useQuery({
+  const PAGE_SIZE = 20;
+
+  const getNextPageParam = (lastPage: { total: number; page: number; per_page: number }) => {
+    const totalPages = Math.ceil(lastPage.total / lastPage.per_page);
+    return lastPage.page < totalPages ? lastPage.page + 1 : undefined;
+  };
+
+  const pendingQuery = useInfiniteQuery({
     queryKey: ["challenges", "pending"],
-    queryFn: mobileApi.getChallenges,
+    queryFn: ({ pageParam }) => mobileApi.getChallenges(pageParam, PAGE_SIZE),
+    initialPageParam: 1,
+    getNextPageParam,
     refetchInterval: isPolling ? 3000 : false,
   });
 
-  const approvalsQuery = useQuery({
+  const approvalsQuery = useInfiniteQuery({
     queryKey: ["approvals"],
-    queryFn: mobileApi.getApprovals,
+    queryFn: ({ pageParam }) => mobileApi.getApprovals(pageParam, PAGE_SIZE),
+    initialPageParam: 1,
+    getNextPageParam,
     refetchInterval: isPolling ? 3000 : false,
   });
 
@@ -295,14 +315,16 @@ export function ActivityScreen() {
     queryFn: mobileApi.getNotificationSettings,
   });
 
-  const historyQuery = useQuery({
+  const historyQuery = useInfiniteQuery({
     queryKey: ["challenges", "history"],
-    queryFn: () => mobileApi.getHistory(1, 50),
+    queryFn: ({ pageParam }) => mobileApi.getHistory(pageParam, PAGE_SIZE),
+    initialPageParam: 1,
+    getNextPageParam,
   });
 
-  const pendingItems = pendingQuery.data?.items ?? [];
-  const activeItems = approvalsQuery.data?.items ?? [];
-  const historyItems = historyQuery.data?.items ?? [];
+  const pendingItems = pendingQuery.data?.pages.flatMap((p) => p.items) ?? [];
+  const activeItems = approvalsQuery.data?.pages.flatMap((p) => p.items) ?? [];
+  const historyItems = historyQuery.data?.pages.flatMap((p) => p.items) ?? [];
   const grantDurationLabel = formatGrantDuration(settingsQuery.data?.grant_expiry_days);
 
   const pendingCount = pendingItems.length;
@@ -333,7 +355,7 @@ export function ActivityScreen() {
 
   // --- Mutations ---
   const decideMutation = useMutation({
-    mutationFn: async ({ id, decision }: { id: string; decision: "APPROVE" | "DENY" }) => {
+    mutationFn: async ({ id, decision }: { id: string; decision: "APPROVE" | "DENY"; approvalMode: ApprovalMode }) => {
       const durationSec = decision === "APPROVE" ? (settingsQuery.data?.grant_expiry_days ?? 30) * 86400 : undefined;
       const idempotencyKey = createIdempotencyKey("decision", id);
       return mobileApi.submitDecision(id, decision, durationSec);
@@ -341,12 +363,20 @@ export function ActivityScreen() {
     onMutate: ({ id }) => {
       setMutatingIds((prev) => new Set(prev).add(id));
     },
-    onSuccess: (_, { decision }) => {
+    onSuccess: (_, { decision, approvalMode }) => {
       void queryClient.invalidateQueries({ queryKey: ["challenges"] });
       void queryClient.invalidateQueries({ queryKey: ["approvals"] });
-      setToast({ message: decision === "APPROVE" ? "Approved" : "Denied", kind: "success" });
       setDetailChallenge(null);
-      if (decision === "APPROVE") setActiveSegment("active");
+
+      const isGrant = decision === "APPROVE" && approvalMode === "grant";
+      const targetSegment: ActivitySegment = isGrant ? "active" : "history";
+      const targetLabel = isGrant ? "View in Active" : "View in History";
+
+      setToast({
+        message: decision === "APPROVE" ? "Approved" : "Denied",
+        kind: "success",
+        action: { label: targetLabel, onPress: () => setActiveSegment(targetSegment) },
+      });
     },
     onError: (error, { id }) => {
       setToast({ message: getDecisionErrorMessage(error), kind: "error" });
@@ -395,9 +425,9 @@ export function ActivityScreen() {
   }, [activeSegment, pendingQuery, approvalsQuery, historyQuery]);
 
   const isRefreshing =
-    (activeSegment === "pending" && pendingQuery.isRefetching) ||
-    (activeSegment === "active" && approvalsQuery.isRefetching) ||
-    (activeSegment === "history" && historyQuery.isRefetching);
+    (activeSegment === "pending" && pendingQuery.isRefetching && !pendingQuery.isFetchingNextPage) ||
+    (activeSegment === "active" && approvalsQuery.isRefetching && !approvalsQuery.isFetchingNextPage) ||
+    (activeSegment === "history" && historyQuery.isRefetching && !historyQuery.isFetchingNextPage);
 
   // --- Loading states ---
   const isInitialLoading =
@@ -460,14 +490,19 @@ export function ActivityScreen() {
                 grantDurationLabel={grantDurationLabel}
                 isMutating={mutatingIds.has(item.id)}
                 onPress={() => setDetailChallenge(item)}
-                onApprove={() => decideMutation.mutate({ id: item.id, decision: "APPROVE" })}
-                onDeny={() => decideMutation.mutate({ id: item.id, decision: "DENY" })}
+                onApprove={() => decideMutation.mutate({ id: item.id, decision: "APPROVE", approvalMode: item.approval_mode })}
+                onDeny={() => decideMutation.mutate({ id: item.id, decision: "DENY", approvalMode: item.approval_mode })}
               />
             )}
             contentContainerStyle={styles.listContent}
             ItemSeparatorComponent={() => <View style={styles.separator} />}
+            onEndReached={() => {
+              if (pendingQuery.hasNextPage && !pendingQuery.isFetchingNextPage) pendingQuery.fetchNextPage();
+            }}
+            onEndReachedThreshold={0.5}
+            ListFooterComponent={pendingQuery.isFetchingNextPage ? <ActivityIndicator style={styles.loadingFooter} color={colors.primary} /> : null}
             refreshControl={
-              <RefreshControl refreshing={isRefreshing} onRefresh={handleRefresh} tintColor={mobileTheme.primary} />
+              <RefreshControl refreshing={isRefreshing} onRefresh={handleRefresh} tintColor={colors.primary} />
             }
           />
         )
@@ -491,8 +526,13 @@ export function ActivityScreen() {
             )}
             contentContainerStyle={styles.listContent}
             ItemSeparatorComponent={() => <View style={styles.separator} />}
+            onEndReached={() => {
+              if (approvalsQuery.hasNextPage && !approvalsQuery.isFetchingNextPage) approvalsQuery.fetchNextPage();
+            }}
+            onEndReachedThreshold={0.5}
+            ListFooterComponent={approvalsQuery.isFetchingNextPage ? <ActivityIndicator style={styles.loadingFooter} color={colors.primary} /> : null}
             refreshControl={
-              <RefreshControl refreshing={isRefreshing} onRefresh={handleRefresh} tintColor={mobileTheme.primary} />
+              <RefreshControl refreshing={isRefreshing} onRefresh={handleRefresh} tintColor={colors.primary} />
             }
           />
         )
@@ -518,8 +558,13 @@ export function ActivityScreen() {
             contentContainerStyle={styles.listContent}
             ItemSeparatorComponent={() => <View style={styles.separator} />}
             SectionSeparatorComponent={() => <View style={styles.sectionSep} />}
+            onEndReached={() => {
+              if (historyQuery.hasNextPage && !historyQuery.isFetchingNextPage) historyQuery.fetchNextPage();
+            }}
+            onEndReachedThreshold={0.5}
+            ListFooterComponent={historyQuery.isFetchingNextPage ? <ActivityIndicator style={styles.loadingFooter} color={colors.primary} /> : null}
             refreshControl={
-              <RefreshControl refreshing={isRefreshing} onRefresh={handleRefresh} tintColor={mobileTheme.primary} />
+              <RefreshControl refreshing={isRefreshing} onRefresh={handleRefresh} tintColor={colors.primary} />
             }
           />
         )
@@ -529,8 +574,8 @@ export function ActivityScreen() {
         challenge={detailChallenge}
         grantDurationLabel={grantDurationLabel}
         onClose={() => setDetailChallenge(null)}
-        onApprove={(id) => decideMutation.mutate({ id, decision: "APPROVE" })}
-        onDeny={(id) => decideMutation.mutate({ id, decision: "DENY" })}
+        onApprove={(id) => decideMutation.mutate({ id, decision: "APPROVE", approvalMode: detailChallenge!.approval_mode })}
+        onDeny={(id) => decideMutation.mutate({ id, decision: "DENY", approvalMode: detailChallenge!.approval_mode })}
         isMutating={mutatingIds.has(detailChallenge?.id ?? "")}
       />
       <ToastOverlay toast={toast} bottom={64} />
@@ -538,7 +583,7 @@ export function ActivityScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (c: ThemeColors) => StyleSheet.create({
   header: {
     paddingHorizontal: spacing.xxl,
     paddingTop: spacing.sm,
@@ -548,12 +593,12 @@ const styles = StyleSheet.create({
   title: {
     fontSize: 26,
     fontWeight: "700",
-    color: mobileTheme.textPrimary,
+    color: c.textPrimary,
     fontFamily: "SpaceGrotesk_700Bold",
   },
   subtitle: {
     fontSize: 13,
-    color: mobileTheme.textSecondary,
+    color: c.textSecondary,
     marginBottom: spacing.md,
   },
   segmentWrap: {
@@ -573,15 +618,18 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.xxl,
     paddingTop: spacing.xxl,
   },
+  loadingFooter: {
+    paddingVertical: spacing.xl,
+  },
 });
 
-const sheetStyles = StyleSheet.create({
+const createSheetStyles = (c: ThemeColors) => StyleSheet.create({
   modalRoot: {
     flex: 1,
   },
   backdrop: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: "#000",
+    backgroundColor: c.overlayBg,
   },
   sheet: {
     position: "absolute",
@@ -589,13 +637,13 @@ const sheetStyles = StyleSheet.create({
     left: 0,
     right: 0,
     bottom: 0,
-    backgroundColor: mobileTheme.bg,
+    backgroundColor: c.bg,
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     borderWidth: 1,
     borderBottomWidth: 0,
-    borderColor: mobileTheme.border,
-    shadowColor: "#000",
+    borderColor: c.border,
+    shadowColor: c.shadowColor,
     shadowOffset: { width: 0, height: -10 },
     shadowOpacity: 0.4,
     shadowRadius: 40,
@@ -611,7 +659,7 @@ const sheetStyles = StyleSheet.create({
     width: 36,
     height: 4,
     borderRadius: 2,
-    backgroundColor: "rgba(255,255,255,0.15)",
+    backgroundColor: c.handleBg,
   },
   sheetHeader: {
     flexDirection: "row",
@@ -620,28 +668,28 @@ const sheetStyles = StyleSheet.create({
     paddingHorizontal: spacing.xxl,
     paddingBottom: spacing.lg,
     borderBottomWidth: 1,
-    borderBottomColor: mobileTheme.borderSoft,
+    borderBottomColor: c.borderSoft,
   },
   sheetTitle: {
     fontSize: 18,
     fontWeight: "700",
-    color: mobileTheme.textPrimary,
+    color: c.textPrimary,
     fontFamily: "SpaceGrotesk_700Bold",
   },
   closeBtn: {
     width: 30,
     height: 30,
     borderRadius: 15,
-    backgroundColor: "rgba(255,255,255,0.06)",
+    backgroundColor: c.primaryGlow,
     borderWidth: 1,
-    borderColor: mobileTheme.borderSoft,
+    borderColor: c.borderSoft,
     alignItems: "center",
     justifyContent: "center",
   },
   closeBtnText: {
     fontSize: 14,
     fontWeight: "600",
-    color: mobileTheme.textMuted,
+    color: c.textMuted,
   },
   sheetBody: {
     flex: 1,
@@ -661,14 +709,14 @@ const sheetStyles = StyleSheet.create({
   },
   stateNoticeText: {
     fontSize: 13,
-    color: mobileTheme.warning,
+    color: c.warning,
     lineHeight: 20,
   },
   detailCard: {
     borderRadius: radius.md,
     borderWidth: 1,
-    borderColor: mobileTheme.border,
-    backgroundColor: mobileTheme.cardSoft,
+    borderColor: c.border,
+    backgroundColor: c.cardSoft,
     padding: spacing.lg,
     gap: spacing.md,
   },

@@ -1,7 +1,8 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { Animated, LayoutChangeEvent, Pressable, StyleSheet, Text, View } from "react-native";
 import Svg, { Path, Circle } from "react-native-svg";
-import { mobileTheme } from "../theme/mobileTheme";
+import { useTheme } from "../theme/ThemeContext";
+import type { ThemeColors } from "../theme/mobileTheme";
 import { radius, spacing } from "../theme/designTokens";
 
 export type BottomNavV2Tab = "activity" | "account";
@@ -9,6 +10,7 @@ export type BottomNavV2Tab = "activity" | "account";
 type BottomNavV2Props = {
   active: BottomNavV2Tab;
   onTabPress: (tab: BottomNavV2Tab) => void;
+  onFabPress?: () => void;
 };
 
 function ShieldCheckIcon({ color }: { color: string }) {
@@ -31,9 +33,11 @@ function PersonIcon({ color }: { color: string }) {
 
 const PADDING = spacing.xs + spacing.xxs; // 6
 const GAP = spacing.xs + spacing.xxs; // 6
-const FAB_WIDTH = 56;
+const FAB_WIDTH = 57;
 
-export function BottomNavV2({ active, onTabPress }: BottomNavV2Props) {
+export function BottomNavV2({ active, onTabPress, onFabPress }: BottomNavV2Props) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
   const translateX = useRef(new Animated.Value(0)).current;
   const tabWidth = useRef(0);
   const containerWidth = useRef(0);
@@ -81,74 +85,75 @@ export function BottomNavV2({ active, onTabPress }: BottomNavV2Props) {
         style={styles.item}
         onPress={() => onTabPress("activity")}
       >
-        <ShieldCheckIcon color={active === "activity" ? mobileTheme.textPrimary : mobileTheme.textMuted} />
+        <ShieldCheckIcon color={active === "activity" ? colors.textPrimary : colors.textMuted} />
         <Text style={[styles.text, active === "activity" && styles.textActive]}>Activity</Text>
       </Pressable>
 
-      <View style={styles.fabSpacer}>
+      <Pressable style={styles.fabSpacer} onPress={onFabPress}>
         <Text style={styles.fabLabel}>Ask Nyx</Text>
-      </View>
+      </Pressable>
 
       <Pressable
         style={styles.item}
         onPress={() => onTabPress("account")}
       >
-        <PersonIcon color={active === "account" ? mobileTheme.textPrimary : mobileTheme.textMuted} />
+        <PersonIcon color={active === "account" ? colors.textPrimary : colors.textMuted} />
         <Text style={[styles.text, active === "account" && styles.textActive]}>Account</Text>
       </Pressable>
     </View>
   );
 }
 
-const styles = StyleSheet.create({
-  wrap: {
-    backgroundColor: mobileTheme.card,
-    borderRadius: radius.xl,
-    borderWidth: 1,
-    borderColor: mobileTheme.border,
-    padding: PADDING,
-    flexDirection: "row",
-    gap: GAP,
-    position: "relative",
-  },
-  activeHighlight: {
-    position: "absolute",
-    top: PADDING,
-    left: PADDING,
-    bottom: PADDING,
-    borderRadius: radius.md,
-    backgroundColor: mobileTheme.navActive,
-  },
-  item: {
-    flex: 1,
-    paddingVertical: spacing.sm,
-    borderRadius: radius.md,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "transparent",
-    gap: 3,
-    zIndex: 1,
-  },
-  fabSpacer: {
-    width: FAB_WIDTH,
-    alignItems: "center",
-    justifyContent: "flex-end",
-    paddingBottom: 2,
-    zIndex: 1,
-  },
-  text: {
-    color: mobileTheme.textMuted,
-    fontSize: 10,
-    fontWeight: "600",
-    letterSpacing: 0.02,
-  },
-  textActive: {
-    color: mobileTheme.textPrimary,
-  },
-  fabLabel: {
-    color: mobileTheme.primary,
-    fontSize: 10,
-    fontWeight: "600",
-    letterSpacing: 0.02,
-  },
-});
+const createStyles = (c: ThemeColors) =>
+  StyleSheet.create({
+    wrap: {
+      backgroundColor: c.card,
+      borderRadius: radius.xl,
+      borderWidth: 1,
+      borderColor: c.border,
+      padding: PADDING,
+      flexDirection: "row",
+      gap: GAP,
+      position: "relative",
+    },
+    activeHighlight: {
+      position: "absolute",
+      top: PADDING,
+      left: PADDING,
+      bottom: PADDING,
+      borderRadius: radius.md,
+      backgroundColor: c.navActive,
+    },
+    item: {
+      flex: 1,
+      paddingVertical: spacing.sm,
+      borderRadius: radius.md,
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: "transparent",
+      gap: 3,
+      zIndex: 1,
+    },
+    fabSpacer: {
+      width: FAB_WIDTH,
+      alignItems: "center",
+      justifyContent: "flex-end",
+      paddingBottom: 2,
+      zIndex: 1,
+    },
+    text: {
+      color: c.textMuted,
+      fontSize: 10,
+      fontWeight: "600",
+      letterSpacing: 0.02,
+    },
+    textActive: {
+      color: c.textPrimary,
+    },
+    fabLabel: {
+      color: c.primary,
+      fontSize: 10,
+      fontWeight: "600",
+      letterSpacing: 0.02,
+    },
+  });

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -16,18 +16,20 @@ import {
   getDecisionErrorMessage,
   formatGrantDuration,
 } from "./challengeUiState";
-import { mobileTheme } from "../../theme/mobileTheme";
+import { useTheme } from "../../theme/ThemeContext";
+import type { ThemeColors } from "../../theme/mobileTheme";
 import { radius, spacing, typeScale } from "../../theme/designTokens";
-import { flowStyles } from "../../theme/flowStyles";
+import { createFlowStyles } from "../../theme/flowStyles";
 import type { RootStackParamList } from "../../app/AppNavigator";
 
 type Props = NativeStackScreenProps<RootStackParamList, "ActivityDetail">;
 
-function DetailRow({ label, value, isLast, valueColor }: {
+function DetailRow({ label, value, isLast, valueColor, flowStyles }: {
   label: string;
   value: string;
   isLast?: boolean;
   valueColor?: string;
+  flowStyles: ReturnType<typeof createFlowStyles>;
 }) {
   return (
     <View style={isLast ? flowStyles.rowLast : flowStyles.row}>
@@ -40,6 +42,9 @@ function DetailRow({ label, value, isLast, valueColor }: {
 }
 
 export function ActivityDetailScreen({ navigation, route }: Props) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+  const flowStyles = useMemo(() => createFlowStyles(colors), [colors]);
   const { challengeId } = route.params;
   const queryClient = useQueryClient();
   const [toast, setToast] = useState<ToastState | null>(null);
@@ -103,7 +108,8 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
 
   const actionState = getChallengeActionState(data);
   const grantDurationLabel = formatGrantDuration(settingsQuery.data?.grant_expiry_days);
-  const riskColor = data.risk_level === "high" ? "#FCA5A5" : "#FCD34D";
+  const riskColorMap = { high: colors.riskHigh.text, medium: colors.riskMedium.text, low: colors.riskLow.text };
+  const riskColor = riskColorMap[data.risk_level];
   const isGrantMode = data.approval_mode === "grant";
 
   return (
@@ -122,13 +128,13 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
 
         <View style={styles.detailCard}>
           <Text style={flowStyles.cardTitle}>Request Context</Text>
-          <DetailRow label="Action" value={data.action} />
-          <DetailRow label="Resource" value={data.resource} />
-          <DetailRow label="Client" value={data.request_context.client} />
-          <DetailRow label="Risk Level" value={data.risk_level.toUpperCase()} valueColor={riskColor} />
-          <DetailRow label="Status" value={actionState.statusLabel} valueColor={mobileTheme.warning} />
-          {isGrantMode && <DetailRow label="Grant Duration" value={grantDurationLabel} />}
-          <DetailRow label="Location" value={data.request_context.location} isLast />
+          <DetailRow label="Action" value={data.action} flowStyles={flowStyles} />
+          <DetailRow label="Resource" value={data.resource} flowStyles={flowStyles} />
+          <DetailRow label="Client" value={data.request_context.client} flowStyles={flowStyles} />
+          <DetailRow label="Risk Level" value={data.risk_level.toUpperCase()} valueColor={riskColor} flowStyles={flowStyles} />
+          <DetailRow label="Status" value={actionState.statusLabel} valueColor={colors.warning} flowStyles={flowStyles} />
+          {isGrantMode && <DetailRow label="Grant Duration" value={grantDurationLabel} flowStyles={flowStyles} />}
+          <DetailRow label="Location" value={data.request_context.location} isLast flowStyles={flowStyles} />
         </View>
 
         {actionState.reason ? (
@@ -158,23 +164,23 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (c: ThemeColors) => StyleSheet.create({
   backBtn: {
     paddingVertical: spacing.xs,
   },
   backText: {
     fontSize: 12,
-    color: mobileTheme.textMuted,
+    color: c.textMuted,
   },
   screenTitle: {
     fontSize: 22,
     fontWeight: "700",
-    color: mobileTheme.textPrimary,
+    color: c.textPrimary,
     fontFamily: "SpaceGrotesk_700Bold",
   },
   screenSub: {
     fontSize: 13,
-    color: mobileTheme.textSecondary,
+    color: c.textSecondary,
     lineHeight: 20,
   },
   stateNotice: {
@@ -186,14 +192,14 @@ const styles = StyleSheet.create({
   },
   stateNoticeText: {
     fontSize: 13,
-    color: mobileTheme.warning,
+    color: c.warning,
     lineHeight: 20,
   },
   detailCard: {
     borderRadius: radius.md,
     borderWidth: 1,
-    borderColor: mobileTheme.border,
-    backgroundColor: mobileTheme.cardSoft,
+    borderColor: c.border,
+    backgroundColor: c.cardSoft,
     padding: spacing.lg,
     gap: spacing.md,
   },
@@ -207,11 +213,11 @@ const styles = StyleSheet.create({
   errorTitle: {
     fontSize: 18,
     fontWeight: "700",
-    color: mobileTheme.textPrimary,
+    color: c.textPrimary,
   },
   errorMsg: {
     fontSize: 14,
-    color: mobileTheme.textSecondary,
+    color: c.textSecondary,
     textAlign: "center",
   },
   errorActions: {

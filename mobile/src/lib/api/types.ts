@@ -91,6 +91,7 @@ export type AccountProfile = {
   mfa_enabled: boolean;
   is_admin: boolean;
   is_active: boolean;
+  social_provider?: string | null;
   created_at: string;
   last_login_at?: string | null;
 };

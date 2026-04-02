@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { Alert, Pressable, ScrollView, StyleSheet, Switch, Text, View } from "react-native";
+import Svg, { Circle, Path } from "react-native-svg";
 import { RootStackParamList } from "../../app/AppNavigator";
 
 import { PrimaryButton } from "../../components/PrimaryButton";
@@ -13,10 +14,11 @@ import { useNetworkStatus } from "../../hooks/useNetworkStatus";
 import { mobileApi } from "../../lib/api/mobileApi";
 import { isApiError } from "../../lib/api/ApiError";
 import { resolveErrorMessage } from "../../lib/api/errorMessages";
-import { mobileTheme } from "../../theme/mobileTheme";
-import { flowStyles } from "../../theme/flowStyles";
+import { useTheme } from "../../theme/ThemeContext";
+import type { ThemeColors } from "../../theme/mobileTheme";
+import { createFlowStyles } from "../../theme/flowStyles";
 import { radius, spacing, typeScale } from "../../theme/designTokens";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 type Props = NativeStackScreenProps<RootStackParamList, "AccountSettings">;
 
@@ -61,6 +63,8 @@ function AccountRow({
   isLast?: boolean;
   onPress?: () => void;
 }) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
   const content = (
     <View style={[styles.accountRow, isLast && styles.accountRowLast]}>
       <Text style={styles.accountRowLabel}>{label}</Text>
@@ -89,6 +93,9 @@ function getInitials(name?: string | null, email?: string): string {
 }
 
 export function AccountSettingsScreen({ navigation }: Props) {
+  const { colors, mode, preference, setPreference } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+  const flowStyles = useMemo(() => createFlowStyles(colors), [colors]);
   const [toast, setToast] = useState<ToastState | null>(null);
   const queryClient = useQueryClient();
   const { signOut } = useAuthSession();
@@ -311,7 +318,7 @@ export function AccountSettingsScreen({ navigation }: Props) {
             <>
               <AccountRow label="Display Name" value={profile.display_name ?? "Not set"} />
               <AccountRow label="Email" value={profile.email} />
-              <AccountRow label="Sign-in Method" value="GitHub" isLast />
+              <AccountRow label="Sign-in Method" value={profile.social_provider ? profile.social_provider.charAt(0).toUpperCase() + profile.social_provider.slice(1) : "Email"} isLast />
             </>
           )}
         </View>
@@ -333,7 +340,7 @@ export function AccountSettingsScreen({ navigation }: Props) {
                       value={notifSettings.push_enabled}
                       onValueChange={handleTogglePush}
                       disabled={notifMutation.isPending}
-                      trackColor={{ false: mobileTheme.borderSoft, true: mobileTheme.success }}
+                      trackColor={{ false: colors.borderSoft, true: colors.success }}
                     />
                   ) : (
                     <Text style={styles.accountRowValue}>No device</Text>
@@ -361,7 +368,7 @@ export function AccountSettingsScreen({ navigation }: Props) {
                     value={notifSettings.telegram_enabled}
                     onValueChange={handleToggleTelegram}
                     disabled={notifMutation.isPending}
-                    trackColor={{ false: mobileTheme.borderSoft, true: mobileTheme.success }}
+                    trackColor={{ false: colors.borderSoft, true: colors.success }}
                   />
                 )}
               </View>
@@ -372,6 +379,51 @@ export function AccountSettingsScreen({ navigation }: Props) {
               )}
             </>
           )}
+        </View>
+
+        {/* Appearance card */}
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>Appearance</Text>
+          <View style={styles.themeToggleWrap}>
+            {(() => {
+              const isLight = preference === "light" || (preference === "system" && mode === "light");
+              const isDark = preference === "dark" || (preference === "system" && mode === "dark");
+              const lightColor = isLight ? colors.primary : colors.textMuted;
+              const darkColor = isDark ? colors.primary : colors.textMuted;
+              return (
+                <>
+                  <Pressable
+                    style={[styles.themeToggleHalf, isLight && styles.themeToggleHalfActive]}
+                    onPress={() => setPreference("light")}
+                  >
+                    <Svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke={lightColor} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                      <Circle cx={12} cy={12} r={5} />
+                      <Path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
+                    </Svg>
+                    <Text style={[styles.themeToggleLabel, isLight && styles.themeToggleLabelActive]}>Light</Text>
+                  </Pressable>
+                  <View style={styles.themeToggleDivider} />
+                  <Pressable
+                    style={[styles.themeToggleHalf, isDark && styles.themeToggleHalfActive]}
+                    onPress={() => setPreference("dark")}
+                  >
+                    <Svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke={darkColor} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                      <Path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+                    </Svg>
+                    <Text style={[styles.themeToggleLabel, isDark && styles.themeToggleLabelActive]}>Dark</Text>
+                  </Pressable>
+                </>
+              );
+            })()}
+          </View>
+          <View style={styles.systemRow}>
+            <Text style={styles.accountRowLabel}>Use system setting</Text>
+            <Switch
+              value={preference === "system"}
+              onValueChange={(on) => setPreference(on ? "system" : mode)}
+              trackColor={{ false: colors.borderSoft, true: colors.success }}
+            />
+          </View>
         </View>
 
         {/* Actions */}
@@ -411,7 +463,7 @@ export function AccountSettingsScreen({ navigation }: Props) {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (c: ThemeColors) => StyleSheet.create({
   identityHeader: {
     flexDirection: "row",
     alignItems: "center",
@@ -441,46 +493,46 @@ const styles = StyleSheet.create({
   identityName: {
     fontSize: 18,
     fontWeight: "700",
-    color: mobileTheme.textPrimary,
+    color: c.textPrimary,
     fontFamily: "SpaceGrotesk_700Bold",
   },
   identityEmail: {
     fontSize: 12,
-    color: mobileTheme.textMuted,
+    color: c.textMuted,
     marginTop: 1,
   },
   statusBadge: {
     paddingHorizontal: 10,
     paddingVertical: 3,
     borderRadius: 20,
-    backgroundColor: "rgba(52,211,153,0.1)",
+    backgroundColor: c.successSoft,
     borderWidth: 1,
     borderColor: "rgba(52,211,153,0.2)",
   },
   statusBadgeOffline: {
-    backgroundColor: "rgba(239,68,68,0.1)",
+    backgroundColor: c.dangerSoftBg,
     borderColor: "rgba(239,68,68,0.2)",
   },
   statusBadgeText: {
     fontSize: 10,
     fontWeight: "700",
-    color: mobileTheme.success,
+    color: c.success,
   },
   statusBadgeTextOffline: {
-    color: "#FCA5A5",
+    color: c.dangerSoft,
   },
   card: {
     borderRadius: radius.lg,
     borderWidth: 1,
-    borderColor: mobileTheme.borderSoft,
-    backgroundColor: mobileTheme.card,
+    borderColor: c.borderSoft,
+    backgroundColor: c.card,
     padding: spacing.xl,
     gap: 0,
     marginBottom: spacing.xl,
   },
   cardTitle: {
     ...typeScale.title,
-    color: mobileTheme.textPrimary,
+    color: c.textPrimary,
     marginBottom: 0,
   },
   accountRow: {
@@ -489,7 +541,7 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     paddingVertical: 14,
     borderBottomWidth: 1,
-    borderBottomColor: mobileTheme.borderSoft,
+    borderBottomColor: c.borderSoft,
   },
   accountRowLast: {
     borderBottomWidth: 0,
@@ -497,7 +549,7 @@ const styles = StyleSheet.create({
   accountRowLabel: {
     fontSize: 14,
     fontWeight: "500",
-    color: mobileTheme.textSecondary,
+    color: c.textSecondary,
   },
   accountRowRight: {
     flexDirection: "row",
@@ -507,11 +559,11 @@ const styles = StyleSheet.create({
   accountRowValue: {
     fontSize: 14,
     fontWeight: "600",
-    color: mobileTheme.textPrimary,
+    color: c.textPrimary,
   },
   accountRowArrow: {
     fontSize: 14,
-    color: mobileTheme.textMuted,
+    color: c.textMuted,
   },
   channelRowLeft: {
     flexDirection: "row",
@@ -533,7 +585,7 @@ const styles = StyleSheet.create({
   connectedPillText: {
     fontSize: 11,
     fontWeight: "600",
-    color: mobileTheme.primary,
+    color: c.primary,
   },
   linkPill: {
     backgroundColor: "rgba(139, 92, 246, 0.08)",
@@ -546,31 +598,68 @@ const styles = StyleSheet.create({
   linkPillText: {
     fontSize: 11,
     fontWeight: "600",
-    color: mobileTheme.primary,
+    color: c.primary,
   },
   channelHint: {
     fontSize: 11,
-    color: mobileTheme.textMuted,
+    color: c.textMuted,
     marginTop: 6,
     lineHeight: 15,
+  },
+  themeToggleWrap: {
+    flexDirection: "row",
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+    overflow: "hidden",
+    marginTop: spacing.sm,
+  },
+  themeToggleHalf: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    paddingVertical: 12,
+  },
+  themeToggleHalfActive: {
+    backgroundColor: c.primaryGlow,
+  },
+  themeToggleDivider: {
+    width: 1,
+    backgroundColor: c.borderSoft,
+  },
+  themeToggleLabel: {
+    fontSize: 13,
+    fontWeight: "600",
+    color: c.textMuted,
+  },
+  themeToggleLabelActive: {
+    color: c.primary,
+  },
+  systemRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginTop: spacing.md,
   },
   actionsWrap: {
     gap: spacing.md,
     marginTop: spacing.xs,
   },
   metaText: {
-    color: mobileTheme.textSecondary,
+    color: c.textSecondary,
     ...typeScale.body,
     paddingVertical: spacing.md,
   },
   errorText: {
-    color: "#FCA5A5",
+    color: c.dangerSoft,
     ...typeScale.caption,
     paddingVertical: spacing.md,
   },
   offlineNote: {
     fontSize: 12,
-    color: mobileTheme.textMuted,
+    color: c.textMuted,
     textAlign: "center",
     paddingVertical: spacing.md,
   },
@@ -584,11 +673,11 @@ const styles = StyleSheet.create({
   },
   legalLink: {
     fontSize: 12,
-    color: mobileTheme.textMuted,
+    color: c.textMuted,
     textDecorationLine: "underline",
   },
   legalDot: {
     fontSize: 12,
-    color: mobileTheme.textMuted,
+    color: c.textMuted,
   },
 });

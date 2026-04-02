@@ -21,7 +21,7 @@ import {
 
 const DEFAULT_API_BASE_URL = "http://localhost:3001/api/v1";
 const DEFAULT_CHALLENGE_DURATION_SEC = 24 * 60 * 60;
-const CHALLENGE_PAGE_SIZE = 100;
+const ACTIVITY_PAGE_SIZE = 20;
 const REFRESH_CONFLICT_RETRY_COUNT = 1;
 const REFRESH_CONFLICT_RETRY_DELAY_MS = 160;
 const PROACTIVE_REFRESH_BUFFER_MS = 2 * 60 * 1000;
@@ -528,7 +528,7 @@ export async function requestJson<T>(path: string, options: RequestOptions = {})
 
 async function listPendingApprovalRequests(
   page = 1,
-  perPage = CHALLENGE_PAGE_SIZE
+  perPage = ACTIVITY_PAGE_SIZE
 ): Promise<BackendApprovalRequestsResponse> {
   return requestJson<BackendApprovalRequestsResponse>(
     `/approvals/requests?status=pending&page=${page}&per_page=${perPage}`
@@ -579,8 +579,11 @@ export async function registerWithPasswordRequest(
   });
 }
 
-export async function listChallengesRequest(): Promise<PageResponse<ChallengeDetail>> {
-  const response = await listPendingApprovalRequests(1, CHALLENGE_PAGE_SIZE);
+export async function listChallengesRequest(
+  page = 1,
+  perPage = ACTIVITY_PAGE_SIZE
+): Promise<PageResponse<ChallengeDetail>> {
+  const response = await listPendingApprovalRequests(page, perPage);
   return {
     items: response.requests.map(mapBackendRequestToChallenge),
     total: response.total,
@@ -651,9 +654,12 @@ export async function submitChallengeDecisionRequest(
   };
 }
 
-export async function listApprovalsRequest(): Promise<PageResponse<ApprovalItem>> {
+export async function listApprovalsRequest(
+  page = 1,
+  perPage = ACTIVITY_PAGE_SIZE
+): Promise<PageResponse<ApprovalItem>> {
   const response = await requestJson<BackendApprovalGrantsResponse>(
-    "/approvals/grants?page=1&per_page=100"
+    `/approvals/grants?page=${page}&per_page=${perPage}`
   );
 
   return {

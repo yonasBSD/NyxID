@@ -35,6 +35,7 @@ import { AuthSessionProvider } from "../features/auth/AuthSessionContext";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import type { BottomNavV2Tab } from "../components/BottomNavV2";
 import { NyxSheet } from "../features/nyx/NyxSheet";
+import { ThemeProvider, useTheme } from "../theme/ThemeContext";
 
 const queryClient = new QueryClient();
 
@@ -199,38 +200,71 @@ export default function App() {
       <GestureHandlerRootView style={appRootStyles.fill}>
         <SafeAreaProvider>
           <QueryClientProvider client={queryClient}>
-            <AuthSessionProvider>
-              <NavigationContainer
-                ref={navigationRef}
-                linking={appLinking}
-                onReady={() => {
-                  const routeName = getActiveRouteName(navigationRef.getRootState());
-                  setCurrentRouteName(routeName);
-                  flushPendingChallengeTapNavigation();
-                }}
-                onStateChange={(state) => {
-                  const routeName = getActiveRouteName(state);
-                  setCurrentRouteName(routeName);
-                  flushPendingChallengeTapNavigation();
-                }}
-              >
-                <StatusBar style="light" />
-                <AppNavigator
+            <ThemeProvider>
+              <AuthSessionProvider>
+                <ThemedAppShell
+                  navigationRef={navigationRef}
                   currentRouteName={currentRouteName}
-                  onMainTabPress={(tab: BottomNavV2Tab) => {
-                    if (!navigationRef.isReady()) return;
-                    if (tab === "activity") navigationRef.navigate("Activity");
-                    if (tab === "account") navigationRef.navigate("AccountSettings");
-                  }}
-                  onNyxPress={() => setIsNyxOpen(true)}
+                  setCurrentRouteName={setCurrentRouteName}
+                  flushPendingChallengeTapNavigation={flushPendingChallengeTapNavigation}
+                  isNyxOpen={isNyxOpen}
+                  setIsNyxOpen={setIsNyxOpen}
                 />
-              </NavigationContainer>
-              <NyxSheet isOpen={isNyxOpen} onClose={() => setIsNyxOpen(false)} />
-            </AuthSessionProvider>
+              </AuthSessionProvider>
+            </ThemeProvider>
           </QueryClientProvider>
         </SafeAreaProvider>
       </GestureHandlerRootView>
     </AppErrorBoundary>
+  );
+}
+
+function ThemedAppShell({
+  navigationRef,
+  currentRouteName,
+  setCurrentRouteName,
+  flushPendingChallengeTapNavigation,
+  isNyxOpen,
+  setIsNyxOpen,
+}: {
+  navigationRef: ReturnType<typeof useNavigationContainerRef<RootStackParamList>>;
+  currentRouteName: string | undefined;
+  setCurrentRouteName: (name: string | undefined) => void;
+  flushPendingChallengeTapNavigation: () => void;
+  isNyxOpen: boolean;
+  setIsNyxOpen: (open: boolean) => void;
+}) {
+  const { mode } = useTheme();
+
+  return (
+    <>
+      <NavigationContainer
+        ref={navigationRef}
+        linking={appLinking}
+        onReady={() => {
+          const routeName = getActiveRouteName(navigationRef.getRootState());
+          setCurrentRouteName(routeName);
+          flushPendingChallengeTapNavigation();
+        }}
+        onStateChange={(state) => {
+          const routeName = getActiveRouteName(state);
+          setCurrentRouteName(routeName);
+          flushPendingChallengeTapNavigation();
+        }}
+      >
+        <StatusBar style={mode === "dark" ? "light" : "dark"} />
+        <AppNavigator
+          currentRouteName={currentRouteName}
+          onMainTabPress={(tab: BottomNavV2Tab) => {
+            if (!navigationRef.isReady()) return;
+            if (tab === "activity") navigationRef.navigate("Activity");
+            if (tab === "account") navigationRef.navigate("AccountSettings");
+          }}
+          onNyxPress={() => setIsNyxOpen(true)}
+        />
+      </NavigationContainer>
+      <NyxSheet isOpen={isNyxOpen} onClose={() => setIsNyxOpen(false)} />
+    </>
   );
 }
 
@@ -251,6 +285,5 @@ const appLoadingStyles = StyleSheet.create({
 const appRootStyles = StyleSheet.create({
   fill: {
     flex: 1,
-    backgroundColor: "#10101A",
   },
 });

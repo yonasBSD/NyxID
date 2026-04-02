@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Pressable, StyleSheet, View, Text } from "react-native";
 import Svg, { Circle, Path, Defs, LinearGradient, Stop } from "react-native-svg";
-import { mobileTheme } from "../theme/mobileTheme";
+import { useTheme } from "../theme/ThemeContext";
+import type { ThemeColors } from "../theme/mobileTheme";
 
 type NyxFABProps = {
   onPress?: () => void;
@@ -12,6 +13,8 @@ const FAB_SIZE = 57;
 const GLOW_SIZE = 110;
 
 export function NyxFAB({ onPress, badgeCount = 0 }: NyxFABProps) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
   const [tapped, setTapped] = useState(false);
 
   const handlePress = () => {
@@ -24,7 +27,7 @@ export function NyxFAB({ onPress, badgeCount = 0 }: NyxFABProps) {
     <View style={styles.wrapper}>
 
       {/* FAB button */}
-      <Pressable style={[styles.fab, tapped && styles.fabTapped]} onPress={handlePress}>
+      <Pressable style={[styles.fab, tapped && styles.fabTapped]} onPress={handlePress} hitSlop={{ top: 20, bottom: 20, left: 20, right: 20 }}>
         <Svg width={36} height={36} viewBox="0 0 130 130" fill="none">
           <Defs>
             <LinearGradient id="fo" gradientUnits="userSpaceOnUse" x1="10" y1="65" x2="120" y2="65">
@@ -63,44 +66,45 @@ export function NyxFAB({ onPress, badgeCount = 0 }: NyxFABProps) {
   );
 }
 
-const styles = StyleSheet.create({
-  wrapper: {
-    width: FAB_SIZE,
-    height: FAB_SIZE,
-    alignItems: "center",
-    justifyContent: "center",
-    overflow: "visible",
-  },
-  fab: {
-    width: FAB_SIZE,
-    height: FAB_SIZE,
-    borderRadius: FAB_SIZE / 2,
-    backgroundColor: "rgba(16,16,26,1)",
-    borderWidth: 1.5,
-    borderColor: "rgba(139,92,246,0.35)",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  fabTapped: {
-    borderColor: "#A78BFA",
-    borderWidth: 3,
-  },
-  badge: {
-    position: "absolute",
-    top: -2,
-    right: -2,
-    width: 14,
-    height: 14,
-    borderRadius: 7,
-    backgroundColor: mobileTheme.danger,
-    borderWidth: 2,
-    borderColor: mobileTheme.bg,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  badgeText: {
-    fontSize: 8,
-    fontWeight: "800",
-    color: "#FFFFFF",
-  },
-});
+const createStyles = (c: ThemeColors) =>
+  StyleSheet.create({
+    wrapper: {
+      width: FAB_SIZE,
+      height: FAB_SIZE,
+      alignItems: "center",
+      justifyContent: "center",
+      overflow: "visible",
+    },
+    fab: {
+      width: FAB_SIZE,
+      height: FAB_SIZE,
+      borderRadius: FAB_SIZE / 2,
+      backgroundColor: c.fabBg,
+      borderWidth: 1.5,
+      borderColor: c.fabBorder,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    fabTapped: {
+      borderColor: "#A78BFA",
+      borderWidth: 3,
+    },
+    badge: {
+      position: "absolute",
+      top: -2,
+      right: -2,
+      width: 14,
+      height: 14,
+      borderRadius: 7,
+      backgroundColor: c.danger,
+      borderWidth: 2,
+      borderColor: c.bg,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    badgeText: {
+      fontSize: 8,
+      fontWeight: "800",
+      color: c.onPrimary,
+    },
+  });

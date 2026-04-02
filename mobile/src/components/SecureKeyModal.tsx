@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Modal, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import Svg, { Path, Rect } from "react-native-svg";
-import { mobileTheme } from "../theme/mobileTheme";
+import { useTheme } from "../theme/ThemeContext";
+import type { ThemeColors } from "../theme/mobileTheme";
 import { radius, spacing } from "../theme/designTokens";
 import type { SecretInputRequest } from "../lib/api/chatTypes";
 
@@ -31,6 +32,8 @@ function LockIcon() {
 }
 
 export function SecureKeyModal({ visible, fields, onSubmit, onCancel }: SecureKeyModalProps) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
   const [values, setValues] = useState<Record<string, string>>({});
 
   const handleSubmit = () => {
@@ -78,7 +81,7 @@ export function SecureKeyModal({ visible, fields, onSubmit, onCancel }: SecureKe
                 style={styles.input}
                 secureTextEntry
                 placeholder={field.placeholder || "sk-••••••••••••••••••••"}
-                placeholderTextColor={mobileTheme.textMuted}
+                placeholderTextColor={colors.textMuted}
                 value={values[field.param_name] ?? ""}
                 onChangeText={(text) => setValues((prev) => ({ ...prev, [field.param_name]: text }))}
                 autoCapitalize="none"
@@ -101,143 +104,144 @@ export function SecureKeyModal({ visible, fields, onSubmit, onCancel }: SecureKe
   );
 }
 
-const styles = StyleSheet.create({
-  backdrop: {
-    flex: 1,
-    backgroundColor: "rgba(0,0,0,0.65)",
-    justifyContent: "center",
-    alignItems: "center",
-    padding: spacing.xxl,
-  },
-  modal: {
-    width: 270,
-    backgroundColor: mobileTheme.card,
-    borderWidth: 1,
-    borderColor: mobileTheme.border,
-    borderRadius: radius.lg,
-    padding: 20,
-    gap: 12,
-  },
-  iconWrap: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: "rgba(34,197,94,0.12)",
-    borderWidth: 1,
-    borderColor: "rgba(34,197,94,0.25)",
-    alignItems: "center",
-    justifyContent: "center",
-    alignSelf: "center",
-  },
-  title: {
-    fontSize: 15,
-    fontWeight: "700",
-    textAlign: "center",
-    color: mobileTheme.textPrimary,
-    fontFamily: "SpaceGrotesk_700Bold",
-  },
-  desc: {
-    fontSize: 11,
-    color: mobileTheme.textSecondary,
-    textAlign: "center",
-    lineHeight: 16.5,
-  },
-  descBold: {
-    fontWeight: "700",
-    color: mobileTheme.textPrimary,
-  },
-  trustBadge: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 5,
-    paddingVertical: 6,
-    paddingHorizontal: 10,
-    borderRadius: radius.sm,
-    backgroundColor: "rgba(34,197,94,0.08)",
-    borderWidth: 1,
-    borderColor: "rgba(34,197,94,0.2)",
-  },
-  trustText: {
-    fontSize: 10,
-    fontWeight: "700",
-    color: mobileTheme.success,
-    letterSpacing: 0.3,
-  },
-  fieldLabel: {
-    fontSize: 10,
-    fontWeight: "600",
-    color: mobileTheme.textMuted,
-    letterSpacing: 0.4,
-  },
-  serviceRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    paddingVertical: 8,
-    paddingHorizontal: 10,
-    borderRadius: radius.sm,
-    backgroundColor: mobileTheme.bg,
-    borderWidth: 1,
-    borderColor: mobileTheme.border,
-  },
-  serviceDot: {
-    width: 20,
-    height: 20,
-    borderRadius: 4,
-    backgroundColor: "rgba(16,163,127,0.15)",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  serviceDotText: {
-    fontSize: 10,
-    fontWeight: "800",
-    color: "#10A37F",
-  },
-  serviceText: {
-    fontSize: 13,
-    fontWeight: "600",
-    color: mobileTheme.textPrimary,
-  },
-  input: {
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    borderRadius: radius.sm,
-    borderWidth: 1,
-    borderColor: mobileTheme.border,
-    backgroundColor: mobileTheme.bg,
-    fontSize: 13,
-    color: mobileTheme.textMuted,
-    fontFamily: "monospace",
-    letterSpacing: 2,
-  },
-  actions: {
-    flexDirection: "row",
-    gap: 8,
-  },
-  cancelBtn: {
-    paddingVertical: 8,
-    paddingHorizontal: 16,
-    borderRadius: radius.sm,
-    borderWidth: 1,
-    borderColor: mobileTheme.border,
-    backgroundColor: "transparent",
-  },
-  cancelText: {
-    fontSize: 12,
-    fontWeight: "600",
-    color: mobileTheme.textSecondary,
-  },
-  submitBtn: {
-    flex: 1,
-    paddingVertical: 8,
-    borderRadius: radius.sm,
-    backgroundColor: mobileTheme.primary,
-    alignItems: "center",
-  },
-  submitText: {
-    fontSize: 12,
-    fontWeight: "700",
-    color: "#FFFFFF",
-  },
-});
+const createStyles = (c: ThemeColors) =>
+  StyleSheet.create({
+    backdrop: {
+      flex: 1,
+      backgroundColor: "rgba(0,0,0,0.65)",
+      justifyContent: "center",
+      alignItems: "center",
+      padding: spacing.xxl,
+    },
+    modal: {
+      width: 270,
+      backgroundColor: c.card,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.lg,
+      padding: 20,
+      gap: 12,
+    },
+    iconWrap: {
+      width: 36,
+      height: 36,
+      borderRadius: 18,
+      backgroundColor: "rgba(34,197,94,0.12)",
+      borderWidth: 1,
+      borderColor: "rgba(34,197,94,0.25)",
+      alignItems: "center",
+      justifyContent: "center",
+      alignSelf: "center",
+    },
+    title: {
+      fontSize: 15,
+      fontWeight: "700",
+      textAlign: "center",
+      color: c.textPrimary,
+      fontFamily: "SpaceGrotesk_700Bold",
+    },
+    desc: {
+      fontSize: 11,
+      color: c.textSecondary,
+      textAlign: "center",
+      lineHeight: 16.5,
+    },
+    descBold: {
+      fontWeight: "700",
+      color: c.textPrimary,
+    },
+    trustBadge: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 5,
+      paddingVertical: 6,
+      paddingHorizontal: 10,
+      borderRadius: radius.sm,
+      backgroundColor: "rgba(34,197,94,0.08)",
+      borderWidth: 1,
+      borderColor: "rgba(34,197,94,0.2)",
+    },
+    trustText: {
+      fontSize: 10,
+      fontWeight: "700",
+      color: c.success,
+      letterSpacing: 0.3,
+    },
+    fieldLabel: {
+      fontSize: 10,
+      fontWeight: "600",
+      color: c.textMuted,
+      letterSpacing: 0.4,
+    },
+    serviceRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+      paddingVertical: 8,
+      paddingHorizontal: 10,
+      borderRadius: radius.sm,
+      backgroundColor: c.bg,
+      borderWidth: 1,
+      borderColor: c.border,
+    },
+    serviceDot: {
+      width: 20,
+      height: 20,
+      borderRadius: 4,
+      backgroundColor: "rgba(16,163,127,0.15)",
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    serviceDotText: {
+      fontSize: 10,
+      fontWeight: "800",
+      color: "#10A37F",
+    },
+    serviceText: {
+      fontSize: 13,
+      fontWeight: "600",
+      color: c.textPrimary,
+    },
+    input: {
+      paddingVertical: 10,
+      paddingHorizontal: 12,
+      borderRadius: radius.sm,
+      borderWidth: 1,
+      borderColor: c.border,
+      backgroundColor: c.bg,
+      fontSize: 13,
+      color: c.textMuted,
+      fontFamily: "monospace",
+      letterSpacing: 2,
+    },
+    actions: {
+      flexDirection: "row",
+      gap: 8,
+    },
+    cancelBtn: {
+      paddingVertical: 8,
+      paddingHorizontal: 16,
+      borderRadius: radius.sm,
+      borderWidth: 1,
+      borderColor: c.border,
+      backgroundColor: "transparent",
+    },
+    cancelText: {
+      fontSize: 12,
+      fontWeight: "600",
+      color: c.textSecondary,
+    },
+    submitBtn: {
+      flex: 1,
+      paddingVertical: 8,
+      borderRadius: radius.sm,
+      backgroundColor: c.primary,
+      alignItems: "center",
+    },
+    submitText: {
+      fontSize: 12,
+      fontWeight: "700",
+      color: c.onPrimary,
+    },
+  });
