@@ -246,23 +246,29 @@ nyxid service delete <id> --yes                                # remove service 
 
 ## Managing API Keys
 
-Each AI agent or integration should use its own NyxID API key. This gives each caller independent scope, audit trail, and optional credential bindings.
+Each AI agent or integration should use its own NyxID API key (agent key). This gives each caller independent audit trail, optional service bindings, and rate limits.
 
 ```bash
 # CRUD
 nyxid api-key create --name "My Key" --scopes "proxy read"
 nyxid api-key create --name "coding-agent" --platform claude-code  # optional platform label
+nyxid api-key create --name "relay-agent" --callback-url "https://..."  # for channel bot relay
 nyxid api-key list --output json
 nyxid api-key show <ID_OR_NAME> --output json
 nyxid api-key rotate <ID_OR_NAME>
 nyxid api-key delete <ID_OR_NAME> --yes
 
-# Scope management (restrict which services/nodes a key can access)
-nyxid api-key update <ID> --allowed-services "svc-id-1,svc-id-2" --allow-all-services false
-nyxid api-key update <ID> --allow-all-services true    # unrestrict
-
-# Credential bindings (override which credential a key uses for a service)
+# Service bindings (override which credential the agent uses for a service)
 nyxid api-key bind <ID_OR_NAME> --service <SERVICE_SLUG> --credential <CREDENTIAL_LABEL>
+
+# By default, agents can access all services with default credentials.
+# Bindings override which credential is used for specific services.
+# To restrict an agent to ONLY access bound services:
+nyxid api-key update <ID> --allow-all-services false
+
+# Callback URL for channel bot relay
+nyxid api-key update <ID> --callback-url "https://my-agent.example.com/webhook"
+nyxid api-key update <ID> --callback-url ""    # clear
 
 # Per-key rate limits
 nyxid api-key update <ID> --rate-limit-per-second 10 --rate-limit-burst 30

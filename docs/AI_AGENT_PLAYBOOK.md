@@ -1964,17 +1964,26 @@ nyxid ssh config \
 **Goal:** Create NyxID API keys for CLI or programmatic access without going through the OAuth flow. Managed from the AI Services page under the "NyxID API Keys" tab at http://localhost:3000/keys.
 
 ```bash
-# CLI (list shows ID, scopes, service scope, node scope)
+# CLI (list shows ID, scopes, service bindings, node scope)
 nyxid api-key create --name "CI Pipeline Key" --scopes "proxy read"
+nyxid api-key create --name "relay-agent" --callback-url "https://..."  # for channel bot relay
 nyxid api-key list                                     # Shows: ID, Name, Scopes, Services, Nodes
-nyxid api-key show <ID>                                # Full details with scope info
+nyxid api-key show <ID>                                # Full details with bindings info
 nyxid api-key rotate <ID>                              # Rotate
 nyxid api-key delete <ID>                              # Delete
 
-# Scope management
-nyxid api-key update <ID> --allowed-services "svc-id-1,svc-id-2"  # Restrict to specific services
-nyxid api-key update <ID> --allow-all-services true               # Allow all services again
-nyxid api-key update <ID> --allowed-nodes "node-id" --allow-all-nodes false  # Restrict nodes
+# Service bindings (override which credential the agent uses for a service)
+nyxid api-key bind <ID> --service <SLUG> --credential <LABEL>
+
+# By default, agents access all services with default credentials.
+# To restrict to only bound services:
+nyxid api-key update <ID> --allow-all-services false
+
+# Callback URL for channel bot relay
+nyxid api-key update <ID> --callback-url "https://my-agent.example.com/webhook"
+
+# Node scope (restrict which nodes the agent can route through)
+nyxid api-key update <ID> --allowed-nodes "node-id" --allow-all-nodes false
 
 # API equivalents
 curl -X POST http://localhost:3001/api/v1/api-keys \
