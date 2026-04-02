@@ -42,6 +42,25 @@ pub struct ApprovalRequest {
     #[serde(default)]
     pub action_description: Option<String>,
 
+    /// Tool approval fields (set when created via POST /api/v1/approvals/requests).
+    /// All optional -- `None` for proxy-initiated approval requests.
+
+    /// Name of the agent tool requesting approval (e.g. "invoke_service")
+    #[serde(default)]
+    pub tool_name: Option<String>,
+
+    /// LLM-generated tool call ID for correlation
+    #[serde(default)]
+    pub tool_call_id: Option<String>,
+
+    /// Serialized JSON of tool arguments
+    #[serde(default)]
+    pub tool_arguments: Option<String>,
+
+    /// Whether the tool performs irreversible operations
+    #[serde(default)]
+    pub is_destructive: Option<bool>,
+
     /// Approval semantics captured at request creation time.
     /// Legacy requests created before this field existed default to grant mode
     /// so their original behavior is preserved when decided later.
@@ -113,6 +132,10 @@ mod tests {
             action_description: Some(
                 "POST /v1/chat/completions (model: gpt-4, 3 messages)".to_string(),
             ),
+            tool_name: None,
+            tool_call_id: None,
+            tool_arguments: None,
+            is_destructive: None,
             approval_mode: ApprovalMode::PerRequest,
             status: "pending".to_string(),
             idempotency_key: "abc123".to_string(),
@@ -176,6 +199,42 @@ mod tests {
         doc.remove("approval_mode");
         let restored: ApprovalRequest = bson::from_document(doc).expect("deserialize");
         assert_eq!(restored.approval_mode, ApprovalMode::Grant);
+    }
+
+    #[test]
+    fn bson_roundtrip_with_tool_fields() {
+        let mut req = make_approval_request();
+        req.tool_name = Some("invoke_service".to_string());
+        req.tool_call_id = Some("call_abc123".to_string());
+        req.tool_arguments = Some(r#"{"service_id":"svc_1","endpoint_id":"ep_1"}"#.to_string());
+        req.is_destructive = Some(true);
+
+        let doc = bson::to_document(&req).expect("serialize");
+        assert_eq!(doc.get_str("tool_name").unwrap(), "invoke_service");
+        assert!(doc.get_bool("is_destructive").unwrap());
+
+        let restored: ApprovalRequest = bson::from_document(doc).expect("deserialize");
+        assert_eq!(restored.tool_name.as_deref(), Some("invoke_service"));
+        assert_eq!(restored.tool_call_id.as_deref(), Some("call_abc123"));
+        assert!(restored.tool_arguments.is_some());
+        assert_eq!(restored.is_destructive, Some(true));
+    }
+
+    #[test]
+    fn missing_tool_fields_default_to_none() {
+        let req = make_approval_request();
+        let mut doc = bson::to_document(&req).expect("serialize");
+        // Remove all tool fields (simulates old document without them)
+        doc.remove("tool_name");
+        doc.remove("tool_call_id");
+        doc.remove("tool_arguments");
+        doc.remove("is_destructive");
+
+        let restored: ApprovalRequest = bson::from_document(doc).expect("deserialize");
+        assert!(restored.tool_name.is_none());
+        assert!(restored.tool_call_id.is_none());
+        assert!(restored.tool_arguments.is_none());
+        assert!(restored.is_destructive.is_none());
     }
 
     #[test]

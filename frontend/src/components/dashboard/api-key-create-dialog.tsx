@@ -7,7 +7,6 @@ import {
   API_KEY_SCOPES,
 } from "@/schemas/api-keys";
 import { useCreateApiKey } from "@/hooks/use-api-keys";
-import { useKeys } from "@/hooks/use-keys";
 import { useNodes } from "@/hooks/use-nodes";
 import { copyToClipboard } from "@/lib/utils";
 import { ApiError } from "@/lib/api-client";
@@ -50,7 +49,7 @@ export function ApiKeyCreateDialog() {
   const [createdKey, setCreatedKey] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const createMutation = useCreateApiKey();
-  const { data: externalServices } = useKeys();
+
   const { data: nodes } = useNodes();
 
   const form = useForm<CreateApiKeyFormData>({
@@ -64,10 +63,10 @@ export function ApiKeyCreateDialog() {
       allow_all_nodes: true,
       allowed_service_ids: [],
       allowed_node_ids: [],
+      callback_url: null,
     },
   });
 
-  const watchAllServices = form.watch("allow_all_services") ?? true;
   const watchAllNodes = form.watch("allow_all_nodes") ?? true;
 
   async function onSubmit(data: CreateApiKeyFormData) {
@@ -233,86 +232,35 @@ export function ApiKeyCreateDialog() {
                   )}
                 />
 
-                {/* Service scope */}
                 <FormField
                   control={form.control}
-                  name="allow_all_services"
+                  name="callback_url"
                   render={({ field }) => (
                     <FormItem>
-                      <div className="flex items-center gap-2">
-                        <Checkbox
-                          id="allow-all-services"
-                          checked={field.value}
-                          onCheckedChange={(checked) =>
-                            field.onChange(checked === true)
+                      <FormLabel>
+                        Callback URL{" "}
+                        <span className="text-muted-foreground">
+                          (optional)
+                        </span>
+                      </FormLabel>
+                      <FormControl>
+                        <Input
+                          type="url"
+                          placeholder="https://my-agent.example.com/webhook"
+                          {...field}
+                          value={field.value ?? ""}
+                          onChange={(e) =>
+                            field.onChange(e.target.value || null)
                           }
                         />
-                        <Label
-                          htmlFor="allow-all-services"
-                          className="text-sm font-medium"
-                        >
-                          Allow all external services
-                        </Label>
-                      </div>
+                      </FormControl>
+                      <p className="text-xs text-muted-foreground">
+                        Where NyxID sends channel relay messages. Required for Channel Bot routing.
+                      </p>
+                      <FormMessage />
                     </FormItem>
                   )}
                 />
-
-                {!watchAllServices && (
-                  <FormField
-                    control={form.control}
-                    name="allowed_service_ids"
-                    render={({ field }) => (
-                      <FormItem>
-                        <div className="space-y-2 rounded-lg border border-border p-3">
-                          <p className="text-xs text-muted-foreground">
-                            Restrict to specific services:
-                          </p>
-                          {externalServices && externalServices.length > 0 ? (
-                            externalServices.map((svc) => (
-                              <div
-                                key={svc.id}
-                                className="flex items-center gap-2"
-                              >
-                                <Checkbox
-                                  id={`create-svc-${svc.id}`}
-                                  checked={(
-                                    field.value as readonly string[]
-                                  ).includes(svc.id)}
-                                  onCheckedChange={() =>
-                                    field.onChange(
-                                      toggleInArray(
-                                        field.value as readonly string[],
-                                        svc.id,
-                                      ),
-                                    )
-                                  }
-                                />
-                                <Label
-                                  htmlFor={`create-svc-${svc.id}`}
-                                  className="text-xs"
-                                >
-                                  {svc.label}
-                                  {svc.catalog_service_name && (
-                                    <span className="text-muted-foreground">
-                                      {" "}
-                                      ({svc.catalog_service_name})
-                                    </span>
-                                  )}
-                                </Label>
-                              </div>
-                            ))
-                          ) : (
-                            <p className="text-xs text-muted-foreground">
-                              No external services configured yet.
-                            </p>
-                          )}
-                        </div>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
-                )}
 
                 {/* Node scope */}
                 <FormField

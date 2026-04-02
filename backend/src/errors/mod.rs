@@ -159,6 +159,24 @@ pub enum AppError {
 
     #[error("API key scope not found: {0}")]
     ApiKeyScopeNotFound(String),
+
+    #[error("Channel bot not found: {0}")]
+    ChannelBotNotFound(String),
+
+    #[error("Channel bot inactive or invalid: {0}")]
+    ChannelBotInactive(String),
+
+    #[error("Channel bot limit reached: {0}")]
+    ChannelBotLimitReached(String),
+
+    #[error("Channel webhook verification failed: {0}")]
+    ChannelWebhookVerificationFailed(String),
+
+    #[error("Channel relay failed: {0}")]
+    ChannelRelayFailed(String),
+
+    #[error("Channel platform error: {0}")]
+    ChannelPlatformError(String),
 }
 
 impl AppError {
@@ -202,6 +220,12 @@ impl AppError {
             Self::ApiKeyScopeForbidden(_) => StatusCode::FORBIDDEN,
             Self::ApiKeyScopeInactive => StatusCode::FORBIDDEN,
             Self::ApiKeyScopeNotFound(_) => StatusCode::NOT_FOUND,
+            Self::ChannelBotNotFound(_) => StatusCode::NOT_FOUND,
+            Self::ChannelBotInactive(_) => StatusCode::BAD_REQUEST,
+            Self::ChannelBotLimitReached(_) => StatusCode::TOO_MANY_REQUESTS,
+            Self::ChannelWebhookVerificationFailed(_) => StatusCode::UNAUTHORIZED,
+            Self::ChannelRelayFailed(_) => StatusCode::BAD_GATEWAY,
+            Self::ChannelPlatformError(_) => StatusCode::BAD_GATEWAY,
             Self::Internal(_) | Self::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -250,6 +274,12 @@ impl AppError {
             Self::ApiKeyScopeForbidden(_) => 9000,
             Self::ApiKeyScopeInactive => 9001,
             Self::ApiKeyScopeNotFound(_) => 9002,
+            Self::ChannelBotNotFound(_) => 10000,
+            Self::ChannelBotInactive(_) => 10001,
+            Self::ChannelBotLimitReached(_) => 10002,
+            Self::ChannelWebhookVerificationFailed(_) => 10003,
+            Self::ChannelRelayFailed(_) => 10004,
+            Self::ChannelPlatformError(_) => 10005,
         }
     }
 
@@ -328,6 +358,12 @@ impl AppError {
             Self::ApiKeyScopeForbidden(_) => "api_key_scope_forbidden",
             Self::ApiKeyScopeInactive => "api_key_scope_inactive",
             Self::ApiKeyScopeNotFound(_) => "api_key_scope_not_found",
+            Self::ChannelBotNotFound(_) => "channel_bot_not_found",
+            Self::ChannelBotInactive(_) => "channel_bot_inactive",
+            Self::ChannelBotLimitReached(_) => "channel_bot_limit_reached",
+            Self::ChannelWebhookVerificationFailed(_) => "channel_webhook_verification_failed",
+            Self::ChannelRelayFailed(_) => "channel_relay_failed",
+            Self::ChannelPlatformError(_) => "channel_platform_error",
         }
     }
 }
@@ -577,6 +613,30 @@ mod tests {
             AppError::ApiKeyScopeNotFound("x".into()).status_code(),
             StatusCode::NOT_FOUND
         );
+        assert_eq!(
+            AppError::ChannelBotNotFound("x".into()).status_code(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            AppError::ChannelBotInactive("x".into()).status_code(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            AppError::ChannelBotLimitReached("x".into()).status_code(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            AppError::ChannelWebhookVerificationFailed("x".into()).status_code(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            AppError::ChannelRelayFailed("x".into()).status_code(),
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            AppError::ChannelPlatformError("x".into()).status_code(),
+            StatusCode::BAD_GATEWAY
+        );
     }
 
     #[test]
@@ -633,6 +693,12 @@ mod tests {
             AppError::ApiKeyScopeForbidden("".into()).error_code(),
             AppError::ApiKeyScopeInactive.error_code(),
             AppError::ApiKeyScopeNotFound("".into()).error_code(),
+            AppError::ChannelBotNotFound("".into()).error_code(),
+            AppError::ChannelBotInactive("".into()).error_code(),
+            AppError::ChannelBotLimitReached("".into()).error_code(),
+            AppError::ChannelWebhookVerificationFailed("".into()).error_code(),
+            AppError::ChannelRelayFailed("".into()).error_code(),
+            AppError::ChannelPlatformError("".into()).error_code(),
         ];
         let unique: std::collections::HashSet<u32> = codes.iter().copied().collect();
         assert_eq!(
@@ -784,6 +850,30 @@ mod tests {
         assert_eq!(
             AppError::ApiKeyScopeNotFound("".into()).error_key(),
             "api_key_scope_not_found"
+        );
+        assert_eq!(
+            AppError::ChannelBotNotFound("".into()).error_key(),
+            "channel_bot_not_found"
+        );
+        assert_eq!(
+            AppError::ChannelBotInactive("".into()).error_key(),
+            "channel_bot_inactive"
+        );
+        assert_eq!(
+            AppError::ChannelBotLimitReached("".into()).error_key(),
+            "channel_bot_limit_reached"
+        );
+        assert_eq!(
+            AppError::ChannelWebhookVerificationFailed("".into()).error_key(),
+            "channel_webhook_verification_failed"
+        );
+        assert_eq!(
+            AppError::ChannelRelayFailed("".into()).error_key(),
+            "channel_relay_failed"
+        );
+        assert_eq!(
+            AppError::ChannelPlatformError("".into()).error_key(),
+            "channel_platform_error"
         );
     }
 

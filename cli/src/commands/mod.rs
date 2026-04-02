@@ -3,6 +3,7 @@ pub mod api_key;
 pub mod approval;
 pub mod auth_flows;
 pub mod catalog;
+pub mod channel_bot;
 pub mod endpoint;
 pub mod external_key;
 pub mod mcp;

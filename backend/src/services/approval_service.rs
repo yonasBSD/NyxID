@@ -161,6 +161,10 @@ pub async fn create_approval_request(
             requester_label: requester_label.map(String::from),
             operation_summary: operation_summary.to_string(),
             action_description: action_description.map(String::from),
+            tool_name: None,
+            tool_call_id: None,
+            tool_arguments: None,
+            is_destructive: None,
             approval_mode: approval_mode.clone(),
             status: "pending".to_string(),
             idempotency_key: idempotency_key.clone(),
@@ -229,6 +233,120 @@ pub async fn create_approval_request(
             tracing::warn!("Failed to send approval notification: {e}");
             // Still return the request even if notification failed --
             // user can approve via web UI
+            Ok(request)
+        }
+    }
+}
+
+/// Create a tool approval request (from an external caller such as Aevatar).
+///
+/// Uses sentinel `service_id: "tool_approval"` and maps the tool name into
+/// proxy-oriented fields so the existing notification and decision pipeline
+/// works unchanged.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_tool_approval_request(
+    db: &Database,
+    config: &AppConfig,
+    http_client: &reqwest::Client,
+    fcm_auth: Option<&FcmAuth>,
+    apns_auth: Option<&ApnsAuth>,
+    user_id: &str,
+    tool_name: &str,
+    tool_call_id: Option<&str>,
+    tool_arguments: Option<&str>,
+    is_destructive: bool,
+    requester_type: &str,
+    requester_id: &str,
+    requester_label: Option<&str>,
+) -> AppResult<ApprovalRequest> {
+    let channel = db
+        .collection::<NotificationChannel>(CHANNELS)
+        .find_one(doc! { "user_id": user_id })
+        .await?;
+
+    let timeout_secs = channel
+        .as_ref()
+        .map(|c| c.approval_timeout_secs)
+        .unwrap_or(30);
+
+    let collection = db.collection::<ApprovalRequest>(REQUESTS);
+
+    // Tool approvals are always unique (per_request semantics).
+    let idempotency_key = uuid::Uuid::new_v4().to_string();
+
+    let now = Utc::now();
+    let expires_at = now + Duration::seconds(i64::from(timeout_secs));
+
+    let operation_summary = format!("tool:{tool_name}");
+    let action_description = tool_arguments.map(|args| format!("{tool_name}({args})"));
+
+    let request = ApprovalRequest {
+        id: uuid::Uuid::new_v4().to_string(),
+        user_id: user_id.to_string(),
+        service_id: "tool_approval".to_string(),
+        service_name: tool_name.to_string(),
+        service_slug: "tool".to_string(),
+        requester_type: requester_type.to_string(),
+        requester_id: requester_id.to_string(),
+        requester_label: requester_label.map(String::from),
+        operation_summary,
+        action_description,
+        tool_name: Some(tool_name.to_string()),
+        tool_call_id: tool_call_id.map(String::from),
+        tool_arguments: tool_arguments.map(String::from),
+        is_destructive: Some(is_destructive),
+        approval_mode: ApprovalMode::PerRequest,
+        status: "pending".to_string(),
+        idempotency_key,
+        notification_channel: None,
+        telegram_message_id: None,
+        telegram_chat_id: None,
+        expires_at,
+        decided_at: None,
+        decision_channel: None,
+        decision_idempotency_key: None,
+        created_at: now,
+    };
+
+    collection
+        .insert_one(&request)
+        .await
+        .map_err(AppError::DatabaseError)?;
+
+    // Send notification through existing pipeline
+    match notification_service::send_approval_notification(
+        db,
+        config,
+        http_client,
+        fcm_auth,
+        apns_auth,
+        user_id,
+        &request,
+    )
+    .await
+    {
+        Ok(result) => {
+            let channel_name = result.channels.join(",");
+            let update = doc! {
+                "$set": {
+                    "notification_channel": &channel_name,
+                    "telegram_chat_id": result.telegram_chat_id,
+                    "telegram_message_id": result.telegram_message_id,
+                }
+            };
+            collection
+                .update_one(doc! { "_id": &request.id }, update)
+                .await?;
+
+            let updated = collection
+                .find_one(doc! { "_id": &request.id })
+                .await?
+                .unwrap_or(request);
+
+            Ok(updated)
+        }
+        Err(e) => {
+            tracing::warn!("Failed to send tool approval notification: {e}");
             Ok(request)
         }
     }
@@ -981,6 +1099,10 @@ mod tests {
             decision_channel: None,
             decision_idempotency_key: None,
             action_description: None,
+            tool_name: None,
+            tool_call_id: None,
+            tool_arguments: None,
+            is_destructive: None,
             approval_mode: ApprovalMode::PerRequest,
             created_at: now,
         }

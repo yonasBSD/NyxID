@@ -160,6 +160,7 @@ pub async fn create_api_key(
     rate_limit_per_second: Option<u32>,
     rate_limit_burst: Option<u32>,
     platform: Option<&str>,
+    callback_url: Option<&str>,
 ) -> AppResult<CreatedApiKey> {
     if name.is_empty() || name.len() > 200 {
         return Err(AppError::ValidationError(
@@ -212,6 +213,14 @@ pub async fn create_api_key(
         rate_limit_per_second,
         rate_limit_burst,
         platform: platform.map(|s| s.to_string()),
+        callback_url: {
+            if let Some(url) = callback_url {
+                crate::handlers::services_helpers::validate_base_url(url)?;
+                Some(url.to_string())
+            } else {
+                None
+            }
+        },
     };
 
     db.collection::<ApiKey>(API_KEYS)
@@ -312,6 +321,7 @@ pub async fn rotate_api_key(
         old_key.rate_limit_per_second,
         old_key.rate_limit_burst,
         old_key.platform.as_deref(),
+        old_key.callback_url.as_deref(),
     )
     .await?;
 
@@ -341,6 +351,7 @@ pub async fn update_api_key_scope(
     rate_limit_per_second: Option<Option<u32>>,
     rate_limit_burst: Option<Option<u32>>,
     platform: Option<Option<&str>>,
+    callback_url: Option<Option<&str>>,
 ) -> AppResult<ApiKey> {
     let existing = db
         .collection::<ApiKey>(API_KEYS)
@@ -423,6 +434,17 @@ pub async fn update_api_key_scope(
             }
             None => {
                 update.insert("platform", bson::Bson::Null);
+            }
+        }
+    }
+    if let Some(url) = callback_url {
+        match url {
+            Some(value) => {
+                crate::handlers::services_helpers::validate_base_url(value)?;
+                update.insert("callback_url", value);
+            }
+            None => {
+                update.insert("callback_url", bson::Bson::Null);
             }
         }
     }

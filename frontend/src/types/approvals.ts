@@ -53,6 +53,11 @@ export interface ApprovalRequestItem {
   readonly requester_label: string | null;
   readonly operation_summary: string;
   readonly action_description: string | null;
+  /** Tool approval fields (null/undefined for proxy-initiated approvals) */
+  readonly tool_name?: string | null;
+  readonly tool_call_id?: string | null;
+  readonly tool_arguments?: string | null;
+  readonly is_destructive?: boolean | null;
   readonly approval_mode: ApprovalMode;
   readonly status: "pending" | "approved" | "rejected" | "expired";
   readonly created_at: string;

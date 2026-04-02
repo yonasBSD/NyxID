@@ -25,6 +25,15 @@ pub struct ApprovalRequestItem {
     pub requester_label: Option<String>,
     pub operation_summary: String,
     pub action_description: Option<String>,
+    /// Tool approval fields (null for proxy-initiated approvals)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_arguments: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_destructive: Option<bool>,
     pub approval_mode: ApprovalMode,
     pub status: String,
     pub created_at: String,
@@ -78,6 +87,25 @@ pub struct MessageResponse {
     pub message: String,
 }
 
+// --- Tool approval types ---
+
+#[derive(Debug, Deserialize)]
+pub struct CreateToolApprovalRequest {
+    pub tool_name: String,
+    pub tool_call_id: Option<String>,
+    pub arguments: Option<String>,
+    pub is_destructive: Option<bool>,
+    #[allow(dead_code)]
+    pub approval_mode: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CreateApprovalResponse {
+    pub id: String,
+    pub status: String,
+    pub expires_at: String,
+}
+
 fn to_approval_request_item(
     request: crate::models::approval_request::ApprovalRequest,
 ) -> ApprovalRequestItem {
@@ -89,6 +117,10 @@ fn to_approval_request_item(
         requester_label: request.requester_label,
         operation_summary: request.operation_summary,
         action_description: request.action_description,
+        tool_name: request.tool_name,
+        tool_call_id: request.tool_call_id,
+        tool_arguments: request.tool_arguments,
+        is_destructive: request.is_destructive,
         approval_mode: request.approval_mode,
         status: request.status,
         created_at: request.created_at.to_rfc3339(),
@@ -217,6 +249,86 @@ pub async fn get_request_status(
         status: request.status,
         expires_at: request.expires_at.to_rfc3339(),
     }))
+}
+
+/// POST /api/v1/approvals/requests
+///
+/// Create a tool approval request (for external callers such as Aevatar).
+/// Triggers the same notification pipeline as proxy-initiated approvals.
+pub async fn create_request(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<CreateToolApprovalRequest>,
+) -> AppResult<(axum::http::StatusCode, Json<CreateApprovalResponse>)> {
+    // Validate tool_name
+    let tool_name = body.tool_name.trim();
+    if tool_name.is_empty() || tool_name.len() > 256 {
+        return Err(AppError::ValidationError(
+            "tool_name must be 1-256 characters".to_string(),
+        ));
+    }
+
+    // Validate arguments length
+    if let Some(ref args) = body.arguments
+        && args.len() > 65536
+    {
+        return Err(AppError::ValidationError(
+            "arguments must be at most 65536 characters".to_string(),
+        ));
+    }
+
+    let user_id = auth_user.user_id.to_string();
+
+    // Determine requester identity from auth context.
+    // Session callers use "user" as requester_type (they are requesting
+    // approval from themselves, valid for agents running in their session).
+    let (requester_type, requester_id) = match auth_user.approval_requester_type() {
+        Some(rt) => (rt.to_string(), auth_user.approval_requester_id()),
+        None => ("user".to_string(), user_id.clone()),
+    };
+
+    let requester_label = auth_user.api_key_name.as_deref();
+
+    let request = approval_service::create_tool_approval_request(
+        &state.db,
+        &state.config,
+        &state.http_client,
+        state.fcm_auth.as_deref(),
+        state.apns_auth.as_deref(),
+        &user_id,
+        tool_name,
+        body.tool_call_id.as_deref(),
+        body.arguments.as_deref(),
+        body.is_destructive.unwrap_or(false),
+        &requester_type,
+        &requester_id,
+        requester_label,
+    )
+    .await?;
+
+    audit_service::log_async(
+        state.db.clone(),
+        Some(user_id),
+        "tool_approval_created".to_string(),
+        Some(serde_json::json!({
+            "request_id": &request.id,
+            "tool_name": tool_name,
+            "is_destructive": body.is_destructive.unwrap_or(false),
+        })),
+        None,
+        None,
+        auth_user.api_key_id.as_deref().map(String::from),
+        auth_user.api_key_name.clone(),
+    );
+
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(CreateApprovalResponse {
+            id: request.id,
+            status: request.status,
+            expires_at: request.expires_at.to_rfc3339(),
+        }),
+    ))
 }
 
 /// POST /api/v1/approvals/requests/{request_id}/decide
@@ -508,6 +620,10 @@ mod tests {
             requester_label: Some("CI bot".to_string()),
             operation_summary: "proxy:POST /v1/chat/completions".to_string(),
             action_description: Some("POST /v1/chat/completions (model: gpt-4)".to_string()),
+            tool_name: None,
+            tool_call_id: None,
+            tool_arguments: None,
+            is_destructive: None,
             approval_mode: ApprovalMode::PerRequest,
             status: "pending".to_string(),
             idempotency_key: "idem_123".to_string(),
@@ -547,5 +663,49 @@ mod tests {
         assert_eq!(item.service_name, expected_service);
         assert_eq!(item.status, expected_status);
         assert!(item.created_at.contains('T'));
+        // Proxy approvals have no tool fields
+        assert!(item.tool_name.is_none());
+        assert!(item.is_destructive.is_none());
+    }
+
+    #[test]
+    fn to_approval_request_item_includes_tool_fields() {
+        let mut request = sample_request("user_1");
+        request.tool_name = Some("invoke_service".to_string());
+        request.tool_call_id = Some("call_abc".to_string());
+        request.tool_arguments = Some(r#"{"service_id":"svc_1"}"#.to_string());
+        request.is_destructive = Some(true);
+
+        let item = to_approval_request_item(request);
+
+        assert_eq!(item.tool_name.as_deref(), Some("invoke_service"));
+        assert_eq!(item.tool_call_id.as_deref(), Some("call_abc"));
+        assert!(item.tool_arguments.is_some());
+        assert_eq!(item.is_destructive, Some(true));
+    }
+
+    #[test]
+    fn create_tool_approval_request_deserializes() {
+        let json = r#"{
+            "tool_name": "invoke_service",
+            "tool_call_id": "call_123",
+            "arguments": "{\"key\":\"val\"}",
+            "is_destructive": true,
+            "approval_mode": "alwaysrequire"
+        }"#;
+        let parsed: CreateToolApprovalRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.tool_name, "invoke_service");
+        assert_eq!(parsed.tool_call_id.as_deref(), Some("call_123"));
+        assert_eq!(parsed.is_destructive, Some(true));
+    }
+
+    #[test]
+    fn create_tool_approval_request_minimal() {
+        let json = r#"{"tool_name": "list_services"}"#;
+        let parsed: CreateToolApprovalRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.tool_name, "list_services");
+        assert!(parsed.tool_call_id.is_none());
+        assert!(parsed.arguments.is_none());
+        assert!(parsed.is_destructive.is_none());
     }
 }

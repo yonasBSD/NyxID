@@ -9,11 +9,11 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { RefreshCw, Trash2 } from "lucide-react";
 import { DetailsCard } from "@/components/dashboard/api-key-detail/details-card";
-import { ServiceScopeCard } from "@/components/dashboard/api-key-detail/service-scope-card";
 import { NodeScopeCard } from "@/components/dashboard/api-key-detail/node-scope-card";
 import { RotateKeyDialog } from "@/components/dashboard/api-key-detail/rotate-key-dialog";
 import { DeleteKeyDialog } from "@/components/dashboard/api-key-detail/delete-key-dialog";
 import { PlatformCard } from "@/components/dashboard/api-key-detail/platform-card";
+import { CallbackUrlCard } from "@/components/dashboard/api-key-detail/callback-url-card";
 import { RateLimitCard } from "@/components/dashboard/api-key-detail/rate-limit-card";
 import { BindingsCard } from "@/components/dashboard/api-key-detail/bindings-card";
 import { UsageStatsCard } from "@/components/dashboard/api-key-detail/usage-stats-card";
@@ -44,7 +44,7 @@ export function ApiKeyDetailPage() {
           title="Key Not Found"
           breadcrumbs={[
             { label: "AI Services", to: "/keys" },
-            { label: "API Keys", to: "/keys?tab=nyxid" },
+            { label: "Agent Keys", to: "/keys?tab=nyxid" },
             { label: "Not Found" },
           ]}
         />
@@ -68,7 +68,7 @@ export function ApiKeyDetailPage() {
         }
         breadcrumbs={[
           { label: "AI Services", to: "/keys" },
-          { label: "API Keys", to: "/keys?tab=nyxid" },
+          { label: "Agent Keys", to: "/keys?tab=nyxid" },
           { label: apiKey.name },
         ]}
         actions={
@@ -108,13 +108,7 @@ export function ApiKeyDetailPage() {
         />
 
         <PlatformCard keyId={apiKey.id} platform={apiKey.platform} />
-
-        <ServiceScopeCard
-          keyId={apiKey.id}
-          allowAllServices={apiKey.allow_all_services}
-          allowedServiceIds={apiKey.allowed_service_ids}
-          allowedServices={apiKey.allowed_services}
-        />
+        <CallbackUrlCard keyId={apiKey.id} callbackUrl={apiKey.callback_url} />
 
         <NodeScopeCard
           keyId={apiKey.id}
@@ -129,7 +123,7 @@ export function ApiKeyDetailPage() {
           rateLimitBurst={apiKey.rate_limit_burst}
         />
 
-        <BindingsCard keyId={apiKey.id} />
+        <BindingsCard keyId={apiKey.id} allowAllServices={apiKey.allow_all_services} />
         <UsageStatsCard keyId={apiKey.id} />
       </div>
 

@@ -250,23 +250,30 @@ nyxid service delete <id> --yes                                # remove service 
 
 ## Managing API Keys
 
-Each AI agent or integration should use its own NyxID API key. This gives each caller independent scope, audit trail, and optional credential bindings.
+Each AI agent or integration should use its own NyxID API key (agent key). This gives each caller independent audit trail, optional service bindings, and rate limits.
 
 ```bash
 # CRUD
 nyxid api-key create --name "My Key" --scopes "proxy read"
 nyxid api-key create --name "coding-agent" --platform claude-code  # optional platform label
+nyxid api-key create --name "relay-agent" --callback-url "https://..."  # for channel bot relay
 nyxid api-key list --output json
 nyxid api-key show <ID_OR_NAME> --output json
 nyxid api-key rotate <ID_OR_NAME>
 nyxid api-key delete <ID_OR_NAME> --yes
 
-# Scope management (restrict which services/nodes a key can access)
-nyxid api-key update <ID> --allowed-services "svc-id-1,svc-id-2" --allow-all-services false
-nyxid api-key update <ID> --allow-all-services true    # unrestrict
+# Service bindings (credential auto-resolved from service)
+nyxid api-key bind <ID_OR_NAME> --service <SERVICE_SLUG>
+nyxid api-key bind <ID_OR_NAME> --service <SLUG> --credential <LABEL>  # explicit override
 
-# Credential bindings (override which credential a key uses for a service)
-nyxid api-key bind <ID_OR_NAME> --service <SERVICE_SLUG> --credential <CREDENTIAL_LABEL>
+# By default, agents can access all services with default credentials.
+# Bindings override which credential is used for specific services.
+# To restrict an agent to ONLY access bound services:
+nyxid api-key update <ID> --allow-all-services false
+
+# Callback URL for channel bot relay
+nyxid api-key update <ID> --callback-url "https://my-agent.example.com/webhook"
+nyxid api-key update <ID> --callback-url ""    # clear
 
 # Per-key rate limits
 nyxid api-key update <ID> --rate-limit-per-second 10 --rate-limit-burst 30
@@ -455,6 +462,90 @@ nyxid notification settings                            # show notification setti
 nyxid notification update --approval-telegram true     # enable telegram notifications
 nyxid notification update --approval-push true         # enable push notifications
 nyxid notification telegram-link                       # link telegram account
+```
+
+## Channel Bot Relay
+
+NyxID can bridge messaging platforms (Telegram, Discord, Lark, Feishu) to AI agent callback URLs. Users register their own bots, configure conversation-to-agent routing, and NyxID handles webhook reception, message normalization, and reply delivery.
+
+### Register a bot
+
+```bash
+# Telegram
+nyxid channel-bot register --platform telegram --label "My Support Bot" --token-env TELEGRAM_BOT_TOKEN
+
+# Discord (requires public key for signature verification)
+nyxid channel-bot register --platform discord --label "My Discord Bot" --token-env DISCORD_BOT_TOKEN --public-key "ed25519_public_key_hex"
+
+# Lark / Feishu (requires app credentials)
+nyxid channel-bot register --platform lark --label "My Lark Bot" --token-env LARK_BOT_TOKEN --app-id "cli_xxx" --app-secret-env LARK_APP_SECRET
+```
+
+For Telegram, NyxID auto-registers the webhook. For Discord/Lark/Feishu, configure the webhook URL in the platform's developer console: `https://<your-nyxid>/api/v1/webhooks/channel/<platform>/<bot-id>`. The bot auto-activates on first successful webhook delivery.
+
+### Manage bots
+
+```bash
+nyxid channel-bot list                          # list registered bots
+nyxid channel-bot show <ID>                     # bot details + conversation count
+nyxid channel-bot verify <ID>                   # re-verify token and webhook
+nyxid channel-bot delete <ID> --yes             # deregister bot
+```
+
+### Configure conversation routing
+
+Each conversation route maps a platform chat to an AI agent (via API key with `callback_url`):
+
+```bash
+# Set up an API key with a callback URL first
+nyxid api-key create --name "my-agent" --platform claude-code --callback-url "https://my-agent.example.com/webhook"
+
+# Route all messages from a bot to this agent (default/catch-all)
+nyxid channel-bot route create --bot <BOT_ID> --agent <API_KEY_ID_OR_NAME>
+
+# Route a specific DM or group chat to a specific agent
+nyxid channel-bot route create --bot <BOT_ID> --conversation-id "<chat_id>" --agent <API_KEY_ID_OR_NAME>
+
+# Route a specific group chat with conversation type hint
+nyxid channel-bot route create --bot <BOT_ID> --conversation-id "<group_chat_id>" --conversation-type group --agent <API_KEY_ID_OR_NAME>
+
+# Per-user routing in a group (different agents for different users)
+nyxid channel-bot route create --bot <BOT_ID> --conversation-id "<group_chat_id>" --sender-id "<user_id>" --agent <AGENT_A>
+nyxid channel-bot route create --bot <BOT_ID> --conversation-id "<group_chat_id>" --sender-id "<user_id_2>" --agent <AGENT_B>
+
+# List and manage routes
+nyxid channel-bot route list --bot-id <BOT_ID>
+nyxid channel-bot route update <ROUTE_ID> --agent <NEW_KEY>
+nyxid channel-bot route delete <ROUTE_ID> --yes
+```
+
+Routing priority: sender-specific match > exact conversation match > default catch-all.
+
+For Telegram, `conversation_id` is the `chat.id` (a number like `-1001234567890` for groups). For Discord, it's the `channel_id`. The bot must be added to the group/channel on the platform side.
+
+### How it works
+
+1. User sends message on Telegram/Discord/Lark/Feishu
+2. Platform webhook delivers to NyxID
+3. NyxID verifies signature, resolves route, stores inbound message
+4. NyxID POSTs normalized payload to agent's `callback_url` (with HMAC signature)
+5. Agent replies synchronously (200 + body) or asynchronously (202, then `POST /channel-relay/reply`)
+6. NyxID sends reply back to the platform chat
+
+The callback payload includes both normalized fields (`content.text`, `sender`, etc.) and the full `raw_platform_data` (original Telegram/Discord/Lark JSON). Most agents use the normalized fields; agents that need platform-specific features (inline keyboards, embeds, interactive cards) can read `raw_platform_data` directly.
+
+### Agent-facing endpoints (API-key authenticated)
+
+```bash
+# Async reply (agent sends response after processing)
+POST /api/v1/channel-relay/reply
+{ "message_id": "<inbound-msg-id>", "reply": { "text": "..." } }
+
+# Message history
+GET /api/v1/channel-relay/messages/<conversation_id>?page=1&per_page=50
+
+# Resolve platform sender to NyxID user
+GET /api/v1/channel-relay/resolve-sender?platform=telegram&platform_id=12345
 ```
 
 ## OpenClaw Integration

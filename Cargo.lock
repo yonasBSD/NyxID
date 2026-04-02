@@ -3351,6 +3351,7 @@ dependencies = [
  "dashmap",
  "dirs",
  "dotenvy",
+ "ed25519-dalek",
  "futures",
  "google-cloud-kms",
  "governor",

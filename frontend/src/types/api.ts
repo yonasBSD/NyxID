@@ -27,6 +27,7 @@ export interface ApiKey {
   readonly allowed_services: readonly AllowedServiceInfo[];
   readonly allowed_nodes: readonly AllowedNodeInfo[];
   readonly platform: string | null;
+  readonly callback_url: string | null;
   readonly rate_limit_per_second: number | null;
   readonly rate_limit_burst: number | null;
   readonly bindings_count: number;

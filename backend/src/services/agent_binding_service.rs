@@ -47,18 +47,11 @@ pub async fn create_binding(
         .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
 
     // Validate ownership: user_service must belong to user
-    let user_service = db
+    let _user_service = db
         .collection::<UserService>(USER_SERVICES)
         .find_one(doc! { "_id": user_service_id, "user_id": user_id, "is_active": true })
         .await?
         .ok_or_else(|| AppError::NotFound("User service not found".to_string()))?;
-
-    // If key is scoped, service must be in allowed_service_ids
-    if !api_key.allow_all_services && !api_key.allowed_service_ids.contains(&user_service.id) {
-        return Err(AppError::ApiKeyScopeForbidden(
-            "Service not in API key's allowed services".to_string(),
-        ));
-    }
 
     // Validate ownership: user_api_key must belong to user
     let _credential = db
@@ -97,6 +90,21 @@ pub async fn create_binding(
         .insert_one(&binding)
         .await?;
 
+    // If the key has explicit scope (allow_all_services: false), ensure the
+    // newly bound service is in allowed_service_ids so the proxy allows it.
+    if !api_key.allow_all_services
+        && !api_key
+            .allowed_service_ids
+            .contains(&user_service_id.to_string())
+    {
+        db.collection::<ApiKey>(API_KEYS)
+            .update_one(
+                doc! { "_id": api_key_id },
+                doc! { "$addToSet": { "allowed_service_ids": user_service_id } },
+            )
+            .await?;
+    }
+
     Ok(binding)
 }
 
@@ -131,17 +139,40 @@ pub async fn delete_binding(
     api_key_id: &str,
     binding_id: &str,
 ) -> AppResult<()> {
-    let result = db
+    let binding = db
         .collection::<AgentServiceBinding>(AGENT_BINDINGS)
-        .delete_one(doc! {
+        .find_one(doc! {
             "_id": binding_id,
             "api_key_id": api_key_id,
             "user_id": user_id,
         })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Binding not found".to_string()))?;
+
+    let result = db
+        .collection::<AgentServiceBinding>(AGENT_BINDINGS)
+        .delete_one(doc! { "_id": binding_id })
         .await?;
 
     if result.deleted_count == 0 {
         return Err(AppError::NotFound("Binding not found".to_string()));
+    }
+
+    // If the key has explicit scope, remove the service from allowed_service_ids
+    let api_key = db
+        .collection::<ApiKey>(API_KEYS)
+        .find_one(doc! { "_id": api_key_id })
+        .await?;
+
+    if let Some(key) = api_key
+        && !key.allow_all_services
+    {
+        db.collection::<ApiKey>(API_KEYS)
+            .update_one(
+                doc! { "_id": api_key_id },
+                doc! { "$pull": { "allowed_service_ids": &binding.user_service_id } },
+            )
+            .await?;
     }
 
     Ok(())

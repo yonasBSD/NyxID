@@ -267,7 +267,7 @@ export function KeysPage() {
     <div className="space-y-8">
       <PageHeader
         title="AI Services"
-        description="Manage your AI service credentials and NyxID API keys."
+        description="Manage your AI service credentials and agent keys."
         actions={
           <div className="flex items-center gap-4">
             {tab === "services" && (
@@ -288,7 +288,7 @@ export function KeysPage() {
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList>
           <TabsTrigger value="services">External Services</TabsTrigger>
-          <TabsTrigger value="nyxid">NyxID API Keys</TabsTrigger>
+          <TabsTrigger value="nyxid">Agent Keys</TabsTrigger>
         </TabsList>
 
         <TabsContent value="services" className="mt-6">

@@ -51,6 +51,14 @@ pub struct MappingResponse {
 /// 2. Looks up the mapping to find the stored secret hash
 /// 3. Verifies the webhook secret and HMAC signature
 /// 4. Returns identity context
+///
+/// TODO(phase-6): Add dual-path lookup here. Before the legacy
+/// `openclaw_channel_mappings` lookup below, try resolving through the new
+/// channel relay system via `channel_routing_service::resolve_agent()`. If a
+/// matching route is found in `channel_conversations`, forward the message to
+/// the agent's callback URL and return early. Fall back to the legacy path
+/// when no relay route exists. This keeps backward compatibility while
+/// allowing users to migrate to the unified channel bot relay incrementally.
 pub async fn handle_channel_message(
     State(state): State<AppState>,
     headers: HeaderMap,

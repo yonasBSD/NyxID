@@ -177,3 +177,18 @@ export const KeysPage = lazy(() =>
 export const KeyDetailPage = lazy(() =>
   import("@/pages/key-detail").then((m) => ({ default: m.KeyDetailPage })),
 );
+export const ChannelBotsPage = lazy(() =>
+  import("@/pages/channel-bots").then((m) => ({
+    default: m.ChannelBotsPage,
+  })),
+);
+export const ChannelBotDetailPage = lazy(() =>
+  import("@/pages/channel-bot-detail").then((m) => ({
+    default: m.ChannelBotDetailPage,
+  })),
+);
+export const ChannelConversationDetailPage = lazy(() =>
+  import("@/pages/channel-conversation-detail").then((m) => ({
+    default: m.ChannelConversationDetailPage,
+  })),
+);

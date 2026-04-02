@@ -18,6 +18,7 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
             allow_all_services,
             allow_all_nodes,
             platform,
+            callback_url,
             auth,
         } => {
             let mut api = ApiClient::from_auth(&auth)?;
@@ -68,6 +69,9 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
             }
             if let Some(ref platform) = platform {
                 body["platform"] = Value::String(platform.clone());
+            }
+            if let Some(ref url) = callback_url {
+                body["callback_url"] = Value::String(url.clone());
             }
 
             let result: Value = api.post("/api-keys", &body).await?;
@@ -259,6 +263,7 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
             allowed_nodes,
             allow_all_services,
             allow_all_nodes,
+            callback_url,
             auth,
         } => {
             let mut api = ApiClient::from_auth(&auth)?;
@@ -285,6 +290,13 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
             if let Some(v) = allow_all_nodes {
                 body.insert("allow_all_nodes".into(), Value::Bool(v));
             }
+            if let Some(url) = callback_url {
+                if url.is_empty() {
+                    body.insert("callback_url".into(), Value::Null);
+                } else {
+                    body.insert("callback_url".into(), Value::String(url));
+                }
+            }
 
             let _: Value = api.put(&format!("/api-keys/{id}"), &body).await?;
             eprintln!("API key updated.");
@@ -296,7 +308,7 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
             service,
             credential,
             auth,
-        } => bind_credential(&auth, &id, &service, &credential).await,
+        } => bind_credential(&auth, &id, &service, credential.as_deref()).await,
     }
 }
 
@@ -346,17 +358,17 @@ async fn bind_credential(
     auth: &AuthArgs,
     id_or_name: &str,
     service_slug: &str,
-    credential_label: &str,
+    credential_label: Option<&str>,
 ) -> Result<()> {
     let mut api = ApiClient::from_auth(auth)?;
 
     // Resolve API key ID
     let key_id = resolve_key_id(&mut api, id_or_name).await?;
 
-    // Resolve service slug to UserService ID
-    let user_services: Value = api.get("/user-services").await?;
-    let service_arr = array_from_response(&user_services, &["services"]).unwrap_or(&[]);
-    let service = service_arr
+    // Resolve service slug to UserService ID (via /keys which includes credential info)
+    let keys: Value = api.get("/keys").await?;
+    let keys_arr = array_from_response(&keys, &["keys"]).unwrap_or(&[]);
+    let service = keys_arr
         .iter()
         .find(|s| s["slug"].as_str() == Some(service_slug))
         .ok_or_else(|| anyhow::anyhow!("Service '{service_slug}' not found"))?;
@@ -364,19 +376,31 @@ async fn bind_credential(
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Service has no ID"))?;
 
-    // Resolve credential label to UserApiKey ID
-    let ext_keys: Value = api.get("/api-keys/external").await?;
-    let ext_arr = array_from_response(&ext_keys, &["api_keys"]).unwrap_or(&[]);
-    let cred = ext_arr
-        .iter()
-        .find(|k| {
-            k["label"].as_str() == Some(credential_label)
-                || k["name"].as_str() == Some(credential_label)
-        })
-        .ok_or_else(|| anyhow::anyhow!("Credential '{credential_label}' not found"))?;
-    let user_api_key_id = cred["id"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("Credential has no ID"))?;
+    // Resolve credential: use explicit label if provided, otherwise auto-resolve
+    // from the service's configured credential (api_key_id field).
+    let user_api_key_id = if let Some(label) = credential_label {
+        let ext_keys: Value = api.get("/api-keys/external").await?;
+        let ext_arr = array_from_response(&ext_keys, &["api_keys"]).unwrap_or(&[]);
+        let cred = ext_arr
+            .iter()
+            .find(|k| k["label"].as_str() == Some(label) || k["name"].as_str() == Some(label))
+            .ok_or_else(|| anyhow::anyhow!("Credential '{label}' not found"))?;
+        cred["id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Credential has no ID"))?
+            .to_string()
+    } else {
+        // Auto-resolve from service's configured credential
+        service["api_key_id"]
+            .as_str()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Service '{service_slug}' has no credential configured. \
+                     Either add a credential to the service first, or use --credential <label>."
+                )
+            })?
+            .to_string()
+    };
 
     // Create binding
     let body = serde_json::json!({
@@ -395,9 +419,8 @@ async fn bind_credential(
         OutputFormat::Table => {
             let binding_id = resp["id"].as_str().unwrap_or("-");
             eprintln!("Binding created: {binding_id}");
-            eprintln!("  Key:        {id_or_name}");
-            eprintln!("  Service:    {service_slug}");
-            eprintln!("  Credential: {credential_label}");
+            eprintln!("  Key:     {id_or_name}");
+            eprintln!("  Service: {service_slug}");
         }
     }
 

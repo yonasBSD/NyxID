@@ -4,11 +4,13 @@ import {
   useCreateBinding,
   useDeleteBinding,
 } from "@/hooks/use-agent-bindings";
-import { useExternalApiKeys, useKeys } from "@/hooks/use-keys";
+import { useUpdateApiKey } from "@/hooks/use-api-keys";
+import { useKeys } from "@/hooks/use-keys";
 import { ApiError } from "@/lib/api-client";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import {
   Card,
   CardContent,
@@ -37,35 +39,51 @@ import type { AgentServiceBinding } from "@/types/keys";
 
 export function BindingsCard({
   keyId,
+  allowAllServices,
 }: {
   readonly keyId: string;
+  readonly allowAllServices: boolean;
 }) {
   const { data: bindings, isLoading } = useAgentBindings(keyId);
   const { data: allKeys } = useKeys();
-  const { data: externalApiKeys } = useExternalApiKeys();
   const createBinding = useCreateBinding();
   const deleteBinding = useDeleteBinding();
+  const updateApiKey = useUpdateApiKey();
   const [adding, setAdding] = useState(false);
   const [selectedServiceId, setSelectedServiceId] = useState("");
-  const [selectedCredentialId, setSelectedCredentialId] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<AgentServiceBinding | null>(
     null,
   );
 
+  // Only show services that have a credential configured
+  const services = (allKeys ?? []).filter((s) => s.api_key_id);
+
+  // Already bound service IDs (to exclude from the dropdown)
+  const boundServiceIds = new Set(
+    (bindings ?? []).map((b) => b.user_service_id),
+  );
+  const availableServices = services.filter(
+    (s) => !boundServiceIds.has(s.id),
+  );
+
   function handleCreate() {
-    if (!selectedServiceId || !selectedCredentialId) return;
+    if (!selectedServiceId) return;
+    const service = services.find((s) => s.id === selectedServiceId);
+    if (!service?.api_key_id) {
+      toast.error("Selected service has no credential configured");
+      return;
+    }
     createBinding.mutate(
       {
         keyId,
         user_service_id: selectedServiceId,
-        user_api_key_id: selectedCredentialId,
+        user_api_key_id: service.api_key_id,
       },
       {
         onSuccess: () => {
-          toast.success("Credential binding created");
+          toast.success("Service binding created");
           setAdding(false);
           setSelectedServiceId("");
-          setSelectedCredentialId("");
         },
         onError: (err) => {
           const message =
@@ -98,65 +116,91 @@ export function BindingsCard({
     );
   }
 
-  const services = allKeys ?? [];
-  const credentials = externalApiKeys ?? [];
-
   return (
     <Card className="md:col-span-2">
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Link2 className="h-4 w-4 text-primary" />
-            <CardTitle className="text-sm">Credential Bindings</CardTitle>
+            <CardTitle className="text-sm">Service Bindings</CardTitle>
           </div>
           <Button
             size="sm"
             variant="outline"
             onClick={() => setAdding(true)}
-            disabled={adding}
+            disabled={adding || availableServices.length === 0}
           >
-            Add Binding
+            Add Service
           </Button>
         </div>
         <CardDescription>
-          Override which credential is used when this agent accesses a service.
-          Without a binding, the service default credential is used.
+          {allowAllServices
+            ? "This agent can access all services. Add bindings to override credentials for specific services."
+            : "This agent can only access services listed below."}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
+        <div className="flex items-center justify-between rounded-lg border border-border p-3">
+          <div className="space-y-0.5">
+            <Label htmlFor="allow-all-toggle" className="text-sm font-medium">
+              Allow all services
+            </Label>
+            <p className="text-xs text-muted-foreground">
+              {allowAllServices
+                ? "Agent uses default credentials; bindings are overrides"
+                : "Agent can only access services with bindings below"}
+            </p>
+          </div>
+          <Switch
+            id="allow-all-toggle"
+            checked={allowAllServices}
+            disabled={updateApiKey.isPending}
+            onCheckedChange={(checked) => {
+              // When restricting, seed allowed_service_ids from current bindings
+              // so the agent doesn't lose access to already-bound services.
+              const boundIds = checked
+                ? undefined
+                : (bindings ?? []).map((b) => b.user_service_id);
+              updateApiKey.mutate(
+                {
+                  keyId,
+                  allow_all_services: checked,
+                  allowed_service_ids: boundIds,
+                },
+                {
+                  onSuccess: () =>
+                    toast.success(
+                      checked
+                        ? "Agent can now access all services"
+                        : "Agent restricted to bound services only",
+                    ),
+                  onError: (err) =>
+                    toast.error(
+                      err instanceof ApiError
+                        ? err.message
+                        : "Failed to update",
+                    ),
+                },
+              );
+            }}
+          />
+        </div>
         {adding && (
           <div className="rounded-lg border border-border p-3 space-y-3">
             <div className="space-y-1.5">
-              <Label className="text-xs">Service</Label>
+              <Label className="text-xs">AI Service</Label>
               <Select
                 value={selectedServiceId}
                 onValueChange={setSelectedServiceId}
               >
                 <SelectTrigger>
-                  <SelectValue placeholder="Select service" />
+                  <SelectValue placeholder="Select a service" />
                 </SelectTrigger>
                 <SelectContent>
-                  {services.map((s) => (
+                  {availableServices.map((s) => (
                     <SelectItem key={s.id} value={s.id}>
-                      {s.label} ({s.slug})
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-1.5">
-              <Label className="text-xs">Override credential</Label>
-              <Select
-                value={selectedCredentialId}
-                onValueChange={setSelectedCredentialId}
-              >
-                <SelectTrigger>
-                  <SelectValue placeholder="Select credential" />
-                </SelectTrigger>
-                <SelectContent>
-                  {credentials.map((credential) => (
-                    <SelectItem key={credential.id} value={credential.id}>
-                      {credential.label}
+                      {s.label}
+                      {s.slug !== s.label ? ` (${s.slug})` : ""}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -166,13 +210,9 @@ export function BindingsCard({
               <Button
                 size="sm"
                 onClick={handleCreate}
-                disabled={
-                  createBinding.isPending ||
-                  !selectedServiceId ||
-                  !selectedCredentialId
-                }
+                disabled={createBinding.isPending || !selectedServiceId}
               >
-                Create
+                Add
               </Button>
               <Button
                 size="sm"
@@ -180,7 +220,6 @@ export function BindingsCard({
                 onClick={() => {
                   setAdding(false);
                   setSelectedServiceId("");
-                  setSelectedCredentialId("");
                 }}
               >
                 Cancel
@@ -203,13 +242,12 @@ export function BindingsCard({
               >
                 <div className="space-y-0.5">
                   <p className="text-sm font-medium">
-                    {b.service_label}{" "}
-                    <span className="text-muted-foreground">
-                      ({b.service_slug})
-                    </span>
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    Uses: {b.credential_label}
+                    {b.service_label}
+                    {b.service_slug !== b.service_label && (
+                      <span className="text-muted-foreground">
+                        {" "}({b.service_slug})
+                      </span>
+                    )}
                   </p>
                 </div>
                 <Button
@@ -225,8 +263,8 @@ export function BindingsCard({
           </div>
         ) : (
           <p className="text-xs text-muted-foreground">
-            No credential bindings. This agent uses default credentials for all
-            services.
+            No credential overrides. This agent uses default credentials for
+            all services.
           </p>
         )}
       </CardContent>
@@ -241,9 +279,8 @@ export function BindingsCard({
           <DialogHeader>
             <DialogTitle>Remove Binding</DialogTitle>
             <DialogDescription>
-              Remove the credential override for &quot;
-              {deleteTarget?.service_label}&quot;? This agent will revert to
-              using the service default credential.
+              Remove &quot;{deleteTarget?.service_label}&quot; from this
+              agent's service bindings?
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
