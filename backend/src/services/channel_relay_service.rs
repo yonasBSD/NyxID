@@ -41,6 +41,11 @@ pub struct CallbackPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
     pub timestamp: String,
+    /// Raw platform-specific webhook payload. Agents that need access to
+    /// platform features (Telegram inline keyboards, Discord embeds, Lark
+    /// cards, etc.) can read this instead of the normalized fields above.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_platform_data: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -388,6 +393,7 @@ pub fn build_callback_payload(
         reply_to_platform_message_id: inbound.reply_to_platform_message_id.clone(),
         thread_id: inbound.thread_id.clone(),
         timestamp: message.created_at.to_rfc3339(),
+        raw_platform_data: Some(inbound.raw_data.clone()),
     }
 }
 
@@ -449,6 +455,7 @@ mod tests {
             reply_to_platform_message_id: None,
             thread_id: None,
             timestamp: "2026-01-01T00:00:00Z".to_string(),
+            raw_platform_data: None,
         };
 
         let json = serde_json::to_value(&payload).unwrap();

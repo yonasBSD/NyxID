@@ -419,13 +419,14 @@ NyxID sends a normalized message to the agent's callback URL.
   },
   "reply_to_message_id": null,
   "thread_id": null,
-  "timestamp": "2026-03-31T12:00:00Z"
+  "timestamp": "2026-03-31T12:00:00Z",
+  "raw_platform_data": { "update_id": 123, "message": { "...": "full Telegram/Discord/Lark JSON" } }
 }
 ```
 
 **Design rationale:**
 
-The payload is intentionally lean -- transport identifiers only, no identity resolution on the hot path.
+The payload normalizes messages into a common format so agents can handle all platforms with one code path. For agents that need platform-specific features (Telegram inline keyboards, Discord embeds/components, Lark interactive cards), the full original webhook JSON is included in `raw_platform_data`. Most agents ignore it; advanced integrations read it directly.
 
 - **`agent.api_key_id`** is the primary agent identifier. Same `ApiKey._id` from agent isolation (PR #132). A shared callback endpoint dispatches based on this value. Use for routing/authorization.
 - **`agent.name`** is the human-readable label from key creation (e.g., `"claude-support-bot"`). For logging and display only -- never use for authorization.
@@ -452,6 +453,7 @@ The payload is intentionally lean -- transport identifiers only, no identity res
 | `reply_to_message_id` | UUID | Yes | NyxID `message_id` of the message being replied to. `null` for standalone messages. |
 | `thread_id` | string | Yes | Platform-native thread ID (Discord threads, Lark threads). `null` if not in a thread. |
 | `timestamp` | ISO 8601 | No | When the message was sent on the platform (not when NyxID received it). |
+| `raw_platform_data` | object | Yes | The full original webhook payload from the platform (Telegram Update, Discord Interaction, Lark Event, etc.). Use this for platform-specific features like inline keyboards, embeds, interactive cards, or any data not captured by the normalized fields. `null` only if the raw data could not be preserved. |
 
 **Headers:**
 

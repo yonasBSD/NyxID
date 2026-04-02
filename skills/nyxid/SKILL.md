@@ -510,6 +510,8 @@ nyxid channel-bot route delete <ROUTE_ID> --yes
 5. Agent replies synchronously (200 + body) or asynchronously (202, then `POST /channel-relay/reply`)
 6. NyxID sends reply back to the platform chat
 
+The callback payload includes both normalized fields (`content.text`, `sender`, etc.) and the full `raw_platform_data` (original Telegram/Discord/Lark JSON). Most agents use the normalized fields; agents that need platform-specific features (inline keyboards, embeds, interactive cards) can read `raw_platform_data` directly.
+
 ### Agent-facing endpoints (API-key authenticated)
 
 ```bash

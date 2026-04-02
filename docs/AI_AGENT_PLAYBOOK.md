@@ -3085,9 +3085,12 @@ When a message arrives, NyxID POSTs a normalized payload to the agent's callback
   "conversation": { "id": "uuid", "platform_id": "12345678", "type": "private" },
   "sender": { "platform_id": "87654321", "display_name": "Alice" },
   "content": { "type": "text", "text": "Hello", "attachments": [] },
-  "timestamp": "2026-04-01T12:00:00Z"
+  "timestamp": "2026-04-01T12:00:00Z",
+  "raw_platform_data": { "...": "full original Telegram/Discord/Lark webhook JSON" }
 }
 ```
+
+The payload includes both normalized fields and `raw_platform_data` (the full original webhook JSON from the platform). Most agents use the normalized fields; agents that need platform-specific features (Telegram inline keyboards, Discord embeds, Lark interactive cards) can read `raw_platform_data` directly.
 
 Headers: `X-NyxID-Signature` (HMAC-SHA256), `X-NyxID-Message-Id`, `X-NyxID-Timestamp`, `X-NyxID-Platform`.
 
