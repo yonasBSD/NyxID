@@ -32,6 +32,7 @@ pub async fn register_user(
     email: &str,
     password_raw: &str,
     display_name: Option<&str>,
+    invite_code_id: Option<&str>,
 ) -> AppResult<RegisterResult> {
     // Validate password length
     if password_raw.len() < 8 {
@@ -88,6 +89,7 @@ pub async fn register_user(
         is_admin: false,
         role_ids: default_role_ids,
         group_ids: vec![],
+        invite_code_id: invite_code_id.map(String::from),
         mfa_enabled: false,
         social_provider: None,
         social_provider_id: None,

@@ -23,6 +23,7 @@ pub mod device_tokens;
 pub mod docs;
 pub mod endpoints;
 pub mod health;
+pub mod invite_codes;
 pub mod keys;
 pub mod llm_gateway;
 pub mod llms_txt;

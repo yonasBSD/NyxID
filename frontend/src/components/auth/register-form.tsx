@@ -46,6 +46,7 @@ export function RegisterForm({ returnTo }: RegisterFormProps) {
   const form = useForm<RegisterFormData>({
     resolver: zodResolver(registerSchema),
     defaultValues: {
+      inviteCode: "",
       name: "",
       email: "",
       password: "",
@@ -62,6 +63,7 @@ export function RegisterForm({ returnTo }: RegisterFormProps) {
         name: data.name,
         email: data.email,
         password: data.password,
+        invite_code: data.inviteCode,
       });
       toast.success(result.message || "Account created successfully");
       void navigate({
@@ -103,6 +105,25 @@ export function RegisterForm({ returnTo }: RegisterFormProps) {
               {form.formState.errors.root.message}
             </div>
           )}
+
+          <FormField
+            control={form.control}
+            name="inviteCode"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Invite Code</FormLabel>
+                <FormControl>
+                  <Input
+                    placeholder="NYX-XXXXXXXX"
+                    autoComplete="off"
+                    className="font-mono uppercase"
+                    {...field}
+                  />
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
 
           <FormField
             control={form.control}

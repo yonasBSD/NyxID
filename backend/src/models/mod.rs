@@ -12,6 +12,7 @@ pub mod channel_message;
 pub mod consent;
 pub mod downstream_service;
 pub mod group;
+pub mod invite_code;
 pub mod mcp_session;
 pub mod mfa_factor;
 pub mod node;

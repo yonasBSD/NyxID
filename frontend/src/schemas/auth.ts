@@ -9,6 +9,9 @@ export type LoginFormData = z.infer<typeof loginSchema>;
 
 export const registerSchema = z
   .object({
+    inviteCode: z
+      .string()
+      .min(1, "Invite code is required"),
     name: z
       .string()
       .min(1, "Name is required")

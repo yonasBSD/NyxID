@@ -15,7 +15,7 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{ACCESS_TOKEN_COOKIE_NAME, AuthUser, SESSION_COOKIE_NAME};
-use crate::services::{audit_service, auth_service, token_service};
+use crate::services::{audit_service, auth_service, invite_code_service, token_service};
 
 // --- Request / Response types ---
 
@@ -29,6 +29,8 @@ pub struct RegisterRequest {
         message = "Password must be between 8 and 128 characters"
     ))]
     pub password: String,
+    #[validate(length(min = 1, message = "Invite code is required"))]
+    pub invite_code: String,
     pub display_name: Option<String>,
 }
 
@@ -310,11 +312,15 @@ pub async fn register(
     body.validate()
         .map_err(|e| AppError::ValidationError(e.to_string()))?;
 
+    let invite_code_id =
+        invite_code_service::validate_and_consume(&state.db, &body.invite_code).await?;
+
     let result = auth_service::register_user(
         &state.db,
         &body.email,
         &body.password,
         body.display_name.as_deref(),
+        Some(&invite_code_id),
     )
     .await?;
 
@@ -734,6 +740,7 @@ pub async fn setup(
         &body.email,
         &body.password,
         body.display_name.as_deref(),
+        None,
     )
     .await?;
 
