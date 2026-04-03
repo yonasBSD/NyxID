@@ -41,6 +41,7 @@ describe("loginSchema", () => {
 
 describe("registerSchema", () => {
   const validData = {
+    inviteCode: "NYX-TESTCODE",
     name: "John Doe",
     email: "john@example.com",
     password: "Password1",
