@@ -114,6 +114,59 @@ pub async fn seed_default_clients(db: &mongodb::Database) -> AppResult<()> {
     Ok(())
 }
 
+/// Backfill the `proxy` scope onto OAuth clients created via Dynamic Client
+/// Registration before scope enforcement landed (commit 871d364).
+///
+/// DCR is used by MCP clients (Cursor, Claude Code, etc.) which need the
+/// `proxy` scope to call `/mcp`. Older DCR clients were registered with
+/// `openid profile email` only, so their access tokens fail the scope check
+/// in `handlers/mcp_transport.rs`. This sweep upgrades them in place so
+/// existing client_id caches keep working without re-registration.
+///
+/// Idempotent: clients that already have `proxy` are skipped.
+pub async fn migrate_dynamic_clients_add_proxy_scope(db: &mongodb::Database) -> AppResult<()> {
+    let collection = db.collection::<OauthClient>(OAUTH_CLIENTS);
+
+    let stale: Vec<OauthClient> = collection
+        .find(doc! {
+            "created_by": "dynamic_registration",
+            "allowed_scopes": { "$not": { "$regex": r"(^|\s)proxy(\s|$)" } },
+        })
+        .await?
+        .try_collect()
+        .await?;
+
+    if stale.is_empty() {
+        return Ok(());
+    }
+
+    let now = bson::DateTime::from_chrono(Utc::now());
+    let mut upgraded = 0_usize;
+
+    for client in &stale {
+        let updated_scopes = validate_allowed_scopes(&format!("{} proxy", client.allowed_scopes))?;
+
+        collection
+            .update_one(
+                doc! { "_id": &client.id },
+                doc! { "$set": {
+                    "allowed_scopes": &updated_scopes,
+                    "updated_at": now,
+                }},
+            )
+            .await?;
+
+        upgraded += 1;
+    }
+
+    tracing::info!(
+        upgraded,
+        "Backfilled `proxy` scope on dynamic-registration OAuth clients"
+    );
+
+    Ok(())
+}
+
 /// Create a new OAuth client.
 ///
 /// Returns the persisted client and, for confidential clients, the raw client
