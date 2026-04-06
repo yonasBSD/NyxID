@@ -38,18 +38,29 @@ impl ChatgptTranslator {
     ) -> AppResult<TranslatedRequest> {
         let mut translated = serde_json::Map::new();
 
-        // Passthrough fields
-        for key in &[
-            "model",
-            "temperature",
-            "top_p",
-            "stream",
-            "tools",
-            "tool_choice",
-        ] {
+        // Passthrough scalar fields
+        for key in &["model", "temperature", "top_p", "stream"] {
             if let Some(val) = body.get(*key) {
                 translated.insert(key.to_string(), val.clone());
             }
+        }
+
+        // Convert Chat Completions tools (nested `function` object) into
+        // Responses API tools (flat `name`/`description`/`parameters`/`strict`).
+        if let Some(tools) = body.get("tools") {
+            translated.insert(
+                "tools".to_string(),
+                convert_tools_to_responses_format(tools),
+            );
+        }
+
+        // Convert tool_choice object form (`{type, function: {name}}`) into
+        // Responses API form (`{type, name}`); string forms pass through.
+        if let Some(tool_choice) = body.get("tool_choice") {
+            translated.insert(
+                "tool_choice".to_string(),
+                convert_tool_choice_to_responses_format(tool_choice),
+            );
         }
 
         // Convert messages -> instructions + input
@@ -460,6 +471,79 @@ impl LlmTranslator for ChatgptTranslator {
             _ => None,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Tool conversion helpers
+// ---------------------------------------------------------------------------
+
+/// Convert a Chat Completions `tools` array into Responses API format.
+///
+/// Chat Completions nests function metadata under a `function` object:
+/// ```json
+/// {"type": "function", "function": {"name": "x", "description": "...", "parameters": {...}, "strict": true}}
+/// ```
+///
+/// The Responses API flattens these fields to the top level:
+/// ```json
+/// {"type": "function", "name": "x", "description": "...", "parameters": {...}, "strict": true}
+/// ```
+///
+/// Non-function tool entries (web_search, file_search, etc.) and tools that
+/// are already in the flat Responses API shape pass through unchanged.
+fn convert_tools_to_responses_format(tools: &serde_json::Value) -> serde_json::Value {
+    let Some(arr) = tools.as_array() else {
+        return tools.clone();
+    };
+
+    let converted: Vec<serde_json::Value> = arr
+        .iter()
+        .map(|tool| {
+            let is_function = tool.get("type").and_then(|t| t.as_str()) == Some("function");
+            if !is_function {
+                return tool.clone();
+            }
+            // Only flatten when the Chat Completions nested shape is present.
+            let Some(func) = tool.get("function").and_then(|f| f.as_object()) else {
+                return tool.clone();
+            };
+
+            let mut flattened = func.clone();
+            flattened.insert(
+                "type".to_string(),
+                serde_json::Value::String("function".to_string()),
+            );
+            serde_json::Value::Object(flattened)
+        })
+        .collect();
+
+    serde_json::Value::Array(converted)
+}
+
+/// Convert a Chat Completions `tool_choice` value into Responses API format.
+///
+/// String forms (`"auto"`, `"none"`, `"required"`) and tool-type objects
+/// without a nested `function` key pass through. Chat Completions' explicit
+/// function selection object is flattened:
+/// `{"type": "function", "function": {"name": "x"}}` -> `{"type": "function", "name": "x"}`.
+fn convert_tool_choice_to_responses_format(tool_choice: &serde_json::Value) -> serde_json::Value {
+    let Some(obj) = tool_choice.as_object() else {
+        return tool_choice.clone();
+    };
+    let is_function = obj.get("type").and_then(|t| t.as_str()) == Some("function");
+    if !is_function {
+        return tool_choice.clone();
+    }
+    let Some(func) = obj.get("function").and_then(|f| f.as_object()) else {
+        return tool_choice.clone();
+    };
+
+    let mut flattened = func.clone();
+    flattened.insert(
+        "type".to_string(),
+        serde_json::Value::String("function".to_string()),
+    );
+    serde_json::Value::Object(flattened)
 }
 
 // ---------------------------------------------------------------------------
@@ -1180,19 +1264,20 @@ mod tests {
     }
 
     #[test]
-    fn chatgpt_translate_request_passthrough_tools() {
+    fn chatgpt_translate_request_flattens_function_tools() {
         let translator = ChatgptTranslator;
-        let tools = serde_json::json!([{
-            "type": "function",
-            "function": {
-                "name": "get_weather",
-                "parameters": {"type": "object", "properties": {}}
-            }
-        }]);
         let body = serde_json::json!({
             "model": "gpt-4o",
             "messages": [{"role": "user", "content": "Hi"}],
-            "tools": tools,
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get current weather",
+                    "parameters": {"type": "object", "properties": {}},
+                    "strict": true
+                }
+            }],
             "tool_choice": "auto"
         });
 
@@ -1200,8 +1285,96 @@ mod tests {
             .translate_request("chat/completions", &body)
             .unwrap();
 
-        assert_eq!(result.body["tools"], tools);
+        // Responses API expects name/description/parameters/strict at the top
+        // level, not nested under a `function` key.
+        let expected_tools = serde_json::json!([{
+            "type": "function",
+            "name": "get_weather",
+            "description": "Get current weather",
+            "parameters": {"type": "object", "properties": {}},
+            "strict": true
+        }]);
+        assert_eq!(result.body["tools"], expected_tools);
         assert_eq!(result.body["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn chatgpt_translate_request_flattens_tool_choice_object() {
+        let translator = ChatgptTranslator;
+        let body = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "get_weather"}
+            }
+        });
+
+        let result = translator
+            .translate_request("chat/completions", &body)
+            .unwrap();
+
+        assert_eq!(
+            result.body["tool_choice"],
+            serde_json::json!({"type": "function", "name": "get_weather"})
+        );
+    }
+
+    #[test]
+    fn chatgpt_translate_request_passes_through_non_function_tools() {
+        let translator = ChatgptTranslator;
+        // Non-function tool types (e.g. hosted tools) should pass through unchanged.
+        let body = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "tools": [
+                {"type": "web_search"},
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "lookup",
+                        "parameters": {"type": "object"}
+                    }
+                }
+            ]
+        });
+
+        let result = translator
+            .translate_request("chat/completions", &body)
+            .unwrap();
+
+        let tools = result.body["tools"].as_array().unwrap();
+        assert_eq!(tools[0], serde_json::json!({"type": "web_search"}));
+        assert_eq!(
+            tools[1],
+            serde_json::json!({
+                "type": "function",
+                "name": "lookup",
+                "parameters": {"type": "object"}
+            })
+        );
+    }
+
+    #[test]
+    fn chatgpt_translate_request_passes_through_already_flat_tools() {
+        // If a caller already provides Responses API shaped tools, leave them alone.
+        let translator = ChatgptTranslator;
+        let tools = serde_json::json!([{
+            "type": "function",
+            "name": "get_weather",
+            "parameters": {"type": "object"}
+        }]);
+        let body = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "tools": tools,
+        });
+
+        let result = translator
+            .translate_request("chat/completions", &body)
+            .unwrap();
+
+        assert_eq!(result.body["tools"], tools);
     }
 
     // --- Format detection tests ---
