@@ -299,30 +299,12 @@ async fn handle_webhook_inner(
             format!("failed to decrypt bot token: {e}").into()
         })?;
 
-    // Generate a short-lived access token for the bot owner so the receiving
-    // agent can make NyxID API calls (proxy, LLM gateway, approvals, etc.)
-    // on their behalf. Uses the same scope as first-party sessions so agents
-    // like NyxIdChat can call the LLM gateway.
-    let user_access_token = {
-        let user_uuid = bot.user_id.parse::<uuid::Uuid>().map_err(
-            |e| -> Box<dyn std::error::Error + Send + Sync> {
-                format!("invalid bot owner user_id: {e}").into()
-            },
-        )?;
-        let scope = crate::services::token_service::FIRST_PARTY_ACCESS_SCOPES;
-        let rbac_data =
-            crate::services::rbac_helpers::build_rbac_claim_data(&state.db, &bot.user_id, scope)
-                .await
-                .ok();
-        crate::crypto::jwt::generate_relay_access_token(
-            &state.jwt_keys,
-            &state.config,
-            &user_uuid,
-            scope,
-            rbac_data.as_ref(),
-        )
-        .ok()
-    };
+    // Parse bot owner UUID once (used for relay token generation per-message)
+    let bot_owner_uuid = bot.user_id.parse::<uuid::Uuid>().map_err(
+        |e| -> Box<dyn std::error::Error + Send + Sync> {
+            format!("invalid bot owner user_id: {e}").into()
+        },
+    )?;
 
     for inbound in &messages {
         // Resolve which agent should handle this message
@@ -393,6 +375,37 @@ async fn handle_webhook_inner(
                 .await;
                 continue;
             }
+        };
+
+        // Generate a relay token scoped to this agent key's permissions.
+        // The token carries the bot owner's identity but inherits the agent
+        // key's service/node scope restrictions.
+        let user_access_token = {
+            let scope = crate::services::token_service::FIRST_PARTY_ACCESS_SCOPES;
+            let rbac_data = crate::services::rbac_helpers::build_rbac_claim_data(
+                &state.db,
+                &bot.user_id,
+                scope,
+            )
+            .await
+            .ok();
+            let agent_scope = crate::crypto::jwt::RelayAgentScope {
+                api_key_id: api_key.id.clone(),
+                api_key_name: api_key.name.clone(),
+                allowed_service_ids: api_key.allowed_service_ids.clone(),
+                allowed_node_ids: api_key.allowed_node_ids.clone(),
+                allow_all_services: api_key.allow_all_services,
+                allow_all_nodes: api_key.allow_all_nodes,
+            };
+            crate::crypto::jwt::generate_relay_access_token(
+                &state.jwt_keys,
+                &state.config,
+                &bot_owner_uuid,
+                scope,
+                rbac_data.as_ref(),
+                &agent_scope,
+            )
+            .ok()
         };
 
         // Build the callback payload
