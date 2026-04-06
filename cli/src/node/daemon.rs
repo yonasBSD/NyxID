@@ -398,7 +398,26 @@ fn restart_launchd(profile: Option<&str>) -> Result<()> {
         ));
     }
 
-    let _ = launchd_bootout(profile, true);
+    // If the job is already loaded, use `launchctl kickstart -k` to atomically
+    // kill the current instance and respawn it. This avoids the race where an
+    // immediate `bootstrap` after `bootout` hits launchd's async teardown and
+    // fails with "Input/output error" (errno 5) because the job label is still
+    // in the domain.
+    if launchd_is_loaded(profile)? {
+        let target = launchd_target_for(profile)?;
+        let output = Command::new("launchctl")
+            .args(["kickstart", "-k", &target])
+            .output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(Error::Config(format!(
+                "launchctl kickstart -k failed: {stderr}"
+            )));
+        }
+        println!("Node agent restarted.");
+        return Ok(());
+    }
+
     bootstrap_launchd(&plist)?;
     println!("Node agent restarted.");
 
