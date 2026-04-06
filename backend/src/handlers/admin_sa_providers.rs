@@ -245,6 +245,7 @@ pub async fn initiate_oauth_for_sa(
         &provider_id,
         Some(&sa_id),
         Some(&redirect_path),
+        &[],
     )
     .await?;
 
@@ -294,6 +295,7 @@ pub async fn initiate_device_code_for_sa(
         &admin_id,
         &provider_id,
         Some(&sa_id),
+        &[],
     )
     .await?;
 

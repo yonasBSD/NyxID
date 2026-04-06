@@ -74,6 +74,9 @@ export interface CatalogEntry {
   readonly device_code_url: string | null;
   readonly default_scopes: readonly string[] | null;
   readonly supports_pkce: boolean | null;
+  /** "rfc8628" (default) or "openai". Determines whether a device-code
+   *  provider accepts a `scope` parameter. OpenAI-format providers do not. */
+  readonly device_code_format: string | null;
   readonly oauth_client_id: string | null;
   readonly client_id_param_name: string | null;
   readonly requires_credential: boolean;

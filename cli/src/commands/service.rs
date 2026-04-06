@@ -21,18 +21,65 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             auth_key_name,
             credential,
             credential_env,
+            scopes,
             auth,
         } => {
             let mut api = ApiClient::from_auth(&auth)?;
 
+            // Normalize --scope inputs: split each entry on comma/whitespace so
+            // users can write `--scope a,b --scope "c d"` or `--scope a --scope b`.
+            let additional_scopes: Vec<String> = scopes
+                .iter()
+                .flat_map(|raw| {
+                    raw.split(|c: char| c == ',' || c.is_whitespace())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                })
+                .collect();
+
+            // `--scope` is forwarded only on the OAuth and device-code flows.
+            // Other paths accept the flag for symmetry (e.g. a user adding a
+            // custom endpoint that they will later connect via OAuth), but
+            // we warn that the scopes are not recorded anywhere yet.
+            let scope_flow_unsupported = !additional_scopes.is_empty() && !oauth && !device_code;
+            if scope_flow_unsupported {
+                if custom {
+                    eprintln!(
+                        "warning: --scope has no effect on --custom endpoints \
+                         (custom endpoints use direct credentials, not OAuth). \
+                         Use --oauth or --device-code with a catalog slug to request additional scopes."
+                    );
+                } else {
+                    bail!(
+                        "--scope is only supported with --oauth or --device-code \
+                         (use one of those flags, or --custom to create a direct-credential endpoint)"
+                    );
+                }
+            }
+
             // OAuth flow
             if oauth {
-                return run_oauth_add(&mut api, slug, via_node.as_deref(), &auth).await;
+                return run_oauth_add(
+                    &mut api,
+                    slug,
+                    via_node.as_deref(),
+                    &additional_scopes,
+                    &auth,
+                )
+                .await;
             }
 
             // Device code flow
             if device_code {
-                return run_device_code_add(&mut api, slug, via_node.as_deref(), &auth).await;
+                return run_device_code_add(
+                    &mut api,
+                    slug,
+                    via_node.as_deref(),
+                    &additional_scopes,
+                    &auth,
+                )
+                .await;
             }
 
             let mut body = serde_json::Map::new();
@@ -536,6 +583,7 @@ async fn run_oauth_add(
     api: &mut ApiClient,
     slug: Option<String>,
     via_node: Option<&str>,
+    additional_scopes: &[String],
     auth: &crate::cli::AuthArgs,
 ) -> Result<()> {
     let slug = slug.ok_or_else(|| anyhow::anyhow!("Catalog slug is required for --oauth"))?;
@@ -565,10 +613,16 @@ async fn run_oauth_add(
         .ok_or_else(|| anyhow::anyhow!("Created key response did not include an id"))?;
 
     if via_node.is_some() {
+        // For node-routed services the OAuth flow runs on the node itself, so
+        // we can't kick off the browser here. Print a copy-paste friendly
+        // next-step command that includes any --scope values the caller
+        // passed, so the node-side `credentials setup` picks up the same
+        // extra scopes (see `cli/src/node/agent.rs::cmd_credentials_setup`).
         print_add_result(api, &key_result, auth.output)?;
         eprintln!();
         eprintln!("Next step: run this on the node that owns the credential:");
-        eprintln!("  nyxid node credentials setup --service {slug}");
+        let scope_suffix = format_scope_suffix(additional_scopes);
+        eprintln!("  nyxid node credentials setup --service {slug}{scope_suffix}");
         return Ok(());
     }
 
@@ -576,12 +630,17 @@ async fn run_oauth_add(
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("No provider found for slug: {slug}"))?;
     let redirect_path = format!("/keys/{key_id}");
-    let initiate: Value = api
-        .get(&format!(
-            "/providers/{provider_id}/connect/oauth?redirect_path={}",
-            urlencoding::encode(&redirect_path)
-        ))
-        .await?;
+    let mut initiate_path = format!(
+        "/providers/{provider_id}/connect/oauth?redirect_path={}",
+        urlencoding::encode(&redirect_path)
+    );
+    if !additional_scopes.is_empty() {
+        initiate_path.push_str(&format!(
+            "&scope={}",
+            urlencoding::encode(&additional_scopes.join(","))
+        ));
+    }
+    let initiate: Value = api.get(&initiate_path).await?;
     let authorization_url = initiate["authorization_url"].as_str().ok_or_else(|| {
         anyhow::anyhow!("OAuth initiate response did not include authorization_url")
     })?;
@@ -606,6 +665,7 @@ async fn run_device_code_add(
     api: &mut ApiClient,
     slug: Option<String>,
     via_node: Option<&str>,
+    additional_scopes: &[String],
     auth: &crate::cli::AuthArgs,
 ) -> Result<()> {
     let slug = slug.ok_or_else(|| anyhow::anyhow!("Catalog slug is required for --device-code"))?;
@@ -637,7 +697,8 @@ async fn run_device_code_add(
         print_add_result(api, &key_result, auth.output)?;
         eprintln!();
         eprintln!("Next step: run this on the node that owns the credential:");
-        eprintln!("  nyxid node credentials setup --service {slug}");
+        let scope_suffix = format_scope_suffix(additional_scopes);
+        eprintln!("  nyxid node credentials setup --service {slug}{scope_suffix}");
         return Ok(());
     }
 
@@ -646,12 +707,14 @@ async fn run_device_code_add(
         .ok_or_else(|| anyhow::anyhow!("No provider found for slug: {slug}"))?;
 
     // Initiate device code flow
-    let initiate: Value = api
-        .post(
-            &format!("/providers/{provider_id}/connect/device-code/initiate"),
-            &serde_json::json!({}),
-        )
-        .await?;
+    let mut initiate_path = format!("/providers/{provider_id}/connect/device-code/initiate");
+    if !additional_scopes.is_empty() {
+        initiate_path.push_str(&format!(
+            "?scope={}",
+            urlencoding::encode(&additional_scopes.join(","))
+        ));
+    }
+    let initiate: Value = api.post(&initiate_path, &serde_json::json!({})).await?;
 
     let user_code = initiate["user_code"].as_str().unwrap_or("-");
     let verification_uri = initiate["verification_uri"]
@@ -756,6 +819,18 @@ async fn wait_for_authorized_key(api: &mut ApiClient, key_id: &str) -> Result<Va
 
     eprintln!();
     bail!("Timed out waiting for OAuth authorization to complete")
+}
+
+/// Format user-supplied extra scopes as a trailing ` --scope "a,b,c"` suffix
+/// for a copy-paste friendly next-step hint shown after `service add --oauth
+/// --via-node`. Returns an empty string when there are no extras, so the
+/// pre-existing hint format is unchanged in the common case.
+fn format_scope_suffix(additional_scopes: &[String]) -> String {
+    if additional_scopes.is_empty() {
+        String::new()
+    } else {
+        format!(" --scope \"{}\"", additional_scopes.join(","))
+    }
 }
 
 fn print_add_result(api: &ApiClient, result: &Value, output: OutputFormat) -> Result<()> {

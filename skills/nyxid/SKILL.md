@@ -93,6 +93,56 @@ nyxid service add --custom                                # add custom endpoint 
 > For API key services, just run `nyxid service add <slug>` without flags. The CLI securely prompts for the key (input hidden). Never ask the user to paste secrets into chat or set environment variables manually.
 > For automation/scripting only: `--credential-env <VAR>` reads from an environment variable.
 
+### Requesting additional OAuth scopes
+
+Some OAuth providers (Lark, Google, GitHub, Atlassian, ...) expose many scopes but NyxID's catalog only configures a sensible default set. When a user needs a capability that isn't covered -- for example Lark's contact/attendance APIs -- add extra scopes on top of the defaults with `--scope`:
+
+```bash
+# Single scope
+nyxid service add api-lark --oauth --scope contact:contact.base:readonly
+
+# Multiple scopes (repeat the flag or comma-separate)
+nyxid service add api-lark --oauth \
+  --scope contact:contact.base:readonly \
+  --scope contact:department.base:readonly
+
+nyxid service add api-lark --oauth \
+  --scope "contact:contact.base:readonly,contact:department.base:readonly"
+
+# Works the same way for device-code services
+nyxid service add llm-openai --device-code --scope "custom-scope-1,custom-scope-2"
+```
+
+The extra scopes are merged (deduped) on top of the provider's `default_scopes` and forwarded in the authorization URL (or device code request). The upstream provider decides whether to grant them -- if the user's app/client doesn't have a scope enabled on the provider side, the authorization flow will still fail there.
+
+**Supported flows:**
+- `--oauth` (all OAuth2 providers) -- scopes are appended to the authorization URL.
+- `--device-code` (RFC 8628 providers like GitHub, Google, most standard device-code providers) -- scopes are sent in the device code request.
+- `--custom` -- `--scope` is accepted for symmetry but has no effect (custom endpoints use direct credentials, not OAuth). The CLI prints a warning.
+- OpenAI-format device-code providers (e.g. the seeded `openai-codex` entry) do **not** accept additional scopes -- scopes are baked into the upstream client registration. The backend returns a validation error if you pass `--scope` to one of these, and the "AI Services" UI hides the scope input for them.
+
+In the "AI Services" UI, the OAuth step and the standard device-code step include an optional "Additional scopes" input that accepts the same comma- or space-separated format.
+
+### Scopes with node-routed services (`--via-node`)
+
+Node-routed OAuth flows run on the node agent (so user credentials never leave the node machine). The two-step pattern is:
+
+```bash
+# Step 1: On any machine -- create the placeholder record on NyxID. The CLI
+# prints the exact next-step command with your scopes pre-filled.
+nyxid service add api-lark --oauth --via-node my-node \
+  --scope contact:contact.base:readonly,contact:department.base:readonly
+# -> "Next step: run this on the node that owns the credential:"
+# -> "  nyxid node credentials setup --service api-lark --scope \"contact:contact.base:readonly,contact:department.base:readonly\""
+
+# Step 2: On the node machine -- run the OAuth flow locally with the extras
+# merged on top of the catalog's default scopes.
+nyxid node credentials setup --service api-lark \
+  --scope contact:contact.base:readonly,contact:department.base:readonly
+```
+
+`nyxid node credentials add-oauth` also accepts the same `--scope` flag (additive, repeatable) for manual setups. It still accepts the legacy `--scopes` flag (which **replaces** the default scope list entirely) for backward compatibility; prefer `--scope` unless you specifically need override semantics.
+
 ## Helping Users Add Services and Credentials
 
 Most users do not know where to find API keys or what authentication method to use. Follow this workflow:
