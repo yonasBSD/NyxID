@@ -88,15 +88,27 @@ export function useInitiateOAuth() {
         | {
             readonly providerId: string;
             readonly redirectPath?: string;
+            /**
+             * Additional OAuth scopes to request on top of the provider's
+             * `default_scopes`. Sent as a comma-separated `scope` query param;
+             * the backend splits on comma/whitespace, validates, and merges.
+             */
+            readonly additionalScopes?: readonly string[];
           },
     ): Promise<OAuthInitiateResponse> => {
       const params =
         typeof input === "string" ? { providerId: input } : input;
-      const query = params.redirectPath
-        ? `?redirect_path=${encodeURIComponent(params.redirectPath)}`
-        : "";
+      const query = new URLSearchParams();
+      if (params.redirectPath) {
+        query.set("redirect_path", params.redirectPath);
+      }
+      if (params.additionalScopes && params.additionalScopes.length > 0) {
+        query.set("scope", params.additionalScopes.join(","));
+      }
+      const queryString = query.toString();
+      const suffix = queryString ? `?${queryString}` : "";
       return api.get<OAuthInitiateResponse>(
-        `/providers/${params.providerId}/connect/oauth${query}`,
+        `/providers/${params.providerId}/connect/oauth${suffix}`,
       );
     },
   });
@@ -105,10 +117,23 @@ export function useInitiateOAuth() {
 export function useInitiateDeviceCode() {
   return useMutation({
     mutationFn: async (
-      providerId: string,
+      input:
+        | string
+        | {
+            readonly providerId: string;
+            readonly additionalScopes?: readonly string[];
+          },
     ): Promise<DeviceCodeInitiateResponse> => {
+      const params =
+        typeof input === "string" ? { providerId: input } : input;
+      const query = new URLSearchParams();
+      if (params.additionalScopes && params.additionalScopes.length > 0) {
+        query.set("scope", params.additionalScopes.join(","));
+      }
+      const queryString = query.toString();
+      const suffix = queryString ? `?${queryString}` : "";
       return api.post<DeviceCodeInitiateResponse>(
-        `/providers/${providerId}/connect/device-code/initiate`,
+        `/providers/${params.providerId}/connect/device-code/initiate${suffix}`,
       );
     },
   });

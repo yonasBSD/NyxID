@@ -376,13 +376,16 @@ pub async fn cmd_credentials(
         }
         NodeCredentialCommands::Setup {
             service,
+            additional_scopes,
             api_url,
             access_token,
         } => {
+            let additional_scopes = normalize_cli_scopes(&additional_scopes);
             cmd_credentials_setup(
                 &config_file,
                 &config_dir,
                 &service,
+                &additional_scopes,
                 api_url.as_deref(),
                 access_token.as_deref(),
             )
@@ -419,11 +422,13 @@ pub async fn cmd_credentials(
             token_url,
             device_code_url,
             scopes,
+            additional_scopes,
             url,
             api_url,
             access_token,
         } => {
             let service = raw_service.to_lowercase();
+            let additional_scopes = normalize_cli_scopes(&additional_scopes);
             cmd_credentials_add_oauth(
                 &config_file,
                 &config_dir,
@@ -435,6 +440,7 @@ pub async fn cmd_credentials(
                 token_url,
                 device_code_url,
                 scopes,
+                &additional_scopes,
                 url,
                 api_url,
                 access_token,
@@ -753,6 +759,37 @@ fn prompt_secret(prompt: &str) -> Result<String> {
     let value = rpassword::prompt_password(format!("{prompt}: "))
         .map_err(|e| super::error::Error::Validation(format!("Failed to read secret: {e}")))?;
     read_secret_value(Some(value), prompt)
+}
+
+/// Normalize repeated `--scope` CLI inputs into a trimmed, deduped list.
+///
+/// Accepts comma- or whitespace-separated values within a single entry and
+/// across multiple entries, e.g. `--scope a,b --scope "c d"`. Matches the
+/// behavior of `nyxid service add --scope` so the two paths feel identical.
+fn normalize_cli_scopes(raw: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for entry in raw {
+        for piece in entry.split(|c: char| c == ',' || c.is_whitespace()) {
+            let trimmed = piece.trim();
+            if !trimmed.is_empty() && !out.iter().any(|existing| existing == trimmed) {
+                out.push(trimmed.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Merge default OAuth scopes with user-supplied additional scopes, preserving
+/// the order of `defaults` and appending any extras that are not already
+/// present. Dedup is case-sensitive (RFC 6749 §3.3).
+fn merge_oauth_scopes(defaults: &[String], additional: &[String]) -> Vec<String> {
+    let mut merged: Vec<String> = defaults.to_vec();
+    for scope in additional {
+        if !merged.iter().any(|existing| existing == scope) {
+            merged.push(scope.clone());
+        }
+    }
+    merged
 }
 
 fn parse_header(header: &str) -> Result<(String, String)> {
@@ -1281,6 +1318,7 @@ async fn cmd_credentials_setup(
     config_file: &Path,
     config_dir: &Path,
     raw_service: &str,
+    additional_scopes: &[String],
     api_url: Option<&str>,
     access_token: Option<&str>,
 ) -> Result<()> {
@@ -1454,7 +1492,9 @@ async fn cmd_credentials_setup(
             println!("Running OAuth flow from the node...");
             println!();
 
-            // Delegate to add-oauth with --from-catalog
+            // Delegate to add-oauth with --from-catalog. Pass through any
+            // additional scopes the caller supplied so they get merged with
+            // the catalog's default_scopes.
             cmd_credentials_add_oauth(
                 config_file,
                 config_dir,
@@ -1465,7 +1505,8 @@ async fn cmd_credentials_setup(
                 None,
                 None,
                 None,
-                None, // OAuth URLs (from catalog)
+                None, // scopes (legacy replacement) -- not used in setup path
+                additional_scopes,
                 target_url,
                 Some(base_api_url),
                 Some(token_str.clone()),
@@ -1473,6 +1514,11 @@ async fn cmd_credentials_setup(
             .await
         }
         _ => {
+            if !additional_scopes.is_empty() {
+                eprintln!(
+                    "warning: --scope has no effect on API-key services (scopes apply to OAuth flows)"
+                );
+            }
             println!("This service requires an API key / bearer token.");
             if let Some(ref url) = entry["api_key_url"].as_str() {
                 println!("  Get your API key at: {url}");
@@ -1553,6 +1599,7 @@ async fn cmd_credentials_add_oauth(
     token_url: Option<String>,
     device_code_url: Option<String>,
     scopes: Option<String>,
+    additional_scopes: &[String],
     target_url: Option<String>,
     api_url: Option<String>,
     access_token: Option<String>,
@@ -1641,7 +1688,38 @@ async fn cmd_credentials_add_oauth(
     };
 
     // 3. Determine scopes
-    let final_scopes = scopes.unwrap_or_else(|| oauth_config.default_scopes.join(" "));
+    //
+    // `scopes` (--scopes) is the legacy power-user escape hatch: if set, it
+    // replaces the catalog's default_scopes entirely. `additional_scopes`
+    // (--scope, repeatable) is the additive path from issue #181: any extras
+    // are merged on top of whichever base scope set we ended up using.
+    //
+    // Backward-compat: when the caller supplied no additional scopes we take
+    // the exact pre-feature code path (single `unwrap_or_else`) so any edge-
+    // case whitespace / empty-string behavior of the legacy `--scopes` flag
+    // is preserved byte-for-byte. Only the new `--scope` path goes through
+    // the split + merge logic.
+    let final_scopes = if additional_scopes.is_empty() {
+        scopes.unwrap_or_else(|| oauth_config.default_scopes.join(" "))
+    } else {
+        // OpenAI-format device code providers do not accept a `scope` field,
+        // so reject additional scopes for them explicitly (mirrors the backend
+        // `ensure_additional_scopes_supported` check).
+        if oauth_config.device_code_format == "openai" {
+            return Err(super::error::Error::Validation(
+                "This provider's device code endpoint does not accept additional OAuth scopes \
+                 (OpenAI-format device code providers ignore the `scope` parameter). \
+                 Remove --scope and try again."
+                    .to_string(),
+            ));
+        }
+
+        let base_scopes: Vec<String> = match scopes.as_deref() {
+            Some(s) if !s.trim().is_empty() => s.split_whitespace().map(String::from).collect(),
+            _ => oauth_config.default_scopes.clone(),
+        };
+        merge_oauth_scopes(&base_scopes, additional_scopes).join(" ")
+    };
 
     // 4. Run the OAuth flow
     let token_response = if oauth_config.device_code_url.is_some() {
@@ -1715,6 +1793,65 @@ mod tests {
     use super::super::encryption::LocalEncryption;
     use super::super::error::Error;
     use super::*;
+
+    #[test]
+    fn normalize_cli_scopes_splits_mixed_separators() {
+        let input = vec![
+            "contact:contact.base:readonly,contact:department.base:readonly".to_string(),
+            "attendance:record:read scope.with.dots".to_string(),
+            "  ".to_string(), // whitespace-only entry is ignored
+            "contact:contact.base:readonly".to_string(), // duplicate is deduped
+        ];
+        let out = normalize_cli_scopes(&input);
+        assert_eq!(
+            out,
+            vec![
+                "contact:contact.base:readonly".to_string(),
+                "contact:department.base:readonly".to_string(),
+                "attendance:record:read".to_string(),
+                "scope.with.dots".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn normalize_cli_scopes_returns_empty_for_empty_input() {
+        assert!(normalize_cli_scopes(&[]).is_empty());
+        assert!(normalize_cli_scopes(&["".to_string(), "  ,  ".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn merge_oauth_scopes_preserves_defaults_and_appends_extras() {
+        let defaults = vec!["openid".to_string(), "email".to_string()];
+        let extras = vec![
+            "profile".to_string(),
+            "email".to_string(), // dedup
+            "offline_access".to_string(),
+        ];
+        let merged = merge_oauth_scopes(&defaults, &extras);
+        assert_eq!(
+            merged,
+            vec![
+                "openid".to_string(),
+                "email".to_string(),
+                "profile".to_string(),
+                "offline_access".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_oauth_scopes_handles_no_defaults_and_no_extras() {
+        assert!(merge_oauth_scopes(&[], &[]).is_empty());
+        assert_eq!(
+            merge_oauth_scopes(&["a".to_string()], &[]),
+            vec!["a".to_string()]
+        );
+        assert_eq!(
+            merge_oauth_scopes(&[], &["b".to_string()]),
+            vec!["b".to_string()]
+        );
+    }
 
     #[test]
     fn find_existing_service_matches_catalog_slug_on_same_node() {

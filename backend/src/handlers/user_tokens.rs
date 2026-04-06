@@ -69,6 +69,18 @@ pub struct OAuthInitiateResponse {
 #[derive(Debug, Deserialize, Default)]
 pub struct OAuthInitiateQuery {
     pub redirect_path: Option<String>,
+    /// Optional comma- or space-separated list of additional OAuth scopes
+    /// to append to the provider's `default_scopes` when building the
+    /// authorization URL. The upstream provider decides whether to grant them.
+    pub scope: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct DeviceCodeInitiateQuery {
+    /// Optional comma- or space-separated list of additional OAuth scopes
+    /// to append to the provider's `default_scopes` when requesting the
+    /// device code.
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -230,6 +242,7 @@ pub async fn initiate_oauth_connect(
     if let Some(ref redirect_path) = query.redirect_path {
         validate_redirect_path(redirect_path)?;
     }
+    let additional_scopes = user_token_service::parse_additional_scopes(query.scope.as_deref())?;
 
     let auth_url = user_token_service::initiate_oauth_connect(
         &state.db,
@@ -239,6 +252,7 @@ pub async fn initiate_oauth_connect(
         &provider_id,
         None,
         query.redirect_path.as_deref(),
+        &additional_scopes,
     )
     .await?;
 
@@ -246,7 +260,10 @@ pub async fn initiate_oauth_connect(
         state.db.clone(),
         Some(user_id_str),
         "provider_oauth_initiated".to_string(),
-        Some(serde_json::json!({ "provider_id": &provider_id })),
+        Some(serde_json::json!({
+            "provider_id": &provider_id,
+            "additional_scope_count": additional_scopes.len(),
+        })),
         None,
         None,
         None,
@@ -596,8 +613,10 @@ pub async fn request_device_code(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Path(provider_id): Path<String>,
+    Query(query): Query<DeviceCodeInitiateQuery>,
 ) -> AppResult<Json<DeviceCodeInitiateResponse>> {
     let user_id_str = auth_user.user_id.to_string();
+    let additional_scopes = user_token_service::parse_additional_scopes(query.scope.as_deref())?;
 
     let result = user_token_service::request_device_code(
         &state.db,
@@ -605,6 +624,7 @@ pub async fn request_device_code(
         &user_id_str,
         &provider_id,
         None,
+        &additional_scopes,
     )
     .await?;
 
@@ -612,7 +632,10 @@ pub async fn request_device_code(
         state.db.clone(),
         Some(user_id_str),
         "provider_device_code_initiated".to_string(),
-        Some(serde_json::json!({ "provider_id": &provider_id })),
+        Some(serde_json::json!({
+            "provider_id": &provider_id,
+            "additional_scope_count": additional_scopes.len(),
+        })),
         None,
         None,
         None,

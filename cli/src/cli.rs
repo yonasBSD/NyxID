@@ -408,6 +408,12 @@ pub enum ServiceCommands {
         /// Read credential from this environment variable instead of prompting
         #[arg(long)]
         credential_env: Option<String>,
+        /// Additional OAuth scopes to request on top of the provider's defaults
+        /// (repeatable, comma- or space-separated). Only used with --oauth or
+        /// --device-code. The upstream provider decides whether to grant them.
+        /// Example: --scope "contact:contact.base:readonly,contact:department.base:readonly"
+        #[arg(long = "scope", value_name = "SCOPES")]
+        scopes: Vec<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -955,9 +961,16 @@ pub enum NodeCredentialCommands {
         /// Device code URL
         #[arg(long)]
         device_code_url: Option<String>,
-        /// Scopes to request (space-separated)
+        /// Replace the catalog's default scopes entirely with the space-separated
+        /// list provided here. Legacy power-user escape hatch; prefer `--scope`
+        /// to add extras on top of the defaults.
         #[arg(long)]
         scopes: Option<String>,
+        /// Additional OAuth scopes to append to the provider's defaults
+        /// (repeatable, comma- or space-separated). Unlike `--scopes`, this is
+        /// additive and mirrors `nyxid service add --scope`.
+        #[arg(long = "scope", value_name = "SCOPES")]
+        additional_scopes: Vec<String>,
         /// Target URL for this service
         #[arg(long)]
         url: Option<String>,
@@ -973,6 +986,11 @@ pub enum NodeCredentialCommands {
         /// Service slug (e.g., "llm-openai", "api-twitter")
         #[arg(long)]
         service: String,
+        /// Additional OAuth scopes to append to the catalog defaults
+        /// (repeatable, comma- or space-separated). Only used when the service
+        /// requires OAuth or device code; ignored for API-key credentials.
+        #[arg(long = "scope", value_name = "SCOPES")]
+        additional_scopes: Vec<String>,
         /// NyxID API base URL
         #[arg(long)]
         api_url: Option<String>,

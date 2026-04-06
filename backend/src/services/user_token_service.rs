@@ -41,6 +41,121 @@ pub struct UserProviderTokenSummary {
 const OAUTH_PROVIDER_NOT_CONFIGURED_MESSAGE: &str =
     "This provider is not configured for OAuth yet. Please contact your admin.";
 
+/// Maximum number of user-supplied additional scopes per OAuth initiate request.
+const MAX_ADDITIONAL_SCOPES: usize = 32;
+/// Maximum length of a single scope string.
+const MAX_SCOPE_LENGTH: usize = 256;
+
+/// Parse a user-supplied scope string into a list of individual scopes.
+///
+/// Accepts comma- or whitespace-separated scopes and trims empty entries.
+/// Returns `Ok(vec![])` when `raw` is empty or `None`, which is indistinguishable
+/// from "no additional scopes" for the caller — the merged result will fall back
+/// to `provider.default_scopes`.
+///
+/// Validation:
+/// - At most [`MAX_ADDITIONAL_SCOPES`] entries.
+/// - Each scope is at most [`MAX_SCOPE_LENGTH`] characters.
+/// - Each scope must match `[A-Za-z0-9._:/~+*=-]+` (RFC 6749 §3.3 permits
+///   a broader set, but this covers every known OAuth scope format including
+///   Google (`https://.../auth/drive.readonly`), Lark (`contact:contact.base:readonly`),
+///   GitHub (`repo`, `read:org`), Atlassian (`read:jira-work`), etc.).
+pub fn parse_additional_scopes(raw: Option<&str>) -> AppResult<Vec<String>> {
+    let Some(raw) = raw else {
+        return Ok(Vec::new());
+    };
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let scopes: Vec<String> = raw
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+
+    if scopes.len() > MAX_ADDITIONAL_SCOPES {
+        return Err(AppError::ValidationError(format!(
+            "Too many additional scopes (max {MAX_ADDITIONAL_SCOPES})"
+        )));
+    }
+
+    for scope in &scopes {
+        if scope.len() > MAX_SCOPE_LENGTH {
+            return Err(AppError::ValidationError(format!(
+                "OAuth scope exceeds {MAX_SCOPE_LENGTH} characters"
+            )));
+        }
+        if !scope.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(c, '.' | '_' | ':' | '/' | '~' | '+' | '*' | '=' | '-')
+        }) {
+            return Err(AppError::ValidationError(format!(
+                "OAuth scope contains invalid characters: {scope}"
+            )));
+        }
+    }
+
+    Ok(scopes)
+}
+
+/// Merge a provider's default scopes with user-supplied additional scopes.
+///
+/// Preserves the order of `default_scopes` first, then appends any additional
+/// scope not already present. Deduplication is case-sensitive (OAuth scopes are
+/// case-sensitive per RFC 6749 §3.3).
+fn merge_scopes(default_scopes: Option<&Vec<String>>, additional_scopes: &[String]) -> Vec<String> {
+    let mut merged: Vec<String> = default_scopes.cloned().unwrap_or_default();
+    for scope in additional_scopes {
+        if !merged.iter().any(|existing| existing == scope) {
+            merged.push(scope.clone());
+        }
+    }
+    merged
+}
+
+/// Validate that a given provider supports user-supplied additional scopes.
+///
+/// Only providers that need/accept scopes should receive them:
+/// - `oauth2` providers always accept scopes (RFC 6749 §3.3).
+/// - `device_code` providers using `rfc8628` format accept scopes.
+/// - `device_code` providers using `openai` format do **not** accept a `scope`
+///   parameter — scopes are baked into the client registration (e.g., Codex).
+///   Forwarding a scope value here would turn a previously working connect
+///   into a provider-side failure.
+///
+/// An empty `additional_scopes` slice is always allowed, so existing default
+/// behavior is preserved on every code path.
+fn ensure_additional_scopes_supported(
+    provider: &ProviderConfig,
+    additional_scopes: &[String],
+) -> AppResult<()> {
+    if additional_scopes.is_empty() {
+        return Ok(());
+    }
+
+    match provider.provider_type.as_str() {
+        "oauth2" => Ok(()),
+        "device_code" => {
+            if provider.device_code_format == "openai" {
+                Err(AppError::ValidationError(
+                    "This provider's device code endpoint does not accept additional OAuth scopes \
+                     (OpenAI-format device code providers ignore the `scope` parameter). \
+                     Remove the extra scopes and try again."
+                        .to_string(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        other => Err(AppError::ValidationError(format!(
+            "Provider type '{other}' does not support OAuth scopes"
+        ))),
+    }
+}
+
 fn build_telegram_identity_metadata(
     data: &crate::crypto::telegram::TelegramLoginData,
 ) -> HashMap<String, String> {
@@ -390,6 +505,11 @@ async fn store_telegram_identity(
 /// When `on_behalf_of` is `Some(sa_id)`, the flow stores tokens under the SA's
 /// ID instead of the initiating user. `redirect_path` overrides the default
 /// frontend callback path for the post-OAuth redirect.
+///
+/// `additional_scopes` are merged (deduped, order-preserving) on top of the
+/// provider's `default_scopes`. Pass an empty slice to preserve the original
+/// default-scopes-only behavior.
+#[allow(clippy::too_many_arguments)]
 pub async fn initiate_oauth_connect(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
@@ -398,6 +518,7 @@ pub async fn initiate_oauth_connect(
     provider_id: &str,
     on_behalf_of: Option<&str>,
     redirect_path: Option<&str>,
+    additional_scopes: &[String],
 ) -> AppResult<String> {
     let provider = db
         .collection::<ProviderConfig>(PROVIDER_CONFIGS)
@@ -412,6 +533,7 @@ pub async fn initiate_oauth_connect(
     }
 
     ensure_oauth_provider_configured(&provider)?;
+    ensure_additional_scopes_supported(&provider, additional_scopes)?;
 
     let authorization_url = provider
         .authorization_url
@@ -483,8 +605,18 @@ pub async fn initiate_oauth_connect(
         urlencoding::encode(&state_id),
     );
 
-    if let Some(ref scopes) = provider.default_scopes {
-        let scope_str = scopes.join(" ");
+    // Backward-compat: when there are no user-supplied additional scopes we
+    // take the exact pre-feature code path so every existing OAuth flow
+    // builds a byte-identical authorization URL (e.g. an admin-seeded
+    // provider with `default_scopes: Some(vec![])` still emits `&scope=`).
+    if additional_scopes.is_empty() {
+        if let Some(ref scopes) = provider.default_scopes {
+            let scope_str = scopes.join(" ");
+            auth_url.push_str(&format!("&scope={}", urlencoding::encode(&scope_str)));
+        }
+    } else {
+        let merged = merge_scopes(provider.default_scopes.as_ref(), additional_scopes);
+        let scope_str = merged.join(" ");
         auth_url.push_str(&format!("&scope={}", urlencoding::encode(&scope_str)));
     }
 
@@ -555,12 +687,17 @@ pub struct DeviceCodePollResult {
 ///
 /// When `on_behalf_of` is `Some(sa_id)`, the resulting tokens will be stored
 /// under the SA's ID instead of the initiating user.
+///
+/// `additional_scopes` are merged on top of `provider.default_scopes` and sent
+/// in the RFC 8628 device code request. Pass an empty slice to preserve the
+/// original default-scopes-only behavior.
 pub async fn request_device_code(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
     user_id: &str,
     provider_id: &str,
     on_behalf_of: Option<&str>,
+    additional_scopes: &[String],
 ) -> AppResult<DeviceCodeInitiateResult> {
     let provider = db
         .collection::<ProviderConfig>(PROVIDER_CONFIGS)
@@ -573,6 +710,8 @@ pub async fn request_device_code(
             "This provider does not use the device code flow".to_string(),
         ));
     }
+
+    ensure_additional_scopes_supported(&provider, additional_scopes)?;
 
     let device_code_url = provider.device_code_url.as_ref().ok_or_else(|| {
         AppError::Internal("Device code provider missing device_code_url".to_string())
@@ -589,6 +728,11 @@ pub async fn request_device_code(
 
     // Branch on device_code_format: "openai" uses JSON, "rfc8628" uses form-urlencoded
     let response = if provider.device_code_format == "openai" {
+        // OpenAI's device code endpoint does not accept a `scope` field
+        // (scopes are baked into the client registration, e.g. Codex). We
+        // enforce this by rejecting `additional_scopes` for openai-format
+        // providers above, so the request body here is unchanged from the
+        // pre-scope-feature implementation.
         let mut body = serde_json::Map::new();
         body.insert(
             oauth_flow::client_id_param_name(&provider).to_string(),
@@ -600,10 +744,20 @@ pub async fn request_device_code(
             .await
             .map_err(|e| AppError::Internal(format!("Device code request failed: {e}")))?
     } else {
-        // RFC 8628: form-urlencoded with client_id and optional scope
+        // RFC 8628: form-urlencoded with client_id and optional scope.
+        //
+        // Backward-compat: when there are no user-supplied additional scopes
+        // we take the exact pre-feature code path so the request body is
+        // byte-identical (an admin-seeded provider with empty default_scopes
+        // still skips the `scope` form field, matching the old behavior).
         let mut params = vec![oauth_flow::client_id_form_field(&provider, &client_id)];
-        if let Some(ref scopes) = provider.default_scopes {
-            params.push(("scope".to_string(), scopes.join(" ")));
+        if additional_scopes.is_empty() {
+            if let Some(ref scopes) = provider.default_scopes {
+                params.push(("scope".to_string(), scopes.join(" ")));
+            }
+        } else {
+            let merged = merge_scopes(provider.default_scopes.as_ref(), additional_scopes);
+            params.push(("scope".to_string(), merged.join(" ")));
         }
         oauth_flow::expect_json_response(oauth_flow::token_exchange_client().post(device_code_url))
             .form(&params)
@@ -1594,7 +1748,8 @@ pub async fn list_user_tokens(
 mod tests {
     use super::{
         build_telegram_identity_metadata, build_telegram_identity_update_doc,
-        build_user_token_summary, normalize_telegram_bot_api_key,
+        build_user_token_summary, ensure_additional_scopes_supported, merge_scopes,
+        normalize_telegram_bot_api_key, parse_additional_scopes,
     };
     use crate::crypto::telegram::TelegramLoginData;
     use crate::models::provider_config::ProviderConfig;
@@ -1663,6 +1818,145 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn parse_additional_scopes_none_and_empty() {
+        assert!(parse_additional_scopes(None).unwrap().is_empty());
+        assert!(parse_additional_scopes(Some("")).unwrap().is_empty());
+        assert!(parse_additional_scopes(Some("   ")).unwrap().is_empty());
+        assert!(parse_additional_scopes(Some(", ,")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_additional_scopes_splits_comma_and_whitespace() {
+        let scopes = parse_additional_scopes(Some(
+            "contact:contact.base:readonly, contact:department.base:readonly attendance:record:read",
+        ))
+        .unwrap();
+        assert_eq!(
+            scopes,
+            vec![
+                "contact:contact.base:readonly".to_string(),
+                "contact:department.base:readonly".to_string(),
+                "attendance:record:read".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_additional_scopes_accepts_google_style_urls() {
+        let scopes =
+            parse_additional_scopes(Some("https://www.googleapis.com/auth/drive.readonly"))
+                .unwrap();
+        assert_eq!(scopes.len(), 1);
+        assert_eq!(scopes[0], "https://www.googleapis.com/auth/drive.readonly");
+    }
+
+    #[test]
+    fn parse_additional_scopes_rejects_invalid_chars() {
+        let err = parse_additional_scopes(Some("ok,bad<scope>")).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid characters"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_additional_scopes_rejects_too_many() {
+        let many = (0..100)
+            .map(|i| format!("scope{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(parse_additional_scopes(Some(&many)).is_err());
+    }
+
+    #[test]
+    fn parse_additional_scopes_rejects_overlong_scope() {
+        let huge = "a".repeat(257);
+        assert!(parse_additional_scopes(Some(&huge)).is_err());
+    }
+
+    #[test]
+    fn merge_scopes_preserves_defaults_and_appends_extras() {
+        let defaults = vec!["openid".to_string(), "email".to_string()];
+        let extras = vec![
+            "profile".to_string(),
+            "email".to_string(), // duplicate
+            "offline_access".to_string(),
+        ];
+        let merged = merge_scopes(Some(&defaults), &extras);
+        assert_eq!(
+            merged,
+            vec![
+                "openid".to_string(),
+                "email".to_string(),
+                "profile".to_string(),
+                "offline_access".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_scopes_handles_no_defaults() {
+        let extras = vec!["scope-a".to_string(), "scope-b".to_string()];
+        let merged = merge_scopes(None, &extras);
+        assert_eq!(merged, extras);
+    }
+
+    #[test]
+    fn merge_scopes_handles_no_extras() {
+        let defaults = vec!["openid".to_string()];
+        let merged = merge_scopes(Some(&defaults), &[]);
+        assert_eq!(merged, defaults);
+    }
+
+    #[test]
+    fn ensure_additional_scopes_supported_allows_oauth2() {
+        let provider = make_provider("oauth2");
+        assert!(ensure_additional_scopes_supported(&provider, &["scope-a".to_string()]).is_ok());
+    }
+
+    #[test]
+    fn ensure_additional_scopes_supported_allows_rfc8628_device_code() {
+        let mut provider = make_provider("device_code");
+        provider.device_code_format = "rfc8628".to_string();
+        assert!(ensure_additional_scopes_supported(&provider, &["scope-a".to_string()]).is_ok());
+    }
+
+    #[test]
+    fn ensure_additional_scopes_supported_rejects_openai_device_code() {
+        let mut provider = make_provider("device_code");
+        provider.device_code_format = "openai".to_string();
+        let err = ensure_additional_scopes_supported(&provider, &["foo".to_string()])
+            .expect_err("openai device_code must reject additional scopes");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("does not accept additional OAuth scopes"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn ensure_additional_scopes_supported_allows_empty_even_for_openai() {
+        // Backwards-compatible: never fail when no extras were provided, even
+        // on providers that otherwise reject scope forwarding.
+        let mut provider = make_provider("device_code");
+        provider.device_code_format = "openai".to_string();
+        assert!(ensure_additional_scopes_supported(&provider, &[]).is_ok());
+    }
+
+    #[test]
+    fn ensure_additional_scopes_supported_rejects_api_key_provider() {
+        let provider = make_provider("api_key");
+        let err = ensure_additional_scopes_supported(&provider, &["foo".to_string()])
+            .expect_err("api_key providers must reject scopes");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("does not support OAuth scopes"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[test]
