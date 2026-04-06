@@ -288,6 +288,7 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
                             let ok_msg = serde_json::json!({
                                 "type": "auth_ok",
                                 "node_id": &node.id,
+                                "heartbeat_interval_secs": state.config.node_heartbeat_interval_secs,
                                 "capabilities": {
                                     "proxy_binary_chunks": true
                                 }

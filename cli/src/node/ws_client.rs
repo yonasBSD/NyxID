@@ -72,6 +72,35 @@ const SSH_CONNECT_TIMEOUT_SECS: u64 = 10;
 const SSH_SHUTDOWN_DRAIN_TIMEOUT_SECS: u64 = 5;
 const AGENT_SHUTDOWN_TIMEOUT_SECS: u64 = 30;
 const WS_WRITE_CHANNEL_SIZE: usize = 256;
+/// Multiplier applied to the advertised server heartbeat interval to compute
+/// the idle watchdog: we allow ~3 missed pings before declaring the socket
+/// dead. For the default 30s interval this yields 90s, matching the prior
+/// hard-coded behavior while respecting custom server settings.
+const WS_READ_IDLE_TIMEOUT_MULTIPLIER: u64 = 3;
+/// Absolute floor for the idle watchdog. Prevents pathologically short
+/// timeouts if a server advertises a very small heartbeat interval.
+const WS_READ_IDLE_TIMEOUT_FLOOR_SECS: u64 = 30;
+/// Absolute ceiling for the idle watchdog. Even if a server advertises an
+/// extremely long heartbeat interval we cap the watchdog at one hour so a
+/// silently dead connection is eventually detected.
+const WS_READ_IDLE_TIMEOUT_CEILING_SECS: u64 = 3600;
+
+/// Compute the WebSocket read-idle timeout from the server-advertised
+/// heartbeat interval. Returns `None` when the server did not advertise an
+/// interval (older backend); in that case the idle watchdog is disabled so
+/// we don't regress deployments that run with `NODE_HEARTBEAT_INTERVAL_SECS`
+/// larger than our assumed default. Defined as a pure helper so it can be
+/// unit-tested.
+fn compute_ws_read_idle_timeout_secs(server_heartbeat_interval_secs: Option<u64>) -> Option<u64> {
+    server_heartbeat_interval_secs.map(|interval| {
+        interval
+            .saturating_mul(WS_READ_IDLE_TIMEOUT_MULTIPLIER)
+            .clamp(
+                WS_READ_IDLE_TIMEOUT_FLOOR_SECS,
+                WS_READ_IDLE_TIMEOUT_CEILING_SECS,
+            )
+    })
+}
 
 /// WebSocket message to send: either a JSON text frame or raw binary data.
 /// Text frames carry control messages (JSON, human-readable for debugging).
@@ -391,17 +420,27 @@ async fn connect_and_serve(
     };
 
     let parsed: serde_json::Value = serde_json::from_str(&text)?;
-    let use_binary_proxy_chunks = match parsed["type"].as_str() {
+    let (use_binary_proxy_chunks, server_heartbeat_interval_secs) = match parsed["type"].as_str() {
         Some("auth_ok") => {
             let enabled = parsed["capabilities"]["proxy_binary_chunks"]
                 .as_bool()
                 .unwrap_or(false);
+            // Only accept the interval when the server explicitly advertises
+            // it. An older backend that doesn't include `heartbeat_interval_secs`
+            // leaves this as None, which disables the idle watchdog below --
+            // preserving pre-patch behavior during mixed-version rollouts so
+            // deployments that customize NODE_HEARTBEAT_INTERVAL_SECS above
+            // our assumed default don't start flapping.
+            let interval = parsed["heartbeat_interval_secs"]
+                .as_u64()
+                .filter(|v| *v > 0);
             tracing::info!(
                 node_id = %config.node.id,
                 proxy_binary_chunks = enabled,
+                heartbeat_interval_secs = ?interval,
                 "Authenticated with NyxID server"
             );
-            enabled
+            (enabled, interval)
         }
         Some("auth_error") => {
             let msg = parsed["message"].as_str().unwrap_or("unknown");
@@ -411,6 +450,13 @@ async fn connect_and_serve(
             return Err(Error::AuthFailed(format!("Unexpected response: {text}")));
         }
     };
+
+    // Derive the idle watchdog from the server's heartbeat cadence so
+    // installations that customize NODE_HEARTBEAT_INTERVAL_SECS don't trigger
+    // spurious reconnects. None when the server didn't advertise: we leave
+    // the read call blocking indefinitely in that case (pre-patch behavior).
+    let ws_read_idle_timeout_secs =
+        compute_ws_read_idle_timeout_secs(server_heartbeat_interval_secs);
 
     let proxy_http_client = proxy_executor::build_http_client()?;
 
@@ -444,10 +490,38 @@ async fn connect_and_serve(
 
     // 5. Reader loop: process incoming messages from the server
     let shutting_down = loop {
-        let Some(msg) = (tokio::select! {
-            msg = ws_stream.next() => msg,
-            _ = wait_for_shutdown(&mut shutdown) => break true,
-        }) else {
+        // Wrap ws_stream.next() with an idle timeout when the server
+        // advertised its heartbeat interval. If it did not (older backend),
+        // we fall back to blocking indefinitely -- this is the pre-patch
+        // behavior and intentionally leaves the silent-hang bug unfixed for
+        // mixed-version rollouts rather than risking healthy-node flapping.
+        let read_result = match ws_read_idle_timeout_secs {
+            Some(secs) => {
+                match tokio::select! {
+                    result = tokio::time::timeout(Duration::from_secs(secs), ws_stream.next()) => result,
+                    _ = wait_for_shutdown(&mut shutdown) => break true,
+                } {
+                    Ok(msg) => msg,
+                    Err(_) => {
+                        // No frame of any kind (including server heartbeat_ping)
+                        // within the derived idle window -- the underlying TCP
+                        // connection is almost certainly dead. Break to force
+                        // the outer connection loop to reconnect.
+                        tracing::warn!(
+                            idle_secs = secs,
+                            server_heartbeat_interval_secs = ?server_heartbeat_interval_secs,
+                            "No WebSocket frames received within idle timeout; assuming connection is dead, reconnecting"
+                        );
+                        break false;
+                    }
+                }
+            }
+            None => tokio::select! {
+                msg = ws_stream.next() => msg,
+                _ = wait_for_shutdown(&mut shutdown) => break true,
+            },
+        };
+        let Some(msg) = read_result else {
             break false;
         };
         let text = match msg {
@@ -2963,6 +3037,47 @@ mod tests {
         backoff.reset();
 
         assert_eq!(backoff.next_delay(), Duration::from_millis(100));
+    }
+
+    #[test]
+    fn ws_read_idle_timeout_matches_default_for_default_interval() {
+        // Unchanged behavior against an unmodified server (30s interval -> 90s).
+        assert_eq!(compute_ws_read_idle_timeout_secs(Some(30)), Some(90));
+    }
+
+    #[test]
+    fn ws_read_idle_timeout_scales_with_server_interval() {
+        // A server configured with a 120s heartbeat must not trigger the
+        // client's watchdog at 90s; the timeout scales to 360s.
+        assert_eq!(compute_ws_read_idle_timeout_secs(Some(120)), Some(360));
+    }
+
+    #[test]
+    fn ws_read_idle_timeout_respects_floor() {
+        // Pathologically small server intervals are floored so we don't
+        // reconnect aggressively.
+        assert_eq!(compute_ws_read_idle_timeout_secs(Some(1)), Some(30));
+        assert_eq!(compute_ws_read_idle_timeout_secs(Some(5)), Some(30));
+    }
+
+    #[test]
+    fn ws_read_idle_timeout_respects_ceiling() {
+        // Absurdly large intervals are capped at the ceiling so silently dead
+        // connections are still detected eventually.
+        assert_eq!(compute_ws_read_idle_timeout_secs(Some(10_000)), Some(3600));
+        assert_eq!(
+            compute_ws_read_idle_timeout_secs(Some(u64::MAX)),
+            Some(3600)
+        );
+    }
+
+    #[test]
+    fn ws_read_idle_timeout_is_disabled_when_server_does_not_advertise() {
+        // Mixed-version rollout against an older backend: the client must
+        // skip the idle watchdog entirely rather than guess the server's
+        // interval, to avoid flapping deployments that customize
+        // NODE_HEARTBEAT_INTERVAL_SECS above 90.
+        assert_eq!(compute_ws_read_idle_timeout_secs(None), None);
     }
 
     #[tokio::test]
