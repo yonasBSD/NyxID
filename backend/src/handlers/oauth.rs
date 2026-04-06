@@ -1278,6 +1278,10 @@ pub async fn register_client(
     // Dynamic registration only creates public clients (PKCE-based, no secret).
     // Delegated RFC 8693 token exchange is controlled by `delegation_scopes`;
     // keeping it empty disables delegated token exchange for dynamic clients.
+    //
+    // DCR is used by MCP clients (Cursor, Claude Code, etc.) which need the
+    // `proxy` scope to call `/mcp` (enforced in handlers/mcp_transport.rs).
+    // Use the MCP scope set so the resulting access tokens pass that check.
     let (client, _secret) = oauth_client_service::create_client(
         &state.db,
         &client_name,
@@ -1285,7 +1289,7 @@ pub async fn register_client(
         "public",
         "dynamic_registration",
         "",
-        oauth_client_service::DEFAULT_ALLOWED_SCOPES,
+        oauth_client_service::DEFAULT_MCP_ALLOWED_SCOPES,
     )
     .await?;
 
@@ -1301,7 +1305,10 @@ pub async fn register_client(
             client_id: client.id,
             client_name: client.client_name,
             redirect_uris: client.redirect_uris,
-            grant_types: vec!["authorization_code".to_string()],
+            grant_types: vec![
+                "authorization_code".to_string(),
+                "refresh_token".to_string(),
+            ],
             response_types: vec!["code".to_string()],
             token_endpoint_auth_method: "none".to_string(),
             scope: client.allowed_scopes,

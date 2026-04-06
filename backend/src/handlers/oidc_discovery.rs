@@ -48,7 +48,7 @@ pub async fn oauth_authorization_server_metadata(
         "jwks_uri": format!("{base}/.well-known/jwks.json"),
         "introspection_endpoint": format!("{base}/oauth/introspect"),
         "revocation_endpoint": format!("{base}/oauth/revoke"),
-        "scopes_supported": ["openid", "profile", "email", "roles", "groups"],
+        "scopes_supported": ["openid", "profile", "email", "roles", "groups", "proxy"],
         "response_types_supported": ["code"],
         "response_modes_supported": ["query"],
         "grant_types_supported": ["authorization_code", "refresh_token"],
@@ -68,7 +68,7 @@ pub async fn oauth_protected_resource(State(state): State<AppState>) -> Json<ser
     Json(serde_json::json!({
         "resource": format!("{base}/mcp"),
         "authorization_servers": [base],
-        "scopes_supported": ["openid", "profile", "email"],
+        "scopes_supported": ["openid", "profile", "email", "proxy"],
         "bearer_methods_supported": ["header"],
     }))
 }
