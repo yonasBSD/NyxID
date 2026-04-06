@@ -125,6 +125,22 @@ impl ChatgptTranslator {
         // Codex backend requires streaming
         enriched.insert("stream".to_string(), serde_json::Value::Bool(true));
 
+        // Defensively normalize `function_call` items in the input array.
+        // Some agent frameworks replay prior `function_call` items from a
+        // Responses API response but drop the `call_id` field, leaving only
+        // `id`. The Codex backend requires `call_id` as the correlation key
+        // between a `function_call` and its matching `function_call_output`.
+        // When `call_id` is missing but `id` is present, copy `id` into
+        // `call_id`. This is safe because the Responses API treats `call_id`
+        // as an opaque string and only requires the values match between the
+        // pair, and misbehaving clients that hit this path are already using
+        // the `id` value as the `call_id` on the paired `function_call_output`.
+        if let Some(input) = enriched.get_mut("input").and_then(|v| v.as_array_mut()) {
+            for item in input.iter_mut() {
+                normalize_function_call_input_item(item);
+            }
+        }
+
         Ok(TranslatedRequest {
             path: path.to_string(),
             body: serde_json::Value::Object(enriched),
@@ -784,6 +800,32 @@ fn convert_messages_to_input(
     };
 
     (instructions, input)
+}
+
+/// Defensively backfill `call_id` on a `function_call` input item when the
+/// caller supplied only `id`. The Responses API requires `call_id` as the
+/// correlation key, and some agent frameworks incorrectly drop it when they
+/// replay prior response items as input. Items that already have `call_id`,
+/// items of other types, and items without an `id` are left untouched.
+fn normalize_function_call_input_item(item: &mut serde_json::Value) {
+    let Some(obj) = item.as_object_mut() else {
+        return;
+    };
+    let is_function_call = obj.get("type").and_then(|t| t.as_str()) == Some("function_call");
+    if !is_function_call {
+        return;
+    }
+    let has_call_id = obj.get("call_id").map(|v| !v.is_null()).unwrap_or(false);
+    if has_call_id {
+        return;
+    }
+    let Some(id_value) = obj.get("id").cloned() else {
+        return;
+    };
+    if id_value.is_null() {
+        return;
+    }
+    obj.insert("call_id".to_string(), id_value);
 }
 
 /// Returns true if a converted content value is effectively empty and should
@@ -1553,6 +1595,126 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.body["parallel_tool_calls"], false);
+    }
+
+    #[test]
+    fn chatgpt_enrich_backfills_missing_call_id_from_id() {
+        // Some agent frameworks replay a prior Responses API `function_call`
+        // item as input but drop the `call_id` field, leaving only `id`.
+        // The Codex backend 400s with `Missing required parameter:
+        // 'input[N].call_id'`. The enrich path should backfill `call_id`
+        // from `id` so the pair still validates.
+        let translator = ChatgptTranslator;
+        let body = serde_json::json!({
+            "model": "gpt-5",
+            "input": [
+                {"role": "user", "content": "what's my status?"},
+                {
+                    "type": "function_call",
+                    "id": "fc_abc123",
+                    "name": "nyxid_account",
+                    "arguments": "{}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "fc_abc123",
+                    "output": "{\"email\":\"x@y.z\"}"
+                }
+            ]
+        });
+
+        let result = translator.translate_request("responses", &body).unwrap();
+        let input = result.body["input"].as_array().unwrap();
+
+        // The well-formed user message is untouched.
+        assert_eq!(input[0]["role"], "user");
+
+        // The function_call item now has `call_id` matching its `id`, and
+        // the original `id` field is preserved.
+        assert_eq!(input[1]["type"], "function_call");
+        assert_eq!(input[1]["id"], "fc_abc123");
+        assert_eq!(input[1]["call_id"], "fc_abc123");
+
+        // The paired function_call_output is untouched.
+        assert_eq!(input[2]["type"], "function_call_output");
+        assert_eq!(input[2]["call_id"], "fc_abc123");
+    }
+
+    #[test]
+    fn chatgpt_enrich_leaves_well_formed_function_call_untouched() {
+        // A function_call item that already has a distinct `call_id`
+        // (different from `id`, as would come from a proper Responses API
+        // response) must not be overwritten.
+        let translator = ChatgptTranslator;
+        let body = serde_json::json!({
+            "model": "gpt-5",
+            "input": [
+                {
+                    "type": "function_call",
+                    "id": "fc_item_999",
+                    "call_id": "call_real_xyz",
+                    "name": "nyxid_account",
+                    "arguments": "{}"
+                }
+            ]
+        });
+
+        let result = translator.translate_request("responses", &body).unwrap();
+        let input = result.body["input"].as_array().unwrap();
+
+        assert_eq!(input[0]["id"], "fc_item_999");
+        assert_eq!(input[0]["call_id"], "call_real_xyz");
+    }
+
+    #[test]
+    fn chatgpt_enrich_ignores_non_function_call_items() {
+        // Only function_call items should be normalized. User/assistant
+        // messages and function_call_output items must pass through
+        // unchanged even if they happen to have an `id` field.
+        let translator = ChatgptTranslator;
+        let body = serde_json::json!({
+            "model": "gpt-5",
+            "input": [
+                {"role": "user", "content": "hi", "id": "msg_1"},
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "ok"
+                }
+            ]
+        });
+
+        let result = translator.translate_request("responses", &body).unwrap();
+        let input = result.body["input"].as_array().unwrap();
+
+        // The user message retains only its role/content/id and did not
+        // gain a spurious call_id.
+        assert!(input[0].get("call_id").is_none());
+        // function_call_output had a call_id already and is untouched.
+        assert_eq!(input[1]["call_id"], "call_1");
+    }
+
+    #[test]
+    fn chatgpt_enrich_skips_function_call_without_id() {
+        // If a caller sends a function_call with neither `id` nor `call_id`,
+        // we can't invent one, so we leave the item alone and let the
+        // backend reject it with the same error as before.
+        let translator = ChatgptTranslator;
+        let body = serde_json::json!({
+            "model": "gpt-5",
+            "input": [
+                {
+                    "type": "function_call",
+                    "name": "nyxid_account",
+                    "arguments": "{}"
+                }
+            ]
+        });
+
+        let result = translator.translate_request("responses", &body).unwrap();
+        let input = result.body["input"].as_array().unwrap();
+        assert!(input[0].get("call_id").is_none());
+        assert!(input[0].get("id").is_none());
     }
 
     #[test]
