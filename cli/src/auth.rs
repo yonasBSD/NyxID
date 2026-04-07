@@ -235,6 +235,9 @@ async fn run_browser_login(base_url: &str, profile: Option<&str>) -> Result<()> 
     eprintln!("If the browser does not open, visit:");
     eprintln!("  {auth_url}");
     eprintln!();
+    eprintln!("If login fails, check the browser tab for details");
+    eprintln!("(e.g. \"invite code required\" for new social sign-ups).");
+    eprintln!();
 
     let _ = open::that(&auth_url);
 
