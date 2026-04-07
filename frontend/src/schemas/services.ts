@@ -6,6 +6,8 @@ export const AUTH_TYPES = [
   "oauth2",
   "basic",
   "bearer",
+  "bot_bearer",
+  "body",
   "oidc",
 ] as const;
 
@@ -122,6 +124,8 @@ export const createServiceSchema = z
     visibility: z.enum(VISIBILITY_OPTIONS).optional(),
     base_url: optionalString,
     auth_type: z.enum(AUTH_TYPES).optional(),
+    /// JSON body key for `body` auth. Required when `auth_type === "body"`.
+    auth_key_name: optionalString,
     service_category: z.enum(SERVICE_CATEGORIES).optional(),
     host: optionalString,
     port: optionalString,
@@ -150,6 +154,17 @@ export const createServiceSchema = z
           code: z.ZodIssueCode.custom,
           path: ["auth_type"],
           message: "Auth type is required",
+        });
+      }
+
+      // `body` auth needs to know which JSON field to inject the credential
+      // into (e.g. "app_secret" for Lark tenant token exchange).
+      if (value.auth_type === "body" && !value.auth_key_name) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["auth_key_name"],
+          message:
+            "Field name is required for Body auth (e.g. 'app_secret' for Lark tenant token)",
         });
       }
       return;

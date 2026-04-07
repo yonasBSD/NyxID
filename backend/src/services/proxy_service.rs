@@ -920,6 +920,29 @@ pub async fn forward_request(
         request = request.header(name, value);
     }
 
+    // Body injection for `body` auth method must happen before the body is
+    // attached to the request. We mutate `body` in place; the actual attach
+    // happens further down in the existing `match body { ... }` block.
+    let body = if target.auth_method == "body" {
+        if target.auth_key_name.is_empty() {
+            return Err(AppError::Internal(
+                "Body auth method requires a non-empty auth_key_name".to_string(),
+            ));
+        }
+        match body {
+            ProxyBody::Buffered(existing) => {
+                let merged = inject_credential_into_json_body(
+                    existing.as_deref(),
+                    &target.auth_key_name,
+                    &target.credential,
+                )?;
+                ProxyBody::Buffered(Some(merged))
+            }
+        }
+    } else {
+        body
+    };
+
     // Inject credentials based on auth method
     match target.auth_method.as_str() {
         "none" => {
@@ -930,6 +953,11 @@ pub async fn forward_request(
         }
         "bearer" => {
             request = request.bearer_auth(&target.credential);
+        }
+        "bot_bearer" => {
+            // Discord bot tokens use `Authorization: Bot <token>` instead of
+            // the standard `Bearer` scheme. Sets the literal header value.
+            request = request.header("Authorization", format!("Bot {}", target.credential));
         }
         "query" => {
             // Use the request builder's query method to properly URL-encode parameters.
@@ -946,6 +974,9 @@ pub async fn forward_request(
                     "Basic auth credential must be in 'username:password' format".to_string(),
                 ));
             }
+        }
+        "body" => {
+            // Body injection already happened above; nothing to add to headers.
         }
         _ => {
             return Err(AppError::Internal(format!(
@@ -1007,6 +1038,49 @@ pub async fn forward_request(
     })?;
 
     Ok(response)
+}
+
+/// Merge a credential into the top level of a JSON request body.
+///
+/// Used by the `body` auth method (e.g. Lark/Feishu `tenant_access_token`
+/// exchange where `app_secret` must be in the request body). The credential
+/// is added under `key`. If the body is empty, a new JSON object is created.
+/// If the caller already set the same key, the caller's value wins -- this
+/// lets clients override the injected secret in test scenarios without
+/// silent overwrite.
+fn inject_credential_into_json_body(
+    existing: Option<&[u8]>,
+    key: &str,
+    credential: &str,
+) -> Result<bytes::Bytes, AppError> {
+    let mut value: serde_json::Value = match existing {
+        Some(bytes) if !bytes.is_empty() => serde_json::from_slice(bytes).map_err(|e| {
+            AppError::BadRequest(format!(
+                "Body auth method requires a JSON request body: {e}"
+            ))
+        })?,
+        _ => serde_json::Value::Object(serde_json::Map::new()),
+    };
+
+    let obj = value.as_object_mut().ok_or_else(|| {
+        AppError::BadRequest(
+            "Body auth method requires a JSON object as the request body".to_string(),
+        )
+    })?;
+
+    // Caller's value wins. Only inject if the key is missing.
+    if !obj.contains_key(key) {
+        obj.insert(
+            key.to_string(),
+            serde_json::Value::String(credential.to_string()),
+        );
+    }
+
+    let bytes = serde_json::to_vec(&value).map_err(|e| {
+        AppError::Internal(format!("Failed to re-serialize body after injection: {e}"))
+    })?;
+
+    Ok(bytes::Bytes::from(bytes))
 }
 
 #[cfg(test)]
@@ -1543,5 +1617,57 @@ mod tests {
             err.to_string().contains("Please contact your admin"),
             "unexpected error: {err}"
         );
+    }
+
+    // ─── inject_credential_into_json_body tests ─────────────────────────
+
+    #[test]
+    fn body_injection_merges_into_existing_object() {
+        let body = br#"{"app_id":"cli_xxx"}"#.to_vec();
+        let result =
+            inject_credential_into_json_body(Some(&body), "app_secret", "secret_value").unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&result).unwrap();
+        assert_eq!(parsed["app_id"], "cli_xxx");
+        assert_eq!(parsed["app_secret"], "secret_value");
+    }
+
+    #[test]
+    fn body_injection_creates_object_when_body_empty() {
+        let result = inject_credential_into_json_body(None, "app_secret", "secret_value").unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&result).unwrap();
+        assert_eq!(parsed["app_secret"], "secret_value");
+    }
+
+    #[test]
+    fn body_injection_creates_object_when_body_is_empty_bytes() {
+        let result =
+            inject_credential_into_json_body(Some(&[]), "app_secret", "secret_value").unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&result).unwrap();
+        assert_eq!(parsed["app_secret"], "secret_value");
+    }
+
+    #[test]
+    fn body_injection_does_not_overwrite_caller_value() {
+        let body = br#"{"app_secret":"caller_value"}"#.to_vec();
+        let result =
+            inject_credential_into_json_body(Some(&body), "app_secret", "server_value").unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&result).unwrap();
+        assert_eq!(parsed["app_secret"], "caller_value");
+    }
+
+    #[test]
+    fn body_injection_rejects_non_json_body() {
+        let body = b"not json".to_vec();
+        let err = inject_credential_into_json_body(Some(&body), "app_secret", "secret_value")
+            .unwrap_err();
+        assert!(err.to_string().contains("JSON"));
+    }
+
+    #[test]
+    fn body_injection_rejects_json_array() {
+        let body = br#"["a","b"]"#.to_vec();
+        let err = inject_credential_into_json_body(Some(&body), "app_secret", "secret_value")
+            .unwrap_err();
+        assert!(err.to_string().contains("JSON object"));
     }
 }

@@ -79,8 +79,57 @@ const AUTH_METHOD_DEFAULTS: Record<string, string> = {
   basic: "Authorization",
   oidc: "Authorization",
   oauth2: "Authorization",
+  body: "app_secret",
+  bot_bearer: "Authorization",
   none: "",
 };
+
+// Derive a user-friendly credential field label/placeholder from the auth
+// method + key name. Prevents confusing "API Key / Credential" + "sk-..." for
+// body-injected credentials (e.g. Lark's `app_secret`) or Discord bot tokens.
+function getCredentialFieldMeta(
+  authMethod: string,
+  authKeyName: string,
+): { readonly label: string; readonly placeholder: string } {
+  if (authMethod === "bot_bearer") {
+    return { label: "Bot Token", placeholder: "Discord bot token" };
+  }
+  if (authMethod === "body") {
+    const fieldName = authKeyName.trim();
+    if (fieldName) {
+      const pretty = fieldName
+        .split(/[_\-\s]+/)
+        .filter(Boolean)
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(" ");
+      return { label: pretty || "Credential", placeholder: `Enter ${fieldName}` };
+    }
+    return { label: "Credential", placeholder: "Enter credential value" };
+  }
+  if (authMethod === "basic") {
+    return { label: "Username:Password", placeholder: "user:pass" };
+  }
+  return { label: "API Key / Credential", placeholder: "sk-..." };
+}
+
+// Auth key name input should only be shown when the user needs to pick a
+// header/query/body field name. `bot_bearer` is a fixed Authorization format
+// and OAuth flows handle their own token storage.
+function shouldShowAuthKeyName(authMethod: string): boolean {
+  return (
+    authMethod !== "none" &&
+    authMethod !== "oidc" &&
+    authMethod !== "oauth2" &&
+    authMethod !== "bot_bearer"
+  );
+}
+
+function getAuthKeyNameLabel(authMethod: string): string {
+  if (authMethod === "body") return "Body Field Name";
+  if (authMethod === "header") return "Header Name";
+  if (authMethod === "query") return "Query Parameter";
+  return "Auth Key Name";
+}
 
 const INITIAL_FORM: FormState = {
   credential: "",
@@ -388,6 +437,10 @@ function KeyForm({
     ? form.authMethod !== "none"
     : (catalogEntry?.auth_method ?? "bearer") !== "none";
   const requiresEndpoint = isCustom || (catalogEntry?.requires_gateway_url ?? false);
+  const credentialMeta = getCredentialFieldMeta(
+    form.authMethod,
+    form.authKeyName,
+  );
 
   return (
     <div className="space-y-4">
@@ -449,14 +502,16 @@ function KeyForm({
 
         <div className="space-y-1.5">
           <Label htmlFor="add-key-credential">
-            API Key / Credential
+            {credentialMeta.label}
             {requiresCredential && <span className="text-destructive"> *</span>}
           </Label>
           <Input
             id="add-key-credential"
             type={requiresCredential ? "password" : "text"}
             placeholder={
-              requiresCredential ? "sk-..." : "No credential required for this service"
+              requiresCredential
+                ? credentialMeta.placeholder
+                : "No credential required for this service"
             }
             value={requiresCredential ? form.credential : ""}
             onChange={(e) => onChange({ credential: e.target.value })}
@@ -466,6 +521,17 @@ function KeyForm({
           {!requiresCredential && (
             <p className="text-[11px] text-muted-foreground">
               This service can be used without storing a user credential in NyxID.
+            </p>
+          )}
+          {requiresCredential && form.authMethod === "body" && (
+            <p className="text-[11px] text-muted-foreground">
+              NyxID injects this value into the request JSON body under the
+              field name below.
+            </p>
+          )}
+          {requiresCredential && form.authMethod === "bot_bearer" && (
+            <p className="text-[11px] text-muted-foreground">
+              Sent as <code className="font-mono">Authorization: Bot &lt;token&gt;</code>.
             </p>
           )}
         </div>
@@ -513,25 +579,29 @@ function KeyForm({
                   <SelectItem value="query">Query Parameter</SelectItem>
                   <SelectItem value="path">Path Prefix</SelectItem>
                   <SelectItem value="basic">Basic Auth</SelectItem>
+                  <SelectItem value="body">JSON Body Injection</SelectItem>
+                  <SelectItem value="bot_bearer">Bot Token (Discord)</SelectItem>
                   <SelectItem value="oauth2">OAuth 2.0</SelectItem>
                   <SelectItem value="oidc">OIDC</SelectItem>
                   <SelectItem value="none">None</SelectItem>
                 </SelectContent>
               </Select>
             </div>
-            {form.authMethod !== "none" &&
-              form.authMethod !== "oidc" &&
-              form.authMethod !== "oauth2" && (
-                <div className="space-y-1.5">
-                  <Label htmlFor="add-key-auth-key">Auth Key Name</Label>
-                  <Input
-                    id="add-key-auth-key"
-                    placeholder="Authorization"
-                    value={form.authKeyName}
-                    onChange={(e) => onChange({ authKeyName: e.target.value })}
-                  />
-                </div>
-              )}
+            {shouldShowAuthKeyName(form.authMethod) && (
+              <div className="space-y-1.5">
+                <Label htmlFor="add-key-auth-key">
+                  {getAuthKeyNameLabel(form.authMethod)}
+                </Label>
+                <Input
+                  id="add-key-auth-key"
+                  placeholder={
+                    form.authMethod === "body" ? "app_secret" : "Authorization"
+                  }
+                  value={form.authKeyName}
+                  onChange={(e) => onChange({ authKeyName: e.target.value })}
+                />
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -728,27 +798,31 @@ function NodeSetupStep({
                     <SelectItem value="query">Query Parameter</SelectItem>
                     <SelectItem value="path">Path Prefix</SelectItem>
                     <SelectItem value="basic">Basic Auth</SelectItem>
+                    <SelectItem value="body">JSON Body Injection</SelectItem>
+                    <SelectItem value="bot_bearer">Bot Token (Discord)</SelectItem>
                     <SelectItem value="oauth2">OAuth 2.0</SelectItem>
                     <SelectItem value="oidc">OIDC</SelectItem>
                     <SelectItem value="none">None</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
-              {form.authMethod !== "none" &&
-                form.authMethod !== "oidc" &&
-                form.authMethod !== "oauth2" && (
-                  <div className="space-y-1.5">
-                    <Label htmlFor="node-auth-key">Auth Key Name</Label>
-                    <Input
-                      id="node-auth-key"
-                      placeholder="Authorization"
-                      value={form.authKeyName}
-                      onChange={(e) =>
-                        onChange({ authKeyName: e.target.value })
-                      }
-                    />
-                  </div>
-                )}
+              {shouldShowAuthKeyName(form.authMethod) && (
+                <div className="space-y-1.5">
+                  <Label htmlFor="node-auth-key">
+                    {getAuthKeyNameLabel(form.authMethod)}
+                  </Label>
+                  <Input
+                    id="node-auth-key"
+                    placeholder={
+                      form.authMethod === "body" ? "app_secret" : "Authorization"
+                    }
+                    value={form.authKeyName}
+                    onChange={(e) =>
+                      onChange({ authKeyName: e.target.value })
+                    }
+                  />
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -818,6 +892,25 @@ function NodeSetupStep({
   );
 }
 
+/**
+ * Parse the free-form "additional scopes" textbox into a trimmed, deduped list.
+ * Accepts comma-, space-, or newline-separated values. Mirrors the CLI's
+ * `--scope` flag and the backend's `parse_additional_scopes` splitter so that
+ * input is forgiving regardless of how the user pastes scopes from docs.
+ */
+function parseAdditionalScopes(raw: string): readonly string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const piece of raw.split(/[,\s]+/)) {
+    const trimmed = piece.trim();
+    if (trimmed && !seen.has(trimmed)) {
+      seen.add(trimmed);
+      out.push(trimmed);
+    }
+  }
+  return out;
+}
+
 function OAuthStep({
   catalogEntry,
   ensureKey,
@@ -829,15 +922,18 @@ function OAuthStep({
 }) {
   const initiateOAuth = useInitiateOAuth();
   const [error, setError] = useState<string | null>(null);
+  const [scopeInput, setScopeInput] = useState("");
 
   async function handleConnect() {
     if (!catalogEntry.provider_config_id) return;
     setError(null);
     try {
       const key = await ensureKey();
+      const additionalScopes = parseAdditionalScopes(scopeInput);
       const response = await initiateOAuth.mutateAsync({
         providerId: catalogEntry.provider_config_id,
         redirectPath: `/keys/${key.id}`,
+        additionalScopes,
       });
       hardRedirect(response.authorization_url);
     } catch (err) {
@@ -872,6 +968,24 @@ function OAuthStep({
         connect your account.
       </p>
 
+      <div className="space-y-1.5">
+        <Label htmlFor="oauth-additional-scopes" className="text-xs">
+          Additional scopes (optional)
+        </Label>
+        <Input
+          id="oauth-additional-scopes"
+          value={scopeInput}
+          onChange={(e) => setScopeInput(e.target.value)}
+          placeholder="e.g. contact:contact.base:readonly, contact:department.base:readonly"
+          autoComplete="off"
+          spellCheck={false}
+        />
+        <p className="text-xs text-muted-foreground">
+          Comma- or space-separated. Merged with the provider's default scopes.
+          The upstream provider decides whether to grant them.
+        </p>
+      </div>
+
       {error && (
         <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
           {error}
@@ -899,7 +1013,12 @@ function OAuthStep({
   );
 }
 
-type DeviceFlowStep = "requesting" | "show_code" | "success" | "error";
+type DeviceFlowStep =
+  | "configure"
+  | "requesting"
+  | "show_code"
+  | "success"
+  | "error";
 
 function DeviceCodeStep({
   catalogEntry,
@@ -912,12 +1031,13 @@ function DeviceCodeStep({
   readonly onBack: () => void;
   readonly onComplete: (keyId: string) => void;
 }) {
-  const [flowStep, setFlowStep] = useState<DeviceFlowStep>("requesting");
+  const [flowStep, setFlowStep] = useState<DeviceFlowStep>("configure");
   const [userCode, setUserCode] = useState("");
   const [verificationUri, setVerificationUri] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
   const [secondsRemaining, setSecondsRemaining] = useState(0);
   const [createdKeyId, setCreatedKeyId] = useState<string | null>(null);
+  const [scopeInput, setScopeInput] = useState("");
 
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const countdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -966,8 +1086,23 @@ function DeviceCodeStep({
     };
   }, [flowStep, secondsRemaining]);
 
-  const schedulePoll = useCallback(
-    (providerId: string, state: string, interval: number) => {
+  // `schedulePoll` is recursive: while polling, the success handler's
+  // "pending" / "slow_down" branches (and the error handler) re-schedule the
+  // next poll by calling the same function. React Compiler's
+  // `react-hooks/immutability` rule flags a direct self-reference inside the
+  // callback body as an access-before-initialization, so we route the
+  // recursive calls through a ref that is synced to the current callback
+  // after every render. This keeps the existing polling behavior identical
+  // while satisfying the linter.
+  type SchedulePoll = (
+    providerId: string,
+    state: string,
+    interval: number,
+  ) => void;
+  const schedulePollRef = useRef<SchedulePoll | null>(null);
+
+  const schedulePoll = useCallback<SchedulePoll>(
+    (providerId, state, interval) => {
       if (!isMountedRef.current) return;
 
       pollTimerRef.current = setTimeout(() => {
@@ -980,10 +1115,14 @@ function DeviceCodeStep({
               if (!isMountedRef.current) return;
               switch (data.status) {
                 case "pending":
-                  schedulePoll(providerId, state, data.interval ?? interval);
+                  schedulePollRef.current?.(
+                    providerId,
+                    state,
+                    data.interval ?? interval,
+                  );
                   break;
                 case "slow_down":
-                  schedulePoll(
+                  schedulePollRef.current?.(
                     providerId,
                     state,
                     data.interval ?? interval + 5,
@@ -1004,7 +1143,7 @@ function DeviceCodeStep({
             },
             onError: () => {
               if (isMountedRef.current) {
-                schedulePoll(providerId, state, interval);
+                schedulePollRef.current?.(providerId, state, interval);
               }
             },
           },
@@ -1014,10 +1153,11 @@ function DeviceCodeStep({
     [pollMutation],
   );
 
+  // Keep the ref in sync with the latest `schedulePoll` identity so recursive
+  // calls always hit the current callback instance.
   useEffect(() => {
-    void handleInitiate();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    schedulePollRef.current = schedulePoll;
+  }, [schedulePoll]);
 
   async function handleInitiate() {
     if (!catalogEntry.provider_config_id) {
@@ -1031,9 +1171,16 @@ function DeviceCodeStep({
       const key = await ensureKey();
       if (!isMountedRef.current) return;
       setCreatedKeyId(key.id);
-      const response = await initiateMutation.mutateAsync(
-        catalogEntry.provider_config_id,
-      );
+      // Only forward additional scopes for formats that accept them. OpenAI
+      // device-code providers reject a `scope` parameter at the backend.
+      const additionalScopes =
+        catalogEntry.device_code_format === "openai"
+          ? []
+          : parseAdditionalScopes(scopeInput);
+      const response = await initiateMutation.mutateAsync({
+        providerId: catalogEntry.provider_config_id,
+        additionalScopes,
+      });
       if (!isMountedRef.current) return;
 
       setUserCode(response.user_code);
@@ -1083,6 +1230,71 @@ function DeviceCodeStep({
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
     return `${String(mins)}:${String(secs).padStart(2, "0")}`;
+  }
+
+  if (flowStep === "configure") {
+    // OpenAI-format device-code providers (e.g. Codex) do not accept a
+    // `scope` parameter -- scopes are baked into the client registration.
+    // Hide the scope input for those and show a short note instead, so the
+    // user never enters something the backend will reject.
+    const supportsAdditionalScopes =
+      catalogEntry.device_code_format !== "openai";
+
+    return (
+      <div className="space-y-4">
+        <button
+          type="button"
+          onClick={onBack}
+          className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+        >
+          <ArrowLeft className="h-3 w-3" />
+          Back
+        </button>
+
+        <div className="rounded-lg border border-border bg-muted/50 p-3">
+          <p className="text-sm font-medium">{catalogEntry.name}</p>
+          {catalogEntry.description && (
+            <p className="text-xs text-muted-foreground">
+              {catalogEntry.description}
+            </p>
+          )}
+        </div>
+
+        <p className="text-sm text-muted-foreground">
+          This service uses a device code to authenticate. Click continue to
+          request a code.
+        </p>
+
+        {supportsAdditionalScopes ? (
+          <div className="space-y-1.5">
+            <Label htmlFor="device-additional-scopes" className="text-xs">
+              Additional scopes (optional)
+            </Label>
+            <Input
+              id="device-additional-scopes"
+              value={scopeInput}
+              onChange={(e) => setScopeInput(e.target.value)}
+              placeholder="e.g. repo,read:org"
+              autoComplete="off"
+              spellCheck={false}
+            />
+            <p className="text-xs text-muted-foreground">
+              Comma- or space-separated. Merged with the provider's default
+              scopes. The upstream provider decides whether to grant them.
+            </p>
+          </div>
+        ) : (
+          <p className="text-xs text-muted-foreground">
+            This provider does not accept additional scopes -- they are fixed
+            by the upstream client registration.
+          </p>
+        )}
+
+        <Button className="w-full" onClick={() => void handleInitiate()}>
+          Continue
+        </Button>
+      </div>
+    );
   }
 
   if (flowStep === "requesting") {

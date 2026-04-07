@@ -81,7 +81,7 @@ impl AuthUser {
             AuthMethod::Delegated => Some("delegated"),
             AuthMethod::ServiceAccount => Some("service_account"),
             AuthMethod::AccessToken => Some("access_token"),
-            AuthMethod::Relay => None, // Relay tokens bypass approval like sessions
+            AuthMethod::Relay => Some("relay"),
             AuthMethod::Session => None,
         }
     }
@@ -99,14 +99,13 @@ impl AuthUser {
     }
 
     pub fn can_use_rest_proxy(&self) -> bool {
-        matches!(self.auth_method, AuthMethod::Session | AuthMethod::Relay)
+        matches!(self.auth_method, AuthMethod::Session)
             || self.has_scope(PROXY_SCOPE)
             || self.has_scope(WIDE_PROXY_SCOPE)
     }
 
     pub fn can_use_llm_proxy(&self) -> bool {
-        matches!(self.auth_method, AuthMethod::Session | AuthMethod::Relay)
-            || scope_allows_llm_proxy(&self.scope)
+        matches!(self.auth_method, AuthMethod::Session) || scope_allows_llm_proxy(&self.scope)
     }
 
     pub fn ensure_rest_proxy_access(&self) -> Result<(), AppError> {
@@ -329,6 +328,28 @@ impl FromRequestParts<AppState> for AuthUser {
                         AuthMethod::AccessToken
                     };
 
+                    // For relay tokens, inherit the agent key's scope restrictions.
+                    // For regular access tokens, allow all (scope enforced at JWT level).
+                    let (
+                        allow_all_services,
+                        allow_all_nodes,
+                        allowed_service_ids,
+                        allowed_node_ids,
+                        api_key_id,
+                        api_key_name,
+                    ) = if auth_method == AuthMethod::Relay {
+                        (
+                            claims.relay_allow_all_services.unwrap_or(true),
+                            claims.relay_allow_all_nodes.unwrap_or(true),
+                            claims.relay_allowed_service_ids.clone().unwrap_or_default(),
+                            claims.relay_allowed_node_ids.clone().unwrap_or_default(),
+                            claims.relay_api_key_id.clone(),
+                            claims.relay_api_key_name.clone(),
+                        )
+                    } else {
+                        (true, true, vec![], vec![], None, None)
+                    };
+
                     return Ok(AuthUser {
                         user_id,
                         session_id: None,
@@ -336,12 +357,12 @@ impl FromRequestParts<AppState> for AuthUser {
                         acting_client_id: claims.act.map(|a| a.sub),
                         approval_owner_user_id: None,
                         auth_method,
-                        allow_all_services: true,
-                        allow_all_nodes: true,
-                        allowed_service_ids: vec![],
-                        allowed_node_ids: vec![],
-                        api_key_id: None,
-                        api_key_name: None,
+                        allow_all_services,
+                        allow_all_nodes,
+                        allowed_service_ids,
+                        allowed_node_ids,
+                        api_key_id,
+                        api_key_name,
                         rate_limit_per_second: None,
                         rate_limit_burst: None,
                     });

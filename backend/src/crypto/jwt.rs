@@ -64,10 +64,26 @@ pub struct Claims {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sa: Option<bool>,
     /// True if this token was issued for channel relay callbacks.
-    /// Relay tokens act on behalf of the bot owner and bypass approval
-    /// enforcement (same as session auth).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay: Option<bool>,
+    /// Agent key ID that triggered the relay (for scope inheritance).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_api_key_id: Option<String>,
+    /// Agent key name (for audit attribution).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_api_key_name: Option<String>,
+    /// Inherited scope: allowed service IDs from the agent key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_allowed_service_ids: Option<Vec<String>>,
+    /// Inherited scope: allowed node IDs from the agent key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_allowed_node_ids: Option<Vec<String>>,
+    /// Inherited scope: allow all services flag from the agent key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_allow_all_services: Option<bool>,
+    /// Inherited scope: allow all nodes flag from the agent key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_allow_all_nodes: Option<bool>,
 }
 
 /// Actor claim per RFC 8693 Section 4.1.
@@ -239,6 +255,12 @@ pub fn generate_access_token(
         delegated: None,
         sa: None,
         relay: None,
+        relay_api_key_id: None,
+        relay_api_key_name: None,
+        relay_allowed_service_ids: None,
+        relay_allowed_node_ids: None,
+        relay_allow_all_services: None,
+        relay_allow_all_nodes: None,
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -248,17 +270,29 @@ pub fn generate_access_token(
         .map_err(|e| AppError::Internal(format!("Failed to encode access token: {e}")))
 }
 
+/// Agent key scope data to embed in relay tokens.
+pub struct RelayAgentScope {
+    pub api_key_id: String,
+    pub api_key_name: String,
+    pub allowed_service_ids: Vec<String>,
+    pub allowed_node_ids: Vec<String>,
+    pub allow_all_services: bool,
+    pub allow_all_nodes: bool,
+}
+
 /// Generate an access token for channel relay callbacks.
 ///
-/// Same as [`generate_access_token`] but sets `relay: true` so the auth
-/// middleware can recognize it and bypass approval enforcement (the bot
-/// owner implicitly approved by configuring the relay route).
+/// Sets `relay: true` and embeds the agent key's scope restrictions so
+/// the auth middleware enforces the same service/node access rules as
+/// if the request came directly from the agent key.
+#[allow(clippy::too_many_arguments)]
 pub fn generate_relay_access_token(
     keys: &JwtKeys,
     config: &AppConfig,
     user_id: &Uuid,
     scope: &str,
     rbac: Option<&RbacClaimData>,
+    agent_scope: &RelayAgentScope,
 ) -> Result<String, AppError> {
     let now = Utc::now().timestamp();
 
@@ -279,6 +313,12 @@ pub fn generate_relay_access_token(
         delegated: None,
         sa: None,
         relay: Some(true),
+        relay_api_key_id: Some(agent_scope.api_key_id.clone()),
+        relay_api_key_name: Some(agent_scope.api_key_name.clone()),
+        relay_allowed_service_ids: Some(agent_scope.allowed_service_ids.clone()),
+        relay_allowed_node_ids: Some(agent_scope.allowed_node_ids.clone()),
+        relay_allow_all_services: Some(agent_scope.allow_all_services),
+        relay_allow_all_nodes: Some(agent_scope.allow_all_nodes),
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -314,6 +354,12 @@ pub fn generate_refresh_token(
         delegated: None,
         sa: None,
         relay: None,
+        relay_api_key_id: None,
+        relay_api_key_name: None,
+        relay_allowed_service_ids: None,
+        relay_allowed_node_ids: None,
+        relay_allow_all_services: None,
+        relay_allow_all_nodes: None,
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -354,6 +400,12 @@ pub fn reissue_refresh_token(
         delegated: None,
         sa: None,
         relay: None,
+        relay_api_key_id: None,
+        relay_api_key_name: None,
+        relay_allowed_service_ids: None,
+        relay_allowed_node_ids: None,
+        relay_allow_all_services: None,
+        relay_allow_all_nodes: None,
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -407,6 +459,12 @@ pub fn generate_delegated_access_token(
         delegated: Some(true),
         sa: None,
         relay: None,
+        relay_api_key_id: None,
+        relay_api_key_name: None,
+        relay_allowed_service_ids: None,
+        relay_allowed_node_ids: None,
+        relay_allow_all_services: None,
+        relay_allow_all_nodes: None,
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -538,6 +596,12 @@ pub fn generate_service_account_token(
         delegated: None,
         sa: Some(true),
         relay: None,
+        relay_api_key_id: None,
+        relay_api_key_name: None,
+        relay_allowed_service_ids: None,
+        relay_allowed_node_ids: None,
+        relay_allow_all_services: None,
+        relay_allow_all_nodes: None,
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -735,6 +799,12 @@ mod tests {
             delegated: None,
             sa: None,
             relay: None,
+            relay_api_key_id: None,
+            relay_api_key_name: None,
+            relay_allowed_service_ids: None,
+            relay_allowed_node_ids: None,
+            relay_allow_all_services: None,
+            relay_allow_all_nodes: None,
         };
 
         let mut header = Header::new(Algorithm::RS256);
@@ -833,6 +903,12 @@ mod tests {
             delegated: None,
             sa: None,
             relay: None,
+            relay_api_key_id: None,
+            relay_api_key_name: None,
+            relay_allowed_service_ids: None,
+            relay_allowed_node_ids: None,
+            relay_allow_all_services: None,
+            relay_allow_all_nodes: None,
         };
         let json = serde_json::to_string(&claims).unwrap();
         let restored: Claims = serde_json::from_str(&json).unwrap();

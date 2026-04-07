@@ -93,6 +93,56 @@ nyxid service add --custom                                # add custom endpoint 
 > For API key services, just run `nyxid service add <slug>` without flags. The CLI securely prompts for the key (input hidden). Never ask the user to paste secrets into chat or set environment variables manually.
 > For automation/scripting only: `--credential-env <VAR>` reads from an environment variable.
 
+### Requesting additional OAuth scopes
+
+Some OAuth providers (Lark, Google, GitHub, Atlassian, ...) expose many scopes but NyxID's catalog only configures a sensible default set. When a user needs a capability that isn't covered -- for example Lark's contact/attendance APIs -- add extra scopes on top of the defaults with `--scope`:
+
+```bash
+# Single scope
+nyxid service add api-lark --oauth --scope contact:contact.base:readonly
+
+# Multiple scopes (repeat the flag or comma-separate)
+nyxid service add api-lark --oauth \
+  --scope contact:contact.base:readonly \
+  --scope contact:department.base:readonly
+
+nyxid service add api-lark --oauth \
+  --scope "contact:contact.base:readonly,contact:department.base:readonly"
+
+# Works the same way for device-code services
+nyxid service add llm-openai --device-code --scope "custom-scope-1,custom-scope-2"
+```
+
+The extra scopes are merged (deduped) on top of the provider's `default_scopes` and forwarded in the authorization URL (or device code request). The upstream provider decides whether to grant them -- if the user's app/client doesn't have a scope enabled on the provider side, the authorization flow will still fail there.
+
+**Supported flows:**
+- `--oauth` (all OAuth2 providers) -- scopes are appended to the authorization URL.
+- `--device-code` (RFC 8628 providers like GitHub, Google, most standard device-code providers) -- scopes are sent in the device code request.
+- `--custom` -- `--scope` is accepted for symmetry but has no effect (custom endpoints use direct credentials, not OAuth). The CLI prints a warning.
+- OpenAI-format device-code providers (e.g. the seeded `openai-codex` entry) do **not** accept additional scopes -- scopes are baked into the upstream client registration. The backend returns a validation error if you pass `--scope` to one of these, and the "AI Services" UI hides the scope input for them.
+
+In the "AI Services" UI, the OAuth step and the standard device-code step include an optional "Additional scopes" input that accepts the same comma- or space-separated format.
+
+### Scopes with node-routed services (`--via-node`)
+
+Node-routed OAuth flows run on the node agent (so user credentials never leave the node machine). The two-step pattern is:
+
+```bash
+# Step 1: On any machine -- create the placeholder record on NyxID. The CLI
+# prints the exact next-step command with your scopes pre-filled.
+nyxid service add api-lark --oauth --via-node my-node \
+  --scope contact:contact.base:readonly,contact:department.base:readonly
+# -> "Next step: run this on the node that owns the credential:"
+# -> "  nyxid node credentials setup --service api-lark --scope \"contact:contact.base:readonly,contact:department.base:readonly\""
+
+# Step 2: On the node machine -- run the OAuth flow locally with the extras
+# merged on top of the catalog's default scopes.
+nyxid node credentials setup --service api-lark \
+  --scope contact:contact.base:readonly,contact:department.base:readonly
+```
+
+`nyxid node credentials add-oauth` also accepts the same `--scope` flag (additive, repeatable) for manual setups. It still accepts the legacy `--scopes` flag (which **replaces** the default scope list entirely) for backward compatibility; prefer `--scope` unless you specifically need override semantics.
+
 ## Helping Users Add Services and Credentials
 
 Most users do not know where to find API keys or what authentication method to use. Follow this workflow:
@@ -464,7 +514,65 @@ nyxid notification update --approval-push true         # enable push notificatio
 nyxid notification telegram-link                       # link telegram account
 ```
 
-## Channel Bot Relay
+## Bot-Capable Service Connections
+
+NyxID treats messaging platform bots as standard service connections. The credentials live in the same place as any other service (encrypted, scoped, audited) and outbound bot API calls go through the regular `/api/v1/proxy/s/{slug}/{path}` proxy. Inbound webhook handling is the responsibility of the calling agent runtime (Aevatar, custom backend, etc.) -- NyxID does not own chat runtime.
+
+```bash
+# Telegram bot (path-injected token)
+nyxid service add api-telegram-bot
+# CLI prompts for the bot token (from @BotFather)
+
+# Then call any Bot API method directly -- pass only the method name in the
+# proxy path. NyxID prepends `bot<token>/` automatically, so the forwarded
+# URL becomes https://api.telegram.org/bot<token>/<method>.
+nyxid proxy request api-telegram-bot sendMessage \
+  -m POST -d '{"chat_id":12345,"text":"hello"}'
+
+nyxid proxy request api-telegram-bot setWebhook \
+  -m POST -d '{"url":"https://aevatar-host/api/channels/telegram/callback/abc"}'
+
+nyxid proxy request api-telegram-bot getWebhookInfo -m POST -d '{}'
+
+# IMPORTANT: do NOT include `/bot/` or `/bot{token}/` in the proxy path --
+# NyxID adds it for you. `setWebhook` is correct; `bot/setWebhook` would
+# forward as `bot<token>/bot/setWebhook` and Telegram returns 404.
+
+# Lark bot (tenant token exchange via body injection)
+nyxid service add api-lark-bot
+# CLI prompts for app_secret. Then to get a tenant_access_token:
+nyxid proxy request api-lark-bot /open-apis/auth/v3/tenant_access_token/internal \
+  -m POST -d '{"app_id":"cli_xxx"}'
+# NyxID merges {app_secret: "..."} into the body server-side. Returns a
+# 2-hour tenant_access_token which the caller caches and uses as a Bearer
+# token for subsequent Lark API calls. Your app_secret never leaves NyxID.
+
+# Feishu bot (China region — same as Lark Bot)
+nyxid service add api-feishu-bot
+
+# Discord bot (Bot prefix in Authorization header, persistent token)
+nyxid service add api-discord-bot
+# CLI prompts for the bot token. Then call:
+nyxid proxy request api-discord-bot /channels/{channel_id}/messages \
+  -m POST -d '{"content":"hello"}'
+# NyxID adds `Authorization: Bot <your_token>` automatically.
+```
+
+### Picking the right service for the job
+
+| Slug | Purpose |
+|---|---|
+| `api-lark` | Lark API as a logged-in user (OAuth) |
+| `api-lark-bot` | Lark API as a bot (tenant token exchange) |
+| `api-feishu` | Feishu API as a logged-in user (OAuth) |
+| `api-feishu-bot` | Feishu API as a bot (tenant token exchange) |
+| `api-telegram-bot` | Telegram Bot API |
+| `api-discord` | Discord API as a logged-in user (OAuth) |
+| `api-discord-bot` | Discord API as a bot (persistent bot token) |
+
+## Channel Bot Relay (DEPRECATED)
+
+> **Deprecated.** Channel mode is being phased out (see ChronoAIProject/NyxID#191). Use the bot-capable service connections above for credentials, and let your agent runtime handle inbound webhooks. This section is kept for users still on the old flow.
 
 NyxID can bridge messaging platforms (Telegram, Discord, Lark, Feishu) to AI agent callback URLs. Users register their own bots, configure conversation-to-agent routing, and NyxID handles webhook reception, message normalization, and reply delivery.
 

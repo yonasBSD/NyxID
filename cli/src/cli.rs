@@ -110,7 +110,7 @@ pub enum Commands {
     },
     /// Update the CLI and installed skills
     Update(UpdateArgs),
-    /// Manage channel bot relay (messaging platform bots)
+    /// [DEPRECATED] Manage channel bot relay. Use `nyxid service add api-telegram-bot` (or api-lark-bot/api-feishu-bot/api-discord-bot) instead. See #191.
     ChannelBot {
         #[command(subcommand)]
         command: ChannelBotCommands,
@@ -396,10 +396,11 @@ pub enum ServiceCommands {
         /// Label for this service
         #[arg(long)]
         label: Option<String>,
-        /// Auth method (bearer, header, query, path, basic)
+        /// Auth method: bearer, bot_bearer (Discord-style "Bot " prefix), header, query, path, basic, body (inject credential into JSON body), none
         #[arg(long)]
         auth_method: Option<String>,
-        /// Auth key name (e.g., Authorization, X-API-Key)
+        /// Auth key name (e.g. Authorization, X-API-Key, or for body auth
+        /// the JSON field name like `app_secret`)
         #[arg(long)]
         auth_key_name: Option<String>,
         /// Credential value (hidden from help -- use --credential-env instead)
@@ -408,6 +409,12 @@ pub enum ServiceCommands {
         /// Read credential from this environment variable instead of prompting
         #[arg(long)]
         credential_env: Option<String>,
+        /// Additional OAuth scopes to request on top of the provider's defaults
+        /// (repeatable, comma- or space-separated). Only used with --oauth or
+        /// --device-code. The upstream provider decides whether to grant them.
+        /// Example: --scope "contact:contact.base:readonly,contact:department.base:readonly"
+        #[arg(long = "scope", value_name = "SCOPES")]
+        scopes: Vec<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -955,9 +962,16 @@ pub enum NodeCredentialCommands {
         /// Device code URL
         #[arg(long)]
         device_code_url: Option<String>,
-        /// Scopes to request (space-separated)
+        /// Replace the catalog's default scopes entirely with the space-separated
+        /// list provided here. Legacy power-user escape hatch; prefer `--scope`
+        /// to add extras on top of the defaults.
         #[arg(long)]
         scopes: Option<String>,
+        /// Additional OAuth scopes to append to the provider's defaults
+        /// (repeatable, comma- or space-separated). Unlike `--scopes`, this is
+        /// additive and mirrors `nyxid service add --scope`.
+        #[arg(long = "scope", value_name = "SCOPES")]
+        additional_scopes: Vec<String>,
         /// Target URL for this service
         #[arg(long)]
         url: Option<String>,
@@ -973,6 +987,11 @@ pub enum NodeCredentialCommands {
         /// Service slug (e.g., "llm-openai", "api-twitter")
         #[arg(long)]
         service: String,
+        /// Additional OAuth scopes to append to the catalog defaults
+        /// (repeatable, comma- or space-separated). Only used when the service
+        /// requires OAuth or device code; ignored for API-key credentials.
+        #[arg(long = "scope", value_name = "SCOPES")]
+        additional_scopes: Vec<String>,
         /// NyxID API base URL
         #[arg(long)]
         api_url: Option<String>,

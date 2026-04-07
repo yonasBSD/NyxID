@@ -200,6 +200,12 @@ async fn main() {
         .await
         .expect("Failed to seed default OAuth clients");
 
+    // Backfill `proxy` scope on dynamic-registration clients created before
+    // MCP scope enforcement landed (idempotent).
+    services::oauth_client_service::migrate_dynamic_clients_add_proxy_scope(&db)
+        .await
+        .expect("Failed to migrate dynamic OAuth clients");
+
     // Seed default AI provider configurations (idempotent)
     services::provider_service::seed_default_providers(&db, encryption_keys.as_ref())
         .await

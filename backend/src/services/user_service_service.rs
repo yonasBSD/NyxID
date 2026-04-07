@@ -10,7 +10,25 @@ use crate::models::user_service::{COLLECTION_NAME, UserService};
 use crate::services::node_service;
 
 /// Valid auth methods for user services.
-const VALID_AUTH_METHODS: &[&str] = &["bearer", "header", "query", "basic", "none"];
+///
+/// - `bearer`: `Authorization: Bearer <credential>` (standard OAuth bearer)
+/// - `bot_bearer`: `Authorization: Bot <credential>` (Discord bot tokens)
+/// - `header`: custom header named by `auth_key_name` set to `<credential>`
+/// - `query`: URL query parameter `<auth_key_name>=<credential>`
+/// - `basic`: HTTP Basic auth, credential is `username:password`
+/// - `body`: merge `{<auth_key_name>: <credential>}` into the JSON request
+///   body (used for Lark/Feishu `tenant_access_token` exchange where
+///   `app_secret` must travel in the body)
+/// - `none`: no credential injection
+const VALID_AUTH_METHODS: &[&str] = &[
+    "bearer",
+    "bot_bearer",
+    "header",
+    "query",
+    "basic",
+    "body",
+    "none",
+];
 
 /// Valid identity propagation modes.
 const VALID_IDENTITY_MODES: &[&str] = &["none", "headers", "jwt", "both"];
@@ -222,6 +240,26 @@ pub async fn create_user_service(
         ));
     }
 
+    // `body` auth must specify which JSON field to inject into.
+    if auth_method == "body" && auth_key_name.is_empty() {
+        return Err(AppError::ValidationError(
+            "auth_key_name is required when auth_method is 'body' \
+             (e.g. 'app_secret' for Lark tenant token exchange)"
+                .to_string(),
+        ));
+    }
+
+    // `body` auth credential injection happens inside the backend proxy's
+    // `forward_request()`. Node-routed requests bypass that path, so body
+    // injection would silently not happen. Reject up front.
+    if auth_method == "body" && node_id.is_some() {
+        return Err(AppError::ValidationError(
+            "auth_method 'body' is not supported for node-routed services. \
+             Credential body injection only works for direct (non-node) routing."
+                .to_string(),
+        ));
+    }
+
     if api_key_id.is_none() && auth_method != "none" {
         return Err(AppError::ValidationError(
             "Services without an API key must use auth_method 'none'".to_string(),
@@ -337,6 +375,32 @@ pub async fn update_user_service(
         } else {
             node_service::get_node(db, user_id, nid).await?;
             set_doc.insert("node_id", nid);
+        }
+    }
+
+    // Cross-field validation for `body` auth method. We check the effective
+    // post-update state: incoming values override current values.
+    let effective_auth_method = auth_method.unwrap_or(&current.auth_method);
+    if effective_auth_method == "body" {
+        let effective_auth_key_name = auth_key_name.unwrap_or(&current.auth_key_name);
+        if effective_auth_key_name.is_empty() {
+            return Err(AppError::ValidationError(
+                "auth_key_name is required when auth_method is 'body' \
+                 (e.g. 'app_secret' for Lark tenant token exchange)"
+                    .to_string(),
+            ));
+        }
+        let effective_node_id: Option<&str> = match node_id {
+            Some("") => None,
+            Some(nid) => Some(nid),
+            None => current.node_id.as_deref(),
+        };
+        if effective_node_id.is_some() {
+            return Err(AppError::ValidationError(
+                "auth_method 'body' is not supported for node-routed services. \
+                 Credential body injection only works for direct (non-node) routing."
+                    .to_string(),
+            ));
         }
     }
     if let Some(np) = node_priority {

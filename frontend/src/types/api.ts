@@ -182,6 +182,9 @@ export type CreateServicePayload =
       readonly visibility?: string;
       readonly base_url: string;
       readonly auth_type: string;
+      /// Required when auth_type is "body" (e.g. "app_secret" for Lark).
+      /// Also accepted as an override for other auth types.
+      readonly auth_key_name?: string;
       readonly service_category?: string;
     }
   | {
