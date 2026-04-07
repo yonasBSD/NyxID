@@ -116,8 +116,13 @@ export function RegisterForm({ returnTo }: RegisterFormProps) {
                   <Input
                     placeholder="NYX-XXXXXXXX"
                     autoComplete="off"
-                    className="font-mono uppercase"
+                    className="font-mono"
                     {...field}
+                    onChange={(e) => {
+                      // Normalize to backend canonical form on every keystroke
+                      // so the displayed value matches what will be submitted.
+                      field.onChange(e.target.value.toUpperCase());
+                    }}
                   />
                 </FormControl>
                 <FormMessage />

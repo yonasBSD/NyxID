@@ -9,9 +9,13 @@ export type LoginFormData = z.infer<typeof loginSchema>;
 
 export const registerSchema = z
   .object({
+    // Normalize to the backend's canonical form: trimmed and uppercased.
+    // Mirrors `invite_code_service::normalize_code` on the server.
     inviteCode: z
       .string()
-      .min(1, "Invite code is required"),
+      .trim()
+      .transform((s) => s.toUpperCase())
+      .pipe(z.string().min(1, "Invite code is required")),
     name: z
       .string()
       .min(1, "Name is required")

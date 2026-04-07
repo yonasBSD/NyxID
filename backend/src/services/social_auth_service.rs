@@ -6,7 +6,6 @@ use uuid::Uuid;
 use crate::config::AppConfig;
 use crate::errors::{AppError, AppResult};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
-use crate::services::role_service;
 
 /// Supported social login providers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -476,8 +475,11 @@ enum SocialLoginOutcome {
     /// token-exchange flow (`social_token_exchange_service`), so the policy
     /// applies uniformly across all social login entry points.
     LinkToExisting { user: User, update: bson::Document },
-    /// No matching user found; create a brand-new account.
-    CreateNew(User),
+    /// No matching user found; registration is gated by an invite code so
+    /// this branch is rejected at the `find_or_create_user` layer. The
+    /// `User` payload is only used by unit tests that exercise the pure
+    /// resolver logic directly.
+    CreateNew(#[allow(dead_code)] User),
 }
 
 /// Pure business-logic resolver: given DB lookup results and the incoming
@@ -636,21 +638,18 @@ pub async fn find_or_create_user(
                 .map_err(map_social_link_error)?;
             Ok(user.clone())
         }
-        SocialLoginOutcome::CreateNew(mut new_user) => {
-            // Auto-assign default roles to new social users
-            let default_role_ids = role_service::get_default_role_ids(db).await?;
-            new_user.role_ids = default_role_ids;
-
-            users
-                .insert_one(&new_user)
-                .await
-                .map_err(map_social_link_error)?;
+        SocialLoginOutcome::CreateNew(_) => {
+            // Registration is gated by invite codes (issue #179). Social
+            // providers don't carry an invite code through the OAuth redirect,
+            // so first-time social sign-ups are blocked: the user must
+            // register via email+invite first, then link their social
+            // provider. The email-password callback path (see `handlers/auth::register`)
+            // handles invite validation and consumption.
             tracing::info!(
-                user_id = %new_user.id,
                 provider = %profile.provider.as_str(),
-                "Social user created"
+                "First-time social sign-up rejected: invite code required"
             );
-            Ok(new_user)
+            Err(AppError::SocialAuthRegistrationClosed)
         }
     }
 }

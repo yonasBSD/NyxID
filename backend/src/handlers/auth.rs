@@ -312,17 +312,41 @@ pub async fn register(
     body.validate()
         .map_err(|e| AppError::ValidationError(e.to_string()))?;
 
+    // Atomically reserve one slot on the invite code. This is the only step
+    // that enforces the per-code limit — any failure below must release the
+    // reservation so that a burned slot isn't counted against the quota.
     let invite_code_id =
-        invite_code_service::validate_and_consume(&state.db, &body.invite_code).await?;
+        invite_code_service::reserve_invite_code(&state.db, &body.invite_code).await?;
 
-    let result = auth_service::register_user(
+    let register_result = auth_service::register_user(
         &state.db,
         &body.email,
         &body.password,
         body.display_name.as_deref(),
         Some(&invite_code_id),
     )
-    .await?;
+    .await;
+
+    let result = match register_result {
+        Ok(r) if r.actually_created => {
+            invite_code_service::record_usage(&state.db, &invite_code_id, &r.user_id).await;
+            r
+        }
+        Ok(r) => {
+            // Email already existed: the service returned a fake-success to
+            // prevent enumeration. The invite code slot was never actually
+            // used, so release it before returning the fake result to the
+            // caller.
+            invite_code_service::release_reservation(&state.db, &invite_code_id).await;
+            r
+        }
+        Err(e) => {
+            // Registration failed for another reason (hash, DB write, etc).
+            // Release the reservation before surfacing the error.
+            invite_code_service::release_reservation(&state.db, &invite_code_id).await;
+            return Err(e);
+        }
+    };
 
     audit_service::log_async(
         state.db.clone(),

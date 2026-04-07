@@ -17,6 +17,11 @@ pub struct RegisterResult {
     /// Used in debug builds to log the verification token.
     #[cfg_attr(not(debug_assertions), allow(dead_code))]
     pub email_verification_token: String,
+    /// `true` when a new user was actually inserted; `false` when the email
+    /// already existed and a fake success was returned for email-enumeration
+    /// protection. Callers that hold a reserved invite code must use this to
+    /// know whether to record or release the reservation.
+    pub actually_created: bool,
 }
 
 /// Register a new user with email and password.
@@ -62,6 +67,7 @@ pub async fn register_user(
         return Ok(RegisterResult {
             user_id: Uuid::new_v4().to_string(), // Fake ID, not stored
             email_verification_token: generate_random_token(), // Fake token
+            actually_created: false,
         });
     }
 
@@ -105,6 +111,7 @@ pub async fn register_user(
     Ok(RegisterResult {
         user_id,
         email_verification_token: verification_token,
+        actually_created: true,
     })
 }
 

@@ -82,5 +82,8 @@ async fn run() -> Result<()> {
 
         // Channel bot relay
         Commands::ChannelBot { command } => commands::channel_bot::run(command).await,
+
+        // Admin-only operations
+        Commands::Admin { command } => commands::admin::run(command).await,
     }
 }

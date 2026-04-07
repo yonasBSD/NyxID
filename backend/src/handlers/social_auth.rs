@@ -350,6 +350,7 @@ pub async fn callback(
                 AppError::SocialAuthConflict => "social_auth_conflict",
                 AppError::SocialAuthNoEmail => "social_auth_no_email",
                 AppError::SocialAuthDeactivated => "social_auth_deactivated",
+                AppError::SocialAuthRegistrationClosed => "social_auth_registration_closed",
                 _ => "social_auth_exchange",
             };
             redirect_with_error(&redirect_target, error_key, secure, domain)
@@ -623,6 +624,7 @@ pub async fn apple_callback(
                 AppError::SocialAuthConflict => "social_auth_conflict",
                 AppError::SocialAuthNoEmail => "social_auth_no_email",
                 AppError::SocialAuthDeactivated => "social_auth_deactivated",
+                AppError::SocialAuthRegistrationClosed => "social_auth_registration_closed",
                 _ => "social_auth_exchange",
             };
             redirect_with_error(&redirect_target, error_key, secure, domain)

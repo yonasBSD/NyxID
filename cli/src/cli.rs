@@ -115,6 +115,47 @@ pub enum Commands {
         #[command(subcommand)]
         command: ChannelBotCommands,
     },
+    /// Administrative commands (admin role required)
+    Admin {
+        #[command(subcommand)]
+        command: AdminCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AdminCommands {
+    /// Manage invite codes used to gate new user registration
+    InviteCode {
+        #[command(subcommand)]
+        command: InviteCodeCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum InviteCodeCommands {
+    /// Create a new invite code
+    Create {
+        /// Maximum number of registrations this code can grant (1-1000, default 10)
+        #[arg(long)]
+        max_uses: Option<i32>,
+        /// Optional admin note describing the intended recipient(s)
+        #[arg(long)]
+        note: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// List all invite codes
+    List {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Deactivate an invite code by ID
+    Deactivate {
+        /// Invite code ID (UUID)
+        id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
 }
 
 // ---- Shared auth args ----
@@ -229,6 +270,9 @@ pub struct RegisterArgs {
     /// Read password from this environment variable
     #[arg(long)]
     pub password_env: Option<String>,
+    /// Invite code (required — request one from an admin)
+    #[arg(long)]
+    pub invite_code: String,
 }
 
 // ---- VerifyEmail (C2) ----
