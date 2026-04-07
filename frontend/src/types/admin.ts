@@ -112,3 +112,36 @@ export interface AdminAuditLogListResponse {
   readonly page: number;
   readonly per_page: number;
 }
+
+// ── Invite codes ──
+
+export interface InviteCodeUsage {
+  readonly user_id: string;
+  readonly used_at: string;
+}
+
+export interface InviteCode {
+  readonly id: string;
+  readonly code: string;
+  readonly max_uses: number;
+  readonly used_count: number;
+  readonly created_by: string;
+  readonly note: string | null;
+  readonly is_active: boolean;
+  readonly created_at: string;
+  readonly updated_at: string;
+  readonly usages: readonly InviteCodeUsage[];
+}
+
+export interface InviteCodeListResponse {
+  readonly invite_codes: readonly InviteCode[];
+}
+
+export interface CreateInviteCodeRequest {
+  readonly max_uses?: number;
+  readonly note?: string;
+}
+
+export interface DeactivateInviteCodeResponse {
+  readonly message: string;
+}

@@ -53,6 +53,7 @@ import {
   NodeDetailPage,
   AdminNodesPage,
   AdminAuditLogPage,
+  AdminInviteCodesPage,
   CliAuthPage,
   SshTerminalPage,
   KeysPage,
@@ -472,6 +473,12 @@ const adminAuditLogRoute = createRoute({
   component: AdminAuditLogPage,
 });
 
+const adminInviteCodesRoute = createRoute({
+  path: "invite-codes",
+  getParentRoute: () => adminLayout,
+  component: AdminInviteCodesPage,
+});
+
 const routeTree = rootRoute.addChildren([
   landingRoute,
   authLayout.addChildren([loginRoute, registerRoute]),
@@ -525,6 +532,7 @@ const routeTree = rootRoute.addChildren([
     adminServiceAccountDetailRoute,
     adminNodesRoute,
     adminAuditLogRoute,
+    adminInviteCodesRoute,
   ]),
   ]),
 ]);
