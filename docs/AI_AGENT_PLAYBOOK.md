@@ -201,8 +201,8 @@ The old **Connection** and **Provider** concepts are now unified into the AI Ser
 
 ### What the user needs before starting
 
-- A NyxID account (register at http://localhost:3000/register or via API)
-- For admin operations: an admin account
+- A NyxID account. Registration requires an **invite code** from an admin. Register via http://localhost:3000/register (web) or `nyxid register ... --invite-code NYX-XXXXXXXX` (CLI). Social login (Google/GitHub/Apple) only works for users who already have a NyxID account -- first-time social sign-ups are rejected because the OAuth redirect cannot carry an invite code.
+- For admin operations: an admin account. Admins can mint new invite codes with `nyxid admin invite-code create` (defaults to 10 uses per code; `--max-uses` accepts 1..1000).
 - An API key for AI agent access (see below)
 
 ### Set up an API key for AI agent access (recommended)
