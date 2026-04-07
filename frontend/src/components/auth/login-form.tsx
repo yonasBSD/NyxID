@@ -24,6 +24,8 @@ const SOCIAL_ERROR_MESSAGES: Record<string, string> = {
     "We couldn't retrieve an email address from your social account. Please ensure your email is public or use email/password sign-in.",
   social_auth_deactivated:
     "Your account has been deactivated. Please contact support for assistance.",
+  social_auth_registration_closed:
+    "No NyxID account found for this social login. Registration requires an invite code — please register with email and your invite code first, then sign in with your social account using the same email address to link it.",
   social_auth_failed: "Social sign-in failed. Please try again.",
   social_auth_exchange:
     "Social sign-in failed due to a temporary error. Please try again.",
