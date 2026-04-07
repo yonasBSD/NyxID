@@ -1,0 +1,429 @@
+import { useState } from "react";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import {
+  useAdminInviteCodes,
+  useCreateInviteCode,
+  useDeactivateInviteCode,
+} from "@/hooks/use-admin-invite-codes";
+import {
+  createInviteCodeSchema,
+  type CreateInviteCodeFormData,
+} from "@/schemas/admin";
+import { ApiError } from "@/lib/api-client";
+import { copyToClipboard, formatDate } from "@/lib/utils";
+import { PageHeader } from "@/components/shared/page-header";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  Form,
+  FormControl,
+  FormField,
+  FormItem,
+  FormLabel,
+  FormMessage,
+} from "@/components/ui/form";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { Ticket, Plus, Copy, Check, Ban } from "lucide-react";
+import { toast } from "sonner";
+import type { InviteCode } from "@/types/admin";
+
+const DEFAULT_MAX_USES = 10;
+
+export function AdminInviteCodesPage() {
+  const { data, isLoading, error } = useAdminInviteCodes();
+  const createMutation = useCreateInviteCode();
+  const deactivateMutation = useDeactivateInviteCode();
+
+  const [createOpen, setCreateOpen] = useState(false);
+  const [createdCode, setCreatedCode] = useState<InviteCode | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [deactivateTarget, setDeactivateTarget] = useState<InviteCode | null>(
+    null,
+  );
+
+  const inviteCodes = data?.invite_codes ?? [];
+
+  const createForm = useForm<CreateInviteCodeFormData>({
+    resolver: zodResolver(createInviteCodeSchema),
+    defaultValues: {
+      max_uses: DEFAULT_MAX_USES,
+      note: "",
+    },
+  });
+
+  function openCreateDialog() {
+    createForm.reset({
+      max_uses: DEFAULT_MAX_USES,
+      note: "",
+    });
+    setCreatedCode(null);
+    setCreateOpen(true);
+  }
+
+  async function handleCreate(formData: CreateInviteCodeFormData) {
+    try {
+      const created = await createMutation.mutateAsync({
+        max_uses: formData.max_uses,
+        note: formData.note || undefined,
+      });
+      setCreatedCode(created);
+      toast.success("Invite code created");
+    } catch (err) {
+      if (err instanceof ApiError) {
+        createForm.setError("root", { message: err.message });
+      } else {
+        toast.error("Failed to create invite code");
+      }
+    }
+  }
+
+  async function handleCopyCode(code: string, id: string) {
+    try {
+      await copyToClipboard(code);
+      setCopiedId(id);
+      toast.success("Code copied to clipboard");
+      setTimeout(() => {
+        setCopiedId((current) => (current === id ? null : current));
+      }, 2000);
+    } catch {
+      toast.error("Failed to copy to clipboard");
+    }
+  }
+
+  async function handleDeactivate() {
+    if (!deactivateTarget) return;
+    try {
+      await deactivateMutation.mutateAsync(deactivateTarget.id);
+      toast.success(`Invite code ${deactivateTarget.code} deactivated`);
+    } catch (err) {
+      toast.error(
+        err instanceof ApiError ? err.message : "Failed to deactivate code",
+      );
+    } finally {
+      setDeactivateTarget(null);
+    }
+  }
+
+  return (
+    <div className="space-y-8">
+      <PageHeader
+        title="Invite Codes"
+        description="Create and manage invite codes that gate new user registration. Each code can grant a bounded number of registrations and can be deactivated at any time."
+      />
+
+      <div className="flex items-center justify-end">
+        <Button size="sm" onClick={openCreateDialog}>
+          <Plus className="mr-1 h-4 w-4" />
+          Create Invite Code
+        </Button>
+      </div>
+
+      {isLoading ? (
+        <div className="space-y-2">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <Skeleton
+              key={`invite-skel-${String(i)}`}
+              className="h-12 w-full"
+            />
+          ))}
+        </div>
+      ) : error ? (
+        <div className="flex flex-col items-center justify-center py-12 text-center">
+          <Ticket className="mb-4 h-12 w-12 text-muted-foreground/50" />
+          <p className="text-sm text-muted-foreground">
+            Failed to load invite codes. Please try again.
+          </p>
+        </div>
+      ) : inviteCodes.length === 0 ? (
+        <div className="flex flex-col items-center justify-center py-12 text-center">
+          <Ticket className="mb-4 h-12 w-12 text-muted-foreground/50" />
+          <p className="text-sm text-muted-foreground">
+            No invite codes yet. Create one to allow a new user to register.
+          </p>
+        </div>
+      ) : (
+        <div className="rounded-xl border border-border">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Code</TableHead>
+                <TableHead>Uses</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>Note</TableHead>
+                <TableHead>Created</TableHead>
+                <TableHead className="w-[100px]">Actions</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {inviteCodes.map((ic) => {
+                const exhausted = ic.used_count >= ic.max_uses;
+                return (
+                  <TableRow key={ic.id}>
+                    <TableCell>
+                      <span className="font-mono text-sm font-medium text-foreground">
+                        {ic.code}
+                      </span>
+                    </TableCell>
+                    <TableCell>
+                      <span className="text-sm tabular-nums text-muted-foreground">
+                        {String(ic.used_count)}/{String(ic.max_uses)}
+                      </span>
+                    </TableCell>
+                    <TableCell>
+                      {!ic.is_active ? (
+                        <Badge variant="destructive">Deactivated</Badge>
+                      ) : exhausted ? (
+                        <Badge variant="warning">Exhausted</Badge>
+                      ) : (
+                        <Badge variant="success">Active</Badge>
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      {ic.note ? (
+                        <span className="text-sm text-muted-foreground">
+                          {ic.note}
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground">--</span>
+                      )}
+                    </TableCell>
+                    <TableCell className="text-muted-foreground">
+                      {formatDate(ic.created_at)}
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-1">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                          onClick={() => void handleCopyCode(ic.code, ic.id)}
+                          aria-label={`Copy ${ic.code} to clipboard`}
+                        >
+                          {copiedId === ic.id ? (
+                            <Check
+                              className="h-4 w-4 text-success"
+                              aria-hidden="true"
+                            />
+                          ) : (
+                            <Copy className="h-4 w-4" aria-hidden="true" />
+                          )}
+                        </Button>
+                        {ic.is_active && (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                            onClick={() => setDeactivateTarget(ic)}
+                            aria-label={`Deactivate ${ic.code}`}
+                          >
+                            <Ban className="h-4 w-4" aria-hidden="true" />
+                          </Button>
+                        )}
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
+        </div>
+      )}
+
+      {/* Create Invite Code Dialog */}
+      <Dialog
+        open={createOpen}
+        onOpenChange={(open) => {
+          setCreateOpen(open);
+          if (!open) {
+            setCreatedCode(null);
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {createdCode ? "Invite code created" : "Create Invite Code"}
+            </DialogTitle>
+            <DialogDescription>
+              {createdCode
+                ? "Share the code below with the user who should register. The code is also visible in the table."
+                : "Generate a new invite code. The code is created server-side and shown once it is ready."}
+            </DialogDescription>
+          </DialogHeader>
+
+          {createdCode ? (
+            <div className="space-y-4">
+              <div className="rounded-md border border-border bg-muted/30 p-4">
+                <p className="mb-2 text-xs uppercase tracking-wider text-text-tertiary">
+                  Invite code
+                </p>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-mono text-lg font-medium text-foreground">
+                    {createdCode.code}
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() =>
+                      void handleCopyCode(createdCode.code, createdCode.id)
+                    }
+                  >
+                    {copiedId === createdCode.id ? (
+                      <>
+                        <Check
+                          className="mr-1 h-4 w-4 text-success"
+                          aria-hidden="true"
+                        />
+                        Copied
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="mr-1 h-4 w-4" aria-hidden="true" />
+                        Copy
+                      </>
+                    )}
+                  </Button>
+                </div>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  Up to {String(createdCode.max_uses)} registrations.
+                </p>
+              </div>
+              <DialogFooter>
+                <Button onClick={() => setCreateOpen(false)}>Done</Button>
+              </DialogFooter>
+            </div>
+          ) : (
+            <Form {...createForm}>
+              <form
+                onSubmit={createForm.handleSubmit(
+                  (formData) => void handleCreate(formData),
+                )}
+                className="space-y-4"
+              >
+                {createForm.formState.errors.root && (
+                  <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+                    {createForm.formState.errors.root.message}
+                  </div>
+                )}
+                <FormField
+                  control={createForm.control}
+                  name="max_uses"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Max uses</FormLabel>
+                      <FormControl>
+                        <Input
+                          type="number"
+                          min={1}
+                          max={1000}
+                          step={1}
+                          value={String(field.value)}
+                          onChange={(e) =>
+                            field.onChange(e.target.valueAsNumber)
+                          }
+                          onBlur={field.onBlur}
+                          name={field.name}
+                          ref={field.ref}
+                        />
+                      </FormControl>
+                      <p className="text-xs text-muted-foreground">
+                        Maximum number of registrations this code can grant
+                        (1-1000).
+                      </p>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={createForm.control}
+                  name="note"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Note</FormLabel>
+                      <FormControl>
+                        <Input
+                          placeholder="e.g. alice@corp"
+                          maxLength={512}
+                          {...field}
+                        />
+                      </FormControl>
+                      <p className="text-xs text-muted-foreground">
+                        Optional reminder of who this code is for. Visible to
+                        admins only.
+                      </p>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <DialogFooter>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => setCreateOpen(false)}
+                  >
+                    Cancel
+                  </Button>
+                  <Button type="submit" isLoading={createMutation.isPending}>
+                    Create Invite Code
+                  </Button>
+                </DialogFooter>
+              </form>
+            </Form>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Deactivate Confirmation Dialog */}
+      <Dialog
+        open={deactivateTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setDeactivateTarget(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Deactivate invite code</DialogTitle>
+            <DialogDescription>
+              {deactivateTarget
+                ? `Deactivating ${deactivateTarget.code} immediately blocks any further registrations with it. This cannot be undone — mint a new code if a user needs another attempt.`
+                : ""}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setDeactivateTarget(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => void handleDeactivate()}
+              isLoading={deactivateMutation.isPending}
+            >
+              Deactivate
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}

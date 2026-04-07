@@ -19,6 +19,7 @@ import {
   Sparkles,
   Cable,
   Radio,
+  Ticket,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth-store";
@@ -49,6 +50,7 @@ const DEVELOPER_NAV_ITEMS = [
 
 const ADMIN_NAV_ITEMS = [
   { to: "/admin/users", icon: Users, label: "Users" },
+  { to: "/admin/invite-codes", icon: Ticket, label: "Invite Codes" },
   { to: "/admin/audit-log", icon: ClipboardList, label: "Audit Log" },
   { to: "/admin/service-accounts", icon: Bot, label: "Service Accounts" },
   { to: "/admin/roles", icon: ShieldCheck, label: "Roles" },

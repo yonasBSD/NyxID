@@ -169,6 +169,11 @@ export const AdminAuditLogPage = lazy(() =>
     default: m.AdminAuditLogPage,
   })),
 );
+export const AdminInviteCodesPage = lazy(() =>
+  import("@/pages/admin-invite-codes").then((m) => ({
+    default: m.AdminInviteCodesPage,
+  })),
+);
 export const SshTerminalPage = lazy(() =>
   import("@/pages/ssh-terminal").then((m) => ({
     default: m.SshTerminalPage,
