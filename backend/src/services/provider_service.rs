@@ -1665,10 +1665,12 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_method: None,
         service_auth_key_name: None,
         description: Some(
-            "Telegram Bot API authenticated by injecting the bot token into the URL path. \
-             Get a token from @BotFather and store it once -- the proxy injects it as `/bot{token}/` \
-             on every request. Use for sending messages, managing webhooks, and any other \
-             Telegram bot operations.",
+            "Telegram Bot API. Get a token from @BotFather and store it once. Pass only the \
+             Bot API method name in the proxy path (e.g. `sendMessage`, `setWebhook`, \
+             `getWebhookInfo`) -- NyxID automatically prepends `bot<token>/` so the request \
+             goes to `https://api.telegram.org/bot<token>/<method>`. Do NOT include `bot/` \
+             yourself; that would double-prefix the path. Works for messages, files, \
+             webhooks, payments, mini apps -- all Bot API methods use the same shape.",
         ),
     },
     DefaultServiceSeed {
@@ -1908,15 +1910,31 @@ pub async fn seed_default_services(
     }
 
     // Migration: update name + description on existing seeded services
-    // whose description still matches the old auto-generated pattern
-    // ("{name} proxied via NyxID proxy" or "... NyxID LLM gateway").
+    // whose description still matches a known auto-generated or previously
+    // seeded value. Lets existing deployments pick up richer catalog
+    // descriptions without overwriting any user-customized text.
     //
-    // This lets existing deployments pick up richer catalog descriptions
-    // without overwriting any user-customized descriptions. The match is
-    // deliberately conservative: we only update records where the stored
-    // description clearly ends with one of the two auto-generated suffixes.
+    // We track three classes of "safe to overwrite":
+    //   1. The original auto-generated suffixes from the very first seed.
+    //   2. Known prior seed descriptions we have shipped and later corrected
+    //      (listed in `STALE_SEED_DESCRIPTIONS`). When a seed description
+    //      gets corrected, add its previous text here so the next backend
+    //      restart propagates the fix to existing deployments.
+    //   3. Empty/missing descriptions (always safe).
     const AUTO_PROXY_SUFFIX: &str = " proxied via NyxID proxy";
     const AUTO_GATEWAY_SUFFIX: &str = " proxied via NyxID LLM gateway";
+
+    // Previously-shipped seed descriptions that have since been corrected.
+    // Listed exactly so the migration can recognize and overwrite them.
+    const STALE_SEED_DESCRIPTIONS: &[&str] = &[
+        // api-telegram-bot, shipped in #205. Replaced in #207 follow-up to
+        // remove the misleading `/bot{token}/` example that suggested
+        // callers should include `bot/` in their proxy path.
+        "Telegram Bot API authenticated by injecting the bot token into the URL path. \
+         Get a token from @BotFather and store it once -- the proxy injects it as `/bot{token}/` \
+         on every request. Use for sending messages, managing webhooks, and any other \
+         Telegram bot operations.",
+    ];
 
     let mut migrated_count: u32 = 0;
     for seed in DEFAULT_SERVICE_SEEDS {
@@ -1932,14 +1950,18 @@ pub async fn seed_default_services(
             continue;
         };
 
-        // Only overwrite if the description looks auto-generated. Empty /
-        // missing descriptions also count as safe to overwrite.
-        let is_auto_generated = match existing.description.as_deref() {
+        // Only overwrite if the description looks auto-generated, empty,
+        // or matches a known stale seed value we previously shipped.
+        let is_safe_to_overwrite = match existing.description.as_deref() {
             None | Some("") => true,
-            Some(d) => d.ends_with(AUTO_PROXY_SUFFIX) || d.ends_with(AUTO_GATEWAY_SUFFIX),
+            Some(d) => {
+                d.ends_with(AUTO_PROXY_SUFFIX)
+                    || d.ends_with(AUTO_GATEWAY_SUFFIX)
+                    || STALE_SEED_DESCRIPTIONS.contains(&d)
+            }
         };
 
-        if !is_auto_generated {
+        if !is_safe_to_overwrite {
             continue;
         }
 

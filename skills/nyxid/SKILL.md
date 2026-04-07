@@ -522,8 +522,21 @@ NyxID treats messaging platform bots as standard service connections. The creden
 # Telegram bot (path-injected token)
 nyxid service add api-telegram-bot
 # CLI prompts for the bot token (from @BotFather)
-# Then call: POST /api/v1/proxy/s/api-telegram-bot/bot{token}/sendMessage
-# (the proxy injects the token into the URL path automatically)
+
+# Then call any Bot API method directly -- pass only the method name in the
+# proxy path. NyxID prepends `bot<token>/` automatically, so the forwarded
+# URL becomes https://api.telegram.org/bot<token>/<method>.
+nyxid proxy request api-telegram-bot sendMessage \
+  -m POST -d '{"chat_id":12345,"text":"hello"}'
+
+nyxid proxy request api-telegram-bot setWebhook \
+  -m POST -d '{"url":"https://aevatar-host/api/channels/telegram/callback/abc"}'
+
+nyxid proxy request api-telegram-bot getWebhookInfo -m POST -d '{}'
+
+# IMPORTANT: do NOT include `/bot/` or `/bot{token}/` in the proxy path --
+# NyxID adds it for you. `setWebhook` is correct; `bot/setWebhook` would
+# forward as `bot<token>/bot/setWebhook` and Telegram returns 404.
 
 # Lark bot (tenant token exchange via body injection)
 nyxid service add api-lark-bot
