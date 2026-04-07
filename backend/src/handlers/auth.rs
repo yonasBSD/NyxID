@@ -29,8 +29,11 @@ pub struct RegisterRequest {
         message = "Password must be between 8 and 128 characters"
     ))]
     pub password: String,
-    #[validate(length(min = 1, message = "Invite code is required"))]
-    pub invite_code: String,
+    /// Invite code. Required when `AppConfig::invite_code_required` is true
+    /// (the default). When the gate is disabled for public launch the
+    /// handler accepts a missing or empty invite code.
+    #[serde(default)]
+    pub invite_code: Option<String>,
     pub display_name: Option<String>,
 }
 
@@ -312,38 +315,54 @@ pub async fn register(
     body.validate()
         .map_err(|e| AppError::ValidationError(e.to_string()))?;
 
-    // Atomically reserve one slot on the invite code. This is the only step
-    // that enforces the per-code limit — any failure below must release the
-    // reservation so that a burned slot isn't counted against the quota.
-    let invite_code_id =
-        invite_code_service::reserve_invite_code(&state.db, &body.invite_code).await?;
+    // When the invite-code gate is enabled, an invite code is mandatory and
+    // we reserve one slot up front. When it is disabled (public launch),
+    // any invite code the client sent is ignored and registration proceeds
+    // without reserving anything.
+    let invite_code_id = if state.config.invite_code_required {
+        let raw_code = body
+            .invite_code
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| AppError::ValidationError("Invite code is required".to_string()))?;
+        Some(invite_code_service::reserve_invite_code(&state.db, raw_code).await?)
+    } else {
+        None
+    };
 
     let register_result = auth_service::register_user(
         &state.db,
         &body.email,
         &body.password,
         body.display_name.as_deref(),
-        Some(&invite_code_id),
+        invite_code_id.as_deref(),
     )
     .await;
 
     let result = match register_result {
         Ok(r) if r.actually_created => {
-            invite_code_service::record_usage(&state.db, &invite_code_id, &r.user_id).await;
+            if let Some(ref code_id) = invite_code_id {
+                invite_code_service::record_usage(&state.db, code_id, &r.user_id).await;
+            }
             r
         }
         Ok(r) => {
             // Email already existed: the service returned a fake-success to
-            // prevent enumeration. The invite code slot was never actually
-            // used, so release it before returning the fake result to the
-            // caller.
-            invite_code_service::release_reservation(&state.db, &invite_code_id).await;
+            // prevent enumeration. The invite code slot (if any) was never
+            // actually used, so release it before returning the fake
+            // result to the caller.
+            if let Some(ref code_id) = invite_code_id {
+                invite_code_service::release_reservation(&state.db, code_id).await;
+            }
             r
         }
         Err(e) => {
             // Registration failed for another reason (hash, DB write, etc).
-            // Release the reservation before surfacing the error.
-            invite_code_service::release_reservation(&state.db, &invite_code_id).await;
+            // Release any reservation before surfacing the error.
+            if let Some(ref code_id) = invite_code_id {
+                invite_code_service::release_reservation(&state.db, code_id).await;
+            }
             return Err(e);
         }
     };

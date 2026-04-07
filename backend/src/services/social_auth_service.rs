@@ -475,11 +475,13 @@ enum SocialLoginOutcome {
     /// token-exchange flow (`social_token_exchange_service`), so the policy
     /// applies uniformly across all social login entry points.
     LinkToExisting { user: User, update: bson::Document },
-    /// No matching user found; registration is gated by an invite code so
-    /// this branch is rejected at the `find_or_create_user` layer. The
-    /// `User` payload is only used by unit tests that exercise the pure
-    /// resolver logic directly.
-    CreateNew(#[allow(dead_code)] User),
+    /// No matching user found; create a brand-new account.
+    ///
+    /// `find_or_create_user` only honors this branch when its
+    /// `allow_new_users` argument is `true` (i.e. when the invite-code gate
+    /// is disabled for public launch). Otherwise it rejects the sign-in
+    /// with `SocialAuthRegistrationClosed`.
+    CreateNew(User),
 }
 
 /// Pure business-logic resolver: given DB lookup results and the incoming
@@ -598,9 +600,14 @@ fn map_social_link_error(e: mongodb::error::Error) -> AppError {
 /// NOTE: The returned `User` struct reflects the state *before* the update.
 /// Only `user.id` should be relied upon from the return value for downstream
 /// operations (e.g. session creation). Profile fields may be stale.
+///
+/// When `allow_new_users` is `false`, first-time social sign-ups are rejected
+/// with `SocialAuthRegistrationClosed`. This mirrors the invite-code gate on
+/// email/password registration — callers should pass `!config.invite_code_required`.
 pub async fn find_or_create_user(
     db: &mongodb::Database,
     profile: &SocialProfile,
+    allow_new_users: bool,
 ) -> AppResult<User> {
     let users = db.collection::<User>(USERS);
 
@@ -638,18 +645,34 @@ pub async fn find_or_create_user(
                 .map_err(map_social_link_error)?;
             Ok(user.clone())
         }
-        SocialLoginOutcome::CreateNew(_) => {
-            // Registration is gated by invite codes (issue #179). Social
-            // providers don't carry an invite code through the OAuth redirect,
-            // so first-time social sign-ups are blocked: the user must
-            // register via email+invite first, then link their social
-            // provider. The email-password callback path (see `handlers/auth::register`)
-            // handles invite validation and consumption.
+        SocialLoginOutcome::CreateNew(mut new_user) => {
+            if !allow_new_users {
+                // Registration is gated by invite codes (issue #179). Social
+                // providers don't carry an invite code through the OAuth
+                // redirect, so first-time social sign-ups are blocked when
+                // the gate is enabled: the user must register via
+                // email+invite first, then link their social provider.
+                tracing::info!(
+                    provider = %profile.provider.as_str(),
+                    "First-time social sign-up rejected: invite code required"
+                );
+                return Err(AppError::SocialAuthRegistrationClosed);
+            }
+
+            // Gate disabled (public launch): create the new social user.
+            let default_role_ids = crate::services::role_service::get_default_role_ids(db).await?;
+            new_user.role_ids = default_role_ids;
+
+            users
+                .insert_one(&new_user)
+                .await
+                .map_err(map_social_link_error)?;
             tracing::info!(
+                user_id = %new_user.id,
                 provider = %profile.provider.as_str(),
-                "First-time social sign-up rejected: invite code required"
+                "Social user created"
             );
-            Err(AppError::SocialAuthRegistrationClosed)
+            Ok(new_user)
         }
     }
 }
@@ -765,6 +788,7 @@ mod tests {
             channel_relay_callback_timeout_secs: 30,
             channel_relay_max_bots_per_user: 5,
             channel_relay_message_ttl_days: 30,
+            invite_code_required: true,
         }
     }
 

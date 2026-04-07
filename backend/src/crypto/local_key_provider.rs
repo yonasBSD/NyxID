@@ -333,6 +333,7 @@ mod tests {
             channel_relay_callback_timeout_secs: 30,
             channel_relay_max_bots_per_user: 5,
             channel_relay_message_ttl_days: 30,
+            invite_code_required: true,
         };
 
         let provider = LocalKeyProvider::from_config(&config);

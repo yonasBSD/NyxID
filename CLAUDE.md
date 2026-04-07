@@ -347,6 +347,9 @@ NODE_MAX_STREAM_DURATION_SECS=300      # Maximum duration for streaming proxy re
 NODE_HMAC_SIGNING_ENABLED=true         # Enable HMAC request signing for node proxy (default: true)
 WS_PASSTHROUGH_MAX_CONNECTIONS=200     # Maximum concurrent WebSocket passthrough connections (default: 200)
 
+# Registration gate (issue #179)
+INVITE_CODE_REQUIRED=true              # Gate new-user registration behind invite codes (default: true). Set to false for public launch.
+
 # Optional
 GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET
 GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET

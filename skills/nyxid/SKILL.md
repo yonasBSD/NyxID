@@ -41,7 +41,7 @@ nyxid login --base-url https://nyx-api.chrono-ai.fun
 
 The CLI stores tokens at `~/.nyxid/` and auto-refreshes them. The base URL is saved on login -- all subsequent commands use it automatically.
 
-> **Registration requires an invite code.** NyxID gates new accounts to control signup. If the user does not yet have an account, they need an invite code from an admin. Register via the web UI, or from the CLI:
+> **Registration may require an invite code.** NyxID instances can gate new accounts behind invite codes (controlled by the backend `INVITE_CODE_REQUIRED` env var, default `true`). When enabled, users need a code from an admin and can register via the web UI or the CLI:
 >
 > ```bash
 > nyxid register --base-url https://nyx-api.chrono-ai.fun \
@@ -49,7 +49,7 @@ The CLI stores tokens at `~/.nyxid/` and auto-refreshes them. The base URL is sa
 >   --invite-code NYX-XXXXXXXX
 > ```
 >
-> Social login (Google, GitHub, Apple) only works for **existing** users -- first-time social sign-ups are blocked. Users must register with email + invite code first, then link a social provider afterwards if they wish.
+> When the gate is enabled, social login (Google, GitHub, Apple) only works for **existing** users -- first-time social sign-ups are blocked. Users must register with email + invite code first, then link a social provider afterwards by signing in with the same email. When the gate is disabled (public-launch mode), both email registration and first-time social sign-ups work without an invite code.
 
 ## Updating
 
@@ -717,6 +717,7 @@ Notes for admins helping new users:
 - `list` shows `used_count/max_uses`, active state, and the per-redemption `usages` array (who used it, when).
 - Deactivation is immediate and cannot be undone -- create a new code if the user needs another attempt.
 - Create and deactivate are audited (`admin_invite_code_create`, `admin_invite_code_deactivate`) and visible in `nyxid` audit tooling.
+- **Turning the gate off entirely:** set `INVITE_CODE_REQUIRED=false` in the backend environment and restart the server. Public registration then works without a code and first-time social sign-ups succeed normally. Set it back to `true` (or unset it) to re-enable the gate.
 
 
 ## MCP Configuration

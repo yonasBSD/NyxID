@@ -341,8 +341,10 @@ pub async fn callback(
                 redirect_with_error(&redirect_target, "social_auth_profile", secure, domain)
             })?;
 
-    // Find or create user
-    let user = social_auth_service::find_or_create_user(&state.db, &profile)
+    // Find or create user. Gate first-time social sign-ups behind the same
+    // invite-code flag that controls email/password registration.
+    let allow_new_users = !state.config.invite_code_required;
+    let user = social_auth_service::find_or_create_user(&state.db, &profile, allow_new_users)
         .await
         .map_err(|e| {
             tracing::warn!(error = %e, "Social auth find_or_create_user failed");
@@ -616,8 +618,10 @@ pub async fn apple_callback(
         };
     }
 
-    // Find or create user (same as Google/GitHub flow)
-    let user = social_auth_service::find_or_create_user(&state.db, &profile)
+    // Find or create user (same as Google/GitHub flow). Honor the
+    // invite-code gate for first-time social sign-ups.
+    let allow_new_users = !state.config.invite_code_required;
+    let user = social_auth_service::find_or_create_user(&state.db, &profile, allow_new_users)
         .await
         .map_err(|e| {
             let error_key = match &e {
