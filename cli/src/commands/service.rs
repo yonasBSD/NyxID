@@ -83,6 +83,12 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             }
 
             let mut body = serde_json::Map::new();
+            // Effective auth method + key name used to generate a
+            // context-aware credential prompt (e.g. "Enter app_secret:" for
+            // Lark bot body auth instead of a generic "API key" label).
+            // Assigned in both the `custom` and catalog branches below.
+            let effective_auth_method: String;
+            let effective_auth_key_name: String;
 
             if custom {
                 let label_val = match label {
@@ -96,31 +102,56 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 let method = match auth_method {
                     Some(m) => m,
                     None => prompt_line_default(
-                        "Auth method [bearer/header/query/path/basic]: ",
+                        "Auth method [bearer/header/query/path/basic/body/bot_bearer]: ",
                         "bearer",
                     )?,
                 };
-                let key_name = match auth_key_name {
-                    Some(k) => k,
-                    None => prompt_line_default("Auth key name: ", "Authorization")?,
+                // Default key name depends on method; `body` wants `app_secret`,
+                // header wants `X-API-Key`, etc. `bot_bearer` is a fixed
+                // `Authorization: Bot <token>` format so we don't prompt.
+                let key_name = if method == "bot_bearer" {
+                    auth_key_name.unwrap_or_else(|| "Authorization".to_string())
+                } else {
+                    match auth_key_name {
+                        Some(k) => k,
+                        None => {
+                            let default_key = default_auth_key_name(&method);
+                            let label = if method == "body" {
+                                "Body field name: "
+                            } else {
+                                "Auth key name: "
+                            };
+                            prompt_line_default(&format!("{label}[{default_key}] "), default_key)?
+                        }
+                    }
                 };
 
                 body.insert("label".into(), Value::String(label_val));
                 body.insert("endpoint_url".into(), Value::String(endpoint));
-                body.insert("auth_method".into(), Value::String(method));
-                body.insert("auth_key_name".into(), Value::String(key_name));
+                body.insert("auth_method".into(), Value::String(method.clone()));
+                body.insert("auth_key_name".into(), Value::String(key_name.clone()));
+
+                effective_auth_method = method;
+                effective_auth_key_name = key_name;
             } else {
                 let slug = slug.ok_or_else(|| {
                     anyhow::anyhow!("Provide a catalog slug or use --custom for a custom endpoint")
                 })?;
                 body.insert("service_slug".into(), Value::String(slug.clone()));
 
-                // Fetch catalog entry to validate slug and get default label
+                // Fetch catalog entry to validate slug and pull defaults
+                // (name, auth method, auth key name) so later prompts can
+                // adapt to what the service actually expects.
                 let catalog_entry = api.get_value(&format!("/catalog/{slug}")).await;
-                let catalog_name = match &catalog_entry {
-                    Ok(entry) => entry["name"].as_str().map(|s| s.to_string()),
-                    Err(_) => None,
-                };
+                let (catalog_name, catalog_auth_method, catalog_auth_key_name) =
+                    match &catalog_entry {
+                        Ok(entry) => (
+                            entry["name"].as_str().map(|s| s.to_string()),
+                            entry["auth_method"].as_str().map(|s| s.to_string()),
+                            entry["auth_key_name"].as_str().map(|s| s.to_string()),
+                        ),
+                        Err(_) => (None, None, None),
+                    };
 
                 if catalog_name.is_none() {
                     eprintln!("Service '{slug}' not found in catalog.");
@@ -140,12 +171,23 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 if let Some(url) = endpoint_url {
                     body.insert("endpoint_url".into(), Value::String(url));
                 }
-                if let Some(method) = auth_method {
-                    body.insert("auth_method".into(), Value::String(method));
+                if let Some(ref method) = auth_method {
+                    body.insert("auth_method".into(), Value::String(method.clone()));
                 }
-                if let Some(key_name) = auth_key_name {
-                    body.insert("auth_key_name".into(), Value::String(key_name));
+                if let Some(ref key_name) = auth_key_name {
+                    body.insert("auth_key_name".into(), Value::String(key_name.clone()));
                 }
+
+                // Effective values: flag override wins, otherwise inherit
+                // from the catalog entry we just fetched.
+                effective_auth_method = auth_method
+                    .clone()
+                    .or(catalog_auth_method)
+                    .unwrap_or_default();
+                effective_auth_key_name = auth_key_name
+                    .clone()
+                    .or(catalog_auth_key_name)
+                    .unwrap_or_default();
             }
 
             if let Some(ref node) = via_node {
@@ -161,7 +203,9 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                     std::env::var(env_var)
                         .with_context(|| format!("Environment variable {env_var} not set"))?
                 } else {
-                    rpassword::prompt_password("Enter API key/credential: ")?
+                    let prompt =
+                        credential_prompt_label(&effective_auth_method, &effective_auth_key_name);
+                    rpassword::prompt_password(&prompt)?
                 };
                 if cred_value.is_empty() {
                     bail!(
@@ -880,5 +924,86 @@ fn prompt_line_default(prompt: &str, default: &str) -> Result<String> {
         Ok(default.to_string())
     } else {
         Ok(trimmed.to_string())
+    }
+}
+
+/// Default auth key name for a given auth method. Mirrors the frontend
+/// defaults in `add-key-dialog.tsx` so CLI and UI stay in sync.
+fn default_auth_key_name(method: &str) -> &'static str {
+    match method {
+        "header" => "X-API-Key",
+        "query" => "key",
+        "path" => "bot",
+        "body" => "app_secret",
+        _ => "Authorization",
+    }
+}
+
+/// Derive a credential input prompt from the auth method and key name so
+/// users know what value they're entering (e.g. "Enter app_secret:" for
+/// Lark body auth instead of a generic "API key/credential" label).
+fn credential_prompt_label(auth_method: &str, auth_key_name: &str) -> String {
+    match auth_method {
+        "bot_bearer" => "Enter bot token: ".to_string(),
+        "basic" => "Enter username:password: ".to_string(),
+        "body" => {
+            let field = auth_key_name.trim();
+            if field.is_empty() {
+                "Enter credential: ".to_string()
+            } else {
+                format!("Enter {field}: ")
+            }
+        }
+        _ => "Enter API key/credential: ".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_auth_key_name_maps_known_methods() {
+        assert_eq!(default_auth_key_name("bearer"), "Authorization");
+        assert_eq!(default_auth_key_name("bot_bearer"), "Authorization");
+        assert_eq!(default_auth_key_name("header"), "X-API-Key");
+        assert_eq!(default_auth_key_name("query"), "key");
+        assert_eq!(default_auth_key_name("path"), "bot");
+        assert_eq!(default_auth_key_name("body"), "app_secret");
+        assert_eq!(default_auth_key_name("unknown"), "Authorization");
+    }
+
+    #[test]
+    fn credential_prompt_reflects_auth_method() {
+        assert_eq!(
+            credential_prompt_label("bearer", "Authorization"),
+            "Enter API key/credential: "
+        );
+        assert_eq!(
+            credential_prompt_label("bot_bearer", "Authorization"),
+            "Enter bot token: "
+        );
+        assert_eq!(
+            credential_prompt_label("basic", "Authorization"),
+            "Enter username:password: "
+        );
+    }
+
+    #[test]
+    fn credential_prompt_body_uses_key_name() {
+        assert_eq!(
+            credential_prompt_label("body", "app_secret"),
+            "Enter app_secret: "
+        );
+        assert_eq!(
+            credential_prompt_label("body", "client_secret"),
+            "Enter client_secret: "
+        );
+    }
+
+    #[test]
+    fn credential_prompt_body_without_key_name_falls_back() {
+        assert_eq!(credential_prompt_label("body", ""), "Enter credential: ");
+        assert_eq!(credential_prompt_label("body", "   "), "Enter credential: ");
     }
 }

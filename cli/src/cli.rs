@@ -399,7 +399,8 @@ pub enum ServiceCommands {
         /// Auth method: bearer, bot_bearer (Discord-style "Bot " prefix), header, query, path, basic, body (inject credential into JSON body), none
         #[arg(long)]
         auth_method: Option<String>,
-        /// Auth key name (e.g., Authorization, X-API-Key)
+        /// Auth key name (e.g. Authorization, X-API-Key, or for body auth
+        /// the JSON field name like `app_secret`)
         #[arg(long)]
         auth_key_name: Option<String>,
         /// Credential value (hidden from help -- use --credential-env instead)
