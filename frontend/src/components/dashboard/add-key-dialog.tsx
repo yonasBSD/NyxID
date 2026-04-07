@@ -79,8 +79,57 @@ const AUTH_METHOD_DEFAULTS: Record<string, string> = {
   basic: "Authorization",
   oidc: "Authorization",
   oauth2: "Authorization",
+  body: "app_secret",
+  bot_bearer: "Authorization",
   none: "",
 };
+
+// Derive a user-friendly credential field label/placeholder from the auth
+// method + key name. Prevents confusing "API Key / Credential" + "sk-..." for
+// body-injected credentials (e.g. Lark's `app_secret`) or Discord bot tokens.
+function getCredentialFieldMeta(
+  authMethod: string,
+  authKeyName: string,
+): { readonly label: string; readonly placeholder: string } {
+  if (authMethod === "bot_bearer") {
+    return { label: "Bot Token", placeholder: "Discord bot token" };
+  }
+  if (authMethod === "body") {
+    const fieldName = authKeyName.trim();
+    if (fieldName) {
+      const pretty = fieldName
+        .split(/[_\-\s]+/)
+        .filter(Boolean)
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(" ");
+      return { label: pretty || "Credential", placeholder: `Enter ${fieldName}` };
+    }
+    return { label: "Credential", placeholder: "Enter credential value" };
+  }
+  if (authMethod === "basic") {
+    return { label: "Username:Password", placeholder: "user:pass" };
+  }
+  return { label: "API Key / Credential", placeholder: "sk-..." };
+}
+
+// Auth key name input should only be shown when the user needs to pick a
+// header/query/body field name. `bot_bearer` is a fixed Authorization format
+// and OAuth flows handle their own token storage.
+function shouldShowAuthKeyName(authMethod: string): boolean {
+  return (
+    authMethod !== "none" &&
+    authMethod !== "oidc" &&
+    authMethod !== "oauth2" &&
+    authMethod !== "bot_bearer"
+  );
+}
+
+function getAuthKeyNameLabel(authMethod: string): string {
+  if (authMethod === "body") return "Body Field Name";
+  if (authMethod === "header") return "Header Name";
+  if (authMethod === "query") return "Query Parameter";
+  return "Auth Key Name";
+}
 
 const INITIAL_FORM: FormState = {
   credential: "",
@@ -388,6 +437,10 @@ function KeyForm({
     ? form.authMethod !== "none"
     : (catalogEntry?.auth_method ?? "bearer") !== "none";
   const requiresEndpoint = isCustom || (catalogEntry?.requires_gateway_url ?? false);
+  const credentialMeta = getCredentialFieldMeta(
+    form.authMethod,
+    form.authKeyName,
+  );
 
   return (
     <div className="space-y-4">
@@ -449,14 +502,16 @@ function KeyForm({
 
         <div className="space-y-1.5">
           <Label htmlFor="add-key-credential">
-            API Key / Credential
+            {credentialMeta.label}
             {requiresCredential && <span className="text-destructive"> *</span>}
           </Label>
           <Input
             id="add-key-credential"
             type={requiresCredential ? "password" : "text"}
             placeholder={
-              requiresCredential ? "sk-..." : "No credential required for this service"
+              requiresCredential
+                ? credentialMeta.placeholder
+                : "No credential required for this service"
             }
             value={requiresCredential ? form.credential : ""}
             onChange={(e) => onChange({ credential: e.target.value })}
@@ -466,6 +521,17 @@ function KeyForm({
           {!requiresCredential && (
             <p className="text-[11px] text-muted-foreground">
               This service can be used without storing a user credential in NyxID.
+            </p>
+          )}
+          {requiresCredential && form.authMethod === "body" && (
+            <p className="text-[11px] text-muted-foreground">
+              NyxID injects this value into the request JSON body under the
+              field name below.
+            </p>
+          )}
+          {requiresCredential && form.authMethod === "bot_bearer" && (
+            <p className="text-[11px] text-muted-foreground">
+              Sent as <code className="font-mono">Authorization: Bot &lt;token&gt;</code>.
             </p>
           )}
         </div>
@@ -513,25 +579,29 @@ function KeyForm({
                   <SelectItem value="query">Query Parameter</SelectItem>
                   <SelectItem value="path">Path Prefix</SelectItem>
                   <SelectItem value="basic">Basic Auth</SelectItem>
+                  <SelectItem value="body">JSON Body Injection</SelectItem>
+                  <SelectItem value="bot_bearer">Bot Token (Discord)</SelectItem>
                   <SelectItem value="oauth2">OAuth 2.0</SelectItem>
                   <SelectItem value="oidc">OIDC</SelectItem>
                   <SelectItem value="none">None</SelectItem>
                 </SelectContent>
               </Select>
             </div>
-            {form.authMethod !== "none" &&
-              form.authMethod !== "oidc" &&
-              form.authMethod !== "oauth2" && (
-                <div className="space-y-1.5">
-                  <Label htmlFor="add-key-auth-key">Auth Key Name</Label>
-                  <Input
-                    id="add-key-auth-key"
-                    placeholder="Authorization"
-                    value={form.authKeyName}
-                    onChange={(e) => onChange({ authKeyName: e.target.value })}
-                  />
-                </div>
-              )}
+            {shouldShowAuthKeyName(form.authMethod) && (
+              <div className="space-y-1.5">
+                <Label htmlFor="add-key-auth-key">
+                  {getAuthKeyNameLabel(form.authMethod)}
+                </Label>
+                <Input
+                  id="add-key-auth-key"
+                  placeholder={
+                    form.authMethod === "body" ? "app_secret" : "Authorization"
+                  }
+                  value={form.authKeyName}
+                  onChange={(e) => onChange({ authKeyName: e.target.value })}
+                />
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -728,27 +798,31 @@ function NodeSetupStep({
                     <SelectItem value="query">Query Parameter</SelectItem>
                     <SelectItem value="path">Path Prefix</SelectItem>
                     <SelectItem value="basic">Basic Auth</SelectItem>
+                    <SelectItem value="body">JSON Body Injection</SelectItem>
+                    <SelectItem value="bot_bearer">Bot Token (Discord)</SelectItem>
                     <SelectItem value="oauth2">OAuth 2.0</SelectItem>
                     <SelectItem value="oidc">OIDC</SelectItem>
                     <SelectItem value="none">None</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
-              {form.authMethod !== "none" &&
-                form.authMethod !== "oidc" &&
-                form.authMethod !== "oauth2" && (
-                  <div className="space-y-1.5">
-                    <Label htmlFor="node-auth-key">Auth Key Name</Label>
-                    <Input
-                      id="node-auth-key"
-                      placeholder="Authorization"
-                      value={form.authKeyName}
-                      onChange={(e) =>
-                        onChange({ authKeyName: e.target.value })
-                      }
-                    />
-                  </div>
-                )}
+              {shouldShowAuthKeyName(form.authMethod) && (
+                <div className="space-y-1.5">
+                  <Label htmlFor="node-auth-key">
+                    {getAuthKeyNameLabel(form.authMethod)}
+                  </Label>
+                  <Input
+                    id="node-auth-key"
+                    placeholder={
+                      form.authMethod === "body" ? "app_secret" : "Authorization"
+                    }
+                    value={form.authKeyName}
+                    onChange={(e) =>
+                      onChange({ authKeyName: e.target.value })
+                    }
+                  />
+                </div>
+              )}
             </div>
           )}
         </div>
