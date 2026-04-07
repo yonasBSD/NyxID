@@ -18,6 +18,8 @@ describe("constants", () => {
       "oauth2",
       "basic",
       "bearer",
+      "bot_bearer",
+      "body",
       "oidc",
     ]);
   });
@@ -107,9 +109,28 @@ describe("createServiceSchema", () => {
       const result = createServiceSchema.safeParse({
         ...validData,
         auth_type: authType,
+        // `body` auth requires auth_key_name to identify the JSON field.
+        auth_key_name: authType === "body" ? "app_secret" : undefined,
       });
       expect(result.success).toBe(true);
     }
+  });
+
+  it("rejects body auth without auth_key_name", () => {
+    const result = createServiceSchema.safeParse({
+      ...validData,
+      auth_type: "body",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("accepts body auth with auth_key_name", () => {
+    const result = createServiceSchema.safeParse({
+      ...validData,
+      auth_type: "body",
+      auth_key_name: "app_secret",
+    });
+    expect(result.success).toBe(true);
   });
 
   it("rejects description over 500 characters", () => {

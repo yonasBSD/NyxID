@@ -72,6 +72,7 @@ export function ServiceListPage() {
       service_type: "http",
       base_url: "",
       auth_type: "api_key",
+      auth_key_name: "",
       service_category: "connection",
       host: "",
       port: "22",
@@ -82,6 +83,7 @@ export function ServiceListPage() {
   });
 
   const serviceType = form.watch("service_type");
+  const authType = form.watch("auth_type");
   const certificateAuthEnabled =
     form.watch("certificate_auth_enabled") ?? false;
 
@@ -115,6 +117,7 @@ export function ServiceListPage() {
               visibility: data.visibility ?? "public",
               base_url: data.base_url ?? "",
               auth_type: data.auth_type ?? "api_key",
+              auth_key_name: data.auth_key_name || undefined,
               service_category: data.service_category ?? "connection",
             });
 
@@ -395,6 +398,11 @@ export function ServiceListPage() {
                               ) {
                                 form.setValue("service_category", "connection");
                               }
+                              // Clear auth_key_name when switching away from
+                              // body auth so stale values don't carry over.
+                              if (value !== "body") {
+                                form.setValue("auth_key_name", "");
+                              }
                             }}
                           >
                             <FormControl>
@@ -410,10 +418,53 @@ export function ServiceListPage() {
                               ))}
                             </SelectContent>
                           </Select>
+                          {authType === "body" && (
+                            <p className="text-xs text-muted-foreground">
+                              NyxID will merge{" "}
+                              <code>{`{<field>: <credential>}`}</code> into the
+                              JSON request body. Used for Lark/Feishu tenant
+                              token exchange where{" "}
+                              <code>app_secret</code> must travel in the body.
+                            </p>
+                          )}
+                          {authType === "bot_bearer" && (
+                            <p className="text-xs text-muted-foreground">
+                              Sends{" "}
+                              <code>Authorization: Bot &lt;credential&gt;</code>{" "}
+                              (Discord bot token format -- note the{" "}
+                              <code>Bot</code> prefix, not{" "}
+                              <code>Bearer</code>).
+                            </p>
+                          )}
                           <FormMessage />
                         </FormItem>
                       )}
                     />
+
+                    {authType === "body" && (
+                      <FormField
+                        control={form.control}
+                        name="auth_key_name"
+                        render={({ field }) => (
+                          <FormItem>
+                            <FormLabel>Body Field Name</FormLabel>
+                            <FormControl>
+                              <Input
+                                placeholder="app_secret"
+                                {...field}
+                                value={field.value ?? ""}
+                              />
+                            </FormControl>
+                            <p className="text-xs text-muted-foreground">
+                              The JSON field where the credential will be
+                              injected. For Lark/Feishu use{" "}
+                              <code>app_secret</code>.
+                            </p>
+                            <FormMessage />
+                          </FormItem>
+                        )}
+                      />
+                    )}
 
                     {form.watch("auth_type") !== "oidc" &&
                       form.watch("auth_type") !== "none" && (

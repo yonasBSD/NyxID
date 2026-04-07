@@ -528,6 +528,7 @@ pub async fn create_service(
                 .clone()
                 .unwrap_or_else(|| match auth_method.as_str() {
                     "bearer" => "Authorization".to_string(),
+                    "bot_bearer" => "Authorization".to_string(),
                     "basic" => "Authorization".to_string(),
                     "query" => "api_key".to_string(),
                     "none" => String::new(),
@@ -536,12 +537,33 @@ pub async fn create_service(
 
         let credential = body.credential.clone().unwrap_or_default();
 
-        let valid_methods = ["header", "bearer", "query", "basic", "oidc", "none"];
+        let valid_methods = [
+            "header",
+            "bearer",
+            "bot_bearer",
+            "query",
+            "basic",
+            "body",
+            "oidc",
+            "none",
+        ];
         if !valid_methods.contains(&auth_method.as_str()) {
             return Err(AppError::ValidationError(format!(
                 "auth_method must be one of: {}",
                 valid_methods.join(", ")
             )));
+        }
+
+        // `body` auth has no sensible default for the field name -- the
+        // proxy needs to know which key to inject into the JSON payload.
+        // Fail at creation time instead of surfacing as a 500 on the first
+        // proxied request.
+        if auth_method == "body" && auth_key_name.is_empty() {
+            return Err(AppError::ValidationError(
+                "auth_key_name is required when auth_method is 'body' \
+                 (e.g. 'app_secret' for Lark tenant token exchange)"
+                    .to_string(),
+            ));
         }
 
         validate_base_url(base_url)?;

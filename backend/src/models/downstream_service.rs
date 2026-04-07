@@ -61,9 +61,18 @@ pub struct DownstreamService {
     /// "public" | "private" -- controls who can see this service in listings
     #[serde(default = "default_visibility")]
     pub visibility: String,
-    /// How credentials are injected: "header", "query", "body"
+    /// How credentials are injected. Valid values:
+    /// - `bearer`: `Authorization: Bearer <credential>`
+    /// - `bot_bearer`: `Authorization: Bot <credential>` (Discord-style)
+    /// - `header`: custom header named by `auth_key_name`
+    /// - `query`: URL query parameter named by `auth_key_name`
+    /// - `basic`: HTTP Basic auth, credential is `username:password`
+    /// - `body`: merge `{<auth_key_name>: <credential>}` into JSON request body
+    /// - `path`: inject credential into URL path (Telegram bot token style)
+    /// - `none`: no credential injection
     pub auth_method: String,
-    /// Header name or query param name for the credential
+    /// Header name, query param name, body field name, or path placeholder
+    /// for the credential (depends on `auth_method`).
     pub auth_key_name: String,
     /// Encrypted master credential for this service
     #[serde(with = "crate::models::bson_bytes::required")]
