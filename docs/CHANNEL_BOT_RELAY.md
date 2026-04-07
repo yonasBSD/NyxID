@@ -1,5 +1,17 @@
 # Channel Bot Relay Design
 
+> ## DEPRECATED
+>
+> Channel mode is deprecated as of 2026-04-07. See ChronoAIProject/NyxID#191 for the rationale.
+>
+> The recommended path for bot integrations is now:
+>
+> 1. **Bot credentials**: Use standard service connections (`api-telegram-bot`, `api-lark-bot`, `api-feishu-bot`, `api-discord-bot`). NyxID stores the bot token / app secret and injects it into outbound API calls -- the same model as any other proxied service.
+>
+> 2. **Inbound chat runtime**: Handled by the calling agent (Aevatar, custom backend, etc.). NyxID does not own webhook lifecycle, conversation routing, or message storage.
+>
+> The code in this design document still works but is no longer being iterated. New features (Lark `body` auth, Discord `bot_bearer` auth, etc.) ship under the standard service connection path. This document is preserved for reference.
+
 ## Overview
 
 NyxID Channel Bot Relay turns NyxID into a **multi-platform messaging gateway**. Users register their own bots (Telegram, Discord, Lark, Feishu), NyxID receives messages via platform webhooks, normalizes them into a common format, routes each message to the correct AI agent's callback URL, and relays the agent's response back to the chat.

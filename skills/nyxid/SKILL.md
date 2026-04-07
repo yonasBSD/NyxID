@@ -514,7 +514,52 @@ nyxid notification update --approval-push true         # enable push notificatio
 nyxid notification telegram-link                       # link telegram account
 ```
 
-## Channel Bot Relay
+## Bot-Capable Service Connections
+
+NyxID treats messaging platform bots as standard service connections. The credentials live in the same place as any other service (encrypted, scoped, audited) and outbound bot API calls go through the regular `/api/v1/proxy/s/{slug}/{path}` proxy. Inbound webhook handling is the responsibility of the calling agent runtime (Aevatar, custom backend, etc.) -- NyxID does not own chat runtime.
+
+```bash
+# Telegram bot (path-injected token)
+nyxid service add api-telegram-bot
+# CLI prompts for the bot token (from @BotFather)
+# Then call: POST /api/v1/proxy/s/api-telegram-bot/bot{token}/sendMessage
+# (the proxy injects the token into the URL path automatically)
+
+# Lark bot (tenant token exchange via body injection)
+nyxid service add api-lark-bot
+# CLI prompts for app_secret. Then to get a tenant_access_token:
+nyxid proxy request api-lark-bot /open-apis/auth/v3/tenant_access_token/internal \
+  -m POST -d '{"app_id":"cli_xxx"}'
+# NyxID merges {app_secret: "..."} into the body server-side. Returns a
+# 2-hour tenant_access_token which the caller caches and uses as a Bearer
+# token for subsequent Lark API calls. Your app_secret never leaves NyxID.
+
+# Feishu bot (China region — same as Lark Bot)
+nyxid service add api-feishu-bot
+
+# Discord bot (Bot prefix in Authorization header, persistent token)
+nyxid service add api-discord-bot
+# CLI prompts for the bot token. Then call:
+nyxid proxy request api-discord-bot /channels/{channel_id}/messages \
+  -m POST -d '{"content":"hello"}'
+# NyxID adds `Authorization: Bot <your_token>` automatically.
+```
+
+### Picking the right service for the job
+
+| Slug | Purpose |
+|---|---|
+| `api-lark` | Lark API as a logged-in user (OAuth) |
+| `api-lark-bot` | Lark API as a bot (tenant token exchange) |
+| `api-feishu` | Feishu API as a logged-in user (OAuth) |
+| `api-feishu-bot` | Feishu API as a bot (tenant token exchange) |
+| `api-telegram-bot` | Telegram Bot API |
+| `api-discord` | Discord API as a logged-in user (OAuth) |
+| `api-discord-bot` | Discord API as a bot (persistent bot token) |
+
+## Channel Bot Relay (DEPRECATED)
+
+> **Deprecated.** Channel mode is being phased out (see ChronoAIProject/NyxID#191). Use the bot-capable service connections above for credentials, and let your agent runtime handle inbound webhooks. This section is kept for users still on the old flow.
 
 NyxID can bridge messaging platforms (Telegram, Discord, Lark, Feishu) to AI agent callback URLs. Users register their own bots, configure conversation-to-agent routing, and NyxID handles webhook reception, message normalization, and reply delivery.
 

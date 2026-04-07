@@ -110,7 +110,7 @@ pub enum Commands {
     },
     /// Update the CLI and installed skills
     Update(UpdateArgs),
-    /// Manage channel bot relay (messaging platform bots)
+    /// [DEPRECATED] Manage channel bot relay. Use `nyxid service add api-telegram-bot` (or api-lark-bot/api-feishu-bot/api-discord-bot) instead. See #191.
     ChannelBot {
         #[command(subcommand)]
         command: ChannelBotCommands,
@@ -396,7 +396,7 @@ pub enum ServiceCommands {
         /// Label for this service
         #[arg(long)]
         label: Option<String>,
-        /// Auth method (bearer, header, query, path, basic)
+        /// Auth method: bearer, bot_bearer (Discord-style "Bot " prefix), header, query, path, basic, body (inject credential into JSON body), none
         #[arg(long)]
         auth_method: Option<String>,
         /// Auth key name (e.g., Authorization, X-API-Key)

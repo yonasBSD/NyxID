@@ -37,7 +37,7 @@ This document is a reference for AI agents (Claude, Codex, ChatGPT, Gemini, etc.
 22. [Common Pitfalls](#22-common-pitfalls)
 23. [NyxID CLI](#23-nyxid-cli)
 24. [Using NyxID in OpenClaw](#24-using-nyxid-in-openclaw)
-25. [Channel Bot Relay](#25-channel-bot-relay)
+25. [Channel Bot Relay](#25-channel-bot-relay-deprecated) (DEPRECATED)
 
 ---
 
@@ -2984,7 +2984,9 @@ See [`docs/OPENCLAW_INTEGRATION.md`](OPENCLAW_INTEGRATION.md) for the full integ
 
 ---
 
-## 25. Channel Bot Relay
+## 25. Channel Bot Relay (DEPRECATED)
+
+> **Deprecated.** Channel mode is being phased out -- see ChronoAIProject/NyxID#191. The recommended path is to register bots as standard service connections (`api-telegram-bot`, `api-lark-bot`, `api-feishu-bot`, `api-discord-bot`) and let your agent runtime handle inbound webhooks. NyxID's job is credential brokering, not chat runtime. This section documents the legacy flow for users still on it.
 
 NyxID acts as a multi-platform messaging gateway. Users register their own bots (Telegram, Discord, Lark, Feishu), and NyxID receives messages via platform webhooks, routes each message to the correct AI agent's callback URL, and relays the agent's response back to the chat.
 

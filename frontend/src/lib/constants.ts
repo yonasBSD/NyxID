@@ -14,6 +14,8 @@ export const AUTH_TYPE_LABELS: Readonly<Record<string, string>> = {
   oauth2: "OAuth 2.0",
   basic: "Basic Auth",
   bearer: "Bearer Token",
+  bot_bearer: "Bot Token (Discord)",
+  body: "JSON Body Injection",
   oidc: "OIDC / SSO",
   ssh: "SSH Tunnel",
   header: "API Key",

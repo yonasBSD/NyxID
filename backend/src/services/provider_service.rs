@@ -1190,6 +1190,167 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
+    // 22b. Lark Bot API (API Key — app credentials for tenant token exchange)
+    if !slug_exists!("lark-bot") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "lark-bot".to_string(),
+            name: "Lark Bot API".to_string(),
+            description: Some(
+                "Lark bot tenant credentials. NyxID stores your app_secret and injects \
+                 it into tenant_access_token exchange requests so the secret never leaves \
+                 the server. Used to authenticate as a Lark bot rather than as a user."
+                    .to_string(),
+            ),
+            provider_type: "api_key".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: Some(
+                "Create a custom app at https://open.larksuite.com/app, then copy the \
+                 App Secret. The App ID is sent in your request body when calling \
+                 /auth/v3/tenant_access_token/internal."
+                    .to_string(),
+            ),
+            api_key_url: Some("https://open.larksuite.com/app".to_string()),
+            icon_url: None,
+            documentation_url: Some(
+                "https://open.larksuite.com/document/server-docs/getting-started/api-access-token/auth-v3/tenant_access_token_internal"
+                    .to_string(),
+            ),
+            is_active: true,
+            credential_mode: "user".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "lark-bot", "Seeded default provider: Lark Bot API");
+        seeded_count += 1;
+    }
+
+    // 22c. Feishu Bot API (China region — same as Lark Bot)
+    if !slug_exists!("feishu-bot") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "feishu-bot".to_string(),
+            name: "Feishu Bot API".to_string(),
+            description: Some(
+                "Feishu bot tenant credentials (China region). NyxID stores your app_secret \
+                 and injects it into tenant_access_token exchange requests so the secret \
+                 never leaves the server. Same as Lark Bot but for the China-region domain."
+                    .to_string(),
+            ),
+            provider_type: "api_key".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: Some(
+                "Create a custom app at https://open.feishu.cn/app, then copy the \
+                 App Secret. The App ID is sent in your request body when calling \
+                 /auth/v3/tenant_access_token/internal."
+                    .to_string(),
+            ),
+            api_key_url: Some("https://open.feishu.cn/app".to_string()),
+            icon_url: None,
+            documentation_url: Some(
+                "https://open.feishu.cn/document/server-docs/authentication-management/access-token/tenant_access_token_internal"
+                    .to_string(),
+            ),
+            is_active: true,
+            credential_mode: "user".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(
+            slug = "feishu-bot",
+            "Seeded default provider: Feishu Bot API"
+        );
+        seeded_count += 1;
+    }
+
+    // 22d. Discord Bot API (API Key — persistent bot token)
+    if !slug_exists!("discord-bot") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "discord-bot".to_string(),
+            name: "Discord Bot API".to_string(),
+            description: Some(
+                "Discord bot token credentials. NyxID stores your bot token and injects \
+                 it as `Authorization: Bot <token>` on outbound calls. Tokens are \
+                 persistent and never expire."
+                    .to_string(),
+            ),
+            provider_type: "api_key".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: Some(
+                "Create an application at https://discord.com/developers/applications, \
+                 add a Bot, then copy the Bot Token. Do not include the 'Bot ' prefix -- \
+                 NyxID adds it automatically."
+                    .to_string(),
+            ),
+            api_key_url: Some("https://discord.com/developers/applications".to_string()),
+            icon_url: None,
+            documentation_url: Some(
+                "https://docs.discord.com/developers/reference#authentication".to_string(),
+            ),
+            is_active: true,
+            credential_mode: "user".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(
+            slug = "discord-bot",
+            "Seeded default provider: Discord Bot API"
+        );
+        seeded_count += 1;
+    }
+
     // 23. OpenClaw (API Key + self-hosted gateway URL)
     if !slug_exists!("openclaw") {
         let provider = ProviderConfig {
@@ -1250,6 +1411,17 @@ struct DefaultServiceSeed {
     base_url: &'static str,
     injection_method: &'static str,
     injection_key: &'static str,
+    /// Optional override for the seeded `DownstreamService.auth_method`.
+    /// When `None`, defaults to `"none"` (delegated/provider-managed).
+    /// Set this for services where the user's static credential should be
+    /// injected directly via the proxy `body`/`bot_bearer`/etc. methods.
+    service_auth_method: Option<&'static str>,
+    /// Optional override for `DownstreamService.auth_key_name`. Required
+    /// when `service_auth_method` is `body`, `header`, or `query`.
+    service_auth_key_name: Option<&'static str>,
+    /// Optional rich description for the catalog entry. When `None`, a
+    /// generic description is generated from the service name.
+    description: Option<&'static str>,
 }
 
 const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
@@ -1260,6 +1432,9 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         base_url: "https://api.openai.com/v1",
         injection_method: "bearer",
         injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: None,
     },
     DefaultServiceSeed {
         provider_slug: "openai-codex",
@@ -1268,6 +1443,9 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         base_url: "https://chatgpt.com/backend-api/codex",
         injection_method: "bearer",
         injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: None,
     },
     DefaultServiceSeed {
         provider_slug: "anthropic",
@@ -1276,6 +1454,9 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         base_url: "https://api.anthropic.com/v1",
         injection_method: "header",
         injection_key: "x-api-key",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: None,
     },
     DefaultServiceSeed {
         provider_slug: "google-ai",
@@ -1284,6 +1465,9 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         base_url: "https://generativelanguage.googleapis.com/v1beta",
         injection_method: "query",
         injection_key: "key",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: None,
     },
     DefaultServiceSeed {
         provider_slug: "mistral",
@@ -1292,6 +1476,9 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         base_url: "https://api.mistral.ai/v1",
         injection_method: "bearer",
         injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: None,
     },
     DefaultServiceSeed {
         provider_slug: "cohere",
@@ -1300,6 +1487,9 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         base_url: "https://api.cohere.com/v2",
         injection_method: "bearer",
         injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: None,
     },
     DefaultServiceSeed {
         provider_slug: "deepseek",
@@ -1308,6 +1498,9 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         base_url: "https://api.deepseek.com/v1",
         injection_method: "bearer",
         injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: None,
     },
     DefaultServiceSeed {
         provider_slug: "twitter",
@@ -1316,6 +1509,9 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         base_url: "https://api.x.com/2",
         injection_method: "bearer",
         injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: None,
     },
     DefaultServiceSeed {
         provider_slug: "google",
@@ -1324,6 +1520,9 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         base_url: "https://www.googleapis.com",
         injection_method: "bearer",
         injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: None,
     },
     DefaultServiceSeed {
         provider_slug: "github",
@@ -1332,6 +1531,9 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         base_url: "https://api.github.com",
         injection_method: "bearer",
         injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: None,
     },
     DefaultServiceSeed {
         provider_slug: "facebook",
@@ -1340,6 +1542,9 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         base_url: "https://graph.facebook.com/v21.0",
         injection_method: "bearer",
         injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: None,
     },
     DefaultServiceSeed {
         provider_slug: "discord",
@@ -1348,6 +1553,9 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         base_url: "https://discord.com/api/v10",
         injection_method: "bearer",
         injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: None,
     },
     DefaultServiceSeed {
         provider_slug: "spotify",
@@ -1356,6 +1564,9 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         base_url: "https://api.spotify.com/v1",
         injection_method: "bearer",
         injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: None,
     },
     DefaultServiceSeed {
         provider_slug: "slack",
@@ -1364,6 +1575,9 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         base_url: "https://slack.com/api",
         injection_method: "bearer",
         injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: None,
     },
     DefaultServiceSeed {
         provider_slug: "microsoft",
@@ -1372,6 +1586,9 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         base_url: "https://graph.microsoft.com/v1.0",
         injection_method: "bearer",
         injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: None,
     },
     DefaultServiceSeed {
         provider_slug: "tiktok",
@@ -1380,6 +1597,9 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         base_url: "https://open.tiktokapis.com/v2",
         injection_method: "bearer",
         injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: None,
     },
     DefaultServiceSeed {
         provider_slug: "twitch",
@@ -1388,6 +1608,9 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         base_url: "https://api.twitch.tv/helix",
         injection_method: "bearer",
         injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: None,
     },
     DefaultServiceSeed {
         provider_slug: "reddit",
@@ -1396,14 +1619,41 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         base_url: "https://oauth.reddit.com",
         injection_method: "bearer",
         injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: None,
     },
     DefaultServiceSeed {
         provider_slug: "lark",
         service_slug: "api-lark",
-        service_name: "Lark API",
+        service_name: "Lark API (User OAuth)",
         base_url: "https://open.larksuite.com/open-apis",
         injection_method: "bearer",
         injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "Lark API authenticated as a logged-in user via OAuth 2.0. \
+             Use this when the bot should act on behalf of a real Lark user. \
+             For bot/tenant-level access, use `api-lark-bot` instead.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "lark-bot",
+        service_slug: "api-lark-bot",
+        service_name: "Lark Bot API (Tenant Token Exchange)",
+        base_url: "https://open.larksuite.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: Some("body"),
+        service_auth_key_name: Some("app_secret"),
+        description: Some(
+            "Lark bot tenant credentials. NyxID stores your `app_secret` and injects \
+             it into the request body when you call `/open-apis/auth/v3/tenant_access_token/internal`. \
+             Send `{\"app_id\": \"cli_xxx\"}` and NyxID merges in the secret server-side. \
+             Returns a `tenant_access_token` valid for 2 hours that you cache and use as \
+             a Bearer token for subsequent Lark API calls. Your `app_secret` never leaves NyxID.",
+        ),
     },
     DefaultServiceSeed {
         provider_slug: "telegram-bot",
@@ -1412,14 +1662,61 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         base_url: "https://api.telegram.org",
         injection_method: "path",
         injection_key: "bot",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "Telegram Bot API authenticated by injecting the bot token into the URL path. \
+             Get a token from @BotFather and store it once -- the proxy injects it as `/bot{token}/` \
+             on every request. Use for sending messages, managing webhooks, and any other \
+             Telegram bot operations.",
+        ),
     },
     DefaultServiceSeed {
         provider_slug: "feishu",
         service_slug: "api-feishu",
-        service_name: "Feishu API",
+        service_name: "Feishu API (User OAuth)",
         base_url: "https://open.feishu.cn/open-apis",
         injection_method: "bearer",
         injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "Feishu API authenticated as a logged-in user via OAuth 2.0 (China region). \
+             Use this when the bot should act on behalf of a real Feishu user. \
+             For bot/tenant-level access, use `api-feishu-bot` instead.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "feishu-bot",
+        service_slug: "api-feishu-bot",
+        service_name: "Feishu Bot API (Tenant Token Exchange)",
+        base_url: "https://open.feishu.cn",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: Some("body"),
+        service_auth_key_name: Some("app_secret"),
+        description: Some(
+            "Feishu bot tenant credentials (China region). Same as `api-lark-bot` but for the \
+             Feishu domain. NyxID stores your `app_secret` and injects it into the request body \
+             when you call `/open-apis/auth/v3/tenant_access_token/internal`. \
+             Returns a `tenant_access_token` valid for 2 hours.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "discord-bot",
+        service_slug: "api-discord-bot",
+        service_name: "Discord Bot API",
+        base_url: "https://discord.com/api/v10",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: Some("bot_bearer"),
+        service_auth_key_name: Some("Authorization"),
+        description: Some(
+            "Discord Bot API. NyxID stores your bot token and injects it as \
+             `Authorization: Bot <token>` (note: `Bot`, not `Bearer`) on outbound calls. \
+             Bot tokens are persistent and never expire. Use for sending channel messages, \
+             managing guilds, and any other Discord bot operations.",
+        ),
     },
     DefaultServiceSeed {
         provider_slug: "openclaw",
@@ -1430,6 +1727,9 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         base_url: "https://openclaw-gateway.invalid",
         injection_method: "bearer",
         injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: None,
     },
 ];
 
@@ -1497,16 +1797,28 @@ pub async fn seed_default_services(
 
         let service_id = Uuid::new_v4().to_string();
         let is_llm_service = seed.service_slug.starts_with("llm-");
-        let description = if is_llm_service {
-            format!("{} proxied via NyxID LLM gateway", seed.service_name)
-        } else {
-            format!("{} proxied via NyxID proxy", seed.service_name)
-        };
+        let description = seed.description.map(String::from).unwrap_or_else(|| {
+            if is_llm_service {
+                format!("{} proxied via NyxID LLM gateway", seed.service_name)
+            } else {
+                format!("{} proxied via NyxID proxy", seed.service_name)
+            }
+        });
         let delegation_scope = if is_llm_service {
             "llm:proxy"
         } else {
             "proxy:*"
         };
+
+        // For services with a static auth method (e.g. body, bot_bearer),
+        // the credential is stored on the user's UserService and injected by
+        // the proxy directly. For provider-managed services, auth_method
+        // stays "none" and the requirement record drives injection.
+        let service_auth_method = seed.service_auth_method.unwrap_or("none").to_string();
+        let service_auth_key_name = seed
+            .service_auth_key_name
+            .map(String::from)
+            .unwrap_or_default();
 
         let service = DownstreamService {
             id: service_id.clone(),
@@ -1516,8 +1828,8 @@ pub async fn seed_default_services(
             base_url: seed.base_url.to_string(),
             service_type: "http".to_string(),
             visibility: "public".to_string(),
-            auth_method: "none".to_string(),
-            auth_key_name: String::new(),
+            auth_method: service_auth_method,
+            auth_key_name: service_auth_key_name,
             credential_encrypted: empty_credential,
             auth_type: None,
             openapi_spec_url: None,
@@ -1553,24 +1865,36 @@ pub async fn seed_default_services(
 
         service_col.insert_one(&service).await?;
 
-        // Create the ServiceProviderRequirement linking this service to its provider
-        let requirement = ServiceProviderRequirement {
-            id: Uuid::new_v4().to_string(),
-            service_id: service_id.clone(),
-            provider_config_id: provider.id.clone(),
-            required: true,
-            scopes: None,
-            injection_method: seed.injection_method.to_string(),
-            injection_key: Some(seed.injection_key.to_string()),
-            created_at: now,
-            updated_at: now,
-        };
+        // Direct-auth services (body / bot_bearer / etc.) store the user's
+        // credential on a UserApiKey and inject it at proxy time via the
+        // static `auth_method` on the DownstreamService. They must NOT have
+        // a ServiceProviderRequirement, because the proxy's delegated
+        // credential resolver would then look for a UserProviderToken that
+        // the `nyxid service add` flow never creates, causing a
+        // "Provider connection required" error on every request.
+        let is_direct_auth = seed.service_auth_method.is_some();
 
-        req_col.insert_one(&requirement).await?;
+        if !is_direct_auth {
+            // Create the ServiceProviderRequirement linking this service to its provider
+            let requirement = ServiceProviderRequirement {
+                id: Uuid::new_v4().to_string(),
+                service_id: service_id.clone(),
+                provider_config_id: provider.id.clone(),
+                required: true,
+                scopes: None,
+                injection_method: seed.injection_method.to_string(),
+                injection_key: Some(seed.injection_key.to_string()),
+                created_at: now,
+                updated_at: now,
+            };
+
+            req_col.insert_one(&requirement).await?;
+        }
 
         tracing::info!(
             slug = seed.service_slug,
             provider = seed.provider_slug,
+            direct_auth = is_direct_auth,
             "Seeded default downstream service"
         );
         seeded_count += 1;
@@ -1580,6 +1904,76 @@ pub async fn seed_default_services(
         tracing::info!(
             count = seeded_count,
             "Default downstream service seeding complete"
+        );
+    }
+
+    // Migration: update name + description on existing seeded services
+    // whose description still matches the old auto-generated pattern
+    // ("{name} proxied via NyxID proxy" or "... NyxID LLM gateway").
+    //
+    // This lets existing deployments pick up richer catalog descriptions
+    // without overwriting any user-customized descriptions. The match is
+    // deliberately conservative: we only update records where the stored
+    // description clearly ends with one of the two auto-generated suffixes.
+    const AUTO_PROXY_SUFFIX: &str = " proxied via NyxID proxy";
+    const AUTO_GATEWAY_SUFFIX: &str = " proxied via NyxID LLM gateway";
+
+    let mut migrated_count: u32 = 0;
+    for seed in DEFAULT_SERVICE_SEEDS {
+        let Some(new_description) = seed.description else {
+            continue;
+        };
+
+        // Find the existing service by slug
+        let Some(existing) = service_col
+            .find_one(doc! { "slug": seed.service_slug })
+            .await?
+        else {
+            continue;
+        };
+
+        // Only overwrite if the description looks auto-generated. Empty /
+        // missing descriptions also count as safe to overwrite.
+        let is_auto_generated = match existing.description.as_deref() {
+            None | Some("") => true,
+            Some(d) => d.ends_with(AUTO_PROXY_SUFFIX) || d.ends_with(AUTO_GATEWAY_SUFFIX),
+        };
+
+        if !is_auto_generated {
+            continue;
+        }
+
+        // Skip if both name and description already match (no-op update)
+        if existing.name == seed.service_name
+            && existing.description.as_deref() == Some(new_description)
+        {
+            continue;
+        }
+
+        service_col
+            .update_one(
+                doc! { "_id": &existing.id },
+                doc! {
+                    "$set": {
+                        "name": seed.service_name,
+                        "description": new_description,
+                        "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                    }
+                },
+            )
+            .await?;
+
+        tracing::info!(
+            slug = seed.service_slug,
+            "Migrated catalog service name + description to current seed"
+        );
+        migrated_count += 1;
+    }
+
+    if migrated_count > 0 {
+        tracing::info!(
+            count = migrated_count,
+            "Catalog service description migration complete"
         );
     }
 

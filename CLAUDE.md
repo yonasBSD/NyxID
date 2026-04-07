@@ -273,12 +273,12 @@ All API routes under `/api/v1`:
 - `/api-keys/external` -- user's external API keys / credentials (list, update, delete)
 - `/user-services` -- user's proxy routing config (list, update, delete)
 - `/catalog` -- read-only service catalog for users (list templates, get template by slug, `?include_all=true` for full discovery including system services). Supports `/{slug}/endpoints` for OpenAPI endpoint discovery via hardened spec fetch.
-- `/channel-bots` -- channel bot registration CRUD (register, list, get, delete, verify). Each bot connects a messaging platform (Telegram, Discord, Lark, Feishu) to NyxID's relay.
-- `/channel-conversations` -- conversation-to-agent routing (CRUD). Maps platform conversations to agent API keys with callback URLs. Supports `/{id}/messages` for owner-accessible message history.
-- `/channel-relay/reply` -- agent async reply to a platform conversation (API-key authenticated)
-- `/channel-relay/messages/{conversation_id}` -- message history for agents (API-key authenticated)
-- `/channel-relay/resolve-sender` -- resolve platform sender to NyxID user (API-key authenticated, scoped to owner)
-- `/webhooks/channel/{telegram,discord,lark,feishu}/{bot_id}` -- platform webhook receivers (unauthenticated, signature-verified)
+- `/channel-bots` -- **[DEPRECATED, see #191]** channel bot registration CRUD. Use `nyxid service add api-{telegram,lark,feishu,discord}-bot` for bot credentials instead. Inbound chat runtime should be handled by the calling agent.
+- `/channel-conversations` -- **[DEPRECATED, see #191]** conversation-to-agent routing (CRUD). Maps platform conversations to agent API keys.
+- `/channel-relay/reply` -- **[DEPRECATED, see #191]** agent async reply to a platform conversation
+- `/channel-relay/messages/{conversation_id}` -- **[DEPRECATED, see #191]** message history for agents
+- `/channel-relay/resolve-sender` -- **[DEPRECATED, see #191]** resolve platform sender to NyxID user
+- `/webhooks/channel/{telegram,discord,lark,feishu}/{bot_id}` -- **[DEPRECATED, see #191]** platform webhook receivers
 - `/ssh/{service_id}/certificate` -- issue short-lived SSH user certificate (POST)
 - `/ssh/{service_id}` -- SSH-over-WebSocket tunnel (GET, upgrade)
 - `/ssh/{service_id}/terminal` -- SSH web terminal (GET, upgrade)
