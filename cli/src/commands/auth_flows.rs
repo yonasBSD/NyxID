@@ -24,6 +24,9 @@ pub async fn run_register(args: RegisterArgs) -> Result<()> {
     let mut body = serde_json::json!({
         "email": args.email,
         "password": password,
+        // Normalize to the backend's canonical form so users don't get a
+        // confusing "invalid code" when they type the code in lowercase.
+        "invite_code": args.invite_code.trim().to_uppercase(),
     });
     if let Some(name) = &args.name {
         body["display_name"] = serde_json::Value::String(name.clone());

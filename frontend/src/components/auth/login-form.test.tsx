@@ -68,4 +68,14 @@ describe("LoginForm social error", () => {
     const alert = screen.getByTestId("social-error");
     expect(alert).toHaveTextContent("Your account has been deactivated");
   });
+
+  it("displays the social_auth_registration_closed error message", () => {
+    render(<LoginForm socialError="social_auth_registration_closed" />);
+
+    const alert = screen.getByTestId("social-error");
+    expect(alert).toHaveTextContent(
+      "No NyxID account found for this social login",
+    );
+    expect(alert).toHaveTextContent("invite code");
+  });
 });

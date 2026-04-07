@@ -898,6 +898,17 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    // ── invite_codes ──
+    let invite_codes = db.collection::<mongodb::bson::Document>("invite_codes");
+    invite_codes
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "code": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+
     backfill_downstream_service_types(db).await?;
 
     Ok(())

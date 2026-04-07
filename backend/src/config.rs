@@ -169,6 +169,13 @@ pub struct AppConfig {
     pub channel_relay_max_bots_per_user: u32,
     /// TTL in days for channel messages before automatic expiry (default: 30)
     pub channel_relay_message_ttl_days: u32,
+
+    // Registration gate
+    /// When `true` (default), new-user registration requires a valid invite
+    /// code and first-time social sign-ups are rejected. Set
+    /// `INVITE_CODE_REQUIRED=false` to open public registration — used once
+    /// the product launches publicly. See issue #179.
+    pub invite_code_required: bool,
 }
 
 impl std::fmt::Debug for AppConfig {
@@ -314,6 +321,20 @@ impl std::fmt::Debug for AppConfig {
                 &self.channel_relay_message_ttl_days,
             )
             .finish()
+    }
+}
+
+/// Parse the `INVITE_CODE_REQUIRED` env var.
+///
+/// Defaults to `true` (invite codes required) when the variable is unset or
+/// empty. Accepts the usual boolean-ish spellings case-insensitively.
+fn parse_invite_code_required(raw: Option<String>) -> bool {
+    match raw.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        None => true,
+        Some(v) => !matches!(
+            v.to_ascii_lowercase().as_str(),
+            "false" | "0" | "no" | "off"
+        ),
     }
 }
 
@@ -514,6 +535,8 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(30),
+
+            invite_code_required: parse_invite_code_required(env::var("INVITE_CODE_REQUIRED").ok()),
         }
     }
 
@@ -807,6 +830,7 @@ mod tests {
             channel_relay_callback_timeout_secs: 30,
             channel_relay_max_bots_per_user: 5,
             channel_relay_message_ttl_days: 30,
+            invite_code_required: true,
         }
     }
 
@@ -976,5 +1000,32 @@ mod tests {
     fn validate_ssh_runtime_config_accepts_valid_values() {
         let cfg = make_config("http://localhost:3001", "dev", &"ab".repeat(32));
         cfg.validate_ssh_runtime_config();
+    }
+
+    #[test]
+    fn invite_code_required_defaults_to_true_when_unset() {
+        assert!(parse_invite_code_required(None));
+        assert!(parse_invite_code_required(Some(String::new())));
+        assert!(parse_invite_code_required(Some("   ".to_string())));
+    }
+
+    #[test]
+    fn invite_code_required_false_for_falsy_values() {
+        for v in ["false", "FALSE", "False", "0", "no", "NO", "off", "OFF"] {
+            assert!(
+                !parse_invite_code_required(Some(v.to_string())),
+                "{v} should disable the gate"
+            );
+        }
+    }
+
+    #[test]
+    fn invite_code_required_true_for_truthy_values() {
+        for v in ["true", "TRUE", "1", "yes", "on", "anything-else"] {
+            assert!(
+                parse_invite_code_required(Some(v.to_string())),
+                "{v} should leave the gate enabled"
+            );
+        }
     }
 }

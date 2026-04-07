@@ -117,6 +117,9 @@ pub enum AppError {
     #[error("Social auth: account is deactivated")]
     SocialAuthDeactivated,
 
+    #[error("Social auth: registration closed — invite code required")]
+    SocialAuthRegistrationClosed,
+
     #[error("Consent required")]
     ConsentRequired { consent_url: String },
 
@@ -206,6 +209,7 @@ impl AppError {
             Self::SocialAuthFailed(_) | Self::SocialAuthNoEmail => StatusCode::BAD_REQUEST,
             Self::SocialAuthConflict => StatusCode::CONFLICT,
             Self::SocialAuthDeactivated => StatusCode::FORBIDDEN,
+            Self::SocialAuthRegistrationClosed => StatusCode::FORBIDDEN,
             Self::ConsentRequired { .. } => StatusCode::FORBIDDEN,
             Self::UnsupportedGrantType(_) => StatusCode::BAD_REQUEST,
             Self::ApprovalRequired { .. } => StatusCode::FORBIDDEN,
@@ -261,6 +265,7 @@ impl AppError {
             Self::SocialAuthConflict => 6001,
             Self::SocialAuthNoEmail => 6002,
             Self::SocialAuthDeactivated => 6003,
+            Self::SocialAuthRegistrationClosed => 6006,
             Self::ConsentRequired { .. } => 3003,
             Self::UnsupportedGrantType(_) => 3004,
             Self::ApprovalRequired { .. } => 7000,
@@ -345,6 +350,7 @@ impl AppError {
             Self::SocialAuthConflict => "social_auth_conflict",
             Self::SocialAuthNoEmail => "social_auth_no_email",
             Self::SocialAuthDeactivated => "social_auth_deactivated",
+            Self::SocialAuthRegistrationClosed => "social_auth_registration_closed",
             Self::ConsentRequired { .. } => "consent_required",
             Self::UnsupportedGrantType(_) => "unsupported_grant_type",
             Self::ApprovalRequired { .. } => "approval_required",
@@ -558,6 +564,10 @@ mod tests {
             StatusCode::FORBIDDEN
         );
         assert_eq!(
+            AppError::SocialAuthRegistrationClosed.status_code(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
             AppError::UnsupportedGrantType("x".into()).status_code(),
             StatusCode::BAD_REQUEST
         );
@@ -673,6 +683,7 @@ mod tests {
             AppError::SocialAuthConflict.error_code(),
             AppError::SocialAuthNoEmail.error_code(),
             AppError::SocialAuthDeactivated.error_code(),
+            AppError::SocialAuthRegistrationClosed.error_code(),
             AppError::UnsupportedGrantType("".into()).error_code(),
             AppError::ApprovalRequired {
                 request_id: "".into(),
@@ -800,6 +811,10 @@ mod tests {
         assert_eq!(
             AppError::SocialAuthDeactivated.error_key(),
             "social_auth_deactivated"
+        );
+        assert_eq!(
+            AppError::SocialAuthRegistrationClosed.error_key(),
+            "social_auth_registration_closed"
         );
         assert_eq!(
             AppError::UnsupportedGrantType("".into()).error_key(),

@@ -52,6 +52,7 @@ export function useRegister() {
       email: string;
       password: string;
       name: string;
+      invite_code: string;
     }): Promise<RegisterResponse> => {
       return api.post<RegisterResponse>("/auth/register", credentials);
     },

@@ -127,6 +127,7 @@ pub async fn create_user(
         is_admin,
         role_ids: default_role_ids,
         group_ids: vec![],
+        invite_code_id: None,
         mfa_enabled: false,
         social_provider: None,
         social_provider_id: None,

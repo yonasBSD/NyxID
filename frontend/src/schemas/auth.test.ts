@@ -41,6 +41,7 @@ describe("loginSchema", () => {
 
 describe("registerSchema", () => {
   const validData = {
+    inviteCode: "NYX-TESTCODE",
     name: "John Doe",
     email: "john@example.com",
     password: "Password1",
@@ -110,6 +111,30 @@ describe("registerSchema", () => {
     const result = registerSchema.safeParse({
       ...validData,
       confirmPassword: "Different1",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects empty invite code", () => {
+    const result = registerSchema.safeParse({ ...validData, inviteCode: "" });
+    expect(result.success).toBe(false);
+  });
+
+  it("normalizes invite code to trimmed uppercase", () => {
+    const result = registerSchema.safeParse({
+      ...validData,
+      inviteCode: "  nyx-abc123  ",
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.inviteCode).toBe("NYX-ABC123");
+    }
+  });
+
+  it("rejects invite code that is only whitespace", () => {
+    const result = registerSchema.safeParse({
+      ...validData,
+      inviteCode: "   ",
     });
     expect(result.success).toBe(false);
   });

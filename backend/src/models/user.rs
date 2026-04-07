@@ -24,6 +24,8 @@ pub struct User {
     pub role_ids: Vec<String>,
     #[serde(default)]
     pub group_ids: Vec<String>,
+    #[serde(default)]
+    pub invite_code_id: Option<String>,
     pub mfa_enabled: bool,
     #[serde(default)]
     pub social_provider: Option<String>,
@@ -61,6 +63,7 @@ mod tests {
             is_admin: false,
             role_ids: vec![],
             group_ids: vec![],
+            invite_code_id: None,
             mfa_enabled: false,
             social_provider: None,
             social_provider_id: None,

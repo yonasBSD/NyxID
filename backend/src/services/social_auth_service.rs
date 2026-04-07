@@ -6,7 +6,6 @@ use uuid::Uuid;
 use crate::config::AppConfig;
 use crate::errors::{AppError, AppResult};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
-use crate::services::role_service;
 
 /// Supported social login providers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -477,6 +476,11 @@ enum SocialLoginOutcome {
     /// applies uniformly across all social login entry points.
     LinkToExisting { user: User, update: bson::Document },
     /// No matching user found; create a brand-new account.
+    ///
+    /// `find_or_create_user` only honors this branch when its
+    /// `allow_new_users` argument is `true` (i.e. when the invite-code gate
+    /// is disabled for public launch). Otherwise it rejects the sign-in
+    /// with `SocialAuthRegistrationClosed`.
     CreateNew(User),
 }
 
@@ -560,6 +564,7 @@ fn resolve_social_login(
         is_admin: false,
         role_ids: vec![],
         group_ids: vec![],
+        invite_code_id: None,
         mfa_enabled: false,
         social_provider: Some(profile.provider.as_str().to_string()),
         social_provider_id: Some(profile.provider_id.clone()),
@@ -595,9 +600,14 @@ fn map_social_link_error(e: mongodb::error::Error) -> AppError {
 /// NOTE: The returned `User` struct reflects the state *before* the update.
 /// Only `user.id` should be relied upon from the return value for downstream
 /// operations (e.g. session creation). Profile fields may be stale.
+///
+/// When `allow_new_users` is `false`, first-time social sign-ups are rejected
+/// with `SocialAuthRegistrationClosed`. This mirrors the invite-code gate on
+/// email/password registration — callers should pass `!config.invite_code_required`.
 pub async fn find_or_create_user(
     db: &mongodb::Database,
     profile: &SocialProfile,
+    allow_new_users: bool,
 ) -> AppResult<User> {
     let users = db.collection::<User>(USERS);
 
@@ -636,8 +646,21 @@ pub async fn find_or_create_user(
             Ok(user.clone())
         }
         SocialLoginOutcome::CreateNew(mut new_user) => {
-            // Auto-assign default roles to new social users
-            let default_role_ids = role_service::get_default_role_ids(db).await?;
+            if !allow_new_users {
+                // Registration is gated by invite codes (issue #179). Social
+                // providers don't carry an invite code through the OAuth
+                // redirect, so first-time social sign-ups are blocked when
+                // the gate is enabled: the user must register via
+                // email+invite first, then link their social provider.
+                tracing::info!(
+                    provider = %profile.provider.as_str(),
+                    "First-time social sign-up rejected: invite code required"
+                );
+                return Err(AppError::SocialAuthRegistrationClosed);
+            }
+
+            // Gate disabled (public launch): create the new social user.
+            let default_role_ids = crate::services::role_service::get_default_role_ids(db).await?;
             new_user.role_ids = default_role_ids;
 
             users
@@ -765,6 +788,7 @@ mod tests {
             channel_relay_callback_timeout_secs: 30,
             channel_relay_max_bots_per_user: 5,
             channel_relay_message_ttl_days: 30,
+            invite_code_required: true,
         }
     }
 
@@ -866,6 +890,7 @@ mod tests {
             is_admin: false,
             role_ids: vec![],
             group_ids: vec![],
+            invite_code_id: None,
             mfa_enabled: false,
             social_provider: social_provider.map(String::from),
             social_provider_id: social_provider_id.map(String::from),

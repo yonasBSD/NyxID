@@ -41,6 +41,16 @@ nyxid login --base-url https://nyx-api.chrono-ai.fun
 
 The CLI stores tokens at `~/.nyxid/` and auto-refreshes them. The base URL is saved on login -- all subsequent commands use it automatically.
 
+> **Registration may require an invite code.** NyxID instances can gate new accounts behind invite codes (controlled by the backend `INVITE_CODE_REQUIRED` env var, default `true`). When enabled, users need a code from an admin and can register via the web UI or the CLI:
+>
+> ```bash
+> nyxid register --base-url https://nyx-api.chrono-ai.fun \
+>   --email you@example.com --name "Your Name" \
+>   --invite-code NYX-XXXXXXXX
+> ```
+>
+> When the gate is enabled, social login (Google, GitHub, Apple) only works for **existing** users -- first-time social sign-ups are blocked. Users must register with email + invite code first, then link a social provider afterwards by signing in with the same email. When the gate is disabled (public-launch mode), both email registration and first-time social sign-ups work without an invite code.
+
 ## Updating
 
 Update the CLI and all installed AI skills in one command:
@@ -682,6 +692,33 @@ nyxid mfa setup                                        # enable MFA (shows QR co
 nyxid mfa verify --code 123456                         # verify MFA setup
 nyxid session list --output json                       # list active sessions
 ```
+
+## Admin Operations
+
+Commands under `nyxid admin` require the caller to have `is_admin=true` on their account. Non-admin callers get `1002 forbidden` from the server.
+
+### Invite Codes
+
+NyxID gates new-user registration behind invite codes. Each code grants a bounded number of registrations and can be deactivated at any time. Only admins can create or deactivate codes.
+
+```bash
+nyxid admin invite-code create                                    # default: 10 uses, no note
+nyxid admin invite-code create --max-uses 5 --note "alice@corp"   # bounded uses + admin note
+nyxid admin invite-code create --output json                      # machine-readable
+nyxid admin invite-code list                                      # show all codes + usage
+nyxid admin invite-code list --output json
+nyxid admin invite-code deactivate <ID>                           # invalidate a code by ID
+```
+
+Notes for admins helping new users:
+
+- `max-uses` must be between 1 and 1000. The default is 10.
+- Codes look like `NYX-XXXXXXXX`. Share the code verbatim -- the CLI and frontend normalize casing/whitespace before hitting the server, so `nyx-abc123` and `NYX-ABC123` are treated the same.
+- `list` shows `used_count/max_uses`, active state, and the per-redemption `usages` array (who used it, when).
+- Deactivation is immediate and cannot be undone -- create a new code if the user needs another attempt.
+- Create and deactivate are audited (`admin_invite_code_create`, `admin_invite_code_deactivate`) and visible in `nyxid` audit tooling.
+- **Turning the gate off entirely:** set `INVITE_CODE_REQUIRED=false` in the backend environment and restart the server. Public registration then works without a code and first-time social sign-ups succeed normally. Set it back to `true` (or unset it) to re-enable the gate.
+
 
 ## MCP Configuration
 
