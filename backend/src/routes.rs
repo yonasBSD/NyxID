@@ -391,7 +391,16 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
             "/oauth-clients/{client_id}/consents",
             get(handlers::admin::list_client_consents),
         )
-        .nest("/service-accounts", sa_admin_routes);
+        .nest("/service-accounts", sa_admin_routes)
+        .nest("/invite-codes", {
+            Router::new()
+                .route("/", get(handlers::invite_codes::list_invite_codes))
+                .route("/", post(handlers::invite_codes::create_invite_code))
+                .route(
+                    "/{id}",
+                    delete(handlers::invite_codes::deactivate_invite_code),
+                )
+        });
 
     let oauth_routes = Router::new()
         .route("/authorize", get(handlers::oauth::authorize))
@@ -445,7 +454,10 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
 
     // Approval management (human-only; status polling is in api_v1_delegated)
     let approval_routes = Router::new()
-        .route("/requests", get(handlers::approvals::list_requests))
+        .route(
+            "/requests",
+            get(handlers::approvals::list_requests).post(handlers::approvals::create_request),
+        )
         .route(
             "/requests/{request_id}",
             get(handlers::approvals::get_request_by_id),
@@ -539,7 +551,50 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
 
     let catalog_routes = Router::new()
         .route("/", get(handlers::catalog::list_catalog))
-        .route("/{slug}", get(handlers::catalog::get_catalog_entry));
+        .route("/{slug}", get(handlers::catalog::get_catalog_entry))
+        .route(
+            "/{slug}/endpoints",
+            get(handlers::catalog::list_catalog_endpoints),
+        );
+
+    let channel_bot_routes = Router::new()
+        .route(
+            "/",
+            get(handlers::channel_bots::list_bots).post(handlers::channel_bots::create_bot),
+        )
+        .route(
+            "/{id}",
+            get(handlers::channel_bots::get_bot).delete(handlers::channel_bots::delete_bot),
+        )
+        .route("/{id}/verify", post(handlers::channel_bots::verify_bot));
+
+    let channel_conversation_routes = Router::new()
+        .route(
+            "/",
+            get(handlers::channel_conversations::list_conversations)
+                .post(handlers::channel_conversations::create_conversation),
+        )
+        .route(
+            "/{id}",
+            get(handlers::channel_conversations::get_conversation)
+                .put(handlers::channel_conversations::update_conversation)
+                .delete(handlers::channel_conversations::delete_conversation),
+        )
+        .route(
+            "/{id}/messages",
+            get(handlers::channel_conversations::list_conversation_messages),
+        );
+
+    let channel_relay_routes = Router::new()
+        .route("/reply", post(handlers::channel_relay::async_reply))
+        .route(
+            "/messages/{conversation_id}",
+            get(handlers::channel_relay::list_messages),
+        )
+        .route(
+            "/resolve-sender",
+            get(handlers::channel_relay::resolve_sender),
+        );
 
     let developer_routes = Router::new()
         .route(
@@ -604,6 +659,7 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
             get(handlers::docs::service_asyncapi_json),
         )
         .route("/proxy/services", get(handlers::proxy::list_proxy_services))
+        .nest("/channel-relay", channel_relay_routes)
         .merge(proxy_passthrough_routes);
 
     // Routes accessible by both users and service accounts (block delegated tokens)
@@ -647,12 +703,13 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
         .nest("/api-keys/external", external_api_key_routes)
         .nest("/user-services", user_service_routes)
         .nest("/catalog", catalog_routes)
+        .nest("/channel-bots", channel_bot_routes)
+        .nest("/channel-conversations", channel_conversation_routes)
         .route(
             "/integrations/openclaw/mappings",
             post(handlers::openclaw_channel::create_mapping),
         )
         .route("/public/config", get(handlers::health::public_config))
-        .route("/chat", post(handlers::chat::post_chat))
         .layer(middleware::from_fn(reject_delegated_tokens))
         .layer(middleware::from_fn(reject_service_account_tokens));
 
@@ -695,6 +752,23 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
         .route("/llms.txt", get(handlers::llms_txt::llms_txt))
         .route("/llms-full.txt", get(handlers::llms_txt::llms_full_txt))
         .nest("/api/v1/webhooks", webhook_routes)
+        // Channel bot webhook routes -- unauthenticated (per-bot signature verified)
+        .route(
+            "/api/v1/webhooks/channel/telegram/{bot_id}",
+            post(handlers::channel_webhooks::telegram_webhook),
+        )
+        .route(
+            "/api/v1/webhooks/channel/discord/{bot_id}",
+            post(handlers::channel_webhooks::discord_webhook),
+        )
+        .route(
+            "/api/v1/webhooks/channel/lark/{bot_id}",
+            post(handlers::channel_webhooks::lark_webhook),
+        )
+        .route(
+            "/api/v1/webhooks/channel/feishu/{bot_id}",
+            post(handlers::channel_webhooks::feishu_webhook),
+        )
         .nest("/api/v1/integrations", integration_routes)
         .nest("/api/v1", api_v1)
         // WebSocket endpoint for node agents. Auth happens in-message (not middleware).
