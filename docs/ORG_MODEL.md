@@ -529,6 +529,14 @@ pub enum CredentialSource {
 
 An org-shared service can route through a member's personal node. The node itself stays personally owned (no need to re-register it under the org). The check is **actor-based**, not "service owner == node owner": when an org admin creates an org-owned service with `--via-node my-laptop-node`, `node_service::ensure_node_writable_by_actor(db, actor_user_id, node_id)` validates that the actor has `OwnerAccess::can_write` on the node. The same helper is used by `sync_node_binding_for_user_service`, so `NodeServiceBinding.user_id` ends up as the org's user_id (where proxy routing looks it up) while node ownership is validated against the actor.
 
+**Why nodes stay personal (design rationale).** A node agent runs on a specific piece of physical hardware that someone installed, has root on, and holds the auth token for. Making the database say "the org owns it" doesn't change who can `sudo systemctl stop nyxid-node`, so org ownership at the DB layer would be a fiction that doesn't match operational reality. Personal ownership also gives three concrete wins:
+
+1. **Multi-org lending is free.** One Raspberry Pi can back a family org, a company org, and personal services simultaneously — each consumer gets its own `NodeServiceBinding` row.
+2. **Admin-leaves semantics are clean.** When an admin leaves an org, their personal node keeps running for their personal services; the org's bindings to it stop being writable (the actor-based check fails on the next edit) and another admin rebinds the org service to their own node. No orphaned resources, no transfer flow.
+3. **Zero re-registration.** An admin who already has a personal node can run `nyxid service add --org X --via-node my-laptop` and be done. No parallel agent, no second config file.
+
+The trade-off: data-center / always-on corporate hardware doesn't fit the "somebody's personal laptop" shape cleanly. See [Limitations / Future Work](#limitations--future-work) → "Optional org-owned nodes" for a proposed follow-up that adds org ownership as an *opt-in* mode without removing the personal default.
+
 ---
 
 ## Org-Aware Approval Cascade
@@ -650,3 +658,31 @@ The following are intentionally **not** in this feature and are tracked separate
 - **Cross-org transfer of resources** — there is no "move my personal OpenAI into the org" path. New shared services should be created with `--org` from the start.
 - **Nested orgs / sub-orgs** — flat membership only.
 - **SSO for orgs (SAML / OIDC auto-membership)** — future RFC.
+- **Optional org-owned nodes** — see below.
+
+### Optional org-owned nodes (proposed follow-up)
+
+Today every `Node` row has `user_id = <person user_id>`. The default is a good match for laptops and home servers (see [Node-routed services](#node-routed-services) for the rationale). It is not a good match for **data-center / always-on corporate hardware** where:
+
+- Multiple ops people need rotate / revoke / metrics access without any one of them being "the node's owner".
+- If the person who registered the node has their account deactivated, their binding should not be the only thing keeping the node usable.
+- Audit / usage attribution wants to point at the org from day one, not just at a person who happens to operate corporate hardware.
+
+**Proposal.** Add an *opt-in* `--org <ORG_ID>` flag on `nyxid node register` (and the corresponding `POST /api/v1/nodes/register-token` body field `target_org_id`). When set:
+
+- The registration token creator must be an admin of the target org (enforced via `OwnerAccess`).
+- The resulting `Node` row has `user_id = <org_user_id>`.
+- Every admin of the org can rotate / revoke / view metrics on the node through the existing `/nodes/{id}` endpoints; `resolve_owner_access` already handles the "admin of the owning org" path, so no new per-handler code is needed.
+- `GET /nodes?org_id=X` lists org-owned nodes (mirrors the `?org_id=` pattern used by `/keys`, `/api-keys`, and friends).
+- Frontend: the Credential Nodes page gains an org filter and admins can register a node directly under an org.
+
+**Compatibility.** The default stays personal — existing workflows are unchanged. Proxy-time routing (`resolve_node_route`) already queries `NodeServiceBinding.user_id` (which can be either a person or an org), so the org-owned case works for free once the node is registered. The per-node `ensure_node_writable_by_actor` check also already supports org ownership — it uses `resolve_owner_access` to accept either the direct owner or an admin of the owning org.
+
+**What's NOT in this proposal.**
+- Moving an existing personal node to an org (transfer flow). A re-register is acceptable for the first cut.
+- Dropping personal nodes. Personal and org nodes coexist; admins choose at registration time.
+- Sharing one node across multiple orgs through org ownership. Personal nodes with multiple `NodeServiceBinding` rows already cover the multi-tenant case — there is no operational reason to introduce a shared-ownership model.
+
+**Scope estimate.** Small. Backend: one optional field on the register-token request, one `resolve_owner_access` gate in the register-token handler, one `?org_id=` filter on the list endpoint. CLI: one `--org` flag on `nyxid node register` and `nyxid node list`. Frontend: one filter + an admin-only "Register under org" control. No new models, no new indexes, no migration.
+
+Not blocked by anything else. Fill in when the data-center case actually shows up.
