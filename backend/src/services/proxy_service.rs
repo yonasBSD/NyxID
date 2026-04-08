@@ -519,7 +519,10 @@ pub async fn resolve_proxy_target_from_user_service(
     // Handle no-auth services (may have no api_key_id)
     if user_service.auth_method == "none" {
         let now = chrono::Utc::now();
-        let minimal_service = build_minimal_downstream_service(&user_service, &endpoint, now);
+        let token_exchange_config =
+            load_token_exchange_config_for_user_service(db, &user_service).await?;
+        let minimal_service =
+            build_minimal_downstream_service(&user_service, &endpoint, now, token_exchange_config);
 
         return Ok(Some(UserServiceResolution {
             target: ProxyTarget {
@@ -576,7 +579,10 @@ pub async fn resolve_proxy_target_from_user_service(
         let has_server_credential = credential.is_some();
 
         let now = chrono::Utc::now();
-        let minimal_service = build_minimal_downstream_service(&user_service, &endpoint, now);
+        let token_exchange_config =
+            load_token_exchange_config_for_user_service(db, &user_service).await?;
+        let minimal_service =
+            build_minimal_downstream_service(&user_service, &endpoint, now, token_exchange_config);
 
         return Ok(Some(UserServiceResolution {
             target: ProxyTarget {
@@ -612,7 +618,10 @@ pub async fn resolve_proxy_target_from_user_service(
     });
 
     let now = chrono::Utc::now();
-    let minimal_service = build_minimal_downstream_service(&user_service, &endpoint, now);
+    let token_exchange_config =
+        load_token_exchange_config_for_user_service(db, &user_service).await?;
+    let minimal_service =
+        build_minimal_downstream_service(&user_service, &endpoint, now, token_exchange_config);
 
     Ok(Some(UserServiceResolution {
         target: ProxyTarget {
@@ -767,12 +776,65 @@ fn missing_user_api_key_credential_error(api_key: &UserApiKey) -> AppError {
     }
 }
 
-/// Build a minimal DownstreamService struct for backward compatibility with
-/// existing proxy pipeline code that expects a `ProxyTarget.service`.
+/// Load the catalog `token_exchange_config` for a user service, if one is
+/// required. Returns `Ok(None)` for auth methods that don't use a token
+/// exchange config. Fails loudly if the user service is configured for
+/// `token_exchange` but the catalog link is missing or the catalog row
+/// lacks the config.
+///
+/// Extracted as its own function so the DB fetch has a single home and
+/// the pure struct-assembly logic in `build_minimal_downstream_service`
+/// stays unit-testable.
+async fn load_token_exchange_config_for_user_service(
+    db: &mongodb::Database,
+    user_service: &crate::models::user_service::UserService,
+) -> AppResult<Option<crate::models::downstream_service::TokenExchangeConfig>> {
+    if user_service.auth_method != "token_exchange" {
+        return Ok(None);
+    }
+    let catalog_id = user_service.catalog_service_id.as_deref().ok_or_else(|| {
+        AppError::BadRequest(
+            "token_exchange services must be linked to a catalog entry".to_string(),
+        )
+    })?;
+    let svc = db
+        .collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+        .find_one(doc! { "_id": catalog_id })
+        .await?
+        .ok_or_else(|| {
+            tracing::error!(
+                user_service_id = %user_service.id,
+                catalog_service_id = %catalog_id,
+                "UserService references missing catalog DownstreamService"
+            );
+            AppError::Internal(
+                "Data integrity error: catalog service not found for token_exchange".to_string(),
+            )
+        })?;
+    // A catalog entry with auth_method=token_exchange MUST have a config.
+    // If it doesn't, surface the integrity error here rather than 500ing
+    // in the proxy's forward_request.
+    if svc.token_exchange_config.is_none() {
+        return Err(AppError::Internal(format!(
+            "Catalog service '{}' is missing token_exchange_config",
+            svc.slug
+        )));
+    }
+    Ok(svc.token_exchange_config)
+}
+
+/// Build a minimal DownstreamService struct for backward compatibility
+/// with existing proxy pipeline code that expects a `ProxyTarget.service`.
+///
+/// Pure function - the caller is responsible for fetching any catalog
+/// `token_exchange_config` via `load_token_exchange_config_for_user_service`
+/// and passing it in. This keeps the function unit-testable without a
+/// live MongoDB connection.
 fn build_minimal_downstream_service(
     user_service: &crate::models::user_service::UserService,
     endpoint: &UserEndpoint,
     now: chrono::DateTime<chrono::Utc>,
+    token_exchange_config: Option<crate::models::downstream_service::TokenExchangeConfig>,
 ) -> DownstreamService {
     DownstreamService {
         id: user_service
@@ -816,7 +878,7 @@ fn build_minimal_downstream_service(
         required_permissions: None,
         examples_url: None,
         recommended_skills: None,
-        token_exchange_config: None,
+        token_exchange_config,
         created_at: now,
         updated_at: now,
     }
@@ -2021,6 +2083,87 @@ mod tests {
             "unexpected error: {err}"
         );
         server.abort();
+    }
+
+    // ─── build_minimal_downstream_service regression test ────────────
+
+    fn make_user_service_token_exchange() -> crate::models::user_service::UserService {
+        crate::models::user_service::UserService {
+            id: "us-1".to_string(),
+            user_id: "user-1".to_string(),
+            slug: "api-lark-bot".to_string(),
+            endpoint_id: "ep-1".to_string(),
+            api_key_id: Some("ak-1".to_string()),
+            auth_method: "token_exchange".to_string(),
+            auth_key_name: String::new(),
+            catalog_service_id: Some("cat-1".to_string()),
+            node_id: None,
+            node_priority: 0,
+            service_type: "http".to_string(),
+            identity_propagation_mode: "none".to_string(),
+            identity_include_user_id: false,
+            identity_include_email: false,
+            identity_include_name: false,
+            identity_jwt_audience: None,
+            forward_access_token: false,
+            inject_delegation_token: false,
+            delegation_token_scope: "llm:proxy".to_string(),
+            is_active: true,
+            source: None,
+            source_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn make_endpoint() -> UserEndpoint {
+        UserEndpoint {
+            id: "ep-1".to_string(),
+            user_id: "user-1".to_string(),
+            label: "Lark Bot".to_string(),
+            url: "https://open.larksuite.com".to_string(),
+            catalog_service_id: Some("cat-1".to_string()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn build_minimal_downstream_service_carries_token_exchange_config_through() {
+        // Regression: before this was wired, the synthetic DownstreamService
+        // built by the user-service resolver hard-coded
+        // `token_exchange_config: None`, so every proxy request to a
+        // token_exchange service 500'd with
+        // "token_exchange auth method requires token_exchange_config on
+        // the service" -- even though the catalog row had a perfectly
+        // valid config.
+        let user_service = make_user_service_token_exchange();
+        let endpoint = make_endpoint();
+        let config = make_lark_token_exchange_config();
+
+        let svc = build_minimal_downstream_service(
+            &user_service,
+            &endpoint,
+            Utc::now(),
+            Some(config.clone()),
+        );
+
+        let carried = svc.token_exchange_config.expect("config must be carried");
+        assert_eq!(carried.endpoint, config.endpoint);
+        assert_eq!(carried.token_response_path, config.token_response_path);
+        assert_eq!(carried.credential_fields.len(), 2);
+    }
+
+    #[test]
+    fn build_minimal_downstream_service_omits_config_for_non_token_exchange() {
+        let mut user_service = make_user_service_token_exchange();
+        user_service.auth_method = "bearer".to_string();
+        let endpoint = make_endpoint();
+
+        let svc = build_minimal_downstream_service(&user_service, &endpoint, Utc::now(), None);
+
+        assert!(svc.token_exchange_config.is_none());
+        assert_eq!(svc.auth_method, "bearer");
     }
 
     // ─── body auth method guard regression tests ─────────────────────

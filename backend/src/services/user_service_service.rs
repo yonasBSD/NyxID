@@ -17,8 +17,13 @@ use crate::services::node_service;
 /// - `query`: URL query parameter `<auth_key_name>=<credential>`
 /// - `basic`: HTTP Basic auth, credential is `username:password`
 /// - `body`: merge `{<auth_key_name>: <credential>}` into the JSON request
-///   body (used for Lark/Feishu `tenant_access_token` exchange where
-///   `app_secret` must travel in the body)
+///   body (POST/PUT/PATCH only) for providers that require credentials in
+///   the payload rather than a header
+/// - `token_exchange`: credential is a JSON blob; the proxy exchanges it
+///   for a short-lived access token using the service's
+///   `TokenExchangeConfig`, caches the result, and injects the token on
+///   every outbound request (Lark/Feishu tenant tokens, OAuth 2.0
+///   client_credentials, etc.)
 /// - `none`: no credential injection
 const VALID_AUTH_METHODS: &[&str] = &[
     "bearer",
@@ -27,6 +32,7 @@ const VALID_AUTH_METHODS: &[&str] = &[
     "query",
     "basic",
     "body",
+    "token_exchange",
     "none",
 ];
 
@@ -557,5 +563,38 @@ mod tests {
 
         let normalized = normalize_identity_config(&config).expect("scopes should validate");
         assert_eq!(normalized.delegation_token_scope, "proxy:* llm:status");
+    }
+
+    #[test]
+    fn validate_auth_method_accepts_token_exchange() {
+        // Regression: token_exchange was missing from VALID_AUTH_METHODS
+        // which made every api-lark-bot / api-feishu-bot key creation
+        // fail with "Invalid auth_method 'token_exchange'" at the
+        // user_service_service validation boundary.
+        validate_auth_method("token_exchange").expect("token_exchange must be accepted");
+    }
+
+    #[test]
+    fn validate_auth_method_accepts_all_known_methods() {
+        for method in [
+            "bearer",
+            "bot_bearer",
+            "header",
+            "query",
+            "basic",
+            "body",
+            "token_exchange",
+            "none",
+        ] {
+            validate_auth_method(method)
+                .unwrap_or_else(|e| panic!("method {method} must be valid: {e}"));
+        }
+    }
+
+    #[test]
+    fn validate_auth_method_rejects_unknown() {
+        assert!(validate_auth_method("lark_token_exchange").is_err());
+        assert!(validate_auth_method("oauth2").is_err());
+        assert!(validate_auth_method("").is_err());
     }
 }
