@@ -548,16 +548,23 @@ nyxid proxy request api-telegram-bot getWebhookInfo -m POST -d '{}'
 # NyxID adds it for you. `setWebhook` is correct; `bot/setWebhook` would
 # forward as `bot<token>/bot/setWebhook` and Telegram returns 404.
 
-# Lark bot (tenant token exchange via body injection)
+# Lark bot (tenant token exchange is fully automatic)
 nyxid service add api-lark-bot
-# CLI prompts for app_secret. Then to get a tenant_access_token:
-nyxid proxy request api-lark-bot /open-apis/auth/v3/tenant_access_token/internal \
-  -m POST -d '{"app_id":"cli_xxx"}'
-# NyxID merges {app_secret: "..."} into the body server-side. Returns a
-# 2-hour tenant_access_token which the caller caches and uses as a Bearer
-# token for subsequent Lark API calls. Your app_secret never leaves NyxID.
+# CLI prompts for app_id AND app_secret. NyxID stores both encrypted and
+# handles the tenant_access_token exchange transparently on every call.
+# Just hit the Lark API path directly -- no manual token management:
+nyxid proxy request api-lark-bot /open-apis/im/v1/chats -m GET
 
-# Feishu bot (China region — same as Lark Bot)
+nyxid proxy request api-lark-bot /open-apis/im/v1/messages \
+  -m POST \
+  -H "Content-Type: application/json; charset=utf-8" \
+  -d '{"receive_id":"oc_xxx","msg_type":"text","content":"{\"text\":\"hello\"}"}'
+
+# NyxID caches the tenant_access_token in-process (~2h TTL) and single-
+# flights refreshes per app, so concurrent requests never produce
+# duplicate exchanges. Your app_secret never leaves NyxID.
+
+# Feishu bot (China region — same flow, same automatic token exchange)
 nyxid service add api-feishu-bot
 
 # Discord bot (Bot prefix in Authorization header, persistent token)
@@ -573,9 +580,9 @@ nyxid proxy request api-discord-bot /channels/{channel_id}/messages \
 | Slug | Purpose |
 |---|---|
 | `api-lark` | Lark API as a logged-in user (OAuth) |
-| `api-lark-bot` | Lark API as a bot (tenant token exchange) |
+| `api-lark-bot` | Lark API as a bot (automatic tenant token exchange) |
 | `api-feishu` | Feishu API as a logged-in user (OAuth) |
-| `api-feishu-bot` | Feishu API as a bot (tenant token exchange) |
+| `api-feishu-bot` | Feishu API as a bot (automatic tenant token exchange) |
 | `api-telegram-bot` | Telegram Bot API |
 | `api-discord` | Discord API as a logged-in user (OAuth) |
 | `api-discord-bot` | Discord API as a bot (persistent bot token) |
