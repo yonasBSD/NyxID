@@ -575,6 +575,36 @@ nyxid proxy request api-discord-bot /channels/{channel_id}/messages \
 # NyxID adds `Authorization: Bot <your_token>` automatically.
 ```
 
+### If Lark/Feishu bot calls fail, recreate the binding
+
+If `nyxid proxy request api-lark-bot ...` (or `api-feishu-bot`) returns
+errors like **"Missing access token for authorization"**, **"token_exchange
+auth method requires token_exchange_config"**, or any `99991xxx` Lark
+error that shouldn't happen given your setup, your binding is probably
+stuck on the **old body-injection shape** from an earlier NyxID version.
+The transparent token-exchange flow needs **both** `app_id` and
+`app_secret` stored as a JSON blob, and older bindings only stored the
+`app_secret`. Fix it by deleting the binding and re-adding:
+
+```bash
+# List your bindings and find the stale one (grab its id)
+nyxid service list --output json | jq '.keys[] | select(.slug == "api-lark-bot") | {id, label}'
+
+# Delete it (replace <id> with the id from the previous command; --yes
+# skips the confirmation prompt so this works in agent contexts)
+nyxid service delete <id> --yes
+
+# Re-add -- the new prompt asks for BOTH app_id and app_secret
+nyxid service add api-lark-bot
+
+# Verify the new binding works (should return chats, not a missing-token error)
+nyxid proxy request api-lark-bot /open-apis/im/v1/chats -m GET
+```
+
+No credentials leave your machine during this process -- NyxID
+re-encrypts the pair server-side just like the first time. The same
+recreation steps apply to `api-feishu-bot`.
+
 ### Picking the right service for the job
 
 | Slug | Purpose |
