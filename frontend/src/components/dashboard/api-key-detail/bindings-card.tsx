@@ -36,13 +36,33 @@ import {
 import { Link2, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import type { AgentServiceBinding } from "@/types/keys";
+import type { CredentialSource } from "@/schemas/orgs";
+
+/// True iff two credential sources point at the same owner. Used by the
+/// binding / scope pickers to filter the service list to options the
+/// backend will actually accept (`agent_binding_service::create_binding`
+/// requires the api_key, user_service, and user_api_key to share a
+/// `user_id`, so an org-owned agent key can only bind to that org's
+/// services -- never to personal services or to a different org).
+function sameOwner(
+  a?: CredentialSource,
+  b?: CredentialSource,
+): boolean {
+  const aType = a?.type ?? "personal";
+  const bType = b?.type ?? "personal";
+  if (aType !== bType) return false;
+  if (aType === "personal") return true;
+  return a?.type === "org" && b?.type === "org" && a.org_id === b.org_id;
+}
 
 export function BindingsCard({
   keyId,
   allowAllServices,
+  apiKeySource,
 }: {
   readonly keyId: string;
   readonly allowAllServices: boolean;
+  readonly apiKeySource?: CredentialSource;
 }) {
   const { data: bindings, isLoading } = useAgentBindings(keyId);
   const { data: allKeys } = useKeys();
@@ -55,8 +75,14 @@ export function BindingsCard({
     null,
   );
 
-  // Only show services that have a credential configured
-  const services = (allKeys ?? []).filter((s) => s.api_key_id);
+  // Filter services to those owned by the same owner as the API key.
+  // Personal API key -> personal services only. Org-owned API key ->
+  // services owned by the same org only. Anything else would be rejected
+  // by `agent_binding_service::create_binding` because the cross-owner
+  // check fails server-side.
+  const services = (allKeys ?? []).filter(
+    (s) => s.api_key_id && sameOwner(s.credential_source, apiKeySource),
+  );
 
   // Already bound service IDs (to exclude from the dropdown)
   const boundServiceIds = new Set(

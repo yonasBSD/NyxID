@@ -146,6 +146,8 @@ mod tests {
             mfa_enabled: false,
             social_provider: None,
             social_provider_id: None,
+            user_type: crate::models::user::UserType::Person,
+            primary_org_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
             last_login_at: None,

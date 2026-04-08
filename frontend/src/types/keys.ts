@@ -1,3 +1,5 @@
+import type { CredentialSource } from "@/schemas/orgs";
+
 export interface KeyInfo {
   readonly id: string;
   readonly label: string;
@@ -25,6 +27,15 @@ export interface KeyInfo {
   readonly ssh_ca_public_key: string | null;
   readonly ssh_allowed_principals: readonly string[] | null;
   readonly ssh_certificate_ttl_minutes: number | null;
+  /**
+   * Provenance of the credential backing this key. Personal items are owned
+   * directly; org items are inherited from an org membership. When undefined
+   * (older backends without the org model) consumers should assume
+   * `{ type: "personal" }`. When the user is a viewer of the owning org,
+   * `credential_source.allowed` is `false` and the UI must render the item
+   * as read-only.
+   */
+  readonly credential_source?: CredentialSource;
 }
 
 export interface KeyListResponse {
@@ -143,6 +154,14 @@ export interface NyxIdApiKeyInfo {
   readonly rate_limit_per_second: number | null;
   readonly rate_limit_burst: number | null;
   readonly bindings_count: number;
+  /**
+   * Provenance: whether this NyxID API key is owned directly by the caller
+   * (Personal) or by an org the caller belongs to (Org). Used by the
+   * scope and binding pickers to filter user services to those owned by
+   * the same owner -- a personal API key only binds to personal services,
+   * an org API key only binds to that org's services.
+   */
+  readonly credential_source?: import("@/schemas/orgs").CredentialSource;
 }
 
 export interface AgentServiceBinding {

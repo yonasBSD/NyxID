@@ -9,12 +9,57 @@ use std::collections::{HashMap, HashSet};
 use utoipa::ToSchema;
 
 use crate::AppState;
-use crate::errors::AppResult;
+use crate::errors::{AppError, AppResult};
+use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
 use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
 use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::mw::auth::AuthUser;
-use crate::services::{agent_binding_service, audit_service};
+use crate::services::org_service::OwnerAccess;
+use crate::services::{agent_binding_service, audit_service, org_service};
+
+struct BindingOwnerAccess {
+    user_id: String,
+    access: OwnerAccess,
+}
+
+/// Resolve the effective owner *and* the caller's `OwnerAccess` for a
+/// binding operation. Bindings are 1:1 with an API key, so the binding's
+/// "owner" is the key's owner. Members and viewers of an org that owns
+/// the key cannot manage its bindings; org admins can.
+///
+/// The membership's `allowed_service_ids` scope is NOT enforced on the
+/// `ApiKey` itself (a NyxID API key is an agent identity, not a
+/// service). It IS enforced on the individual binding's
+/// `user_service_id` -- create/delete handlers must call
+/// `OwnerAccess::allows_resource(&user_service_id)` before mutating.
+async fn resolve_binding_owner(
+    state: &AppState,
+    actor: &str,
+    key_id: &str,
+    for_write: bool,
+) -> AppResult<BindingOwnerAccess> {
+    let key = state
+        .db
+        .collection::<ApiKey>(API_KEYS)
+        .find_one(doc! { "_id": key_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
+
+    let access = org_service::resolve_owner_access(&state.db, actor, &key.user_id).await?;
+    if !access.can_read() {
+        return Err(AppError::NotFound("API key not found".to_string()));
+    }
+    if for_write && !access.can_write() {
+        return Err(AppError::OrgRoleInsufficient(
+            "you do not have permission to modify bindings on this API key".to_string(),
+        ));
+    }
+    Ok(BindingOwnerAccess {
+        user_id: key.user_id,
+        access,
+    })
+}
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateBindingRequest {
@@ -167,7 +212,20 @@ pub async fn create_binding(
     Path(key_id): Path<String>,
     Json(body): Json<CreateBindingRequest>,
 ) -> AppResult<Json<BindingResponse>> {
-    let user_id = auth_user.user_id.to_string();
+    let actor = auth_user.user_id.to_string();
+    // Effective owner = the org user_id for org-owned keys, else the actor.
+    // `agent_binding_service::create_binding` then validates that the
+    // `user_service_id` and `user_api_key_id` also belong to the same
+    // owner, which is the intended invariant: an org-owned agent can
+    // only bind to org-owned services and credentials, not personal ones.
+    let BindingOwnerAccess { user_id, access } =
+        resolve_binding_owner(&state, &actor, &key_id, true).await?;
+    // Per-binding scope check: a scoped admin can only bind services in
+    // their `allowed_service_ids` set. The body's `user_service_id` is
+    // already in `UserService.id` space, so it can be checked directly.
+    if !access.allows_resource(&body.user_service_id) {
+        return Err(AppError::NotFound("User service not found".to_string()));
+    }
     let binding = agent_binding_service::create_binding(
         &state.db,
         &user_id,
@@ -179,7 +237,7 @@ pub async fn create_binding(
 
     audit_service::log_async(
         state.db.clone(),
-        Some(user_id),
+        Some(actor),
         "agent_binding_created".to_string(),
         Some(serde_json::json!({
             "binding_id": &binding.id,
@@ -215,8 +273,18 @@ pub async fn list_bindings(
     auth_user: AuthUser,
     Path(key_id): Path<String>,
 ) -> AppResult<Json<BindingListResponse>> {
-    let user_id = auth_user.user_id.to_string();
-    let bindings = agent_binding_service::list_bindings(&state.db, &user_id, &key_id).await?;
+    let actor = auth_user.user_id.to_string();
+    // Read access: any active member/viewer/admin of the owning org can
+    // list bindings on an org-owned key. Scope filtering still applies:
+    // a scoped admin only sees bindings whose `user_service_id` is in
+    // their `allowed_service_ids` set.
+    let BindingOwnerAccess { user_id, access } =
+        resolve_binding_owner(&state, &actor, &key_id, false).await?;
+    let bindings: Vec<_> = agent_binding_service::list_bindings(&state.db, &user_id, &key_id)
+        .await?
+        .into_iter()
+        .filter(|b| access.allows_resource(&b.user_service_id))
+        .collect();
     let bindings = enrich_bindings(&state, bindings).await?;
     Ok(Json(BindingListResponse { bindings }))
 }
@@ -240,12 +308,22 @@ pub async fn delete_binding(
     auth_user: AuthUser,
     Path((key_id, binding_id)): Path<(String, String)>,
 ) -> AppResult<Json<DeleteBindingResponse>> {
-    let user_id = auth_user.user_id.to_string();
+    let actor = auth_user.user_id.to_string();
+    let BindingOwnerAccess { user_id, access } =
+        resolve_binding_owner(&state, &actor, &key_id, true).await?;
+    // Look up the binding to enforce per-binding scope: a scoped admin
+    // can only delete bindings whose `user_service_id` is in their
+    // `allowed_service_ids` set.
+    let binding =
+        agent_binding_service::get_binding(&state.db, &user_id, &key_id, &binding_id).await?;
+    if !access.allows_resource(&binding.user_service_id) {
+        return Err(AppError::NotFound("Binding not found".to_string()));
+    }
     agent_binding_service::delete_binding(&state.db, &user_id, &key_id, &binding_id).await?;
 
     audit_service::log_async(
         state.db.clone(),
-        Some(user_id),
+        Some(actor),
         "agent_binding_deleted".to_string(),
         Some(serde_json::json!({
             "binding_id": &binding_id,

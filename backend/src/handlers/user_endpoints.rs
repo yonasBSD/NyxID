@@ -4,14 +4,58 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::AppState;
-use crate::errors::AppResult;
-use crate::models::user_endpoint::UserEndpoint;
+use crate::errors::{AppError, AppResult};
+use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
 use crate::mw::auth::AuthUser;
-use crate::services::user_endpoint_service;
+use crate::services::{org_service, user_endpoint_service, user_service_service};
+
+/// Resolve which user_id owns this endpoint and whether the actor may
+/// modify it. Returns the effective owner_id (may be an org user id) for
+/// downstream service calls. Errors out as Forbidden / NotFound otherwise.
+///
+/// `OrgMembership.allowed_service_ids` is keyed by `UserService.id`, not
+/// by endpoint id. We translate by looking up every UserService that
+/// references this endpoint and gating on `allows_any_resource`. An
+/// orphan endpoint (referenced by zero services) is treated as a
+/// scope-less resource: only Direct owners or unscoped admins can touch
+/// it, since a scoped admin has no concrete claim to it.
+async fn resolve_endpoint_write_owner(
+    state: &AppState,
+    actor: &str,
+    endpoint_id: &str,
+) -> AppResult<String> {
+    let endpoint = state
+        .db
+        .collection::<UserEndpoint>(USER_ENDPOINTS)
+        .find_one(doc! { "_id": endpoint_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Endpoint not found".to_string()))?;
+
+    let access = org_service::resolve_owner_access(&state.db, actor, &endpoint.user_id).await?;
+    if !access.can_read() {
+        return Err(AppError::NotFound("Endpoint not found".to_string()));
+    }
+    let backing_service_ids = user_service_service::user_service_ids_for_endpoint(
+        &state.db,
+        &endpoint.user_id,
+        &endpoint.id,
+    )
+    .await?;
+    if !access.allows_any_resource(&backing_service_ids) {
+        return Err(AppError::NotFound("Endpoint not found".to_string()));
+    }
+    if !access.can_write() {
+        return Err(AppError::OrgRoleInsufficient(
+            "you do not have permission to modify this endpoint".to_string(),
+        ));
+    }
+    Ok(endpoint.user_id)
+}
 
 #[derive(Deserialize, ToSchema)]
 pub struct UpdateEndpointRequest {
@@ -76,17 +120,19 @@ pub async fn update_endpoint(
     Path(endpoint_id): Path<String>,
     Json(body): Json<UpdateEndpointRequest>,
 ) -> AppResult<Json<EndpointResponse>> {
-    let user_id_str = auth_user.user_id.to_string();
+    let actor = auth_user.user_id.to_string();
+    let owner_id = resolve_endpoint_write_owner(&state, &actor, &endpoint_id).await?;
+
     user_endpoint_service::update_endpoint(
         &state.db,
-        &user_id_str,
+        &owner_id,
         &endpoint_id,
         body.url.as_deref(),
         body.label.as_deref(),
     )
     .await?;
 
-    let ep = user_endpoint_service::get_endpoint(&state.db, &user_id_str, &endpoint_id).await?;
+    let ep = user_endpoint_service::get_endpoint(&state.db, &owner_id, &endpoint_id).await?;
     Ok(Json(endpoint_response(ep)))
 }
 
@@ -109,8 +155,9 @@ pub async fn delete_endpoint(
     auth_user: AuthUser,
     Path(endpoint_id): Path<String>,
 ) -> AppResult<impl IntoResponse> {
-    let user_id_str = auth_user.user_id.to_string();
-    user_endpoint_service::delete_endpoint(&state.db, &user_id_str, &endpoint_id).await?;
+    let actor = auth_user.user_id.to_string();
+    let owner_id = resolve_endpoint_write_owner(&state, &actor, &endpoint_id).await?;
+    user_endpoint_service::delete_endpoint(&state.db, &owner_id, &endpoint_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

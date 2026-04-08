@@ -9,9 +9,15 @@ use crate::cli::{ApprovalCommands, OutputFormat};
 
 pub async fn run(command: ApprovalCommands) -> Result<()> {
     match command {
-        ApprovalCommands::List { auth } => {
+        ApprovalCommands::List { org, auth } => {
             let mut api = ApiClient::from_auth(&auth)?;
-            let requests: Value = api.get("/approvals/requests").await?;
+            let path = match org {
+                Some(ref id) => {
+                    format!("/approvals/requests?org_id={}", urlencoding::encode(id))
+                }
+                None => "/approvals/requests".to_string(),
+            };
+            let requests: Value = api.get(&path).await?;
 
             match auth.output {
                 OutputFormat::Json => {
@@ -141,9 +147,15 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
             Ok(())
         }
 
-        ApprovalCommands::Grants { auth } => {
+        ApprovalCommands::Grants { org, auth } => {
             let mut api = ApiClient::from_auth(&auth)?;
-            let grants: Value = api.get("/approvals/grants").await?;
+            let path = match org {
+                Some(ref id) => {
+                    format!("/approvals/grants?org_id={}", urlencoding::encode(id))
+                }
+                None => "/approvals/grants".to_string(),
+            };
+            let grants: Value = api.get(&path).await?;
 
             match auth.output {
                 OutputFormat::Json => {
@@ -186,7 +198,7 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
             Ok(())
         }
 
-        ApprovalCommands::RevokeGrant { id, yes, auth } => {
+        ApprovalCommands::RevokeGrant { id, org, yes, auth } => {
             if !yes {
                 eprint!("Revoke grant {id}? [y/N] ");
                 std::io::stderr().flush()?;
@@ -199,7 +211,14 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
             }
 
             let mut api = ApiClient::from_auth(&auth)?;
-            api.delete_empty(&format!("/approvals/grants/{id}")).await?;
+            let path = match org {
+                Some(ref org_id) => format!(
+                    "/approvals/grants/{id}?org_id={}",
+                    urlencoding::encode(org_id)
+                ),
+                None => format!("/approvals/grants/{id}"),
+            };
+            api.delete_empty(&path).await?;
             eprintln!("Grant {id} revoked.");
             Ok(())
         }
@@ -253,9 +272,18 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
             Ok(())
         }
 
-        ApprovalCommands::ServiceConfigs { auth } => {
+        ApprovalCommands::ServiceConfigs { org, auth } => {
             let mut api = ApiClient::from_auth(&auth)?;
-            let configs: Value = api.get("/approvals/service-configs").await?;
+            let path = match org {
+                Some(ref id) => {
+                    format!(
+                        "/approvals/service-configs?org_id={}",
+                        urlencoding::encode(id)
+                    )
+                }
+                None => "/approvals/service-configs".to_string(),
+            };
+            let configs: Value = api.get(&path).await?;
 
             match auth.output {
                 OutputFormat::Json => {
@@ -298,6 +326,7 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
             id,
             require_approval,
             approval_mode,
+            org,
             auth,
         } => {
             let mut api = ApiClient::from_auth(&auth)?;
@@ -321,9 +350,14 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
                 return Ok(());
             }
 
-            let result: Value = api
-                .put(&format!("/approvals/service-configs/{id}"), &body)
-                .await?;
+            let path = match org {
+                Some(ref org_id) => format!(
+                    "/approvals/service-configs/{id}?org_id={}",
+                    urlencoding::encode(org_id)
+                ),
+                None => format!("/approvals/service-configs/{id}"),
+            };
+            let result: Value = api.put(&path, &body).await?;
 
             match auth.output {
                 OutputFormat::Json => {

@@ -568,6 +568,8 @@ fn resolve_social_login(
         mfa_enabled: false,
         social_provider: Some(profile.provider.as_str().to_string()),
         social_provider_id: Some(profile.provider_id.clone()),
+        user_type: crate::models::user::UserType::Person,
+        primary_org_id: None,
         created_at: now,
         updated_at: now,
         last_login_at: Some(now),
@@ -620,7 +622,14 @@ pub async fn find_or_create_user(
 
     let existing_email = if existing_social.is_none() {
         let email_lower = profile.email.to_lowercase();
-        users.find_one(doc! { "email": &email_lower }).await?
+        // Restrict to person accounts -- orgs share the email field but
+        // must never be reachable via social login.
+        users
+            .find_one(doc! {
+                "email": &email_lower,
+                "user_type": "person",
+            })
+            .await?
     } else {
         None
     };
@@ -894,6 +903,8 @@ mod tests {
             mfa_enabled: false,
             social_provider: social_provider.map(String::from),
             social_provider_id: social_provider_id.map(String::from),
+            user_type: crate::models::user::UserType::Person,
+            primary_org_id: None,
             created_at: now,
             updated_at: now,
             last_login_at: None,

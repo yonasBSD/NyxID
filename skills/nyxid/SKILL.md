@@ -86,6 +86,7 @@ The response includes:
 - `status`: whether the service is active
 - `endpoint_url`: where requests are routed
 - `node_id`: whether routing through a node agent
+- `credential_source`: `{ "type": "personal" }` for the user's own credentials, or `{ "type": "org", "org_id": ..., "org_name": ..., "role": ..., "allowed": ... }` for credentials inherited from an organization the user belongs to. Org-inherited services with `allowed: false` are visible to viewers but cannot be proxied -- do not attempt to call them.
 
 If the target service is missing, help the user add it:
 
@@ -322,6 +323,17 @@ nyxid api-key show <ID_OR_NAME> --output json
 nyxid api-key rotate <ID_OR_NAME>
 nyxid api-key delete <ID_OR_NAME> --yes
 
+# Org-owned agent keys (for sharing one agent identity across the whole org)
+nyxid api-key create --name "shared-coding-agent" --org <ORG_ID> --platform claude-code
+nyxid api-key list --org <ORG_ID>                     # list all keys owned by this org
+nyxid api-key rotate <ID> --output json               # any org admin can rotate
+nyxid api-key delete <ID> --yes                       # any org admin can delete
+
+# Consumers authenticate as the org: the agent's NYXID_ACCESS_TOKEN is the
+# org's key, proxy calls see org-shared services directly without needing
+# membership resolution, and audit logs attribute requests to the key
+# (not the admin who created it).
+
 # Service bindings (credential auto-resolved from service)
 nyxid api-key bind <ID_OR_NAME> --service <SERVICE_SLUG>
 nyxid api-key bind <ID_OR_NAME> --service <SLUG> --credential <LABEL>  # explicit override
@@ -344,6 +356,185 @@ Set `NYXID_ACCESS_TOKEN` in your agent's environment to authenticate:
 ```bash
 export NYXID_ACCESS_TOKEN="nyxid_ag_..."
 ```
+
+## Organizations (Shared Credentials)
+
+NyxID supports **organizations** for sharing a single set of credentials across multiple users. The classic example is a family Home Assistant or a company OpenAI key: one credential record, many people calling it through their own NyxID accounts. The proxy automatically falls back to org credentials when a personal one is missing for the requested service, with full per-member audit attribution.
+
+### Mental model
+
+- An **org is just a special user** (`user_type: "org"`) that cannot log in directly. It owns its own services, endpoints, API keys, etc., the same way a person does.
+- **Membership** lives in `org_memberships`. Each member has a **role** (`admin` / `member` / `viewer`) and an optional service-id scope. Admins manage everything; members can use org services through the proxy; viewers can see them in `nyxid service list` but cannot proxy through them.
+- **Resolution priority:** when a proxy request comes in, NyxID first looks for a personal `UserService` matching the slug. Only if that misses does it walk the user's active memberships (in `primary_org_id` order, then earliest-joined) and try the org's services. Personal credentials always win.
+- **`credential_source` on `nyxid service list`**: every service in the response is tagged with `{ "type": "personal" }` or `{ "type": "org", "org_id": ..., "org_name": ..., "role": ..., "allowed": ... }`. Use this to tell the user which credentials are theirs vs. shared.
+
+### Creating and managing an org
+
+```bash
+# Create an org. You become the first admin.
+nyxid org create --display-name "Chrono AI"
+
+# List all orgs you belong to
+nyxid org list
+
+# Show details (member count, your role)
+nyxid org show <ORG_ID>
+
+# Update metadata (admin only). Pass --avatar-url "" to clear.
+nyxid org update <ORG_ID> --display-name "New Name"
+
+# Delete (admin only). Refuses if the org still owns any shared services,
+# endpoints, API keys, or NyxID API keys -- transfer or delete those first.
+nyxid org delete <ORG_ID> --yes
+```
+
+### Sharing a service with the org
+
+An org admin creates a shared service by passing `--org <ORG_ID>` to `nyxid service add`. The resulting `UserService`, `UserEndpoint`, and `UserApiKey` rows are written with `user_id = <org_user_id>`, so every member of the org immediately sees the service in their `nyxid service list` (tagged with `credential_source.type = "org"`) and can proxy through it using their own NyxID account.
+
+```bash
+# Shared OpenAI key for the whole org (API key credential)
+nyxid service add llm-openai --org 1c3f8e2a-...
+
+# OAuth flow targeted at the org. The browser opens under YOUR login, you
+# grant access to the org's copy of the provider, and the resulting token
+# is stored under the org's user_id so every member can proxy through it.
+nyxid service add api-google --oauth --org 1c3f8e2a-...
+
+# Device-code flow targeted at the org
+nyxid service add llm-anthropic --device-code --org 1c3f8e2a-...
+
+# Custom endpoint targeted at the org
+nyxid service add --custom --org 1c3f8e2a-... \
+  --label "Shared Home Assistant" \
+  --endpoint-url https://ha.home.local:8123 \
+  --auth-method bearer
+
+# Node-routed shared service. The credential lives on the admin's
+# personal node (encrypted at rest there) but the org service points
+# at it. Every org member's proxy calls flow: NyxID -> admin's node ->
+# downstream API. The admin must have write access to the node (which
+# they do because it's their personal node); the node itself does not
+# need to be re-registered under the org.
+nyxid service add llm-openai --org 1c3f8e2a-... --via-node my-laptop-node
+# Then on the node:
+nyxid node credentials setup --service llm-openai
+```
+
+The backend enforces that the caller is an admin of the target org before writing the row (returns `8103 org_role_insufficient` otherwise). Creating or updating an org-owned service respects the membership's `allowed_service_ids` scope just like the proxy path.
+
+> **How org-OAuth works under the hood.** The CLI creates a placeholder `UserApiKey` under the org's user_id (`POST /keys` with `target_org_id`), then initiates the OAuth / device-code flow with `target_org_id=X` on the query string. The backend stores the resulting `UserProviderToken` with `user_id = org`, and the sync routine matches it to the placeholder because both share the same user_id. The admin's personal scope is untouched -- the grant lives entirely under the org. If you prefer a dedicated identity for the org's OAuth grants (so personal account compromise does not leak the org credential), create a dedicated service account and use its token for the initial `nyxid login` before running `nyxid service add ... --oauth --org <X>`.
+
+> Viewer-role members still see org services in the list (tagged `credential_source.allowed = false`) but cannot click into their detail page or proxy through them. Scoped members only see services within their `allowed_service_ids` scope -- services outside the scope are hidden entirely, not just disabled.
+
+The frontend `/keys` page groups personal vs. each org section, with viewer-role and out-of-scope items rendered read-only.
+
+### Inviting members
+
+```bash
+# Issue a one-time invite (admin only). Default role is member, default TTL 24h.
+nyxid org invite create <ORG_ID> --role member
+nyxid org invite create <ORG_ID> --role viewer --ttl-hours 168
+
+# Restrict the invitee to specific UserService IDs (comma-separated)
+nyxid org invite create <ORG_ID> --role member --allowed-service-ids "<svc1>,<svc2>"
+
+# The output includes a join link AND a bare nonce. Share whichever is convenient:
+#   Join link: https://<frontend>/orgs/join/ORGINV-...
+#   CLI:       nyxid org join ORGINV-...
+
+# Recipient redeems while signed in
+nyxid org join ORGINV-ABCDEF12345678
+nyxid org join "https://nyx.example.com/orgs/join/ORGINV-..."   # full URL also works
+
+# List or cancel pending invites
+nyxid org invite list <ORG_ID>
+nyxid org invite cancel <ORG_ID> <INVITE_ID> --yes
+```
+
+Direct add (without an invite) is also available for tooling but not recommended:
+
+```bash
+nyxid org member add <ORG_ID> --user-id <USER_ID> --role member
+```
+
+### Managing members
+
+```bash
+# List members of an org (any member can read)
+nyxid org member list <ORG_ID>
+
+# Change a member's role or scope (admin only)
+nyxid org member update <ORG_ID> <MEMBER_USER_ID> --role admin
+nyxid org member update <ORG_ID> <MEMBER_USER_ID> --allowed-service-ids "<svc1>,<svc2>"
+nyxid org member update <ORG_ID> <MEMBER_USER_ID> --allowed-service-ids ""    # clear scope
+
+# Remove a member (admin only). Re-adding later reactivates the same membership row.
+nyxid org member remove <ORG_ID> <MEMBER_USER_ID> --yes
+```
+
+### Multi-org tiebreaker: `primary_org_id`
+
+When a user belongs to multiple orgs that all happen to share the same service slug, the proxy needs a deterministic winner. The default is the earliest-joined org. To override:
+
+```bash
+nyxid org set-primary --org-id <ORG_ID>      # set
+nyxid org set-primary --clear                # unset (revert to earliest-joined)
+```
+
+### Working with org services in agents
+
+For an AI agent making proxy requests, **nothing changes**. The agent calls `nyxid proxy request <slug> ...` exactly as before. NyxID looks up the credential -- personal first, then org -- and injects it. The audit log records `routed_via: "personal"` or `routed_via: "org"` (with `org_user_id` and `member_user_id`) so the org admin can see who used what.
+
+When listing services for the user, **always print the `credential_source` field** so the user can tell which credentials are theirs and which are shared. Viewer-role items have `credential_source.allowed = false`; do not attempt to proxy through them -- the request will return `8103 org_role_insufficient`.
+
+### Org-level approval policies
+
+An org admin can require approval whenever any member uses a specific org-owned service. Unlike personal per-service configs, **the org policy is dominant**: it overrides the member's personal approval gate for that service.
+
+```bash
+# Set an org policy: every member must get an admin's approval before
+# their proxy call through this org service goes through. Per-request mode.
+nyxid approval set-config <SERVICE_ID> --org <ORG_ID> --require-approval true
+
+# Same but use time-based grant mode (approval creates a reusable grant)
+nyxid approval set-config <SERVICE_ID> --org <ORG_ID> --require-approval true --approval-mode grant
+
+# List current org-level policies on org-owned services
+nyxid approval service-configs --org <ORG_ID> --output json
+
+# List approval requests filed against org services (admin-only view)
+nyxid approval list --org <ORG_ID> --output json
+
+# List active grants created from org-policy approvals (grant mode only).
+# These live under the org's user_id, so this is the only way for admins
+# to see / revoke them.
+nyxid approval grants --org <ORG_ID> --output json
+nyxid approval revoke-grant <GRANT_ID> --org <ORG_ID> --yes
+```
+
+Frontend: the Org detail page has an **Approvals** tab for admins to manage these policies via a UI.
+
+**Cascade semantics** (`approval_service::resolve_org_aware_approval`):
+
+1. If the service being called is **org-owned** and the org has a per-service config row, the org's config wins absolutely. The `notify_user_ids` fan-out goes to every admin of the owning org, and **any** of them can decide.
+2. Otherwise, fall back to the **actor's** per-service config for that service.
+3. Otherwise, fall back to the actor's **global** approval toggle (`nyxid approval enable/disable`).
+
+When a request is decided by an org admin, the decision is accepted regardless of which admin was the first to receive the notification -- the decide endpoint cross-checks current org admin status as defense-in-depth against admin set changes since the request was created. Grants created by approved org-policy requests live under the **org's** `user_id`, so the next member's call reuses the same grant instead of triggering a second approval.
+
+Audit entries for org-policy-gated decisions include `routed_via: "org"`, `org_user_id`, `member_user_id`, and `policy_owner_user_id: "<org_user_id>"` so it is unambiguous whose policy caused the gate.
+
+### Related error codes
+
+- `1403 org_cannot_authenticate` -- attempted to log in as an org user (orgs cannot log in directly)
+- `8100 org_query_timeout` -- the org-fallback membership query exceeded its 500ms wall-clock budget. The proxy returns 503; usually indicates MongoDB is degraded.
+- `8101 org_not_found`
+- `8102 org_membership_required` -- you tried to access an org you do not belong to
+- `8103 org_role_insufficient` -- viewer tried to proxy, or non-admin tried to manage
+- `8104 org_invite_invalid` -- unknown nonce or already-redeemed
+- `8105 org_invite_expired` -- invite TTL elapsed; ask the admin for a new one
+- `8106 org_approval_no_admin` -- the org policy on this service requires approval but the org has no active admins; an admin must be added before any member can use the service. Returned as 503 to make the degraded state obvious.
 
 ### CLI profiles
 
@@ -517,6 +708,14 @@ nyxid approval grants --output json                    # list active grants (gra
 nyxid approval service-configs --output json           # list per-service approval configs (includes approval_mode)
 nyxid approval set-config <SERVICE_ID> --require-approval true                    # per-request (default)
 nyxid approval set-config <SERVICE_ID> --require-approval true --approval-mode grant  # grant mode
+
+# Org-level per-service approval policies (admin only). When set, the
+# policy is dominant over the member's personal gate: every member of
+# the org must get an admin's approval before the proxy call goes through.
+nyxid approval service-configs --org <ORG_ID> --output json
+nyxid approval set-config <SERVICE_ID> --org <ORG_ID> --require-approval true
+nyxid approval set-config <SERVICE_ID> --org <ORG_ID> --require-approval true --approval-mode grant
+nyxid approval list --org <ORG_ID> --output json       # list requests against org services
 
 nyxid notification settings                            # show notification settings
 nyxid notification update --approval-telegram true     # enable telegram notifications

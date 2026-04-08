@@ -10,7 +10,7 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::{AuthUser, OptionalAuthUser};
 use crate::services::{
-    audit_service, credential_push_service, provider_service, user_api_key_service,
+    audit_service, credential_push_service, org_service, provider_service, user_api_key_service,
     user_token_service,
 };
 
@@ -73,6 +73,11 @@ pub struct OAuthInitiateQuery {
     /// to append to the provider's `default_scopes` when building the
     /// authorization URL. The upstream provider decides whether to grant them.
     pub scope: Option<String>,
+    /// When set, initiate the OAuth flow on behalf of an org. The resulting
+    /// `UserProviderToken` is stored under the org's user_id so that every
+    /// member of the org can proxy through the resulting credential. The
+    /// caller must be an admin of the org.
+    pub target_org_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -81,6 +86,10 @@ pub struct DeviceCodeInitiateQuery {
     /// to append to the provider's `default_scopes` when requesting the
     /// device code.
     pub scope: Option<String>,
+    /// When set, initiate the device-code flow on behalf of an org. The
+    /// resulting token is stored under the org's user_id. The caller must
+    /// be an admin of the org. See [`OAuthInitiateQuery::target_org_id`].
+    pub target_org_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -231,6 +240,28 @@ pub async fn connect_api_key(
     }))
 }
 
+/// Verify that the caller is an admin of the given org and return the org's
+/// user_id so OAuth state plumbing can store the token on its behalf.
+///
+/// Returns `Ok(None)` when `target_org_id` is not set. Errors out with
+/// `OrgRoleInsufficient` if the caller is not an admin of the target org.
+async fn resolve_oauth_target_org(
+    state: &AppState,
+    actor: &str,
+    target_org_id: Option<&str>,
+) -> AppResult<Option<String>> {
+    let Some(target) = target_org_id else {
+        return Ok(None);
+    };
+    let access = org_service::resolve_owner_access(&state.db, actor, target).await?;
+    if !access.can_write() {
+        return Err(AppError::OrgRoleInsufficient(
+            "you must be an admin of the target org to initiate OAuth on its behalf".to_string(),
+        ));
+    }
+    Ok(Some(target.to_string()))
+}
+
 /// GET /api/v1/providers/{provider_id}/connect/oauth
 pub async fn initiate_oauth_connect(
     State(state): State<AppState>,
@@ -244,13 +275,19 @@ pub async fn initiate_oauth_connect(
     }
     let additional_scopes = user_token_service::parse_additional_scopes(query.scope.as_deref())?;
 
+    // Optional org-targeted flow. When set, the admin is initiating OAuth
+    // on behalf of the org -- the resulting token lives under the org's
+    // user_id and is visible to every org member via the proxy fallback.
+    let target_org_user_id =
+        resolve_oauth_target_org(&state, &user_id_str, query.target_org_id.as_deref()).await?;
+
     let auth_url = user_token_service::initiate_oauth_connect(
         &state.db,
         &state.encryption_keys,
         &state.config.base_url,
         &user_id_str,
         &provider_id,
-        None,
+        target_org_user_id.as_deref(),
         query.redirect_path.as_deref(),
         &additional_scopes,
     )
@@ -618,12 +655,16 @@ pub async fn request_device_code(
     let user_id_str = auth_user.user_id.to_string();
     let additional_scopes = user_token_service::parse_additional_scopes(query.scope.as_deref())?;
 
+    // See `initiate_oauth_connect` for the org-targeting contract.
+    let target_org_user_id =
+        resolve_oauth_target_org(&state, &user_id_str, query.target_org_id.as_deref()).await?;
+
     let result = user_token_service::request_device_code(
         &state.db,
         &state.encryption_keys,
         &user_id_str,
         &provider_id,
-        None,
+        target_org_user_id.as_deref(),
         &additional_scopes,
     )
     .await?;

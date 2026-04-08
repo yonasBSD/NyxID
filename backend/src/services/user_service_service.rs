@@ -4,10 +4,12 @@ use mongodb::bson::{self, doc};
 use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
+use crate::models::org_membership::OrgRole;
+use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::models::user_api_key::COLLECTION_NAME as USER_API_KEYS;
 use crate::models::user_endpoint::COLLECTION_NAME as USER_ENDPOINTS;
 use crate::models::user_service::{COLLECTION_NAME, UserService};
-use crate::services::node_service;
+use crate::services::{node_service, org_service};
 
 /// Valid auth methods for user services.
 ///
@@ -165,6 +167,105 @@ pub async fn list_user_services(
     Ok(services)
 }
 
+/// Provenance tag distinguishing personal credentials from org-shared ones.
+///
+/// Personal entries are owned directly by the actor; org entries are owned
+/// by an org user the actor is a member of. Viewer-role memberships also
+/// surface here with `allowed: false` so the UI can show "you can see this
+/// but cannot use it".
+#[derive(Debug, Clone)]
+pub enum CredentialSource {
+    Personal,
+    Org {
+        org_user_id: String,
+        org_name: String,
+        role: OrgRole,
+        allowed: bool,
+    },
+}
+
+/// A user service paired with the provenance of its credentials.
+#[derive(Debug, Clone)]
+pub struct UserServiceWithSource {
+    pub service: UserService,
+    pub source: CredentialSource,
+}
+
+/// List all user services visible to a person, including those inherited
+/// from org memberships. Personal entries come first, then one section per
+/// org. Viewer-role org services are returned with `allowed = false` so the
+/// UI can render them as read-only.
+///
+/// **Dedup rule:** if the actor has both a personal and an org-inherited
+/// service for the same slug, both are returned. The frontend groups by
+/// `source` and the proxy resolution path picks personal first.
+pub async fn list_user_services_with_sources(
+    db: &mongodb::Database,
+    user_id: &str,
+) -> AppResult<Vec<UserServiceWithSource>> {
+    let mut out: Vec<UserServiceWithSource> = list_user_services(db, user_id)
+        .await?
+        .into_iter()
+        .map(|s| UserServiceWithSource {
+            service: s,
+            source: CredentialSource::Personal,
+        })
+        .collect();
+
+    let memberships = org_service::list_memberships_for_member(db, user_id, false).await?;
+
+    // Cache org user lookups so we don't re-query the same org twice when
+    // the user belongs to multiple memberships pointing at the same org
+    // (shouldn't happen due to the unique index, but cheap to be safe).
+    let mut org_name_cache: std::collections::HashMap<String, String> = Default::default();
+
+    for m in memberships {
+        let org_name = if let Some(name) = org_name_cache.get(&m.org_user_id) {
+            name.clone()
+        } else {
+            let org = db
+                .collection::<User>(USERS)
+                .find_one(doc! { "_id": &m.org_user_id })
+                .await?;
+            let name = org
+                .and_then(|u| u.display_name)
+                .unwrap_or_else(|| "Unnamed Org".to_string());
+            org_name_cache.insert(m.org_user_id.clone(), name.clone());
+            name
+        };
+
+        let org_services = list_user_services(db, &m.org_user_id).await?;
+        for svc in org_services {
+            // Scope filter: drop services outside the membership's
+            // `allowed_service_ids` entirely. We do NOT return them with
+            // `allowed: false` because the response payload still contains
+            // endpoint_id, api_key_id, auth metadata, etc. -- a member
+            // scoped to service A must not see metadata for service B.
+            //
+            // Role-based "can see but not proxy" (viewer) remains visible
+            // with `allowed: false` because viewers are explicitly entitled
+            // to see the listing of services their org has.
+            if !m.allows_service(&svc.id) {
+                continue;
+            }
+            // Viewer can see but not proxy. Member/Admin can use.
+            let allowed = m.role.can_proxy();
+
+            out.push(UserServiceWithSource {
+                service: svc,
+                source: CredentialSource::Org {
+                    org_user_id: m.org_user_id.clone(),
+                    org_name: org_name.clone(),
+                    role: m.role,
+                    allowed,
+                },
+            });
+        }
+    }
+
+    Ok(out)
+}
+
 /// Get single user service by ID, verifying ownership.
 pub async fn get_user_service(
     db: &mongodb::Database,
@@ -205,11 +306,75 @@ pub async fn find_by_catalog_service_id(
         .await?)
 }
 
+/// Return the IDs of every active `UserService` for `user_id` that
+/// references the given endpoint. Used by org-scope checks: an
+/// `OrgMembership.allowed_service_ids` is a set of `UserService` ids,
+/// so to gate write access on a `UserEndpoint` we have to translate
+/// the endpoint id back to the services it backs.
+pub async fn user_service_ids_for_endpoint(
+    db: &mongodb::Database,
+    user_id: &str,
+    endpoint_id: &str,
+) -> AppResult<Vec<String>> {
+    let services: Vec<UserService> = db
+        .collection::<UserService>(COLLECTION_NAME)
+        .find(doc! { "user_id": user_id, "endpoint_id": endpoint_id })
+        .await?
+        .try_collect()
+        .await?;
+    Ok(services.into_iter().map(|s| s.id).collect())
+}
+
+/// Return the IDs of every active `UserService` for `user_id` that
+/// references the given external `UserApiKey`. See the endpoint helper
+/// above for the rationale.
+pub async fn user_service_ids_for_api_key(
+    db: &mongodb::Database,
+    user_id: &str,
+    user_api_key_id: &str,
+) -> AppResult<Vec<String>> {
+    let services: Vec<UserService> = db
+        .collection::<UserService>(COLLECTION_NAME)
+        .find(doc! { "user_id": user_id, "api_key_id": user_api_key_id })
+        .await?
+        .try_collect()
+        .await?;
+    Ok(services.into_iter().map(|s| s.id).collect())
+}
+
+/// Return the IDs of every `UserService` (active or inactive) for
+/// `user_id` that points at the given catalog `DownstreamService.id`.
+/// Used by the approval scope check, which needs the `UserService.id`
+/// space because that is what `OrgMembership.allowed_service_ids`
+/// stores. Inactive services are included so a member who deactivated
+/// their UserService cannot dodge an outstanding approval.
+pub async fn user_service_ids_for_catalog(
+    db: &mongodb::Database,
+    user_id: &str,
+    catalog_service_id: &str,
+) -> AppResult<Vec<String>> {
+    let services: Vec<UserService> = db
+        .collection::<UserService>(COLLECTION_NAME)
+        .find(doc! { "user_id": user_id, "catalog_service_id": catalog_service_id })
+        .await?
+        .try_collect()
+        .await?;
+    Ok(services.into_iter().map(|s| s.id).collect())
+}
+
 /// Create a new user service.
+///
+/// `user_id` is the *effective owner* of the new service (the actor when
+/// creating personal services, the org user_id when creating org-owned
+/// services). `actor_user_id` is the human/API key actually making the
+/// request -- it's used for the node ownership check, because nodes are
+/// owned by individual people and an admin should be able to route an
+/// org service through their personal node without re-registering it.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_user_service(
     db: &mongodb::Database,
     user_id: &str,
+    actor_user_id: &str,
     slug: &str,
     endpoint_id: &str,
     api_key_id: Option<&str>,
@@ -299,7 +464,12 @@ pub async fn create_user_service(
     }
 
     if let Some(node_id) = node_id {
-        node_service::get_node(db, user_id, node_id).await?;
+        // Actor-based check: the human (or API key) making the request must
+        // have write access to the node. This lets an admin route an
+        // org-owned service through their personal node, where they're the
+        // direct owner. The service's effective owner (user_id) does not
+        // need to match the node's owner.
+        node_service::ensure_node_writable_by_actor(db, actor_user_id, node_id).await?;
     }
 
     let now = Utc::now();
@@ -338,10 +508,16 @@ pub async fn create_user_service(
 }
 
 /// Update service config (auth method, node routing, identity propagation, etc.).
+///
+/// `user_id` is the *effective owner* of the service (caller for personal,
+/// org user_id for org-owned). `actor_user_id` is the human/API key making
+/// the request -- used for the node ownership check (see
+/// `create_user_service` for rationale).
 #[allow(clippy::too_many_arguments)]
 pub async fn update_user_service(
     db: &mongodb::Database,
     user_id: &str,
+    actor_user_id: &str,
     service_id: &str,
     auth_method: Option<&str>,
     auth_key_name: Option<&str>,
@@ -373,7 +549,8 @@ pub async fn update_user_service(
             // Empty string clears the node_id
             set_doc.insert("node_id", bson::Bson::Null);
         } else {
-            node_service::get_node(db, user_id, nid).await?;
+            // Actor-based check: see `create_user_service` for rationale.
+            node_service::ensure_node_writable_by_actor(db, actor_user_id, nid).await?;
             set_doc.insert("node_id", nid);
         }
     }
@@ -450,14 +627,20 @@ pub async fn update_user_service(
 }
 
 /// Deactivate a user service (soft delete).
+///
+/// `actor_user_id` is the human/API key making the request -- forwarded to
+/// `update_user_service` for symmetry, but not actually used since
+/// deactivation doesn't change the node_id.
 pub async fn deactivate_user_service(
     db: &mongodb::Database,
     user_id: &str,
+    actor_user_id: &str,
     service_id: &str,
 ) -> AppResult<()> {
     update_user_service(
         db,
         user_id,
+        actor_user_id,
         service_id,
         None,
         None,

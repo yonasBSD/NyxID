@@ -549,6 +549,38 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
                 .delete(handlers::user_services_handler::delete_user_service),
         );
 
+    // Org management routes (creation, members, invites). All routes
+    // authenticate as a regular session/user; admin-vs-member checks happen
+    // inside the handlers based on org_memberships rather than a global flag.
+    let org_routes = Router::new()
+        .route(
+            "/",
+            get(handlers::orgs::list_orgs).post(handlers::orgs::create_org),
+        )
+        .route("/join/{nonce}", post(handlers::orgs::redeem_invite))
+        .route(
+            "/{org_id}",
+            get(handlers::orgs::get_org)
+                .patch(handlers::orgs::update_org)
+                .delete(handlers::orgs::delete_org),
+        )
+        .route(
+            "/{org_id}/members",
+            get(handlers::orgs::list_members).post(handlers::orgs::add_member),
+        )
+        .route(
+            "/{org_id}/members/{member_id}",
+            patch(handlers::orgs::update_member).delete(handlers::orgs::remove_member),
+        )
+        .route(
+            "/{org_id}/invites",
+            get(handlers::orgs::list_invites).post(handlers::orgs::create_invite),
+        )
+        .route(
+            "/{org_id}/invites/{invite_id}",
+            delete(handlers::orgs::cancel_invite),
+        );
+
     let catalog_routes = Router::new()
         .route("/", get(handlers::catalog::list_catalog))
         .route("/{slug}", get(handlers::catalog::get_catalog_entry))
@@ -702,6 +734,11 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
         .nest("/endpoints", user_endpoint_routes)
         .nest("/api-keys/external", external_api_key_routes)
         .nest("/user-services", user_service_routes)
+        .nest("/orgs", org_routes)
+        .route(
+            "/users/me/primary-org",
+            patch(handlers::orgs::set_primary_org),
+        )
         .nest("/catalog", catalog_routes)
         .nest("/channel-bots", channel_bot_routes)
         .nest("/channel-conversations", channel_conversation_routes)

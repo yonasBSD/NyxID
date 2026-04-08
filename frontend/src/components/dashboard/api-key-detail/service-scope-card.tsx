@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useUpdateApiKey } from "@/hooks/use-api-keys";
 import { useKeys } from "@/hooks/use-keys";
 import { ApiError } from "@/lib/api-client";
@@ -16,11 +16,25 @@ import {
 import { Shield, Pencil } from "lucide-react";
 import { toast } from "sonner";
 
+import type { CredentialSource } from "@/schemas/orgs";
+
+function sameOwner(
+  a?: CredentialSource,
+  b?: CredentialSource,
+): boolean {
+  const aType = a?.type ?? "personal";
+  const bType = b?.type ?? "personal";
+  if (aType !== bType) return false;
+  if (aType === "personal") return true;
+  return a?.type === "org" && b?.type === "org" && a.org_id === b.org_id;
+}
+
 export function ServiceScopeCard({
   keyId,
   allowAllServices,
   allowedServiceIds,
   allowedServices,
+  apiKeySource,
 }: {
   readonly keyId: string;
   readonly allowAllServices: boolean;
@@ -31,12 +45,23 @@ export function ServiceScopeCard({
     readonly label: string;
     readonly catalog_service_name: string | null;
   }[];
+  readonly apiKeySource?: CredentialSource;
 }) {
   const [editing, setEditing] = useState(false);
   const [allowAll, setAllowAll] = useState(allowAllServices);
   const [selectedIds, setSelectedIds] =
     useState<readonly string[]>(allowedServiceIds);
   const { data: allKeys } = useKeys();
+  // Filter to services owned by the same owner as the API key. Personal
+  // API keys can only scope to personal services; org API keys can only
+  // scope to the same org's services. The backend
+  // (`key_service::validate_service_ids`) enforces this server-side; the
+  // filter here is to avoid offering options that would 400 on save.
+  const personalKeys = useMemo(
+    () =>
+      (allKeys ?? []).filter((k) => sameOwner(k.credential_source, apiKeySource)),
+    [allKeys, apiKeySource],
+  );
   const updateApiKey = useUpdateApiKey();
 
   function handleSave() {
@@ -104,8 +129,8 @@ export function ServiceScopeCard({
                 <p className="text-xs text-muted-foreground">
                   Select allowed services:
                 </p>
-                {allKeys && allKeys.length > 0 ? (
-                  allKeys.map((k) => (
+                {personalKeys.length > 0 ? (
+                  personalKeys.map((k) => (
                     <div key={k.id} className="flex items-center gap-2">
                       <Checkbox
                         id={`svc-${k.id}`}

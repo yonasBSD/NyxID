@@ -1,0 +1,652 @@
+# Organizations (Org Model)
+
+NyxID Organizations let multiple people share a single set of credentials, services, API keys, developer apps, and service accounts under one logical owner. The classic examples:
+
+- A family that all needs to call the same Home Assistant instance.
+- A company that buys one OpenAI API key for the team.
+- A team whose agents all post messages through one Lark or Discord bot.
+
+The design borrows GitHub's insight that **an organization is just a special kind of user**. There is no separate "org" model — an org is a `User` row with `user_type: "org"` that cannot log in directly. Every existing model that is owned by `user_id` (UserService, UserApiKey, UserEndpoint, ApiKey, ServiceAccount, OauthClient, ServiceApprovalConfig, ApprovalGrant) gets org support for free by having its `user_id` point at the org's user id. The only new model is `OrgMembership`, which connects person users to org users with a role and an optional service-id scope.
+
+This is an opt-in feature. Users without org memberships continue using their personal credentials exactly as before. Users with memberships can choose to share credentials at the org level while still keeping personal ones for their own use.
+
+---
+
+## Table of Contents
+
+- [Concepts](#concepts)
+- [Data Model](#data-model)
+- [Auth: Why Orgs Cannot Log In](#auth-why-orgs-cannot-log-in)
+- [Proxy Credential Resolution](#proxy-credential-resolution)
+- [Multi-Org Tiebreaker](#multi-org-tiebreaker)
+- [Audit Trail](#audit-trail)
+- [REST API](#rest-api)
+- [CLI](#cli)
+- [Frontend](#frontend)
+- [Org-Owned Resources](#org-owned-resources)
+- [Org-Aware Approval Cascade](#org-aware-approval-cascade)
+- [Org Deletion](#org-deletion)
+- [Error Codes](#error-codes)
+- [Migration Notes](#migration-notes)
+- [Limitations / Future Work](#limitations--future-work)
+
+---
+
+## Concepts
+
+```mermaid
+graph LR
+    subgraph "Before (per-user only)"
+        U1[User: alice] --> US1[UserService: openai]
+        U2[User: bob] --> US2[UserService: openai]
+        U3[User: carol] --> US3[UserService: openai]
+    end
+
+    subgraph "After (Org = User)"
+        OU[User: chrono-ai<br/>user_type: org]
+        OU --> OUS[UserService: openai<br/>owner: chrono-ai user_id]
+        M1[Membership: alice → chrono-ai<br/>role: Admin]
+        M2[Membership: bob → chrono-ai<br/>role: Member]
+        M3[Membership: carol → chrono-ai<br/>role: Viewer]
+    end
+
+    style OU fill:#f96,stroke:#333
+    style OUS fill:#9f9,stroke:#333
+```
+
+### Roles
+
+| Role | Manage org / members / invites | Use org services through proxy | See org services in `/keys` |
+|------|---|---|---|
+| **Admin** | Yes | Yes | Yes |
+| **Member** | No | Yes | Yes |
+| **Viewer** | No | No (`allowed: false`, 403 on proxy) | Yes (read-only) |
+
+### Scope: `allowed_service_ids`
+
+Each membership can carry an optional list of `UserService.id`s that the member is allowed to manage or use. `None` means unrestricted (the entire org). `Some(ids)` restricts the member to that subset. The check is enforced both at proxy time (members cannot call services outside their scope) and at write time (admins cannot edit services outside their own scope).
+
+### Org user vs. person user
+
+Both rows live in the `users` collection. The differences:
+
+| Field | Person user | Org user |
+|---|---|---|
+| `user_type` | `"person"` (default) | `"org"` |
+| `password_hash`, MFA, social provider fields | meaningful | unused (always `None` / `false`) |
+| `email` | unique within `user_type: "person"` (partial unique index) | freely set as a contact address; not subject to the unique index |
+| Can log in directly | Yes | **No** — see [Auth: Why Orgs Cannot Log In](#auth-why-orgs-cannot-log-in) |
+| Owns rows in `user_services`, `user_endpoints`, `user_api_keys`, `api_keys`, `oauth_clients`, `service_accounts`, `approval_grants`, etc. | Yes | Yes — every collection that keys off `user_id` works the same way |
+
+---
+
+## Data Model
+
+```mermaid
+erDiagram
+    User ||--o{ OrgMembership : "member_user_id"
+    User ||--o{ OrgMembership : "org_user_id (when user_type=org)"
+    User ||--o{ UserService : "user_id"
+    User ||--o{ UserApiKey : "user_id"
+    User ||--o{ UserEndpoint : "user_id"
+    User ||--o{ ApiKey : "user_id"
+    User ||--o{ ServiceAccount : "owner_user_id"
+    User ||--o{ OauthClient : "created_by"
+    User ||--o{ OrgInvite : "created_by"
+    User ||--o{ OrgInvite : "org_user_id (when user_type=org)"
+
+    User {
+        string id PK
+        string email
+        string user_type "person | org"
+        string primary_org_id FK "optional"
+        bool is_active
+    }
+
+    OrgMembership {
+        string id PK
+        string org_user_id FK
+        string member_user_id FK
+        enum role "Admin|Member|Viewer"
+        array allowed_service_ids "nullable"
+        datetime created_at
+        datetime revoked_at "nullable"
+    }
+
+    OrgInvite {
+        string id PK
+        string org_user_id FK
+        string nonce UK
+        enum role
+        array allowed_service_ids "nullable"
+        string created_by FK
+        datetime expires_at "TTL indexed"
+        string redeemed_by FK "nullable"
+        datetime redeemed_at "nullable"
+    }
+```
+
+### `User` fields added by this feature
+
+```rust
+pub user_type: UserType,            // serde default = Person
+pub primary_org_id: Option<String>, // optional multi-org tiebreaker
+```
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UserType {
+    Person,
+    Org,
+}
+```
+
+Existing rows without `user_type` deserialize as `Person` via serde default, so no backfill is required.
+
+### `OrgMembership`
+
+```rust
+pub struct OrgMembership {
+    pub id: String,                                 // UUID v4
+    pub org_user_id: String,                        // User where user_type = Org
+    pub member_user_id: String,                     // User where user_type = Person
+    pub role: OrgRole,
+    pub allowed_service_ids: Option<Vec<String>>,   // None = entire org
+    pub created_at: DateTime<Utc>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+pub enum OrgRole { Admin, Member, Viewer }
+```
+
+`COLLECTION_NAME = "org_memberships"`. Soft-deletes use `revoked_at`; rows are kept so re-invites can reactivate the same row in place and audit history is preserved across revoke / rejoin cycles.
+
+### `OrgInvite`
+
+```rust
+pub struct OrgInvite {
+    pub id: String,                            // UUID v4
+    pub org_user_id: String,                   // The org being joined
+    pub nonce: String,                         // URL-safe one-time token
+    pub role: OrgRole,                         // Role granted on redemption
+    pub allowed_service_ids: Option<Vec<String>>,
+    pub created_by: String,                    // Admin who issued it
+    pub expires_at: DateTime<Utc>,             // TTL-indexed
+    pub redeemed_by: Option<String>,
+    pub redeemed_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+```
+
+`COLLECTION_NAME = "org_invites"`. Distinct from the existing `InviteCode` model (which is for new-user registration); the two have different shapes and lifecycles and never share storage.
+
+### Indexes
+
+Set up in `backend/src/db.rs::ensure_indexes()`:
+
+| Collection | Keys | Type | Purpose |
+|---|---|---|---|
+| `users` | `{ email: 1 }` | partial unique, `{ user_type: "person" }` | preserve person-login uniqueness while allowing real contact emails on orgs |
+| `org_memberships` | `{ member_user_id: 1, revoked_at: 1 }` | normal | proxy resolve walks active memberships of the actor |
+| `org_memberships` | `{ org_user_id: 1, member_user_id: 1 }` | unique | one row per (org, member) pair across active+revoked |
+| `org_memberships` | `{ org_user_id: 1, revoked_at: 1 }` | normal | admin-side member listing |
+| `org_invites` | `{ nonce: 1 }` | unique | redeem-by-nonce lookup |
+| `org_invites` | `{ expires_at: 1 }` | TTL | auto-expire pending invites |
+| `org_invites` | `{ org_user_id: 1 }` | normal | admin invite listing |
+
+The `users.email` index migration is handled by `db.rs` at startup: drop the legacy `email_1` if present, create the partial-unique replacement. Safe because every existing row has `user_type` defaulting to `"person"` and therefore satisfies the partial filter.
+
+---
+
+## Auth: Why Orgs Cannot Log In
+
+```mermaid
+flowchart TD
+    A[Incoming auth request] --> B{Path}
+    B -->|POST /auth/login| C[auth_service::login_with_password]
+    B -->|POST /auth/refresh| D[auth_service::refresh_tokens]
+    B -->|POST /auth/social/*| E[auth_service::social_login]
+    B -->|POST /auth/forgot-password| F[auth_service::request_password_reset]
+    B -->|POST /auth/reset-password| G[auth_service::reset_password]
+    B -->|POST /mfa/*| H[mfa_service::*]
+
+    C --> X{user_type == Org?}
+    D --> X
+    E --> X
+    F --> X
+    G --> X
+    H --> X
+
+    X -->|Yes| R[AppError::OrgCannotAuthenticate<br/>HTTP 403, code 1403]
+    X -->|No| OK[Continue existing flow]
+
+    style X fill:#f96,stroke:#333
+    style R fill:#faa,stroke:#333
+```
+
+`auth_service::ensure_person_user(&user)` is called immediately after every `find_one_by_email` / `find_one_by_id` in the auth paths above. Person-login email lookups also include an explicit `user_type: "person"` filter as belt-and-suspenders even though the partial unique index already guarantees uniqueness for that subset.
+
+---
+
+## Proxy Credential Resolution
+
+The proxy runs the same resolution every request, with org fallback layered on top of the personal path:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client (agent)
+    participant P as Proxy Handler
+    participant RS as resolve_proxy_target_from_user_service
+    participant OS as org_service
+    participant DB as MongoDB
+    participant Audit as audit_service
+
+    C->>P: ANY /api/v1/proxy/s/{slug}/...
+    P->>RS: resolve(actor_user_id, slug)
+
+    RS->>DB: find UserService where user_id = actor AND slug = X
+    alt Personal UserService exists
+        DB-->>RS: UserService row
+        RS->>RS: load endpoint + api_key
+        RS-->>P: Resolution { routed_via: "personal" }
+    else No personal UserService
+        RS->>DB: legacy personal connection check
+        alt Legacy connection found
+            RS-->>P: Ok(None) → caller falls back to legacy path
+        else No legacy
+            RS->>OS: find_active_memberships_with_timeout(actor, 500ms)
+            OS->>DB: find org_memberships(member_user_id=actor, revoked_at=null)
+            alt Wall-clock timeout
+                OS-->>RS: Err(OrgQueryTimeout)
+                RS-->>P: 503 OrgQueryTimeout
+            else No memberships
+                OS-->>RS: []
+                RS-->>P: Ok(None) → 404 from caller
+            else Memberships found
+                OS-->>RS: Vec ordered by primary_org_id then created_at
+                loop For each membership
+                    RS->>DB: find UserService(org_user_id, slug)
+                    alt Found AND role allows AND scope allows
+                        RS->>RS: load endpoint + api_key (owned by org)
+                        RS-->>P: Resolution { routed_via: "org", org_user_id, membership_id }
+                    else Found but role/scope denies
+                        Note over RS: remember role_denied=true, continue loop
+                    else Not found
+                        Note over RS: continue loop
+                    end
+                end
+                alt Loop ended with role_denied
+                    RS-->>P: 403 OrgRoleInsufficient
+                else
+                    RS-->>P: Ok(None) → 404 from caller
+                end
+            end
+        end
+    end
+
+    P->>P: execute proxy request
+    P->>Audit: log_async(member_user_id, event, {routed_via, org_user_id?, membership_id?})
+```
+
+### The 500 ms wall-clock timeout
+
+Users with a personal `UserService` never reach the fallback path — they short-circuit at step 4. Users without one pay one extra Mongo round-trip per proxy call. If Mongo is degraded, that round-trip becomes the dominant latency for proxy 404s, so the org fallback query is wrapped in `tokio::time::timeout(Duration::from_millis(500), ...)` to bound blast radius.
+
+`Mongo's max_time_ms` is not enough on its own — it only governs query plan execution, not connection acquisition or cursor iteration. The wall-clock timeout is the only way to guarantee bounded latency end-to-end.
+
+Constant: `org_service::ORG_FALLBACK_TIMEOUT = Duration::from_millis(500)`. Update both this constant and this doc together if it ever changes.
+
+### Legacy personal guard
+
+Pre-migration personal connections (`UserServiceConnection`, `UserProviderToken`) outrank any org-shared credential the user might inherit. Joining an org must never silently retarget a user's own credentials, and must never throw a scope/role 403 at someone who already had working personal access. The legacy guard runs **between** the personal `UserService` lookup and the org fallback so that resolution is unambiguous.
+
+---
+
+## Multi-Org Tiebreaker
+
+When the same actor belongs to multiple orgs that all expose the same service slug, NyxID picks a deterministic winner:
+
+1. **Personal `UserService`** (always wins).
+2. **Legacy personal connection** (wins for users not yet migrated).
+3. **`User.primary_org_id`**, if set and the user is still a member of that org.
+4. **Earliest active membership by `created_at`**.
+
+`primary_org_id` is set via `nyxid org set-primary --org-id <ORG_ID>` (or unset with `--clear`).
+
+---
+
+## Audit Trail
+
+Every proxy call routed through an org carries the routing context in its audit `event_data`:
+
+```json
+{
+  "service_id": "...",
+  "user_service_id": "...",
+  "routed_via": "org",
+  "org_user_id": "<org user_id>",
+  "member_user_id": "<actor user_id>",
+  "membership_id": "..."
+}
+```
+
+Personal-routed calls record `routed_via: "personal"` and omit the org fields. Audit writes are fire-and-forget (`audit_service::log_async`) so audit failures never block the proxy request — degraded audit storage degrades observability, not availability.
+
+---
+
+## REST API
+
+All routes are under `/api/v1`. Org-aware mutation handlers gate on the new `org_service::resolve_owner_access(actor, target_owner_id)` helper, which returns one of `Direct | AsOrgAdmin | AsOrgMember | Forbidden` and carries the membership's `allowed_service_ids` so per-resource scope checks compose with role checks.
+
+### Org CRUD
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| `POST` | `/orgs` | session | Create an org (caller becomes the first Admin) |
+| `GET` | `/orgs` | session | List orgs the caller belongs to |
+| `GET` | `/orgs/{id}` | org member | Org detail |
+| `PATCH` | `/orgs/{id}` | org admin | Update display name / avatar |
+| `DELETE` | `/orgs/{id}` | org admin | Delete org (see [Org Deletion](#org-deletion)) |
+
+### Members
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| `GET` | `/orgs/{id}/members` | org member | List members |
+| `POST` | `/orgs/{id}/members` | org admin | Add member by user_id (admin add path) |
+| `PATCH` | `/orgs/{id}/members/{member_user_id}` | org admin | Change role or `allowed_service_ids` |
+| `DELETE` | `/orgs/{id}/members/{member_user_id}` | org admin | Revoke membership |
+
+### Invites
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| `POST` | `/orgs/{id}/invite` | org admin | Create a one-time invite (returns `nonce`) |
+| `GET` | `/orgs/{id}/invites` | org admin | List pending invites |
+| `DELETE` | `/orgs/{id}/invites/{invite_id}` | org admin | Cancel a pending invite |
+| `POST` | `/orgs/join/{nonce}` | session | Redeem an invite — caller joins the org |
+
+Invites carry their own `role` and optional `allowed_service_ids`. Once redeemed, the invite is marked `redeemed_by` + `redeemed_at` and the corresponding `OrgMembership` is created (or reactivated if a revoked row exists for the same pair).
+
+### Personal multi-org tiebreaker
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| `PATCH` | `/users/me/primary-org` | session | Set or clear `primary_org_id` for the caller |
+
+### Existing endpoints that became org-aware
+
+Every endpoint listed below already accepted a single `user_id`. With the org model they additionally accept a `target_org_id` (or, for query endpoints, `?org_id=<ORG_ID>`). The caller must be an admin of the target org. There is no new endpoint surface for these — the same routes serve both personal and org modes.
+
+| Endpoint | Org param | Notes |
+|---|---|---|
+| `POST /keys` | `target_org_id` body field | Auto-provisions UserEndpoint + UserApiKey + UserService under the org |
+| `GET /keys` | (org-tagged via `credential_source`) | Returns personal + org-inherited keys with provenance |
+| `POST /api-keys` | `target_org_id` body field | Org-owned NyxID API keys (agent identities) |
+| `GET /api-keys?org_id=` | query param | List org-owned API keys |
+| `POST /api-keys/{id}/bindings` | (auto: binding inherits owner) | Per-binding scope check applies for scoped admins |
+| `POST /admin/service-accounts` | `target_org_id` body field | Org-owned SAs; legacy admin path still works for global SAs |
+| `GET /admin/service-accounts?org_id=` | query param | List org-owned SAs |
+| `POST /developer/oauth-clients` | `target_org_id` body field | Org-owned developer apps |
+| `GET /developer/oauth-clients?org_id=` | query param | List org-owned developer apps |
+| `POST /providers/{id}/connect` | implicit via key flow | OAuth tokens for org keys are stored under the org's user_id |
+| `GET /approvals/requests?org_id=` | query param | List approval requests filed against org services |
+| `GET /approvals/grants?org_id=` | query param | List active approval grants owned by the org |
+| `DELETE /approvals/grants/{id}?org_id=` | query param | Revoke an org-owned grant |
+| `GET /approvals/service-configs?org_id=` | query param | List org-level approval policies |
+| `PUT /approvals/service-configs/{service_id}?org_id=` | query param | Set an org-level approval policy |
+| `DELETE /approvals/service-configs/{service_id}?org_id=` | query param | Remove an org-level approval policy |
+
+The CredentialSource discriminator on `GET /user-services` and `GET /keys` (see [Org-Owned Resources](#org-owned-resources)) is what lets clients distinguish personal items from org-inherited ones in a single response.
+
+---
+
+## CLI
+
+Every org operation has a `nyxid org *` subcommand. Other resource subcommands (`service`, `api-key`, `approval`, `service-account`, `developer-app`) take an `--org <ORG_ID>` flag wherever a personal action would otherwise default to the actor.
+
+```bash
+# Create + manage orgs
+nyxid org create --display-name "Chrono AI"
+nyxid org list
+nyxid org show <ORG_ID>
+nyxid org update <ORG_ID> --display-name "New Name"
+nyxid org delete <ORG_ID> --yes
+
+# Multi-org tiebreaker
+nyxid org set-primary --org-id <ORG_ID>      # set
+nyxid org set-primary --clear                # revert to earliest-joined
+
+# Members
+nyxid org member list <ORG_ID>
+nyxid org member add <ORG_ID> --user-id <USER_ID> --role member
+nyxid org member update <ORG_ID> <MEMBER_USER_ID> --role admin
+nyxid org member update <ORG_ID> <MEMBER_USER_ID> --allowed-service-ids "<svc1>,<svc2>"
+nyxid org member update <ORG_ID> <MEMBER_USER_ID> --allowed-service-ids ""    # clear scope
+nyxid org member remove <ORG_ID> <MEMBER_USER_ID> --yes
+
+# Invites
+nyxid org invite create <ORG_ID> --role member
+nyxid org invite create <ORG_ID> --role viewer --ttl-hours 168
+nyxid org invite create <ORG_ID> --role member --allowed-service-ids "<svc1>,<svc2>"
+nyxid org invite list <ORG_ID>
+nyxid org invite cancel <ORG_ID> <INVITE_ID> --yes
+nyxid org join ORGINV-ABCDEF12345678
+nyxid org join "https://nyx.example.com/orgs/join/ORGINV-..."   # full URL also works
+
+# Org-owned services / keys / SAs / apps (existing commands + --org)
+nyxid service add llm-openai --org <ORG_ID>
+nyxid service add api-google --oauth --org <ORG_ID>
+nyxid service add llm-anthropic --device-code --org <ORG_ID>
+nyxid service add --custom --org <ORG_ID> --label "Internal" --endpoint-url ...
+nyxid service add llm-openai --org <ORG_ID> --via-node my-laptop-node
+
+nyxid api-key create --name "shared-coding-agent" --org <ORG_ID> --platform claude-code
+nyxid api-key list --org <ORG_ID>
+nyxid api-key rotate <ID>           # any org admin can rotate
+nyxid api-key bind <ID> --service <SLUG> --credential <LABEL>
+
+# Org approval policies + grants
+nyxid approval list --org <ORG_ID> --output json
+nyxid approval service-configs --org <ORG_ID> --output json
+nyxid approval set-config <SERVICE_ID> --org <ORG_ID> --require-approval true
+nyxid approval set-config <SERVICE_ID> --org <ORG_ID> --require-approval true --approval-mode grant
+nyxid approval grants --org <ORG_ID> --output json
+nyxid approval revoke-grant <GRANT_ID> --org <ORG_ID> --yes
+```
+
+Service create with `--org X --via-node Y` is supported: the node remains personally owned by the admin (no re-registration), the org service references it, and proxy-time fallback queries use the org's user_id so failover candidates correctly reflect the org's bindings. The cross-check is actor-based — see [Org-Owned Resources](#org-owned-resources) → "Node-routed services".
+
+---
+
+## Frontend
+
+| Page | Route | Purpose |
+|---|---|---|
+| Orgs list | `/orgs` | All orgs the caller belongs to, with role badges and a "Create org" CTA |
+| Org detail | `/orgs/{id}` | Tabs: **Members**, **Invites**, **Approvals**, **Settings** (admin-only tabs hidden for non-admins) |
+| Org join | `/orgs/join/{nonce}` | Redeem an invite link, then redirect to `/orgs/{id}` |
+| AI Services / Keys | `/keys` | Personal vs. each org section, with viewer-role and out-of-scope items rendered read-only |
+
+Auth-aware behavior:
+
+- `useUpdateMember` invalidates the org detail query in addition to the members list, so if an admin self-demotes, the admin-only tabs disappear immediately (no stale UI requiring a hard refresh).
+- The Approvals tab includes a per-service policy editor and an org grants list. The picker only offers services with a `catalog_service_id` (custom-only services have no per-service approval surface) and submits the `catalog_service_id` to match the backend's expected key space.
+- Items with `credential_source.type === "org" && credential_source.allowed === false` are visible (so viewers see what exists) but rendered read-only and not actionable from agent flows.
+
+---
+
+## Org-Owned Resources
+
+The Org=User insight means every resource that already keys off `user_id` works for orgs without a new model. The backend gates writes through `org_service::resolve_owner_access` and translates membership scopes (`UserService.id` space) to backing-resource scopes where needed.
+
+### `credential_source` discriminator
+
+```rust
+pub enum CredentialSource {
+    Personal,
+    Org {
+        org_user_id: String,
+        org_name: String,
+        role: OrgRole,
+        allowed: bool,   // false for viewers / out-of-scope members
+    },
+}
+```
+
+`GET /user-services`, `GET /keys`, and several enrichment endpoints carry this on every item so clients can group personal vs. org credentials and gate UI affordances.
+
+### Resources that became org-aware
+
+| Resource | Owner field | Org-aware via |
+|---|---|---|
+| `UserService` / `UserEndpoint` / `UserApiKey` | `user_id` | `target_org_id` on `POST /keys`; admins of the target org can manage |
+| `ApiKey` (NyxID agent identity) | `user_id` | `target_org_id` on `POST /api-keys`; ApiKey's own `allowed_service_ids` is its agent scope, *not* the membership scope |
+| `AgentServiceBinding` | `user_id` | inherits the owning ApiKey's owner; per-binding scope check on `user_service_id` |
+| `OauthClient` (developer app) | `created_by` | `target_org_id` on `POST /developer/oauth-clients` |
+| `ServiceAccount` | `owner_user_id` (with `created_by` fallback) | `target_org_id` on `POST /admin/service-accounts` |
+| `UserProviderToken` (OAuth provider tokens) | `user_id` | OAuth flows kicked off with `target_org_id` store the token under the org |
+| `ServiceApprovalConfig` | `user_id` | `?org_id=X` on the service-config endpoints |
+| `ApprovalGrant` | `user_id` | created under the org when an org-policy approval is decided in grant mode |
+
+### Resource scope and `allowed_service_ids`
+
+`OrgMembership.allowed_service_ids` is keyed by **`UserService.id`**, not by catalog id and not by ApiKey/OauthClient id. The owner-resolver helpers translate as needed:
+
+- **`UserEndpoint`** → look up every `UserService` whose `endpoint_id` matches; gate via `allows_any_resource(&user_service_ids)`. An orphan endpoint (no backing service) is only writable by Direct owners and unscoped admins.
+- **`UserApiKey` (external)** → look up every `UserService` whose `api_key_id` matches; same `allows_any_resource` gate.
+- **`ApiKey` (NyxID agent identity)** → no resource scope. The membership scope governs which **services** the admin can manage, not whether they can rotate an API key. The API key has its own `allowed_service_ids` field that bounds what its bearer can call at runtime.
+- **`OauthClient`** → no resource scope. OAuth clients are developer-app identities, not services.
+- **`AgentServiceBinding`** → enforced per-binding: the binding's `user_service_id` is checked against the membership scope on create / list (filter) / delete.
+
+### Approval requests and the catalog id translation
+
+`ApprovalRequest.service_id` stores a `DownstreamService.id` (the catalog id, not the per-user service). Decide-side scope gating uses `user_service_service::user_service_ids_for_catalog(db, request.user_id, request.service_id)` to translate to the `UserService.id`(s) backing the request, then runs `OwnerAccess::allows_any_resource` against the result. If no `UserService` exists for that pair the request can only be decided by Direct owners or unscoped admins — safer than letting any scoped admin land it.
+
+### Node-routed services
+
+An org-shared service can route through a member's personal node. The node itself stays personally owned (no need to re-register it under the org). The check is **actor-based**, not "service owner == node owner": when an org admin creates an org-owned service with `--via-node my-laptop-node`, `node_service::ensure_node_writable_by_actor(db, actor_user_id, node_id)` validates that the actor has `OwnerAccess::can_write` on the node. The same helper is used by `sync_node_binding_for_user_service`, so `NodeServiceBinding.user_id` ends up as the org's user_id (where proxy routing looks it up) while node ownership is validated against the actor.
+
+---
+
+## Org-Aware Approval Cascade
+
+Approval policies cascade differently for org-owned services so an org admin can require approval on behalf of every member at once.
+
+### Resolution rules (`approval_service::resolve_org_aware_approval`)
+
+1. If the service being called is **owned by an org** (detected via `User.user_type.is_org()`, NOT by comparing actor to owner) AND the org has a `ServiceApprovalConfig` row for that service, the org's policy is **dominant**. The actor's personal gate cannot override it. `primary_owner_user_id` is set to the org's user_id and `from_org_policy = true`.
+2. Otherwise, fall back to the actor's per-service config for that catalog service.
+3. Otherwise, fall back to the actor's global toggle (`nyxid approval enable / disable`).
+
+The first rule's "detect by user_type" is what makes the cascade work for **org-owned API keys and service accounts** where the actor IS the org id — comparing actor to owner would never trigger the org branch in those cases.
+
+### Notification fan-out
+
+When `from_org_policy = true`, the proxy / LLM / SSH handlers populate `ApprovalRequest.notify_user_ids` with the org's current admin list (`org_service::list_admin_user_ids`). Push notifications and Telegram messages fan out to every admin so any of them can decide. The first admin's notification channel drives the wall-clock timeout; the rest receive parallel notifications.
+
+### Fail-closed for orgs with no admins
+
+If `list_admin_user_ids` returns empty (e.g. the last admin removed themselves), the proxy / LLM / SSH handlers return `AppError::OrgApprovalNoAdmin` (HTTP 503, error code 8106) instead of routing the request to the requesting member. This prevents a member from self-approving an org-gated request after the admin set has degenerated. The org must add an admin before the gated service is usable again.
+
+### Decide-time authorization
+
+`ensure_caller_can_decide` is the single source of truth at decision time. The rules:
+
+1. Literal owner match (`request.user_id == auth_user_id`) → personal request, allowed.
+2. Live `resolve_owner_access(...).can_write()` → org admin, then translate `request.service_id` to `UserService.id`(s) and require `allows_any_resource` to pass.
+3. Otherwise → `Forbidden`.
+
+`notify_user_ids` is **not** consulted here. It is a routing hint captured at creation time and would otherwise let an admin who has since been removed or demoted decide outstanding requests. Live admin status is the only check.
+
+### Grant ownership
+
+In grant mode, an approved org-policy request creates an `ApprovalGrant` under the **org's** `user_id`, not the requesting member's. The next call from any member of the same org reuses the same grant instead of triggering a fresh approval. Org admins can list / revoke org-owned grants via `?org_id=X` on the grants endpoints (or `nyxid approval grants --org <ORG_ID>`).
+
+### Audit attribution
+
+Org-policy decisions include `policy_owner_user_id: "<org_user_id>"` in the audit `event_data` alongside the existing `routed_via: "org"`, `org_user_id`, `member_user_id` fields, so it is unambiguous whose policy gated the request.
+
+---
+
+## Org Deletion
+
+`DELETE /orgs/{id}` (admin only) refuses to proceed while the org still owns *live* resources, then cascade-deletes dead state.
+
+### Live blockers (must be empty)
+
+```text
+- user services
+- endpoints
+- external API keys (UserApiKey)
+- NyxID API keys (ApiKey)
+- provider tokens (UserProviderToken)
+- per-service approval configs
+- *active* approval grants (revoked = false AND expires_at > now)
+- *pending* approval requests (status = "pending")
+- service accounts
+- developer OAuth clients
+```
+
+If any of these are non-zero, the API returns `409 Conflict` with a list (`"Cannot delete org while it still owns 3 user services, 1 NyxID API key, ..."`) and the admin must transfer or delete them first. Without this guard the org user record could disappear while orphaned resources continue to point at it, and `resolve_owner_access` would deny every read/write so nobody could clean them up.
+
+### Cascade-deleted (no admin action required)
+
+```text
+- decided approval requests (status in {approved, rejected, expired})
+- dead approval grants (revoked = true OR expires_at <= now)
+- org_memberships (all rows for the org)
+- org_invites (all rows for the org, redeemed or pending)
+```
+
+These rows are dead state once the org is gone — no API call could read or mutate them again. The audit log lives in its own collection and survives deletion intact.
+
+After cascading, the org `User` row itself is hard-deleted.
+
+---
+
+## Error Codes
+
+Org-related errors live in the 8100–8199 range (8000–8099 is reserved for nodes). The `OrgCannotAuthenticate` exception sits in the 1xxx auth range for symmetry with the rest of the auth errors.
+
+| Code | Variant | HTTP | Meaning |
+|---|---|---|---|
+| `1403` | `OrgCannotAuthenticate` | 403 | Tried to log in as an org user via password / refresh / social / forgot-password / MFA |
+| `8100` | `OrgQueryTimeout` | 503 | Org-fallback membership query exceeded its 500 ms wall-clock budget; usually means MongoDB is degraded |
+| `8101` | `OrgNotFound` | 404 | Target org id does not exist |
+| `8102` | `OrgMembershipRequired` | 403 | You tried to access an org you do not belong to |
+| `8103` | `OrgRoleInsufficient` | 403 | Viewer tried to proxy, or non-admin tried to manage; also surfaced when an admin's `allowed_service_ids` excludes the target |
+| `8104` | `OrgInviteInvalid` | 400 | Unknown nonce or already-redeemed invite |
+| `8105` | `OrgInviteExpired` | 410 | Invite TTL elapsed; ask the admin for a new one |
+| `8106` | `OrgApprovalNoAdmin` | 503 | Org approval policy fired but the org has no active admins to decide; add an admin and retry |
+
+---
+
+## Migration Notes
+
+This feature is purely additive at the schema level for existing rows. No data backfill is needed.
+
+What `db.rs::ensure_indexes()` does at first start with this code deployed:
+
+1. Drops the legacy `email_1` unique index on `users` if it exists.
+2. Creates the partial-unique replacement `{ email: 1 }` filtered to `{ user_type: "person" }`. Safe because every existing row deserializes with `user_type = Person` via serde default.
+3. Creates the three `org_memberships` indexes and the three `org_invites` indexes (`nonce` unique, `expires_at` TTL, `org_user_id`).
+
+Existing users have no memberships and the `/orgs` page shows an empty state for them. The proxy resolution chain short-circuits at the personal `UserService` lookup for any user who already has one, so the new fallback path is invisible to migration users.
+
+**Rollback:** drop the `/orgs` routes and the org fallback branch in `proxy_service.rs`. Leave the collections and indexes in place — they cost nothing if unused. No data migration to reverse.
+
+---
+
+## Limitations / Future Work
+
+The following are intentionally **not** in this feature and are tracked separately:
+
+- **Credential rotation notifications** — when a shared OAuth token expires or is rotated, members are not notified.
+- **Org usage dashboard** — aggregate request counts, latency, error rates per org.
+- **Org billing / quota** — per-org rate limits and spend caps.
+- **Cross-org transfer of resources** — there is no "move my personal OpenAI into the org" path. New shared services should be created with `--org` from the start.
+- **Nested orgs / sub-orgs** — flat membership only.
+- **SSO for orgs (SAML / OIDC auto-membership)** — future RFC.

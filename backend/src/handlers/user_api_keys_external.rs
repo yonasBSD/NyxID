@@ -4,14 +4,55 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::AppState;
-use crate::errors::AppResult;
-use crate::models::user_api_key::UserApiKey;
+use crate::errors::{AppError, AppResult};
+use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
 use crate::mw::auth::AuthUser;
-use crate::services::user_api_key_service;
+use crate::services::{org_service, user_api_key_service, user_service_service};
+
+/// Look up the external API key without an ownership filter and check
+/// whether the actor may modify it (directly or as an org admin).
+/// Returns the effective owner_id (which may be an org user_id) for
+/// downstream service calls.
+///
+/// `OrgMembership.allowed_service_ids` lives in the `UserService.id`
+/// space, so we translate by looking up every UserService that
+/// references this credential and gating on `allows_any_resource`. An
+/// orphan credential (referenced by zero services) is only writable by
+/// Direct owners or unscoped admins.
+async fn resolve_api_key_write_owner(
+    state: &AppState,
+    actor: &str,
+    key_id: &str,
+) -> AppResult<String> {
+    let key = state
+        .db
+        .collection::<UserApiKey>(USER_API_KEYS)
+        .find_one(doc! { "_id": key_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
+
+    let access = org_service::resolve_owner_access(&state.db, actor, &key.user_id).await?;
+    if !access.can_read() {
+        return Err(AppError::NotFound("API key not found".to_string()));
+    }
+    let backing_service_ids =
+        user_service_service::user_service_ids_for_api_key(&state.db, &key.user_id, &key.id)
+            .await?;
+    if !access.allows_any_resource(&backing_service_ids) {
+        return Err(AppError::NotFound("API key not found".to_string()));
+    }
+    if !access.can_write() {
+        return Err(AppError::OrgRoleInsufficient(
+            "you do not have permission to modify this API key".to_string(),
+        ));
+    }
+    Ok(key.user_id)
+}
 
 #[derive(Deserialize, ToSchema)]
 pub struct UpdateExternalApiKeyRequest {
@@ -95,18 +136,20 @@ pub async fn update_external_api_key(
     Path(key_id): Path<String>,
     Json(body): Json<UpdateExternalApiKeyRequest>,
 ) -> AppResult<Json<ExternalApiKeyResponse>> {
-    let user_id_str = auth_user.user_id.to_string();
+    let actor = auth_user.user_id.to_string();
+    let owner_id = resolve_api_key_write_owner(&state, &actor, &key_id).await?;
+
     user_api_key_service::update_api_key(
         &state.db,
         &state.encryption_keys,
-        &user_id_str,
+        &owner_id,
         &key_id,
         body.label.as_deref(),
         body.credential.as_deref(),
     )
     .await?;
 
-    let key = user_api_key_service::get_api_key(&state.db, &user_id_str, &key_id).await?;
+    let key = user_api_key_service::get_api_key(&state.db, &owner_id, &key_id).await?;
     Ok(Json(external_api_key_response(key)))
 }
 
@@ -129,8 +172,9 @@ pub async fn delete_external_api_key(
     auth_user: AuthUser,
     Path(key_id): Path<String>,
 ) -> AppResult<impl IntoResponse> {
-    let user_id_str = auth_user.user_id.to_string();
-    user_api_key_service::delete_api_key(&state.db, &user_id_str, &key_id).await?;
+    let actor = auth_user.user_id.to_string();
+    let owner_id = resolve_api_key_write_owner(&state, &actor, &key_id).await?;
+    user_api_key_service::delete_api_key(&state.db, &owner_id, &key_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

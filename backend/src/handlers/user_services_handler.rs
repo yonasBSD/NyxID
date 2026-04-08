@@ -4,14 +4,47 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::AppState;
-use crate::errors::AppResult;
-use crate::models::user_service::UserService;
+use crate::errors::{AppError, AppResult};
+use crate::models::org_membership::OrgRole;
+use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::mw::auth::AuthUser;
-use crate::services::{node_service, unified_key_service, user_service_service};
+use crate::services::user_service_service::{CredentialSource, UserServiceWithSource};
+use crate::services::{node_service, org_service, unified_key_service, user_service_service};
+
+/// Resolve which user_id owns this user service and whether the actor may
+/// modify it (directly or as an org admin). Returns the effective owner_id
+/// (which may be an org user_id) for downstream service calls.
+///
+/// Honors the membership's `allowed_service_ids` scope. An org admin whose
+/// scope excludes this service gets `NotFound`.
+async fn resolve_service_write_owner(
+    state: &AppState,
+    actor: &str,
+    service_id: &str,
+) -> AppResult<String> {
+    let svc = state
+        .db
+        .collection::<UserService>(USER_SERVICES)
+        .find_one(doc! { "_id": service_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("User service not found".to_string()))?;
+
+    let access = org_service::resolve_owner_access(&state.db, actor, &svc.user_id).await?;
+    if !access.can_read() || !access.allows_resource(&svc.id) {
+        return Err(AppError::NotFound("User service not found".to_string()));
+    }
+    if !access.can_write() {
+        return Err(AppError::OrgRoleInsufficient(
+            "you do not have permission to modify this service".to_string(),
+        ));
+    }
+    Ok(svc.user_id)
+}
 
 #[derive(Deserialize, ToSchema)]
 pub struct UpdateUserServiceRequest {
@@ -58,6 +91,62 @@ pub struct UserServiceResponse {
     pub delegation_token_scope: String,
     pub created_at: String,
     pub updated_at: String,
+    /// Provenance: personal credentials, or inherited from an org membership.
+    /// Always present in list responses; the single-item update/delete
+    /// responses use Personal as a sensible default since they only operate
+    /// on personally-owned services.
+    pub credential_source: CredentialSourceResponse,
+}
+
+/// Wire-format provenance tag mirroring
+/// [`crate::services::user_service_service::CredentialSource`].
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CredentialSourceResponse {
+    Personal,
+    Org {
+        org_id: String,
+        org_name: String,
+        role: OrgRoleResponse,
+        allowed: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OrgRoleResponse {
+    Admin,
+    Member,
+    Viewer,
+}
+
+impl From<OrgRole> for OrgRoleResponse {
+    fn from(role: OrgRole) -> Self {
+        match role {
+            OrgRole::Admin => Self::Admin,
+            OrgRole::Member => Self::Member,
+            OrgRole::Viewer => Self::Viewer,
+        }
+    }
+}
+
+impl From<CredentialSource> for CredentialSourceResponse {
+    fn from(source: CredentialSource) -> Self {
+        match source {
+            CredentialSource::Personal => Self::Personal,
+            CredentialSource::Org {
+                org_user_id,
+                org_name,
+                role,
+                allowed,
+            } => Self::Org {
+                org_id: org_user_id,
+                org_name,
+                role: role.into(),
+                allowed,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -75,13 +164,21 @@ pub struct UserServiceListResponse {
     tag = "User Services"
 )]
 /// GET /api/v1/user-services
+///
+/// Returns the union of personal and org-inherited services. Each item is
+/// tagged with `credential_source` so the client can group personal vs.
+/// org credentials. Viewer-role services are returned with `allowed: false`.
 pub async fn list_user_services(
     State(state): State<AppState>,
     auth_user: AuthUser,
 ) -> AppResult<Json<UserServiceListResponse>> {
     let user_id_str = auth_user.user_id.to_string();
-    let services = user_service_service::list_user_services(&state.db, &user_id_str).await?;
-    let items = services.into_iter().map(user_service_response).collect();
+    let services =
+        user_service_service::list_user_services_with_sources(&state.db, &user_id_str).await?;
+    let items = services
+        .into_iter()
+        .map(user_service_with_source_response)
+        .collect();
     Ok(Json(UserServiceListResponse { services: items }))
 }
 
@@ -106,7 +203,11 @@ pub async fn update_user_service(
     Path(service_id): Path<String>,
     Json(body): Json<UpdateUserServiceRequest>,
 ) -> AppResult<Json<UserServiceResponse>> {
-    let user_id_str = auth_user.user_id.to_string();
+    let actor = auth_user.user_id.to_string();
+    let user_id_str = resolve_service_write_owner(&state, &actor, &service_id).await?;
+    // The actor (human/API key) is what determines node access -- see
+    // `user_service_service::update_user_service` doc for the rationale.
+    let actor_for_node_check = actor.clone();
 
     // Load current state before update (needed for node binding sync).
     let current =
@@ -156,6 +257,7 @@ pub async fn update_user_service(
     user_service_service::update_user_service(
         &state.db,
         &user_id_str,
+        &actor_for_node_check,
         &service_id,
         body.auth_method.as_deref(),
         body.auth_key_name.as_deref(),
@@ -175,11 +277,14 @@ pub async fn update_user_service(
         .await?;
     }
 
-    // Auto-sync NodeServiceBinding when node_id changes.
+    // Auto-sync NodeServiceBinding when node_id changes. The actor (a
+    // human or API key) is what owns the node; for org-shared services
+    // the binding is owned by the org but the node is the actor's.
     if body.node_id.is_some() {
         node_service::sync_node_binding_for_user_service(
             &state.db,
             &user_id_str,
+            &actor,
             current.catalog_service_id.as_deref(),
             body.node_id.as_deref(),
             current.node_id.as_deref(),
@@ -210,18 +315,21 @@ pub async fn delete_user_service(
     auth_user: AuthUser,
     Path(service_id): Path<String>,
 ) -> AppResult<impl IntoResponse> {
-    let user_id_str = auth_user.user_id.to_string();
+    let actor = auth_user.user_id.to_string();
+    let user_id_str = resolve_service_write_owner(&state, &actor, &service_id).await?;
 
     // Load current state to clean up node binding.
     let current =
         user_service_service::get_user_service(&state.db, &user_id_str, &service_id).await?;
 
-    user_service_service::deactivate_user_service(&state.db, &user_id_str, &service_id).await?;
+    user_service_service::deactivate_user_service(&state.db, &user_id_str, &actor, &service_id)
+        .await?;
 
     // Deactivate the node binding if this service was node-routed.
     node_service::sync_node_binding_for_user_service(
         &state.db,
         &user_id_str,
+        &actor,
         current.catalog_service_id.as_deref(),
         None, // new node_id = none (cleared)
         current.node_id.as_deref(),
@@ -232,6 +340,17 @@ pub async fn delete_user_service(
 }
 
 fn user_service_response(svc: UserService) -> UserServiceResponse {
+    user_service_with_source_response(UserServiceWithSource {
+        service: svc,
+        source: CredentialSource::Personal,
+    })
+}
+
+fn user_service_with_source_response(item: UserServiceWithSource) -> UserServiceResponse {
+    let UserServiceWithSource {
+        service: svc,
+        source,
+    } = item;
     UserServiceResponse {
         id: svc.id,
         slug: svc.slug,
@@ -253,5 +372,6 @@ fn user_service_response(svc: UserService) -> UserServiceResponse {
         delegation_token_scope: svc.delegation_token_scope,
         created_at: svc.created_at.to_rfc3339(),
         updated_at: svc.updated_at.to_rfc3339(),
+        credential_source: source.into(),
     }
 }

@@ -36,6 +36,7 @@ pub mod notifications;
 pub mod oauth;
 pub mod oidc_discovery;
 pub mod openclaw_channel;
+pub mod orgs;
 pub mod providers;
 pub mod proxy;
 pub mod service_requirements;

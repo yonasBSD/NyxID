@@ -61,6 +61,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: ApiKeyCommands,
     },
+    /// Manage organizations (shared credentials across multiple users)
+    Org {
+        #[command(subcommand)]
+        command: OrgCommands,
+    },
     /// Manage credential nodes
     Node {
         #[command(subcommand)]
@@ -459,6 +464,12 @@ pub enum ServiceCommands {
         /// Example: --scope "contact:contact.base:readonly,contact:department.base:readonly"
         #[arg(long = "scope", value_name = "SCOPES")]
         scopes: Vec<String>,
+        /// Create this key under the given org (you must be an admin of that org).
+        /// Every member of the org will see the resulting service in their
+        /// `nyxid service list` and can proxy through it using their own
+        /// NyxID account. Omit for a personal key.
+        #[arg(long, value_name = "ORG_ID")]
+        org: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -615,11 +626,20 @@ pub enum ApiKeyCommands {
         /// Callback URL for channel bot relay (where NyxID sends forwarded messages)
         #[arg(long)]
         callback_url: Option<String>,
+        /// Create this key under the given org (you must be an admin of that org).
+        /// The key authenticates as the org — proxy calls see org-owned services
+        /// directly, and every org admin can rotate / delete it via this same CLI.
+        #[arg(long, value_name = "ORG_ID")]
+        org: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },
     /// List API keys
     List {
+        /// List keys owned by the given org instead of your personal scope
+        /// (you must be an admin of that org).
+        #[arg(long, value_name = "ORG_ID")]
+        org: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -674,6 +694,185 @@ pub enum ApiKeyCommands {
         /// External credential label (auto-resolved from service if omitted)
         #[arg(long)]
         credential: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+// ---- Org ----
+//
+// All org commands hit /api/v1/orgs/* and are gated by org membership
+// (read) or admin role (write) on the server. The actor's auth comes from
+// the standard `AuthArgs`. There is no profile-aware switching here -- the
+// caller is always the actor; org credentials are resolved server-side.
+
+#[derive(Subcommand)]
+pub enum OrgCommands {
+    /// Create a new organization (you become the first admin)
+    Create {
+        /// Display name for the organization
+        #[arg(long)]
+        display_name: String,
+        /// Optional contact email (kept private; orgs can share emails with persons)
+        #[arg(long)]
+        contact_email: Option<String>,
+        /// Optional avatar URL (https://...)
+        #[arg(long)]
+        avatar_url: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// List organizations you are a member of
+    List {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Show details of an organization (must be a member)
+    Show {
+        /// Org ID (UUID)
+        id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Update an organization's metadata (admin only)
+    Update {
+        /// Org ID
+        id: String,
+        /// New display name
+        #[arg(long)]
+        display_name: Option<String>,
+        /// New avatar URL. Pass an empty string to clear.
+        #[arg(long)]
+        avatar_url: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Delete an organization (admin only). Refuses if the org still owns shared resources.
+    Delete {
+        /// Org ID
+        id: String,
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Redeem an org invite link or nonce
+    Join {
+        /// Invite nonce or full join URL
+        nonce_or_url: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Set or clear your primary organization (proxy resolution tiebreaker)
+    SetPrimary {
+        /// Org ID. Omit or pass --clear to unset.
+        #[arg(long)]
+        org_id: Option<String>,
+        /// Clear the primary org.
+        #[arg(long, conflicts_with = "org_id")]
+        clear: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Manage members of an organization
+    Member {
+        #[command(subcommand)]
+        command: OrgMemberCommands,
+    },
+    /// Manage one-time invites for an organization
+    Invite {
+        #[command(subcommand)]
+        command: OrgInviteCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum OrgMemberCommands {
+    /// List members of an organization (must be a member)
+    List {
+        /// Org ID
+        org_id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Add a member directly by user ID (admin only). Prefer `org invite create`.
+    Add {
+        /// Org ID
+        org_id: String,
+        /// User ID of the member to add
+        #[arg(long)]
+        user_id: String,
+        /// Role: admin, member, viewer (default: member)
+        #[arg(long, default_value = "member")]
+        role: String,
+        /// Comma-separated list of UserService IDs to scope this member to.
+        /// Omit for full access to all org services.
+        #[arg(long)]
+        allowed_service_ids: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Update a member's role or service scope (admin only)
+    Update {
+        /// Org ID
+        org_id: String,
+        /// Member user ID
+        member_id: String,
+        /// New role: admin, member, viewer
+        #[arg(long)]
+        role: Option<String>,
+        /// Comma-separated UserService IDs to scope this member. Pass empty to clear.
+        #[arg(long)]
+        allowed_service_ids: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Remove a member from an organization (admin only)
+    Remove {
+        /// Org ID
+        org_id: String,
+        /// Member user ID
+        member_id: String,
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum OrgInviteCommands {
+    /// Issue a new one-time invite (admin only)
+    Create {
+        /// Org ID
+        org_id: String,
+        /// Role to grant on redemption: admin, member, viewer (default: member)
+        #[arg(long, default_value = "member")]
+        role: String,
+        /// Comma-separated UserService IDs to scope the new member to.
+        #[arg(long)]
+        allowed_service_ids: Option<String>,
+        /// Time-to-live in hours (default: 24)
+        #[arg(long)]
+        ttl_hours: Option<i64>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// List outstanding invites for an organization (admin only)
+    List {
+        /// Org ID
+        org_id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Cancel a pending invite (admin only)
+    Cancel {
+        /// Org ID
+        org_id: String,
+        /// Invite ID
+        invite_id: String,
+        #[arg(long)]
+        yes: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -1284,6 +1483,10 @@ pub enum NotificationCommands {
 pub enum ApprovalCommands {
     /// List approval requests
     List {
+        /// List approval history scoped to the given org instead of your
+        /// personal scope. You must be an admin of that org.
+        #[arg(long, value_name = "ORG_ID")]
+        org: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -1313,6 +1516,12 @@ pub enum ApprovalCommands {
     },
     /// List approval grants
     Grants {
+        /// List grants owned by the given org instead of your personal scope.
+        /// You must be an admin of that org. Org-policy approvals create
+        /// grants under the org's user_id, so this is the only way for org
+        /// admins to see / manage them.
+        #[arg(long, value_name = "ORG_ID")]
+        org: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -1320,6 +1529,10 @@ pub enum ApprovalCommands {
     RevokeGrant {
         /// Grant ID
         id: String,
+        /// Revoke a grant owned by the given org. You must be an admin
+        /// of that org.
+        #[arg(long, value_name = "ORG_ID")]
+        org: Option<String>,
         /// Skip confirmation
         #[arg(long)]
         yes: bool,
@@ -1341,6 +1554,10 @@ pub enum ApprovalCommands {
     },
     /// List per-service approval configurations
     ServiceConfigs {
+        /// List configs for the given org instead of your personal scope.
+        /// You must be an admin of that org.
+        #[arg(long, value_name = "ORG_ID")]
+        org: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -1354,6 +1571,13 @@ pub enum ApprovalCommands {
         /// Approval mode: "per_request" (every call needs approval) or "grant" (approval creates a time-based grant)
         #[arg(long)]
         approval_mode: Option<String>,
+        /// Set the policy on the given org's behalf instead of your personal
+        /// scope. You must be an admin of that org. The org's policy is
+        /// authoritative for org-shared services -- it overrides any
+        /// personal policy each member may have set, and notifications
+        /// fan out to every active org admin.
+        #[arg(long, value_name = "ORG_ID")]
+        org: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },

@@ -5,6 +5,30 @@ use super::bson_datetime;
 
 pub const COLLECTION_NAME: &str = "users";
 
+/// Distinguishes a real person account from an organization account.
+///
+/// Org accounts are users with `user_type = Org`. They cannot log in directly
+/// (password / social / refresh paths reject them) and exist purely as the
+/// owner record for shared resources (UserService, UserApiKey, ApiKey, etc.).
+/// Membership in an org is tracked via the `org_memberships` collection.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UserType {
+    #[default]
+    Person,
+    Org,
+}
+
+impl UserType {
+    pub fn is_org(&self) -> bool {
+        matches!(self, Self::Org)
+    }
+
+    pub fn is_person(&self) -> bool {
+        matches!(self, Self::Person)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct User {
     #[serde(rename = "_id")]
@@ -31,6 +55,15 @@ pub struct User {
     pub social_provider: Option<String>,
     #[serde(default)]
     pub social_provider_id: Option<String>,
+    /// Account type: `Person` (default) or `Org`. Existing rows without this
+    /// field deserialize as `Person` via serde default.
+    #[serde(default)]
+    pub user_type: UserType,
+    /// Optional preferred org for proxy credential resolution tiebreaking.
+    /// When a user belongs to multiple orgs that share a service, this
+    /// org's credentials win. Falls back to earliest membership when unset.
+    #[serde(default)]
+    pub primary_org_id: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -67,6 +100,8 @@ mod tests {
             mfa_enabled: false,
             social_provider: None,
             social_provider_id: None,
+            user_type: UserType::Person,
+            primary_org_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
             last_login_at: None,
@@ -108,7 +143,46 @@ mod tests {
         assert!(keys.contains(&"is_active"));
         assert!(keys.contains(&"is_admin"));
         assert!(keys.contains(&"mfa_enabled"));
+        assert!(keys.contains(&"user_type"));
         assert!(keys.contains(&"created_at"));
         assert!(keys.contains(&"updated_at"));
+    }
+
+    #[test]
+    fn user_type_default_is_person() {
+        let ut = UserType::default();
+        assert!(ut.is_person());
+        assert!(!ut.is_org());
+    }
+
+    #[test]
+    fn user_type_serializes_snake_case() {
+        let person = bson::to_bson(&UserType::Person).expect("ser person");
+        let org = bson::to_bson(&UserType::Org).expect("ser org");
+        assert_eq!(person.as_str().unwrap(), "person");
+        assert_eq!(org.as_str().unwrap(), "org");
+    }
+
+    #[test]
+    fn org_user_roundtrip() {
+        let mut org = make_user();
+        org.user_type = UserType::Org;
+        org.password_hash = None;
+        org.display_name = Some("Chrono AI".to_string());
+        let doc = bson::to_document(&org).expect("serialize org");
+        let restored: User = bson::from_document(doc).expect("deserialize org");
+        assert!(restored.user_type.is_org());
+        assert_eq!(restored.password_hash, None);
+    }
+
+    #[test]
+    fn legacy_user_without_user_type_deserializes_as_person() {
+        // Simulate a row written before the user_type field existed.
+        let mut doc = bson::to_document(&make_user()).expect("serialize");
+        doc.remove("user_type");
+        doc.remove("primary_org_id");
+        let restored: User = bson::from_document(doc).expect("deserialize legacy");
+        assert!(restored.user_type.is_person());
+        assert_eq!(restored.primary_org_id, None);
     }
 }

@@ -1,20 +1,33 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Link, useSearch, useNavigate } from "@tanstack/react-router";
 import { useKeys } from "@/hooks/use-keys";
+import { useUserServices } from "@/hooks/use-user-services";
 import { PageHeader } from "@/components/shared/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Plus, Globe, KeyRound, Server, Router, Terminal, Zap } from "lucide-react";
+import {
+  Plus,
+  Globe,
+  KeyRound,
+  Server,
+  Router,
+  Terminal,
+  Zap,
+  Building2,
+  Lock,
+} from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
 import { ApiKeyTable } from "@/components/dashboard/api-key-table";
 import { ApiKeyCreateDialog } from "@/components/dashboard/api-key-create-dialog";
 import { ApiKeyUsageDashboard } from "@/components/dashboard/api-key-usage-dashboard";
+import { RoleBadge } from "@/components/orgs/role-badge";
 import type { KeyInfo } from "@/types/keys";
+import type { CredentialSource } from "@/schemas/orgs";
 
 type TabValue = "services" | "nyxid";
 
@@ -34,7 +47,13 @@ function statusVariant(
   }
 }
 
-function KeyCard({ keyInfo }: { readonly keyInfo: KeyInfo }) {
+interface KeyCardProps {
+  readonly keyInfo: KeyInfo;
+  /** Credential provenance; undefined is treated as personal. */
+  readonly source: CredentialSource | undefined;
+}
+
+function KeyCardContent({ keyInfo, source }: KeyCardProps) {
   const isSsh = keyInfo.service_type === "ssh";
   const hasSshCertificateAuth = isSsh && keyInfo.ssh_ca_public_key !== null;
   const displayUrl = isSsh
@@ -43,73 +62,196 @@ function KeyCard({ keyInfo }: { readonly keyInfo: KeyInfo }) {
       ? `${keyInfo.endpoint_url.slice(0, 50)}...`
       : keyInfo.endpoint_url;
 
+  const isOrgInherited = source?.type === "org";
+  // Viewers and out-of-scope members see the card with reduced opacity.
+  const isBlocked = source?.type === "org" && !source.allowed;
+  // Members can USE the credential (allowed=true) but cannot MODIFY it.
+  // Non-admin org cards are non-clickable on the listing (see KeyCard)
+  // and flagged as read-only so the user knows why.
+  const isReadOnly =
+    source?.type === "org" && source.allowed && source.role !== "admin";
+
+  return (
+    <Card
+      className={`transition-colors ${
+        isBlocked
+          ? "opacity-60"
+          : "hover:border-primary/30 hover:bg-accent/30"
+      }`}
+      aria-disabled={isBlocked ? true : undefined}
+    >
+      <CardContent className="flex flex-col gap-3 p-5">
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <p className="truncate text-sm font-medium text-foreground">
+              {keyInfo.label}
+            </p>
+            {keyInfo.catalog_service_name && (
+              <p className="text-xs text-muted-foreground">
+                {keyInfo.catalog_service_name}
+              </p>
+            )}
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            {isOrgInherited && (
+              <Badge variant="info" className="gap-1">
+                <Building2 className="h-3 w-3" />
+                Org
+              </Badge>
+            )}
+            {isBlocked && (
+              <Badge variant="secondary" className="gap-1">
+                <Lock className="h-3 w-3" />
+                Read-only
+              </Badge>
+            )}
+            {isReadOnly && !isBlocked && (
+              <Badge variant="secondary" className="gap-1">
+                <Lock className="h-3 w-3" />
+                View-only
+              </Badge>
+            )}
+            {keyInfo.auto_connected && (
+              <Badge variant="secondary">Auto-connected</Badge>
+            )}
+            {isSsh && <Badge variant="outline">SSH</Badge>}
+            <Badge variant={statusVariant(keyInfo.status)}>
+              {keyInfo.status}
+            </Badge>
+            {!keyInfo.is_active && <Badge variant="outline">Inactive</Badge>}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs text-muted-foreground">
+          <div className="flex items-center gap-1.5">
+            {isSsh ? (
+              <Terminal className="h-3 w-3 shrink-0" />
+            ) : (
+              <Globe className="h-3 w-3 shrink-0" />
+            )}
+            <span className="truncate">{displayUrl}</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            {keyInfo.auto_connected ? (
+              <Zap className="h-3 w-3 shrink-0" />
+            ) : (
+              <KeyRound className="h-3 w-3 shrink-0" />
+            )}
+            <span>
+              {keyInfo.auto_connected
+                ? "No auth required"
+                : isSsh
+                  ? hasSshCertificateAuth
+                    ? "certificate"
+                    : "ssh tunnel"
+                  : keyInfo.credential_type}
+            </span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <Server className="h-3 w-3 shrink-0" />
+            <span className="font-mono">
+              {isSsh ? keyInfo.slug : `/proxy/s/${keyInfo.slug}`}
+            </span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <Router className="h-3 w-3 shrink-0" />
+            <span>{keyInfo.node_id ? "Via node" : "Direct"}</span>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function KeyCard({ keyInfo, source }: KeyCardProps) {
+  // Navigation gating:
+  //
+  // - Personal credentials and admin-role org credentials: fully clickable
+  //   and the detail page renders all mutation controls.
+  // - Member / viewer org credentials: clickable, but the detail page
+  //   renders in read-only mode (see KeyDetailPage's `readOnly` branch).
+  //   Members can still see endpoint / auth metadata and a usage snippet
+  //   for credentials they're entitled to proxy through.
+  // - Out-of-scope org items (source.allowed === false due to scope, not
+  //   role) don't even appear in the listing because
+  //   `list_user_services_with_sources` drops them.
   return (
     <Link to="/keys/$keyId" params={{ keyId: keyInfo.id }}>
-      <Card className="transition-colors hover:border-primary/30 hover:bg-accent/30">
-        <CardContent className="flex flex-col gap-3 p-5">
-          <div className="flex items-start justify-between gap-2">
-            <div className="min-w-0">
-              <p className="truncate text-sm font-medium text-foreground">
-                {keyInfo.label}
-              </p>
-              {keyInfo.catalog_service_name && (
-                <p className="text-xs text-muted-foreground">
-                  {keyInfo.catalog_service_name}
-                </p>
-              )}
-            </div>
-            <div className="flex shrink-0 items-center gap-2">
-              {keyInfo.auto_connected && (
-                <Badge variant="secondary">Auto-connected</Badge>
-              )}
-              {isSsh && <Badge variant="outline">SSH</Badge>}
-              <Badge variant={statusVariant(keyInfo.status)}>
-                {keyInfo.status}
-              </Badge>
-              {!keyInfo.is_active && <Badge variant="outline">Inactive</Badge>}
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs text-muted-foreground">
-            <div className="flex items-center gap-1.5">
-              {isSsh ? (
-                <Terminal className="h-3 w-3 shrink-0" />
-              ) : (
-                <Globe className="h-3 w-3 shrink-0" />
-              )}
-              <span className="truncate">{displayUrl}</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              {keyInfo.auto_connected ? (
-                <Zap className="h-3 w-3 shrink-0" />
-              ) : (
-                <KeyRound className="h-3 w-3 shrink-0" />
-              )}
-              <span>
-                {keyInfo.auto_connected
-                  ? "No auth required"
-                  : isSsh
-                    ? hasSshCertificateAuth
-                      ? "certificate"
-                      : "ssh tunnel"
-                    : keyInfo.credential_type}
-              </span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <Server className="h-3 w-3 shrink-0" />
-              <span className="font-mono">
-                {isSsh ? keyInfo.slug : `/proxy/s/${keyInfo.slug}`}
-              </span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <Router className="h-3 w-3 shrink-0" />
-              <span>{keyInfo.node_id ? "Via node" : "Direct"}</span>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
+      <KeyCardContent keyInfo={keyInfo} source={source} />
     </Link>
   );
+}
+
+interface ServiceGroup {
+  readonly key: string;
+  readonly title: string;
+  readonly subtitle: string | null;
+  readonly role: "admin" | "member" | "viewer" | null;
+  readonly icon: "personal" | "org";
+  readonly keys: readonly {
+    readonly keyInfo: KeyInfo;
+    readonly source: CredentialSource;
+  }[];
+}
+
+/**
+ * Group visible keys by credential source. Personal items first, then one
+ * section per org (ordered by first-seen in the incoming list).
+ *
+ * Keys without an explicit `credential_source` default to `personal` so the
+ * UI keeps working against older backends that have not yet been augmented.
+ */
+function groupKeysBySource(
+  keys: readonly KeyInfo[],
+  sourceById: ReadonlyMap<string, CredentialSource>,
+): readonly ServiceGroup[] {
+  const personal: ServiceGroup = {
+    key: "personal",
+    title: "My services",
+    subtitle: null,
+    role: null,
+    icon: "personal",
+    keys: [],
+  };
+
+  const orgGroups = new Map<string, ServiceGroup>();
+  const personalMut: { keyInfo: KeyInfo; source: CredentialSource }[] = [];
+
+  for (const keyInfo of keys) {
+    const source: CredentialSource = keyInfo.credential_source ??
+      sourceById.get(keyInfo.id) ?? { type: "personal" };
+
+    if (source.type === "personal") {
+      personalMut.push({ keyInfo, source });
+      continue;
+    }
+
+    const existing = orgGroups.get(source.org_id);
+    if (existing) {
+      orgGroups.set(source.org_id, {
+        ...existing,
+        keys: [...existing.keys, { keyInfo, source }],
+      });
+    } else {
+      orgGroups.set(source.org_id, {
+        key: `org-${source.org_id}`,
+        title: source.org_name,
+        subtitle: "Shared from organization",
+        role: source.role,
+        icon: "org",
+        keys: [{ keyInfo, source }],
+      });
+    }
+  }
+
+  const groups: ServiceGroup[] = [];
+  if (personalMut.length > 0) {
+    groups.push({ ...personal, keys: personalMut });
+  }
+  for (const g of orgGroups.values()) {
+    groups.push(g);
+  }
+  return groups;
 }
 
 function ServicesEmptyState({ onAdd }: { readonly onAdd: () => void }) {
@@ -152,6 +294,19 @@ function ExternalServicesTab({
   readonly showAutoConnected: boolean;
 }) {
   const { data: keys, isLoading, error } = useKeys();
+  // user-services carries credential_source for both personal and
+  // org-inherited items. When the backend augments /keys directly in a
+  // future change, the `credential_source` field on KeyInfo will take
+  // precedence and this call becomes a no-op.
+  const { data: userServices } = useUserServices();
+
+  const sourceById = useMemo(() => {
+    const map = new Map<string, CredentialSource>();
+    for (const svc of userServices ?? []) {
+      map.set(svc.id, svc.credential_source);
+    }
+    return map;
+  }, [userServices]);
 
   if (isLoading) return <LoadingSkeleton />;
 
@@ -177,10 +332,49 @@ function ExternalServicesTab({
     return <ServicesEmptyState onAdd={onAdd} />;
   }
 
+  const groups = groupKeysBySource(visibleKeys, sourceById);
+
+  // If only personal services exist, skip section headers to preserve the
+  // current flat-grid look-and-feel.
+  const [firstGroup] = groups;
+  if (groups.length === 1 && firstGroup && firstGroup.icon === "personal") {
+    return (
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        {firstGroup.keys.map(({ keyInfo, source }) => (
+          <KeyCard key={keyInfo.id} keyInfo={keyInfo} source={source} />
+        ))}
+      </div>
+    );
+  }
+
   return (
-    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-      {visibleKeys.map((k) => (
-        <KeyCard key={k.id} keyInfo={k} />
+    <div className="space-y-8">
+      {groups.map((group) => (
+        <section key={group.key} className="space-y-3">
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2">
+              {group.icon === "org" ? (
+                <Building2 className="h-4 w-4 text-muted-foreground" />
+              ) : (
+                <KeyRound className="h-4 w-4 text-muted-foreground" />
+              )}
+              <h3 className="text-sm font-semibold text-foreground">
+                {group.title}
+              </h3>
+            </div>
+            {group.role && <RoleBadge role={group.role} />}
+            {group.subtitle && (
+              <span className="text-xs text-muted-foreground">
+                {group.subtitle}
+              </span>
+            )}
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {group.keys.map(({ keyInfo, source }) => (
+              <KeyCard key={keyInfo.id} keyInfo={keyInfo} source={source} />
+            ))}
+          </div>
+        </section>
       ))}
     </div>
   );
