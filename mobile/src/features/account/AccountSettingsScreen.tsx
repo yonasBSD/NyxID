@@ -99,7 +99,7 @@ export function AccountSettingsScreen({ navigation }: Props) {
   const [toast, setToast] = useState<ToastState | null>(null);
   const queryClient = useQueryClient();
   const { signOut } = useAuthSession();
-  const { isConnected } = useNetworkStatus();
+  const { isConnected, recheckConnection } = useNetworkStatus();
 
   const {
     data: profile,
@@ -286,7 +286,15 @@ export function AccountSettingsScreen({ navigation }: Props) {
         contentContainerStyle={[flowStyles.scrollContent, { paddingHorizontal: spacing.xxl }]}
         showsVerticalScrollIndicator={false}
       >
-        {isOffline && <OfflineBanner subtitle="Some features unavailable" onRetry={() => refetchProfile()} />}
+        {isOffline && <OfflineBanner subtitle="Some features unavailable" onRetry={async () => {
+          const online = await recheckConnection();
+          if (online) {
+            void refetchProfile();
+            void refetchNotifSettings();
+          } else {
+            showToast("Still offline — will retry when connected", "error");
+          }
+        }} />}
 
         {/* User identity header */}
         <View style={styles.identityHeader}>

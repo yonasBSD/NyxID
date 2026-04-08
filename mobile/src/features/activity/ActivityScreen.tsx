@@ -273,7 +273,7 @@ export function ActivityScreen() {
   const navigation = useNavigation<Nav>();
   const route = useRoute<RouteProp<RootStackParamList, "Activity">>();
   const queryClient = useQueryClient();
-  const { isConnected } = useNetworkStatus();
+  const { isConnected, recheckConnection } = useNetworkStatus();
   const isPolling = usePushPollingActive();
   const [activeSegment, setActiveSegment] = useState<ActivitySegment>("pending");
   const [toast, setToast] = useState<ToastState | null>(null);
@@ -299,7 +299,7 @@ export function ActivityScreen() {
     queryFn: ({ pageParam }) => mobileApi.getChallenges(pageParam, PAGE_SIZE),
     initialPageParam: 1,
     getNextPageParam,
-    refetchInterval: isPolling ? 3000 : false,
+    refetchInterval: isPolling ? 30_000 : false,
   });
 
   const approvalsQuery = useInfiniteQuery({
@@ -307,7 +307,7 @@ export function ActivityScreen() {
     queryFn: ({ pageParam }) => mobileApi.getApprovals(pageParam, PAGE_SIZE),
     initialPageParam: 1,
     getNextPageParam,
-    refetchInterval: isPolling ? 3000 : false,
+    refetchInterval: isPolling ? 30_000 : false,
   });
 
   const settingsQuery = useQuery({
@@ -320,6 +320,7 @@ export function ActivityScreen() {
     queryFn: ({ pageParam }) => mobileApi.getHistory(pageParam, PAGE_SIZE),
     initialPageParam: 1,
     getNextPageParam,
+    refetchInterval: isPolling ? 30_000 : false,
   });
 
   const pendingItems = pendingQuery.data?.pages.flatMap((p) => p.items) ?? [];
@@ -424,6 +425,15 @@ export function ActivityScreen() {
     if (activeSegment === "history") void historyQuery.refetch();
   }, [activeSegment, pendingQuery, approvalsQuery, historyQuery]);
 
+  const handleOfflineRetry = useCallback(async () => {
+    const online = await recheckConnection();
+    if (online) {
+      handleRefresh();
+    } else {
+      setToast({ message: "Still offline — will retry when connected", kind: "error" });
+    }
+  }, [recheckConnection, handleRefresh]);
+
   const isRefreshing =
     (activeSegment === "pending" && pendingQuery.isRefetching && !pendingQuery.isFetchingNextPage) ||
     (activeSegment === "active" && approvalsQuery.isRefetching && !approvalsQuery.isFetchingNextPage) ||
@@ -464,7 +474,7 @@ export function ActivityScreen() {
       </View>
 
       <View style={styles.segmentWrap}>
-        {!isConnected && <OfflineBanner onRetry={handleRefresh} />}
+        {!isConnected && <OfflineBanner onRetry={handleOfflineRetry} />}
         <SegmentControl
           segments={segments}
           activeIndex={segmentIndex}
