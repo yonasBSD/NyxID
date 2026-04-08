@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useNavigate, Link } from "@tanstack/react-router";
@@ -145,6 +145,30 @@ export function AuthFlow({
   const inviteInputRef = useRef<HTMLInputElement>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
 
+  // Refs for panel height measurement
+  const panelRefs = [
+    useRef<HTMLDivElement>(null),
+    useRef<HTMLDivElement>(null),
+    useRef<HTMLDivElement>(null),
+  ] as const;
+  const [containerHeight, setContainerHeight] = useState<number | undefined>(
+    undefined,
+  );
+
+  const measureActivePanel = useCallback(() => {
+    const el = panelRefs[panel]?.current;
+    if (el) setContainerHeight(el.scrollHeight);
+  }, [panel]);
+
+  useEffect(() => {
+    measureActivePanel();
+    // Re-measure if content changes (e.g. validation errors appear)
+    const observer = new ResizeObserver(measureActivePanel);
+    const el = panelRefs[panel]?.current;
+    if (el) observer.observe(el);
+    return () => observer.disconnect();
+  }, [panel, measureActivePanel]);
+
   // -- Forms --
   const loginForm = useForm<LoginFormData>({
     resolver: zodResolver(loginSchema),
@@ -271,17 +295,28 @@ export function AuthFlow({
     panel === 0 ? "0%" : panel === 1 ? "-33.3333%" : "-66.6667%";
 
   return (
-    <div className="-m-8 overflow-hidden rounded-[10px]">
+    <div
+      className="-m-8 overflow-hidden rounded-[10px] transition-[height] duration-300 ease-in-out"
+      style={{ height: containerHeight ? `${containerHeight}px` : "auto" }}
+    >
       <div
-        className="flex w-[300%] transition-transform duration-300 ease-in-out"
+        className="flex w-[300%] items-start transition-transform duration-300 ease-in-out"
         style={{ transform: `translateX(${translateX})` }}
       >
         {/* ================================================================
             Panel 0 — Login
             ================================================================ */}
-        <div className="w-1/3 shrink-0 px-7 pt-8 pb-7">
+        <div ref={panelRefs[0]} className="w-1/3 shrink-0 px-7 pt-8 pb-7">
           <div className="mb-7 text-center">
-            <h1 className="font-display text-2xl font-semibold tracking-tight [background:linear-gradient(180deg,#fff_30%,#a0a0a8_100%)] bg-clip-text text-transparent">
+            <h1
+              className="font-display text-2xl font-semibold tracking-tight"
+              style={{
+                background: "linear-gradient(180deg, #fff 30%, #a0a0a8 100%)",
+                WebkitBackgroundClip: "text",
+                WebkitTextFillColor: "transparent",
+                backgroundClip: "text",
+              }}
+            >
               Welcome back
             </h1>
             <p className="mt-1.5 text-[13px] text-text-tertiary">
@@ -401,9 +436,17 @@ export function AuthFlow({
         {/* ================================================================
             Panel 1 — Register Methods
             ================================================================ */}
-        <div className="w-1/3 shrink-0 px-7 pt-8 pb-7">
+        <div ref={panelRefs[1]} className="w-1/3 shrink-0 px-7 pt-8 pb-7">
           <div className="mb-7 text-center">
-            <h1 className="font-display text-2xl font-semibold tracking-tight [background:linear-gradient(180deg,#fff_30%,#a0a0a8_100%)] bg-clip-text text-transparent">
+            <h1
+              className="font-display text-2xl font-semibold tracking-tight"
+              style={{
+                background: "linear-gradient(180deg, #fff 30%, #a0a0a8 100%)",
+                WebkitBackgroundClip: "text",
+                WebkitTextFillColor: "transparent",
+                backgroundClip: "text",
+              }}
+            >
               Create your account
             </h1>
             <p className="mt-1.5 text-[13px] text-text-tertiary">
@@ -549,6 +592,7 @@ export function AuthFlow({
             Panel 2 — Email Registration
             ================================================================ */}
         <div
+          ref={panelRefs[2]}
           className="w-1/3 shrink-0 px-7 pt-8 pb-7"
           onKeyDown={(e) => {
             if (e.key === "Escape") slideToPanel(1);
