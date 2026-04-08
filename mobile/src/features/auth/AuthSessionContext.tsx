@@ -12,7 +12,8 @@ import {
   clearLocalPushRegistrationState,
   deactivatePushOnLogout,
 } from "../../lib/notifications/pushNotifications";
-import { refreshAccessTokenIfNeeded, setSessionInvalidationListener } from "../../lib/api/http";
+import { getCurrentUserProfileRequest, refreshAccessTokenIfNeeded, setSessionInvalidationListener } from "../../lib/api/http";
+import { isEmailAllowed, ALLOWED_EMAILS } from "../../lib/env";
 
 const PROACTIVE_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
 
@@ -127,6 +128,25 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
   const value = useMemo<AuthSessionContextValue>(() => {
     const signInWithSession = async (session: StoredAuthSession) => {
       await persistAuthSession(session);
+
+      // Gate: if an allowlist is configured, verify the user's email before proceeding
+      if (ALLOWED_EMAILS.length > 0) {
+        try {
+          const profile = await getCurrentUserProfileRequest();
+          if (!isEmailAllowed(profile.email)) {
+            await clearStoredAuthSession();
+            throw new Error("Access restricted. Your account is not authorized for this app.");
+          }
+        } catch (error) {
+          // Re-throw allowlist rejections; swallow profile-fetch failures only
+          if (error instanceof Error && error.message.includes("Access restricted")) {
+            throw error;
+          }
+          await clearStoredAuthSession();
+          throw new Error("Unable to verify account access. Please try again.");
+        }
+      }
+
       setIsAuthenticated(true);
       try {
         const pushResult = await activatePushAfterLogin({ forceRegister: true });

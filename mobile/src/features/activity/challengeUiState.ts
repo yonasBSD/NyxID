@@ -46,18 +46,7 @@ export function formatGrantDuration(grantExpiryDays?: number): string {
 export function getChallengeActionState(
   challenge: Pick<ChallengeDetail, "status" | "expires_at">
 ): ChallengeActionState {
-  const expiredByTime = Number.isFinite(Date.parse(challenge.expires_at))
-    ? Date.parse(challenge.expires_at) <= Date.now()
-    : false;
-
-  if (challenge.status === "EXPIRED" || expiredByTime) {
-    return {
-      statusLabel: "EXPIRED",
-      canDecide: false,
-      reason: "This challenge has expired. Decision actions are disabled.",
-    };
-  }
-
+  // Check definitive statuses first — these take precedence over time-based expiry
   if (challenge.status === "APPROVED") {
     return {
       statusLabel: "APPROVED",
@@ -71,6 +60,27 @@ export function getChallengeActionState(
       statusLabel: "DENIED",
       canDecide: false,
       reason: "This challenge has already been denied.",
+    };
+  }
+
+  if (challenge.status === "EXPIRED") {
+    return {
+      statusLabel: "EXPIRED",
+      canDecide: false,
+      reason: "This challenge has expired. Decision actions are disabled.",
+    };
+  }
+
+  // Only apply time-based expiry to PENDING items
+  const expiredByTime = Number.isFinite(Date.parse(challenge.expires_at))
+    ? Date.parse(challenge.expires_at) <= Date.now()
+    : false;
+
+  if (expiredByTime) {
+    return {
+      statusLabel: "EXPIRED",
+      canDecide: false,
+      reason: "This challenge has expired. Decision actions are disabled.",
     };
   }
 

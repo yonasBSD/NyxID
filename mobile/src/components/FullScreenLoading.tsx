@@ -1,6 +1,6 @@
 import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
 import { radius, spacing } from "../theme/designTokens";
-import { MobileStatusBar } from "./MobileStatusBar";
+
 import { ScreenContainer } from "./ScreenContainer";
 
 // Use system font only so this screen always renders (e.g. when custom fonts not yet loaded).
@@ -22,7 +22,6 @@ export function FullScreenLoading({
 }: FullScreenLoadingProps) {
   return (
     <ScreenContainer>
-      <MobileStatusBar />
       <View style={styles.center}>
         <View style={styles.card}>
           <ActivityIndicator size="small" color={FALLBACK_PRIMARY} />
@@ -39,6 +38,7 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
+    paddingHorizontal: spacing.xxl,
     paddingBottom: 72,
   },
   card: {

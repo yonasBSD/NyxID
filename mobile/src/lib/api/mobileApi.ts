@@ -5,6 +5,7 @@ import {
   getChallengeRequest,
   getNotificationSettingsRequest,
   listApprovalsRequest,
+  listApprovalRequestsRequest,
   listChallengesRequest,
   loginWithPasswordRequest,
   registerWithPasswordRequest,
@@ -12,7 +13,10 @@ import {
   revokeApprovalRequest,
   rotatePushTokenRequest,
   submitChallengeDecisionRequest,
+  telegramDisconnectRequest,
+  telegramLinkRequest,
   unregisterPushTokenRequest,
+  updateNotificationSettingsRequest,
 } from "./http";
 import {
   AccountProfile,
@@ -24,6 +28,8 @@ import {
   SubmitDecisionOptions,
   PushTokenRegisterRequest,
   PushTokenRegisterResponse,
+  TelegramLinkInfo,
+  UpdateNotificationSettingsInput,
 } from "./types";
 
 type LoginWithPasswordInput = {
@@ -96,11 +102,20 @@ export const mobileApi = {
     const encodedRedirectUri = encodeURIComponent(redirectUri);
     return `${getApiBaseUrl()}/auth/social/${provider}?client=mobile&redirect_uri=${encodedRedirectUri}`;
   },
-  async getChallenges(): Promise<PageResponse<ChallengeDetail>> {
-    return listChallengesRequest();
+  async getChallenges(page = 1, perPage = 20): Promise<PageResponse<ChallengeDetail>> {
+    return listChallengesRequest(page, perPage);
   },
   async getNotificationSettings(): Promise<NotificationSettings> {
     return getNotificationSettingsRequest();
+  },
+  async updateNotificationSettings(input: UpdateNotificationSettingsInput): Promise<NotificationSettings> {
+    return updateNotificationSettingsRequest(input);
+  },
+  async telegramLink(): Promise<TelegramLinkInfo> {
+    return telegramLinkRequest();
+  },
+  async telegramDisconnect(): Promise<{ message: string }> {
+    return telegramDisconnectRequest();
   },
   async getChallengeById(challengeId: string): Promise<ChallengeDetail> {
     return getChallengeRequest(challengeId);
@@ -115,8 +130,15 @@ export const mobileApi = {
       options?.idempotencyKey ?? createIdempotencyKey("decision", challengeId);
     return submitChallengeDecisionRequest(challengeId, decision, durationSec, idempotencyKey);
   },
-  async getApprovals(): Promise<PageResponse<ApprovalItem>> {
-    return listApprovalsRequest();
+  async getApprovals(page = 1, perPage = 20): Promise<PageResponse<ApprovalItem>> {
+    return listApprovalsRequest(page, perPage);
+  },
+  async getHistory(page = 1, perPage = 20): Promise<PageResponse<ChallengeDetail>> {
+    const response = await listApprovalRequestsRequest({ page, per_page: perPage });
+    return {
+      ...response,
+      items: response.items.filter((item) => item.status !== "PENDING"),
+    };
   },
   async revoke(approvalId: string): Promise<{ message: string }> {
     return revokeApprovalRequest(approvalId);

@@ -1,9 +1,11 @@
+import "react-native-gesture-handler";
 import { StatusBar } from "expo-status-bar";
 import * as Notifications from "expo-notifications";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ActivityIndicator, AppState, StyleSheet, Text, View } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { onlineManager, QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import NetInfo from "@react-native-community/netinfo";
 import {
   NavigationContainer,
   NavigationState,
@@ -29,8 +31,20 @@ import {
   PushSyncSignal,
   setPushSyncHandler,
 } from "../lib/notifications/pushNotifications";
+import { startPushPolling } from "../lib/notifications/pushPollingSignal";
 import { AuthSessionProvider } from "../features/auth/AuthSessionContext";
-import { BottomNavTab } from "../components/BottomNav";
+import { GestureHandlerRootView } from "react-native-gesture-handler";
+import type { BottomNavV2Tab } from "../components/BottomNavV2";
+import { NyxSheet } from "../features/nyx/NyxSheet";
+import { ThemeProvider, useTheme } from "../theme/ThemeContext";
+
+// Wire TanStack Query's online state to NetInfo so queries pause when offline
+// and auto-refetch when connectivity returns.
+onlineManager.setEventListener((setOnline) => {
+  return NetInfo.addEventListener((state) => {
+    setOnline(!!state.isConnected);
+  });
+});
 
 const queryClient = new QueryClient();
 
@@ -38,6 +52,7 @@ function refreshQueryCacheFromPushSignal(signal: PushSyncSignal) {
   void queryClient.invalidateQueries({ queryKey: ["challenges"] });
   void queryClient.invalidateQueries({ queryKey: ["approvals"] });
   void queryClient.invalidateQueries({ queryKey: ["challenge", signal.challengeId] });
+  startPushPolling();
 }
 
 function getActiveRouteName(
@@ -59,6 +74,7 @@ function getActiveRouteName(
 export default function App() {
   const navigationRef = useNavigationContainerRef<RootStackParamList>();
   const [currentRouteName, setCurrentRouteName] = useState<string | undefined>(undefined);
+  const [isNyxOpen, setIsNyxOpen] = useState(false);
   const pendingChallengeFromTapRef = useRef<string | null>(null);
   const lastAppStateRef = useRef(AppState.currentState);
 
@@ -69,12 +85,12 @@ export default function App() {
     if (!pendingChallengeId) return;
 
     const rootState = navigationRef.getRootState();
-    if (!rootState?.routeNames?.includes("ChallengeDetail")) {
+    if (!rootState?.routeNames?.includes("Activity")) {
       return;
     }
 
     pendingChallengeFromTapRef.current = null;
-    navigationRef.navigate("ChallengeDetail", { challengeId: pendingChallengeId });
+    navigationRef.navigate("Activity", { challengeId: pendingChallengeId });
   }, [navigationRef]);
 
   const [fontsLoaded] = useFonts({
@@ -190,41 +206,74 @@ export default function App() {
 
   return (
     <AppErrorBoundary>
-      <View style={appRootStyles.fill}>
+      <GestureHandlerRootView style={appRootStyles.fill}>
         <SafeAreaProvider>
           <QueryClientProvider client={queryClient}>
-            <AuthSessionProvider>
-              <NavigationContainer
-                ref={navigationRef}
-                linking={appLinking}
-                onReady={() => {
-                  const routeName = getActiveRouteName(navigationRef.getRootState());
-                  setCurrentRouteName(routeName);
-                  flushPendingChallengeTapNavigation();
-                }}
-                onStateChange={(state) => {
-                  const routeName = getActiveRouteName(state);
-                  setCurrentRouteName(routeName);
-                  flushPendingChallengeTapNavigation();
-                }}
-              >
-                <StatusBar style="light" />
-                <AppNavigator
+            <ThemeProvider>
+              <AuthSessionProvider>
+                <ThemedAppShell
+                  navigationRef={navigationRef}
                   currentRouteName={currentRouteName}
-                  onMainTabPress={(tab: BottomNavTab) => {
-                    if (!navigationRef.isReady()) return;
-                    if (tab === "dashboard") navigationRef.navigate("Dashboard");
-                    if (tab === "inbox") navigationRef.navigate("Inbox");
-                    if (tab === "approvals") navigationRef.navigate("Approvals");
-                    if (tab === "account") navigationRef.navigate("AccountSettings");
-                  }}
+                  setCurrentRouteName={setCurrentRouteName}
+                  flushPendingChallengeTapNavigation={flushPendingChallengeTapNavigation}
+                  isNyxOpen={isNyxOpen}
+                  setIsNyxOpen={setIsNyxOpen}
                 />
-              </NavigationContainer>
-            </AuthSessionProvider>
+              </AuthSessionProvider>
+            </ThemeProvider>
           </QueryClientProvider>
         </SafeAreaProvider>
-      </View>
+      </GestureHandlerRootView>
     </AppErrorBoundary>
+  );
+}
+
+function ThemedAppShell({
+  navigationRef,
+  currentRouteName,
+  setCurrentRouteName,
+  flushPendingChallengeTapNavigation,
+  isNyxOpen,
+  setIsNyxOpen,
+}: {
+  navigationRef: ReturnType<typeof useNavigationContainerRef<RootStackParamList>>;
+  currentRouteName: string | undefined;
+  setCurrentRouteName: (name: string | undefined) => void;
+  flushPendingChallengeTapNavigation: () => void;
+  isNyxOpen: boolean;
+  setIsNyxOpen: (open: boolean) => void;
+}) {
+  const { mode } = useTheme();
+
+  return (
+    <>
+      <NavigationContainer
+        ref={navigationRef}
+        linking={appLinking}
+        onReady={() => {
+          const routeName = getActiveRouteName(navigationRef.getRootState());
+          setCurrentRouteName(routeName);
+          flushPendingChallengeTapNavigation();
+        }}
+        onStateChange={(state) => {
+          const routeName = getActiveRouteName(state);
+          setCurrentRouteName(routeName);
+          flushPendingChallengeTapNavigation();
+        }}
+      >
+        <StatusBar style={mode === "dark" ? "light" : "dark"} />
+        <AppNavigator
+          currentRouteName={currentRouteName}
+          onMainTabPress={(tab: BottomNavV2Tab) => {
+            if (!navigationRef.isReady()) return;
+            if (tab === "activity") navigationRef.navigate("Activity");
+            if (tab === "account") navigationRef.navigate("AccountSettings");
+          }}
+          onNyxPress={() => setIsNyxOpen(true)}
+        />
+      </NavigationContainer>
+      <NyxSheet isOpen={isNyxOpen} onClose={() => setIsNyxOpen(false)} />
+    </>
   );
 }
 
@@ -245,6 +294,5 @@ const appLoadingStyles = StyleSheet.create({
 const appRootStyles = StyleSheet.create({
   fill: {
     flex: 1,
-    backgroundColor: "#10101A",
   },
 });
