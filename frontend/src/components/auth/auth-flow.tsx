@@ -2,8 +2,13 @@ import { useState, useRef } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useNavigate, Link } from "@tanstack/react-router";
-import { registerSchema, type RegisterFormData } from "@/schemas/auth";
-import { useRegister } from "@/hooks/use-auth";
+import {
+  loginSchema,
+  type LoginFormData,
+  registerSchema,
+  type RegisterFormData,
+} from "@/schemas/auth";
+import { useLogin, useRegister } from "@/hooks/use-auth";
 import { usePublicConfig } from "@/hooks/use-public-config";
 import { ApiError } from "@/lib/api-client";
 import { openExternal } from "@/lib/navigation";
@@ -17,7 +22,12 @@ import {
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { SocialLoginButtons } from "@/components/auth/social-login-buttons";
 import { toast } from "sonner";
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 function getPasswordStrength(password: string): {
   score: number;
@@ -39,7 +49,32 @@ function getPasswordStrength(password: string): {
 
 const INVITE_PATTERN = /^NYX-[A-Z0-9]{8,}$/;
 
-const SOCIAL_PROVIDERS = [
+/** Map backend social-auth error keys to user-friendly messages. */
+const SOCIAL_ERROR_MESSAGES: Record<string, string> = {
+  social_auth_conflict:
+    "This social account is already linked elsewhere. Please use your original sign-in method or contact support.",
+  social_auth_no_email:
+    "We couldn't retrieve an email address from your social account. Please ensure your email is public or use email/password sign-in.",
+  social_auth_deactivated:
+    "Your account has been deactivated. Please contact support for assistance.",
+  social_auth_registration_closed:
+    "No NyxID account found for this social login. Registration requires an invite code — please register with email and your invite code first, then sign in with your social account using the same email address to link it.",
+  social_auth_failed: "Social sign-in failed. Please try again.",
+  social_auth_exchange:
+    "Social sign-in failed due to a temporary error. Please try again.",
+};
+
+/** Trusted origins for return_to redirect validation (open-redirect prevention). */
+const BACKEND_URL = (
+  (import.meta.env.VITE_BACKEND_URL as string | undefined) ??
+  (import.meta.env.VITE_API_URL as string | undefined) ??
+  ""
+).replace(/\/+$/, "");
+
+const FRONTEND_ORIGIN = window.location.origin;
+
+// Social provider buttons for the register methods panel (full-width list style)
+const REGISTER_PROVIDERS = [
   {
     id: "google",
     label: "Continue with Google",
@@ -84,19 +119,39 @@ const SOCIAL_PROVIDERS = [
   },
 ] as const;
 
-interface RegisterFormProps {
+// ---------------------------------------------------------------------------
+// Component
+// ---------------------------------------------------------------------------
+
+type AuthPanel = 0 | 1 | 2;
+
+interface AuthFlowProps {
+  readonly initialPanel?: AuthPanel;
   readonly returnTo?: string;
+  readonly socialError?: string;
 }
 
-export function RegisterForm({ returnTo }: RegisterFormProps) {
-  const [showEmailPanel, setShowEmailPanel] = useState(false);
+export function AuthFlow({
+  initialPanel = 0,
+  returnTo,
+  socialError,
+}: AuthFlowProps) {
+  const [panel, setPanel] = useState<AuthPanel>(initialPanel);
   const navigate = useNavigate();
-  const registerMutation = useRegister();
   const { data: config } = usePublicConfig();
-  const nameInputRef = useRef<HTMLInputElement>(null);
-  const inviteInputRef = useRef<HTMLInputElement>(null);
 
-  const form = useForm<RegisterFormData>({
+  // Refs for focus after slide
+  const loginEmailRef = useRef<HTMLInputElement>(null);
+  const inviteInputRef = useRef<HTMLInputElement>(null);
+  const nameInputRef = useRef<HTMLInputElement>(null);
+
+  // -- Forms --
+  const loginForm = useForm<LoginFormData>({
+    resolver: zodResolver(loginSchema),
+    defaultValues: { email: "", password: "" },
+  });
+
+  const registerForm = useForm<RegisterFormData>({
     resolver: zodResolver(registerSchema),
     defaultValues: {
       inviteCode: "",
@@ -107,18 +162,101 @@ export function RegisterForm({ returnTo }: RegisterFormProps) {
     },
   });
 
-  const inviteCode = form.watch("inviteCode");
-  const password = form.watch("password");
-  const strength = getPasswordStrength(password);
+  // -- Mutations --
+  const loginMutation = useLogin();
+  const registerMutation = useRegister();
+
+  // -- Watched values --
+  const inviteCode = registerForm.watch("inviteCode");
+  const regPassword = registerForm.watch("password");
+  const strength = getPasswordStrength(regPassword);
   const isInviteValid = INVITE_PATTERN.test(inviteCode.trim().toUpperCase());
 
-  const enabledProviders = config
-    ? SOCIAL_PROVIDERS.filter((p) =>
+  // Filter social providers by server config
+  const enabledRegisterProviders = config
+    ? REGISTER_PROVIDERS.filter((p) =>
         config.social_providers.includes(p.id),
       )
-    : SOCIAL_PROVIDERS;
+    : REGISTER_PROVIDERS;
 
-  function handleSocialLogin(providerId: string) {
+  // -- Slide helpers --
+  const TRANSITION_MS = 320;
+
+  function slideToPanel(target: AuthPanel) {
+    setPanel(target);
+    if (target === 0) {
+      void navigate({
+        to: "/login" as string,
+        search: returnTo ? { return_to: returnTo } : {},
+        replace: true,
+      });
+      setTimeout(() => loginEmailRef.current?.focus(), TRANSITION_MS);
+    } else {
+      void navigate({
+        to: "/register" as string,
+        search: returnTo ? { return_to: returnTo } : {},
+        replace: true,
+      });
+      setTimeout(() => {
+        if (target === 1) {
+          inviteInputRef.current?.focus();
+        } else {
+          nameInputRef.current?.focus();
+        }
+      }, TRANSITION_MS);
+    }
+  }
+
+  // -- Login submit --
+  async function onLoginSubmit(data: LoginFormData) {
+    try {
+      const result = await loginMutation.mutateAsync(data);
+      if (!result.mfaRequired) {
+        if (
+          returnTo &&
+          (returnTo.startsWith(FRONTEND_ORIGIN + "/") ||
+            returnTo.startsWith(BACKEND_URL + "/"))
+        ) {
+          window.location.assign(returnTo);
+          return;
+        }
+        void navigate({ to: "/dashboard" as string });
+      }
+    } catch (error) {
+      if (error instanceof ApiError) {
+        loginForm.setError("root", { message: error.message });
+      } else {
+        loginForm.setError("root", {
+          message: "An unexpected error occurred. Please try again.",
+        });
+      }
+    }
+  }
+
+  // -- Register submit --
+  async function onRegisterSubmit(data: RegisterFormData) {
+    try {
+      const result = await registerMutation.mutateAsync({
+        name: data.name,
+        email: data.email,
+        password: data.password,
+        invite_code: data.inviteCode,
+      });
+      toast.success(result.message || "Account created successfully");
+      slideToPanel(0);
+    } catch (error) {
+      if (error instanceof ApiError) {
+        registerForm.setError("root", { message: error.message });
+      } else {
+        registerForm.setError("root", {
+          message: "An unexpected error occurred. Please try again.",
+        });
+      }
+    }
+  }
+
+  // -- Register social login (passes invite code) --
+  function handleRegisterSocialLogin(providerId: string) {
     const params = new URLSearchParams();
     if (returnTo) params.set("return_to", returnTo);
     const code = inviteCode.trim().toUpperCase();
@@ -128,53 +266,142 @@ export function RegisterForm({ returnTo }: RegisterFormProps) {
     void openExternal(url);
   }
 
-  function slideToEmail() {
-    setShowEmailPanel(true);
-    setTimeout(() => nameInputRef.current?.focus(), 380);
-  }
-
-  function slideBack() {
-    setShowEmailPanel(false);
-    setTimeout(() => {
-      inviteInputRef.current?.focus();
-      inviteInputRef.current?.select();
-    }, 380);
-  }
-
-  async function onSubmit(data: RegisterFormData) {
-    try {
-      const result = await registerMutation.mutateAsync({
-        name: data.name,
-        email: data.email,
-        password: data.password,
-        invite_code: data.inviteCode,
-      });
-      toast.success(result.message || "Account created successfully");
-      void navigate({
-        to: "/login" as string,
-        search: returnTo ? { return_to: returnTo } : {},
-      });
-    } catch (error) {
-      if (error instanceof ApiError) {
-        form.setError("root", { message: error.message });
-      } else {
-        form.setError("root", {
-          message: "An unexpected error occurred. Please try again.",
-        });
-      }
-    }
-  }
+  // -- Transform --
+  const translateX =
+    panel === 0 ? "0%" : panel === 1 ? "-33.3333%" : "-66.6667%";
 
   return (
     <div className="-m-8 overflow-hidden rounded-[10px]">
       <div
-        className="flex w-[200%] transition-transform duration-350 ease-[cubic-bezier(0.4,0,0.2,1)]"
-        style={{
-          transform: showEmailPanel ? "translateX(-50%)" : "translateX(0)",
-        }}
+        className="flex w-[300%] transition-transform duration-300 ease-in-out"
+        style={{ transform: `translateX(${translateX})` }}
       >
-        {/* Panel 1: Method Selection */}
-        <div className="w-1/2 shrink-0 px-7 pt-8 pb-7">
+        {/* ================================================================
+            Panel 0 — Login
+            ================================================================ */}
+        <div className="w-1/3 shrink-0 px-7 pt-8 pb-7">
+          <div className="mb-7 text-center">
+            <h1 className="font-display text-2xl font-semibold tracking-tight [background:linear-gradient(180deg,#fff_30%,#a0a0a8_100%)] bg-clip-text text-transparent">
+              Welcome back
+            </h1>
+            <p className="mt-1.5 text-[13px] text-text-tertiary">
+              Sign in to your NyxID account
+            </p>
+          </div>
+
+          {socialError && (
+            <div
+              role="alert"
+              data-testid="social-error"
+              className="mb-4 rounded-md bg-destructive/10 p-3 text-sm text-destructive"
+            >
+              {SOCIAL_ERROR_MESSAGES[socialError] ??
+                "Social sign-in failed. Please try again."}
+            </div>
+          )}
+
+          <Form {...loginForm}>
+            <form
+              onSubmit={loginForm.handleSubmit(onLoginSubmit)}
+              className="flex flex-col gap-4"
+            >
+              {loginForm.formState.errors.root && (
+                <div
+                  role="alert"
+                  className="rounded-md bg-destructive/10 p-3 text-sm text-destructive"
+                >
+                  {loginForm.formState.errors.root.message}
+                </div>
+              )}
+
+              <FormField
+                control={loginForm.control}
+                name="email"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Email</FormLabel>
+                    <FormControl>
+                      <Input
+                        type="email"
+                        placeholder="you@example.com"
+                        autoComplete="email"
+                        {...field}
+                        ref={(el) => {
+                          field.ref(el);
+                          (
+                            loginEmailRef as React.MutableRefObject<HTMLInputElement | null>
+                          ).current = el;
+                        }}
+                      />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+
+              <FormField
+                control={loginForm.control}
+                name="password"
+                render={({ field }) => (
+                  <FormItem>
+                    <div className="flex items-center justify-between">
+                      <FormLabel>Password</FormLabel>
+                      <Link
+                        to={"/forgot-password" as string}
+                        className="text-xs font-medium text-violet-400 hover:text-violet-300"
+                      >
+                        Forgot password?
+                      </Link>
+                    </div>
+                    <FormControl>
+                      <Input
+                        type="password"
+                        placeholder="Enter your password"
+                        autoComplete="current-password"
+                        {...field}
+                      />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+
+              <Button
+                type="submit"
+                className="w-full"
+                isLoading={loginMutation.isPending}
+              >
+                Sign In
+              </Button>
+            </form>
+          </Form>
+
+          {/* Divider */}
+          <div className="my-6 flex items-center gap-4">
+            <div className="h-px flex-1 bg-border" />
+            <span className="text-xs text-text-tertiary">or</span>
+            <div className="h-px flex-1 bg-border" />
+          </div>
+
+          <SocialLoginButtons returnTo={returnTo} />
+
+          {/* Footer */}
+          <div className="mt-6 border-t border-border pt-5 text-center text-[13px] text-muted-foreground">
+            Don&apos;t have an account?{" "}
+            <button
+              type="button"
+              onClick={() => slideToPanel(1)}
+              className="font-medium text-violet-400 hover:text-violet-300"
+            >
+              Create account
+            </button>
+          </div>
+        </div>
+
+        {/* ================================================================
+            Panel 1 — Register Methods
+            ================================================================ */}
+        <div className="w-1/3 shrink-0 px-7 pt-8 pb-7">
           <div className="mb-7 text-center">
             <h1 className="font-display text-2xl font-semibold tracking-tight [background:linear-gradient(180deg,#fff_30%,#a0a0a8_100%)] bg-clip-text text-transparent">
               Create your account
@@ -185,64 +412,71 @@ export function RegisterForm({ returnTo }: RegisterFormProps) {
           </div>
 
           {/* Step 1: Invite Code */}
-          <div className="relative mb-6 pl-9">
-            <div className="absolute left-[11px] top-7 bottom-[-12px] w-px bg-gradient-to-b from-violet-500/10 to-transparent" />
-            <div
-              className={`absolute left-0 top-0 flex h-6 w-6 items-center justify-center rounded-full border text-[11px] font-semibold transition-colors ${
-                isInviteValid
-                  ? "border-transparent bg-gradient-to-br from-violet-400 via-violet-500 to-violet-600 text-white"
-                  : "border-violet-500/15 bg-violet-500/10 text-violet-400"
-              }`}
-            >
-              {isInviteValid ? (
-                <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
-                  <path
-                    d="M3 8.5L6.5 12L13 4"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </svg>
-              ) : (
-                "1"
-              )}
-            </div>
-            <p className="mb-3 text-[13px] font-medium leading-6 text-muted-foreground">
-              Enter your invite code
-            </p>
-            <FormField
-              control={form.control}
-              name="inviteCode"
-              render={({ field }) => (
-                <FormItem>
-                  <FormControl>
-                    <Input
-                      placeholder="NYX-XXXXXXXX"
-                      autoComplete="off"
-                      spellCheck={false}
-                      className={`h-12 font-mono text-base tracking-wider ${
-                        isInviteValid
-                          ? "border-emerald-400/40 shadow-[0_0_0_3px_rgba(52,211,153,0.08)]"
-                          : ""
-                      }`}
-                      {...field}
-                      ref={(el) => {
-                        field.ref(el);
-                        (
-                          inviteInputRef as React.MutableRefObject<HTMLInputElement | null>
-                        ).current = el;
-                      }}
-                      onChange={(e) =>
-                        field.onChange(e.target.value.toUpperCase())
-                      }
+          <Form {...registerForm}>
+            <div className="relative mb-6 pl-9">
+              <div className="absolute left-[11px] top-7 bottom-[-12px] w-px bg-gradient-to-b from-violet-500/10 to-transparent" />
+              <div
+                className={`absolute left-0 top-0 flex h-6 w-6 items-center justify-center rounded-full border text-[11px] font-semibold transition-colors ${
+                  isInviteValid
+                    ? "border-transparent bg-gradient-to-br from-violet-400 via-violet-500 to-violet-600 text-white"
+                    : "border-violet-500/15 bg-violet-500/10 text-violet-400"
+                }`}
+              >
+                {isInviteValid ? (
+                  <svg
+                    width="12"
+                    height="12"
+                    viewBox="0 0 16 16"
+                    fill="none"
+                  >
+                    <path
+                      d="M3 8.5L6.5 12L13 4"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
                     />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-          </div>
+                  </svg>
+                ) : (
+                  "1"
+                )}
+              </div>
+              <p className="mb-3 text-[13px] font-medium leading-6 text-muted-foreground">
+                Enter your invite code
+              </p>
+              <FormField
+                control={registerForm.control}
+                name="inviteCode"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormControl>
+                      <Input
+                        placeholder="NYX-XXXXXXXX"
+                        autoComplete="off"
+                        spellCheck={false}
+                        className={`h-12 font-mono text-base tracking-wider ${
+                          isInviteValid
+                            ? "border-emerald-400/40 shadow-[0_0_0_3px_rgba(52,211,153,0.08)]"
+                            : ""
+                        }`}
+                        {...field}
+                        ref={(el) => {
+                          field.ref(el);
+                          (
+                            inviteInputRef as React.MutableRefObject<HTMLInputElement | null>
+                          ).current = el;
+                        }}
+                        onChange={(e) =>
+                          field.onChange(e.target.value.toUpperCase())
+                        }
+                      />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+            </div>
+          </Form>
 
           {/* Step 2: Choose Method */}
           <div className="relative pl-9">
@@ -254,11 +488,11 @@ export function RegisterForm({ returnTo }: RegisterFormProps) {
             </p>
 
             <div className="flex flex-col gap-2">
-              {enabledProviders.map((provider) => (
+              {enabledRegisterProviders.map((provider) => (
                 <button
                   key={provider.id}
                   type="button"
-                  onClick={() => handleSocialLogin(provider.id)}
+                  onClick={() => handleRegisterSocialLogin(provider.id)}
                   className="flex h-[46px] items-center gap-3 rounded-lg border border-border bg-background px-4 text-[13.5px] font-medium text-foreground transition-colors hover:border-border/80 hover:bg-white/[0.03] active:scale-[0.99]"
                 >
                   <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-white/[0.06]">
@@ -273,7 +507,7 @@ export function RegisterForm({ returnTo }: RegisterFormProps) {
 
               <button
                 type="button"
-                onClick={slideToEmail}
+                onClick={() => slideToPanel(2)}
                 className="flex h-[46px] items-center gap-3 rounded-lg border border-border bg-background px-4 text-[13.5px] font-medium text-foreground transition-colors hover:border-border/80 hover:bg-white/[0.03] active:scale-[0.99]"
               >
                 <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-violet-500/10">
@@ -301,28 +535,30 @@ export function RegisterForm({ returnTo }: RegisterFormProps) {
           {/* Footer */}
           <div className="mt-6 border-t border-border pt-5 text-center text-[13px] text-muted-foreground">
             Already have an account?{" "}
-            <Link
-              to="/login"
-              search={returnTo ? { return_to: returnTo } : {}}
+            <button
+              type="button"
+              onClick={() => slideToPanel(0)}
               className="font-medium text-violet-400 hover:text-violet-300"
             >
               Sign in
-            </Link>
+            </button>
           </div>
         </div>
 
-        {/* Panel 2: Email Registration */}
+        {/* ================================================================
+            Panel 2 — Email Registration
+            ================================================================ */}
         <div
-          className="w-1/2 shrink-0 px-7 pt-8 pb-7"
+          className="w-1/3 shrink-0 px-7 pt-8 pb-7"
           onKeyDown={(e) => {
-            if (e.key === "Escape") slideBack();
+            if (e.key === "Escape") slideToPanel(1);
           }}
         >
           {/* Header with back button */}
           <div className="mb-6 flex items-center gap-3">
             <button
               type="button"
-              onClick={slideBack}
+              onClick={() => slideToPanel(1)}
               className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border bg-transparent text-muted-foreground transition-colors hover:border-border/80 hover:bg-white/[0.03] hover:text-foreground"
               aria-label="Back to sign-up methods"
             >
@@ -367,7 +603,7 @@ export function RegisterForm({ returnTo }: RegisterFormProps) {
             </span>
             <button
               type="button"
-              onClick={slideBack}
+              onClick={() => slideToPanel(1)}
               className="ml-auto border-0 bg-transparent text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground"
             >
               Edit
@@ -375,22 +611,22 @@ export function RegisterForm({ returnTo }: RegisterFormProps) {
           </div>
 
           {/* Email registration form */}
-          <Form {...form}>
+          <Form {...registerForm}>
             <form
-              onSubmit={form.handleSubmit(onSubmit)}
+              onSubmit={registerForm.handleSubmit(onRegisterSubmit)}
               className="flex flex-col gap-3.5"
             >
-              {form.formState.errors.root && (
+              {registerForm.formState.errors.root && (
                 <div
                   role="alert"
                   className="rounded-md bg-destructive/10 p-3 text-sm text-destructive"
                 >
-                  {form.formState.errors.root.message}
+                  {registerForm.formState.errors.root.message}
                 </div>
               )}
 
               <FormField
-                control={form.control}
+                control={registerForm.control}
                 name="name"
                 render={({ field }) => (
                   <FormItem>
@@ -415,7 +651,7 @@ export function RegisterForm({ returnTo }: RegisterFormProps) {
               />
 
               <FormField
-                control={form.control}
+                control={registerForm.control}
                 name="email"
                 render={({ field }) => (
                   <FormItem>
@@ -435,7 +671,7 @@ export function RegisterForm({ returnTo }: RegisterFormProps) {
               />
 
               <FormField
-                control={form.control}
+                control={registerForm.control}
                 name="password"
                 render={({ field }) => (
                   <FormItem>
@@ -449,7 +685,7 @@ export function RegisterForm({ returnTo }: RegisterFormProps) {
                         {...field}
                       />
                     </FormControl>
-                    {password.length > 0 && (
+                    {regPassword.length > 0 && (
                       <div className="mt-1.5 space-y-0.5">
                         <div
                           className="flex gap-[3px]"
@@ -481,11 +717,13 @@ export function RegisterForm({ returnTo }: RegisterFormProps) {
               />
 
               <FormField
-                control={form.control}
+                control={registerForm.control}
                 name="confirmPassword"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel className="text-xs">Confirm Password</FormLabel>
+                    <FormLabel className="text-xs">
+                      Confirm Password
+                    </FormLabel>
                     <FormControl>
                       <Input
                         type="password"
@@ -513,13 +751,13 @@ export function RegisterForm({ returnTo }: RegisterFormProps) {
           {/* Footer */}
           <div className="mt-6 border-t border-border pt-5 text-center text-[13px] text-muted-foreground">
             Already have an account?{" "}
-            <Link
-              to="/login"
-              search={returnTo ? { return_to: returnTo } : {}}
+            <button
+              type="button"
+              onClick={() => slideToPanel(0)}
               className="font-medium text-violet-400 hover:text-violet-300"
             >
               Sign in
-            </Link>
+            </button>
           </div>
         </div>
       </div>
