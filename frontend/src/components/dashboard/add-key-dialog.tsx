@@ -81,7 +81,7 @@ const AUTH_METHOD_DEFAULTS: Record<string, string> = {
   oauth2: "Authorization",
   body: "app_secret",
   bot_bearer: "Authorization",
-  lark_token_exchange: "",
+  token_exchange: "",
   none: "",
 };
 
@@ -113,47 +113,57 @@ function getCredentialFieldMeta(
   return { label: "API Key / Credential", placeholder: "sk-..." };
 }
 
-// Parse a stored `lark_token_exchange` credential back out into its component
-// app_id / app_secret fields. Returns empty strings on any parse error so
-// the form stays usable even if the underlying JSON is mangled.
-function parseLarkCredential(
+// Parse a stored `token_exchange` credential (JSON object) back into a
+// plain key-value map. Returns an empty object on any parse error so the
+// form stays usable even if the underlying JSON is mangled.
+function parseTokenExchangeCredential(
   credential: string,
-): { readonly appId: string; readonly appSecret: string } {
-  if (!credential) return { appId: "", appSecret: "" };
+): Readonly<Record<string, string>> {
+  if (!credential) return {};
   try {
     const parsed = JSON.parse(credential);
-    if (parsed && typeof parsed === "object") {
-      return {
-        appId: typeof parsed.app_id === "string" ? parsed.app_id : "",
-        appSecret: typeof parsed.app_secret === "string" ? parsed.app_secret : "",
-      };
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const result: Record<string, string> = {};
+      for (const [k, v] of Object.entries(parsed)) {
+        if (typeof v === "string") result[k] = v;
+      }
+      return result;
     }
   } catch {
     // Fall through -- treat malformed JSON as empty.
   }
-  return { appId: "", appSecret: "" };
+  return {};
 }
 
-// Compose the two-field Lark credential back into the single JSON blob
-// that the backend expects in `credential_encrypted`.
-function composeLarkCredential(appId: string, appSecret: string): string {
-  const trimmedId = appId.trim();
-  const trimmedSecret = appSecret.trim();
-  if (!trimmedId && !trimmedSecret) return "";
-  return JSON.stringify({ app_id: trimmedId, app_secret: trimmedSecret });
+// Compose a map of field values back into the JSON blob the backend
+// expects in `credential_encrypted`. Returns an empty string when all
+// fields are blank so the surrounding "required credential" check still
+// fires.
+function composeTokenExchangeCredential(
+  values: Readonly<Record<string, string>>,
+): string {
+  const trimmed: Record<string, string> = {};
+  let anyPresent = false;
+  for (const [k, v] of Object.entries(values)) {
+    const t = v.trim();
+    if (t) anyPresent = true;
+    trimmed[k] = t;
+  }
+  if (!anyPresent) return "";
+  return JSON.stringify(trimmed);
 }
 
 // Auth key name input should only be shown when the user needs to pick a
 // header/query/body field name. `bot_bearer` is a fixed Authorization format,
-// OAuth flows handle their own token storage, and `lark_token_exchange`
-// ignores auth_key_name entirely (the credential is a structured JSON blob).
+// OAuth flows handle their own token storage, and `token_exchange` ignores
+// auth_key_name entirely (the credential is a structured JSON blob).
 function shouldShowAuthKeyName(authMethod: string): boolean {
   return (
     authMethod !== "none" &&
     authMethod !== "oidc" &&
     authMethod !== "oauth2" &&
     authMethod !== "bot_bearer" &&
-    authMethod !== "lark_token_exchange"
+    authMethod !== "token_exchange"
   );
 }
 
@@ -533,59 +543,46 @@ function KeyForm({
           </p>
         </div>
 
-        {form.authMethod === "lark_token_exchange" ? (
+        {form.authMethod === "token_exchange" &&
+        (catalogEntry?.token_exchange_credential_fields?.length ?? 0) > 0 ? (
           (() => {
-            const { appId, appSecret } = parseLarkCredential(form.credential);
+            const fields = catalogEntry?.token_exchange_credential_fields ?? [];
+            const values = parseTokenExchangeCredential(form.credential);
             return (
               <>
-                <div className="space-y-1.5">
-                  <Label htmlFor="add-key-lark-app-id">
-                    App ID
-                    {requiresCredential && (
-                      <span className="text-destructive"> *</span>
+                {fields.map((field) => (
+                  <div key={field.name} className="space-y-1.5">
+                    <Label htmlFor={`add-key-te-${field.name}`}>
+                      {field.label}
+                      {requiresCredential && (
+                        <span className="text-destructive"> *</span>
+                      )}
+                    </Label>
+                    <Input
+                      id={`add-key-te-${field.name}`}
+                      type={field.secret ? "password" : "text"}
+                      placeholder={
+                        field.placeholder ?? `Enter ${field.label.toLowerCase()}`
+                      }
+                      value={values[field.name] ?? ""}
+                      onChange={(e) =>
+                        onChange({
+                          credential: composeTokenExchangeCredential({
+                            ...values,
+                            [field.name]: e.target.value,
+                          }),
+                        })
+                      }
+                    />
+                    {field.secret && (
+                      <p className="text-[11px] text-muted-foreground">
+                        Stored encrypted. NyxID exchanges this server-side
+                        for an access token and caches it -- you never have
+                        to refresh tokens, and the secret never leaves NyxID.
+                      </p>
                     )}
-                  </Label>
-                  <Input
-                    id="add-key-lark-app-id"
-                    type="text"
-                    placeholder="cli_a940e30bf3b89eea"
-                    value={appId}
-                    onChange={(e) =>
-                      onChange({
-                        credential: composeLarkCredential(e.target.value, appSecret),
-                      })
-                    }
-                  />
-                  <p className="text-[11px] text-muted-foreground">
-                    Your Lark / Feishu bot app ID. Not secret -- visible in
-                    request URLs and logs.
-                  </p>
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="add-key-lark-app-secret">
-                    App Secret
-                    {requiresCredential && (
-                      <span className="text-destructive"> *</span>
-                    )}
-                  </Label>
-                  <Input
-                    id="add-key-lark-app-secret"
-                    type="password"
-                    placeholder="Enter app secret"
-                    value={appSecret}
-                    onChange={(e) =>
-                      onChange({
-                        credential: composeLarkCredential(appId, e.target.value),
-                      })
-                    }
-                  />
-                  <p className="text-[11px] text-muted-foreground">
-                    NyxID exchanges this server-side for a{" "}
-                    <code className="font-mono">tenant_access_token</code> and
-                    caches it. Your secret never leaves NyxID, and you never
-                    have to refresh tokens.
-                  </p>
-                </div>
+                  </div>
+                ))}
               </>
             );
           })()
@@ -672,8 +669,8 @@ function KeyForm({
                   <SelectItem value="basic">Basic Auth</SelectItem>
                   <SelectItem value="body">JSON Body Injection</SelectItem>
                   <SelectItem value="bot_bearer">Bot Token (Discord)</SelectItem>
-                  <SelectItem value="lark_token_exchange">
-                    Lark / Feishu Tenant Token
+                  <SelectItem value="token_exchange">
+                    Token Exchange (Lark / OAuth client_credentials)
                   </SelectItem>
                   <SelectItem value="oauth2">OAuth 2.0</SelectItem>
                   <SelectItem value="oidc">OIDC</SelectItem>

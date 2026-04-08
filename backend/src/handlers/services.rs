@@ -544,7 +544,7 @@ pub async fn create_service(
             "query",
             "basic",
             "body",
-            "lark_token_exchange",
+            "token_exchange",
             "oidc",
             "none",
         ];
@@ -567,12 +567,17 @@ pub async fn create_service(
             ));
         }
 
-        // `lark_token_exchange` stores both `app_id` and `app_secret` as a
-        // JSON blob in the credential field. Validate the shape at creation
-        // time so the operator sees a clear error instead of a proxy-time
-        // failure on their first request.
-        if auth_method == "lark_token_exchange" && !credential.is_empty() {
-            crate::services::lark_token_service::parse_tenant_credential(&credential)?;
+        // `token_exchange` stores a JSON credential blob whose shape is
+        // driven by the service's `token_exchange_config.credential_fields`.
+        // At admin create time we don't have that config yet -- it is set
+        // by catalog seeds or via a separate admin flow -- so we only
+        // validate that the credential parses as JSON when provided.
+        if auth_method == "token_exchange" && !credential.is_empty() {
+            serde_json::from_str::<serde_json::Value>(&credential).map_err(|_| {
+                AppError::ValidationError(
+                    "token_exchange credential must be a JSON object".to_string(),
+                )
+            })?;
         }
 
         validate_base_url(base_url)?;
@@ -747,6 +752,7 @@ pub async fn create_service(
         required_permissions: body.required_permissions.clone(),
         examples_url: body.examples_url.clone(),
         recommended_skills: body.recommended_skills.clone(),
+        token_exchange_config: None,
         created_at: now,
         updated_at: now,
     };

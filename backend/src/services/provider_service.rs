@@ -1404,6 +1404,15 @@ pub async fn seed_default_providers(
     Ok(())
 }
 
+/// Whether a catalog slug belongs to the Lark / Feishu bot family, which
+/// shares the declarative `token_exchange` config defined in the channel
+/// adapter. Kept as a function so the matching logic has one home; new
+/// token_exchange catalog entries should add their slug here (or grow a
+/// proper per-seed config lookup if the list gets long).
+fn is_lark_family_slug(slug: &str) -> bool {
+    matches!(slug, "api-lark-bot" | "api-feishu-bot")
+}
+
 struct DefaultServiceSeed {
     provider_slug: &'static str,
     service_slug: &'static str,
@@ -1645,7 +1654,7 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         base_url: "https://open.larksuite.com",
         injection_method: "bearer",
         injection_key: "Authorization",
-        service_auth_method: Some("lark_token_exchange"),
+        service_auth_method: Some("token_exchange"),
         service_auth_key_name: None,
         description: Some(
             "Lark bot tenant APIs. NyxID handles token exchange transparently: store your \
@@ -1697,7 +1706,7 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         base_url: "https://open.feishu.cn",
         injection_method: "bearer",
         injection_key: "Authorization",
-        service_auth_method: Some("lark_token_exchange"),
+        service_auth_method: Some("token_exchange"),
         service_auth_key_name: None,
         description: Some(
             "Feishu bot tenant APIs (China region). Same as `api-lark-bot` but for the Feishu domain. \
@@ -1824,6 +1833,18 @@ pub async fn seed_default_services(
             .map(String::from)
             .unwrap_or_default();
 
+        // Populate the token_exchange_config for catalog services that use
+        // the declarative token_exchange auth method. Lark and Feishu share
+        // the same config shape (only the base_url differs) and pull their
+        // definition from the channel adapter so there is one source of
+        // truth in the tree.
+        let token_exchange_config =
+            if service_auth_method == "token_exchange" && is_lark_family_slug(seed.service_slug) {
+                Some(crate::services::channel_adapters::lark::lark_family_token_exchange_config())
+            } else {
+                None
+            };
+
         let service = DownstreamService {
             id: service_id.clone(),
             name: seed.service_name.to_string(),
@@ -1863,6 +1884,7 @@ pub async fn seed_default_services(
             required_permissions: None,
             examples_url: None,
             recommended_skills: None,
+            token_exchange_config,
             created_at: now,
             updated_at: now,
         };
@@ -1951,28 +1973,36 @@ pub async fn seed_default_services(
          Returns a `tenant_access_token` valid for 2 hours.",
     ];
 
-    // #220 migration: existing api-lark-bot / api-feishu-bot records from
-    // #205 still have `auth_method=body` and `auth_key_name=app_secret`.
-    // Upgrade them to `lark_token_exchange` so the new transparent token
-    // exchange path kicks in. Idempotent: the filter ensures we only touch
-    // records still carrying the old shape, and the update wipes the
-    // now-unused auth_key_name.
+    // #220 migration: existing api-lark-bot / api-feishu-bot catalog rows
+    // need to land on the declarative `token_exchange` auth method with a
+    // populated `token_exchange_config`. Two waves are possible depending
+    // on when the row was seeded:
+    //   - #205: auth_method="body", auth_key_name="app_secret", no config
+    //   - #220 pre-refactor: auth_method="lark_token_exchange", no config
+    // Both need the same end state. Idempotent: the filter only matches
+    // stale shapes and the update wipes the now-unused auth_key_name.
     //
     // Note: this only updates the catalog `DownstreamService` rows. User
-    // UserService rows pointing at these catalog services still need to be
-    // recreated by the user, because the credential format changed from a
-    // raw `app_secret` string to a JSON `{app_id, app_secret}` blob.
+    // `UserService` rows pointing at these catalog services still need to
+    // be recreated by the user, because the credential format changed
+    // from a raw `app_secret` string to a JSON `{app_id, app_secret}` blob.
+    let lark_exchange_config =
+        crate::services::channel_adapters::lark::lark_family_token_exchange_config();
+    let lark_exchange_config_bson = bson::to_bson(&lark_exchange_config)
+        .map_err(|e| AppError::Internal(format!("Failed to serialize TokenExchangeConfig: {e}")))?;
+
     for slug in ["api-lark-bot", "api-feishu-bot"] {
         let res = service_col
             .update_many(
                 doc! {
                     "slug": slug,
-                    "auth_method": "body",
+                    "auth_method": { "$in": ["body", "lark_token_exchange"] },
                 },
                 doc! {
                     "$set": {
-                        "auth_method": "lark_token_exchange",
+                        "auth_method": "token_exchange",
                         "auth_key_name": "",
+                        "token_exchange_config": &lark_exchange_config_bson,
                         "updated_at": bson::DateTime::from_chrono(Utc::now()),
                     }
                 },
@@ -1982,7 +2012,7 @@ pub async fn seed_default_services(
             tracing::info!(
                 slug = slug,
                 modified = res.modified_count,
-                "Migrated catalog service from body auth to lark_token_exchange"
+                "Migrated catalog service to declarative token_exchange auth"
             );
         }
     }

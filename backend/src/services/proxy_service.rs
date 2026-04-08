@@ -20,8 +20,8 @@ use crate::models::user_service_connection::{
     COLLECTION_NAME as USER_SERVICE_CONNECTIONS, UserServiceConnection,
 };
 use crate::services::delegation_service::DelegatedCredential;
-use crate::services::lark_token_service::{self, TenantTokenCache};
 use crate::services::node_ws_manager::NodeWsManager;
+use crate::services::provider_token_exchange_service::{self, TokenExchangeCache};
 use crate::services::{
     agent_binding_service, user_api_key_service, user_service_service, user_token_service,
 };
@@ -816,6 +816,7 @@ fn build_minimal_downstream_service(
         required_permissions: None,
         examples_url: None,
         recommended_skills: None,
+        token_exchange_config: None,
         created_at: now,
         updated_at: now,
     }
@@ -883,8 +884,8 @@ pub async fn forward_request(
     delegated_credentials: Vec<DelegatedCredential>,
     // The caller's raw NyxID access token, used when auth_method is "nyxid_token".
     caller_token: Option<&str>,
-    // Shared Lark/Feishu tenant token cache (used by `lark_token_exchange`).
-    tenant_token_cache: &TenantTokenCache,
+    // Shared generic token exchange cache (used by `token_exchange`).
+    token_exchange_cache: &TokenExchangeCache,
 ) -> AppResult<reqwest::Response> {
     let prepared = prepare_delegated_request(path, query, &delegated_credentials)?;
 
@@ -987,30 +988,42 @@ pub async fn forward_request(
         "body" => {
             // Body injection already happened above; nothing to add to headers.
         }
-        "lark_token_exchange" => {
-            // Transparent server-side token exchange for Lark / Feishu bot
-            // APIs. The stored credential is a JSON blob containing both
-            // `app_id` and `app_secret`. The proxy POSTs them to Lark's
-            // `/auth/v3/tenant_access_token/internal` endpoint (or reuses a
-            // cached token) and injects the resulting `tenant_access_token`
-            // as `Authorization: Bearer ...` on the outbound request.
-            //
-            // Callers never see `app_secret`, never manage token refresh,
-            // and never touch the exchange endpoint directly -- if they do
-            // hit `/auth/v3/tenant_access_token/internal`, the proxy still
-            // injects its own Bearer header and Lark rejects it, which is
-            // the intended signal that the endpoint is reserved.
-            let (app_id, app_secret) =
-                lark_token_service::parse_tenant_credential(&target.credential)?;
-            let token = lark_token_service::get_cached_tenant_token(
-                tenant_token_cache,
+        "token_exchange" => {
+            // Declarative server-side token exchange. The service's
+            // `TokenExchangeConfig` describes how to POST the stored
+            // credential JSON, extract a token from the response, cache
+            // it, and inject it on outbound requests. Covers Lark/Feishu
+            // tenant tokens, OAuth 2.0 client_credentials, and similar
+            // provider flows without per-provider code.
+            let exchange_config =
+                target
+                    .service
+                    .token_exchange_config
+                    .as_ref()
+                    .ok_or_else(|| {
+                        AppError::Internal(
+                        "token_exchange auth method requires token_exchange_config on the service"
+                            .to_string(),
+                    )
+                    })?;
+            let credential_map = provider_token_exchange_service::parse_credential(
+                &target.credential,
+                &exchange_config.credential_fields,
+            )?;
+            let token = provider_token_exchange_service::get_cached_exchange_token(
+                token_exchange_cache,
                 client,
                 &target.base_url,
-                &app_id,
-                &app_secret,
+                &target.credential,
+                exchange_config,
+                &credential_map,
             )
             .await?;
-            request = request.bearer_auth(&token);
+            request = provider_token_exchange_service::apply_injection(
+                request,
+                &exchange_config.injection,
+                &token,
+            )?;
         }
         _ => {
             return Err(AppError::Internal(format!(
@@ -1170,11 +1183,11 @@ mod tests {
         StatusCode::OK
     }
 
-    /// Fresh empty tenant token cache for tests that don't exercise
-    /// `lark_token_exchange`. Dedicated tests for the cache itself live
-    /// in `lark_token_service::tests`.
-    fn empty_token_cache() -> TenantTokenCache {
-        TenantTokenCache::new()
+    /// Fresh empty token exchange cache for tests that don't exercise
+    /// `token_exchange`. Dedicated tests for the cache itself live in
+    /// `provider_token_exchange_service::tests`.
+    fn empty_token_cache() -> TokenExchangeCache {
+        TokenExchangeCache::new()
     }
 
     fn make_proxy_target(base_url: String) -> ProxyTarget {
@@ -1223,6 +1236,7 @@ mod tests {
                 required_permissions: None,
                 examples_url: None,
                 recommended_skills: None,
+                token_exchange_config: None,
                 created_at: now,
                 updated_at: now,
             },
@@ -1753,7 +1767,7 @@ mod tests {
         assert!(!method_can_have_body(&reqwest::Method::OPTIONS));
     }
 
-    // ─── lark_token_exchange integration tests ────────────────────────
+    // ─── token_exchange integration tests (Lark as example) ──────────
 
     use axum::{Json, routing::get};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1764,7 +1778,7 @@ mod tests {
         token_exchange_count: Arc<AtomicUsize>,
     }
 
-    async fn lark_token_exchange_handler(
+    async fn mock_lark_token_endpoint_handler(
         State(state): State<LarkMockState>,
         body: Bytes,
     ) -> Json<serde_json::Value> {
@@ -1793,11 +1807,43 @@ mod tests {
         Json(serde_json::json!({"code": 0, "data": {"items": []}}))
     }
 
+    fn make_lark_token_exchange_config() -> crate::models::downstream_service::TokenExchangeConfig {
+        use crate::models::downstream_service::{CredentialFieldSpec, TokenExchangeConfig};
+        TokenExchangeConfig {
+            endpoint: "{base_url}/open-apis/auth/v3/tenant_access_token/internal".to_string(),
+            request_encoding: "json".to_string(),
+            request_template: serde_json::json!({
+                "app_id": "$app_id",
+                "app_secret": "$app_secret",
+            }),
+            token_response_path: "tenant_access_token".to_string(),
+            ttl_response_path: Some("expire".to_string()),
+            default_ttl_secs: 7200,
+            injection: "bearer".to_string(),
+            error_code_path: Some("code".to_string()),
+            error_message_path: Some("msg".to_string()),
+            credential_fields: vec![
+                CredentialFieldSpec {
+                    name: "app_id".to_string(),
+                    label: "App ID".to_string(),
+                    placeholder: None,
+                    secret: false,
+                },
+                CredentialFieldSpec {
+                    name: "app_secret".to_string(),
+                    label: "App Secret".to_string(),
+                    placeholder: None,
+                    secret: true,
+                },
+            ],
+        }
+    }
+
     fn make_lark_proxy_target(base_url: String) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
             base_url: base_url.clone(),
-            auth_method: "lark_token_exchange".to_string(),
+            auth_method: "token_exchange".to_string(),
             auth_key_name: String::new(),
             credential: r#"{"app_id":"cli_test","app_secret":"super-secret"}"#.to_string(),
             service: DownstreamService {
@@ -1806,7 +1852,7 @@ mod tests {
                 slug: "api-lark-bot".to_string(),
                 description: None,
                 base_url,
-                auth_method: "lark_token_exchange".to_string(),
+                auth_method: "token_exchange".to_string(),
                 auth_key_name: String::new(),
                 credential_encrypted: vec![],
                 auth_type: None,
@@ -1839,6 +1885,7 @@ mod tests {
                 required_permissions: None,
                 recommended_skills: None,
                 examples_url: None,
+                token_exchange_config: Some(make_lark_token_exchange_config()),
                 created_at: now,
                 updated_at: now,
             },
@@ -1853,7 +1900,7 @@ mod tests {
         let app = Router::new()
             .route(
                 "/open-apis/auth/v3/tenant_access_token/internal",
-                post(lark_token_exchange_handler),
+                post(mock_lark_token_endpoint_handler),
             )
             .route("/open-apis/im/v1/chats", get(lark_api_handler))
             .with_state(state.clone());
@@ -1869,9 +1916,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lark_token_exchange_injects_bearer_on_downstream_request() {
+    async fn token_exchange_injects_bearer_on_downstream_request() {
         let (base_url, mock, server) = start_lark_mock().await;
-        let cache = TenantTokenCache::new();
+        let cache = TokenExchangeCache::new();
 
         let response = forward_request(
             &Client::new(),
@@ -1900,9 +1947,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lark_token_exchange_caches_across_calls() {
+    async fn token_exchange_caches_across_calls() {
         let (base_url, mock, server) = start_lark_mock().await;
-        let cache = TenantTokenCache::new();
+        let cache = TokenExchangeCache::new();
         let target = make_lark_proxy_target(base_url);
 
         // First call triggers a token exchange.
@@ -1948,7 +1995,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lark_token_exchange_rejects_malformed_credential() {
+    async fn token_exchange_rejects_malformed_credential() {
         let (base_url, _mock, server) = start_lark_mock().await;
         let mut target = make_lark_proxy_target(base_url);
         target.credential = "not valid json".to_string();
@@ -1964,13 +2011,13 @@ mod tests {
             vec![],
             vec![],
             None,
-            &TenantTokenCache::new(),
+            &TokenExchangeCache::new(),
         )
         .await
         .expect_err("malformed credential should error");
 
         assert!(
-            err.to_string().contains("lark_token_exchange"),
+            err.to_string().contains("token_exchange"),
             "unexpected error: {err}"
         );
         server.abort();
@@ -2037,6 +2084,7 @@ mod tests {
                 required_permissions: None,
                 recommended_skills: None,
                 examples_url: None,
+                token_exchange_config: None,
                 created_at: now,
                 updated_at: now,
             },

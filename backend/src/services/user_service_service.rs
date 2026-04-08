@@ -260,14 +260,14 @@ pub async fn create_user_service(
         ));
     }
 
-    // `lark_token_exchange` performs server-side token exchange against
-    // Lark/Feishu directly from the backend process. Node-routed requests
-    // would have to relay the exchange through the node agent, which is
-    // not implemented. Reject at bind time.
-    if auth_method == "lark_token_exchange" && node_id.is_some() {
+    // `token_exchange` performs server-side token exchange against the
+    // configured endpoint directly from the backend process. Node-routed
+    // requests would have to relay the exchange through the node agent,
+    // which is not implemented. Reject at bind time.
+    if auth_method == "token_exchange" && node_id.is_some() {
         return Err(AppError::ValidationError(
-            "auth_method 'lark_token_exchange' is not supported for node-routed services. \
-             The tenant token exchange runs server-side and does not flow through nodes."
+            "auth_method 'token_exchange' is not supported for node-routed services. \
+             The token exchange runs server-side and does not flow through nodes."
                 .to_string(),
         ));
     }
@@ -416,8 +416,8 @@ pub async fn update_user_service(
         }
     }
 
-    // Same node-routing reject for lark_token_exchange post-update.
-    if effective_auth_method == "lark_token_exchange" {
+    // Same node-routing reject for token_exchange post-update.
+    if effective_auth_method == "token_exchange" {
         let effective_node_id: Option<&str> = match node_id {
             Some("") => None,
             Some(nid) => Some(nid),
@@ -425,8 +425,8 @@ pub async fn update_user_service(
         };
         if effective_node_id.is_some() {
             return Err(AppError::ValidationError(
-                "auth_method 'lark_token_exchange' is not supported for node-routed services. \
-                 The tenant token exchange runs server-side and does not flow through nodes."
+                "auth_method 'token_exchange' is not supported for node-routed services. \
+                 The token exchange runs server-side and does not flow through nodes."
                     .to_string(),
             ));
         }

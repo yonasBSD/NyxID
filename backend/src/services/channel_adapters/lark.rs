@@ -11,9 +11,10 @@
 //! Message parsing handles the standard `im.message.receive_v1` event schema
 //! and the `url_verification` challenge flow.
 //!
-//! Tenant token acquisition goes through [`lark_token_service`] so the
-//! channel adapter and the proxy's `lark_token_exchange` auth method share
-//! one in-memory cache with per-key single-flight.
+//! Tenant token acquisition goes through the generic
+//! [`provider_token_exchange_service`] helpers so the channel adapter and
+//! the proxy's `token_exchange` auth method share one in-memory cache with
+//! per-key single-flight.
 
 use std::sync::Arc;
 
@@ -23,12 +24,47 @@ use subtle::ConstantTimeEq;
 
 use crate::errors::{AppError, AppResult};
 use crate::models::channel_bot::ChannelBot;
+use crate::models::downstream_service::{CredentialFieldSpec, TokenExchangeConfig};
 use crate::services::channel_platform::{
     BotIdentity, InboundMessage, OutboundReply, PlatformAdapter,
 };
-use crate::services::lark_token_service::{self, TenantTokenCache};
+use crate::services::provider_token_exchange_service::{self, TokenExchangeCache};
 
 type HmacSha256 = Hmac<Sha256>;
+
+/// Build the `TokenExchangeConfig` that matches Lark / Feishu's tenant
+/// token endpoint. Shared with the proxy catalog seeds so there is exactly
+/// one definition in the tree.
+pub fn lark_family_token_exchange_config() -> TokenExchangeConfig {
+    TokenExchangeConfig {
+        endpoint: "{base_url}/open-apis/auth/v3/tenant_access_token/internal".to_string(),
+        request_encoding: "json".to_string(),
+        request_template: serde_json::json!({
+            "app_id": "$app_id",
+            "app_secret": "$app_secret",
+        }),
+        token_response_path: "tenant_access_token".to_string(),
+        ttl_response_path: Some("expire".to_string()),
+        default_ttl_secs: 7200,
+        injection: "bearer".to_string(),
+        error_code_path: Some("code".to_string()),
+        error_message_path: Some("msg".to_string()),
+        credential_fields: vec![
+            CredentialFieldSpec {
+                name: "app_id".to_string(),
+                label: "App ID".to_string(),
+                placeholder: Some("cli_a940e30bf3b89eea".to_string()),
+                secret: false,
+            },
+            CredentialFieldSpec {
+                name: "app_secret".to_string(),
+                label: "App Secret".to_string(),
+                placeholder: None,
+                secret: true,
+            },
+        ],
+    }
+}
 
 /// Lark / Feishu platform adapter.
 ///
@@ -36,43 +72,54 @@ type HmacSha256 = Hmac<Sha256>;
 pub struct LarkFamilyAdapter {
     base_url: String,
     platform: String,
-    tenant_token_cache: Arc<TenantTokenCache>,
+    token_exchange_cache: Arc<TokenExchangeCache>,
 }
 
 impl LarkFamilyAdapter {
     /// Create an adapter for the international Lark platform.
-    pub fn lark(tenant_token_cache: Arc<TenantTokenCache>) -> Self {
+    pub fn lark(token_exchange_cache: Arc<TokenExchangeCache>) -> Self {
         Self {
             base_url: "https://open.larksuite.com".to_string(),
             platform: "lark".to_string(),
-            tenant_token_cache,
+            token_exchange_cache,
         }
     }
 
     /// Create an adapter for the China mainland Feishu platform.
-    pub fn feishu(tenant_token_cache: Arc<TenantTokenCache>) -> Self {
+    pub fn feishu(token_exchange_cache: Arc<TokenExchangeCache>) -> Self {
         Self {
             base_url: "https://open.feishu.cn".to_string(),
             platform: "feishu".to_string(),
-            tenant_token_cache,
+            token_exchange_cache,
         }
     }
 
     /// Exchange app credentials for a tenant access token via the shared
     /// process-wide cache. Multiple concurrent callers for the same app
-    /// coalesce into a single HTTP round-trip (see `TenantTokenCache`).
+    /// coalesce into a single HTTP round-trip (see `TokenExchangeCache`).
     async fn get_tenant_access_token(
         &self,
         http: &reqwest::Client,
         app_id: &str,
         app_secret: &str,
     ) -> AppResult<String> {
-        lark_token_service::get_cached_tenant_token(
-            &self.tenant_token_cache,
+        let config = lark_family_token_exchange_config();
+        let credential_json = serde_json::json!({
+            "app_id": app_id,
+            "app_secret": app_secret,
+        })
+        .to_string();
+        let mut credential_map = serde_json::Map::new();
+        credential_map.insert("app_id".to_string(), serde_json::json!(app_id));
+        credential_map.insert("app_secret".to_string(), serde_json::json!(app_secret));
+
+        provider_token_exchange_service::get_cached_exchange_token(
+            &self.token_exchange_cache,
             http,
             &self.base_url,
-            app_id,
-            app_secret,
+            &credential_json,
+            &config,
+            &credential_map,
         )
         .await
     }
@@ -430,8 +477,8 @@ mod tests {
     /// Tests only exercise parsing/signature verification paths, so they
     /// never actually hit the cache. We still need a concrete instance to
     /// pass to the adapter constructors.
-    fn test_cache() -> Arc<TenantTokenCache> {
-        Arc::new(TenantTokenCache::new())
+    fn test_cache() -> Arc<TokenExchangeCache> {
+        Arc::new(TokenExchangeCache::new())
     }
 
     // -- platform_id ---------------------------------------------------------
