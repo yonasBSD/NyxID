@@ -44,20 +44,18 @@ export function ChallengeCard({
 
   return (
     <Pressable style={styles.card} onPress={onPress} disabled={isMutating}>
-      <View style={styles.header}>
-        <Text style={styles.title} numberOfLines={1}>
-          {challenge.action} {challenge.resource}
-        </Text>
-        <StatusBadge
-          variant={riskVariant}
-          label={challenge.risk_level.toUpperCase()}
-        />
+      <View style={styles.chipRow}>
+        <StatusBadge variant={riskVariant} label={challenge.risk_level.toUpperCase()} />
+        <StatusBadge variant="modeChip" label={modeLabel} />
       </View>
+      <Text style={styles.title} numberOfLines={1}>
+        {challenge.action} {challenge.resource}
+      </Text>
       <Text style={styles.resource} numberOfLines={1}>
         {challenge.title}
       </Text>
       <Text style={styles.meta}>
-        {modeLabel}{durationLabel} · {timeAgo}
+        {durationLabel ? grantDurationLabel : ""}{durationLabel ? " · " : ""}{timeAgo}
       </Text>
       <View style={styles.actions}>
         <Pressable
@@ -89,17 +87,14 @@ const createStyles = (c: ThemeColors) =>
       padding: spacing.lg,
       gap: 6,
     },
-    header: {
-      flexDirection: "row",
-      justifyContent: "space-between",
-      alignItems: "center",
-      gap: spacing.sm,
-    },
     title: {
-      flex: 1,
       fontSize: 14,
       fontWeight: "700",
       color: c.textPrimary,
+    },
+    chipRow: {
+      flexDirection: "row",
+      gap: 6,
     },
     resource: {
       fontSize: 13,

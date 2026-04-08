@@ -41,14 +41,17 @@ export function HistoryCard({ item, onPress }: HistoryCardProps) {
 
   const modeLabel = item.approval_mode === "grant" ? "Grant" : "Per-request";
 
+  const riskVariant = item.risk_level === "high" ? "riskHigh" : item.risk_level === "medium" ? "riskMedium" : "riskLow";
+
   return (
     <Pressable style={styles.card} onPress={onPress}>
-      <View style={styles.header}>
-        <Text style={styles.title} numberOfLines={1}>
-          {item.action} {item.resource}
-        </Text>
+      <View style={styles.chipRow}>
         <StatusBadge variant={decisionVariant(item.status)} label={decisionLabel(item.status)} />
+        <StatusBadge variant={riskVariant} label={item.risk_level.toUpperCase()} />
       </View>
+      <Text style={styles.title} numberOfLines={1}>
+        {item.action} {item.resource}
+      </Text>
       <Text style={styles.secondary} numberOfLines={1}>
         {item.title} · {modeLabel}
       </Text>
@@ -83,11 +86,9 @@ const createStyles = (c: ThemeColors) =>
       gap: 4,
       opacity: 0.8,
     },
-    header: {
+    chipRow: {
       flexDirection: "row",
-      justifyContent: "space-between",
-      alignItems: "center",
-      gap: spacing.sm,
+      gap: 6,
     },
     title: {
       flex: 1,

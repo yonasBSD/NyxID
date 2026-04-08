@@ -12,7 +12,8 @@ type BadgeVariant =
   | "expiryNormal"
   | "decisionApproved"
   | "decisionDenied"
-  | "decisionExpired";
+  | "decisionExpired"
+  | "modeChip";
 
 type StatusBadgeProps = {
   variant: BadgeVariant;
@@ -29,6 +30,7 @@ function getVariantStyles(c: ThemeColors): Record<BadgeVariant, { bg: string; te
     decisionApproved: { bg: "rgba(52,211,153,0.12)", text: c.success, border: "rgba(52,211,153,0.2)" },
     decisionDenied: { bg: "rgba(239,68,68,0.12)", text: c.danger, border: "rgba(239,68,68,0.2)" },
     decisionExpired: { bg: "rgba(143,136,171,0.12)", text: c.textMuted, border: "rgba(143,136,171,0.2)" },
+    modeChip: { bg: c.primaryGlow, text: c.primary, border: "rgba(139,92,246,0.2)" },
   };
 }
 

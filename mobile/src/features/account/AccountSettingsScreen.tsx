@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
-import { Alert, Pressable, ScrollView, StyleSheet, Switch, Text, View } from "react-native";
+import { Alert, Image, Pressable, ScrollView, StyleSheet, Switch, Text, View } from "react-native";
 import Svg, { Circle, Path } from "react-native-svg";
 import { RootStackParamList } from "../../app/AppNavigator";
 
@@ -291,7 +291,11 @@ export function AccountSettingsScreen({ navigation }: Props) {
         {/* User identity header */}
         <View style={styles.identityHeader}>
           <View style={styles.avatarCircle}>
-            <Text style={styles.avatarText}>{initials}</Text>
+            {profile?.avatar_url ? (
+              <Image source={{ uri: profile.avatar_url }} style={styles.avatarImage} />
+            ) : (
+              <Text style={styles.avatarText}>{initials}</Text>
+            )}
           </View>
           <View style={styles.identityInfo}>
             <Text style={styles.identityName}>{profile?.display_name ?? "User"}</Text>
@@ -479,6 +483,11 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
     backgroundColor: "#7A4FE3",
     alignItems: "center",
     justifyContent: "center",
+  },
+  avatarImage: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
   },
   avatarText: {
     fontSize: 18,

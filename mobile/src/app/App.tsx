@@ -4,7 +4,8 @@ import * as Notifications from "expo-notifications";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ActivityIndicator, AppState, StyleSheet, Text, View } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { onlineManager, QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import NetInfo from "@react-native-community/netinfo";
 import {
   NavigationContainer,
   NavigationState,
@@ -36,6 +37,14 @@ import { GestureHandlerRootView } from "react-native-gesture-handler";
 import type { BottomNavV2Tab } from "../components/BottomNavV2";
 import { NyxSheet } from "../features/nyx/NyxSheet";
 import { ThemeProvider, useTheme } from "../theme/ThemeContext";
+
+// Wire TanStack Query's online state to NetInfo so queries pause when offline
+// and auto-refetch when connectivity returns.
+onlineManager.setEventListener((setOnline) => {
+  return NetInfo.addEventListener((state) => {
+    setOnline(!!state.isConnected);
+  });
+});
 
 const queryClient = new QueryClient();
 
