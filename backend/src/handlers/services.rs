@@ -544,6 +544,7 @@ pub async fn create_service(
             "query",
             "basic",
             "body",
+            "lark_token_exchange",
             "oidc",
             "none",
         ];
@@ -561,9 +562,17 @@ pub async fn create_service(
         if auth_method == "body" && auth_key_name.is_empty() {
             return Err(AppError::ValidationError(
                 "auth_key_name is required when auth_method is 'body' \
-                 (e.g. 'app_secret' for Lark tenant token exchange)"
+                 (e.g. 'app_secret' for custom body-auth services)"
                     .to_string(),
             ));
+        }
+
+        // `lark_token_exchange` stores both `app_id` and `app_secret` as a
+        // JSON blob in the credential field. Validate the shape at creation
+        // time so the operator sees a clear error instead of a proxy-time
+        // failure on their first request.
+        if auth_method == "lark_token_exchange" && !credential.is_empty() {
+            crate::services::lark_token_service::parse_tenant_credential(&credential)?;
         }
 
         validate_base_url(base_url)?;

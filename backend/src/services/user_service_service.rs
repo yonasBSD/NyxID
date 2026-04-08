@@ -244,7 +244,7 @@ pub async fn create_user_service(
     if auth_method == "body" && auth_key_name.is_empty() {
         return Err(AppError::ValidationError(
             "auth_key_name is required when auth_method is 'body' \
-             (e.g. 'app_secret' for Lark tenant token exchange)"
+             (e.g. 'app_secret' for custom body-auth services)"
                 .to_string(),
         ));
     }
@@ -256,6 +256,18 @@ pub async fn create_user_service(
         return Err(AppError::ValidationError(
             "auth_method 'body' is not supported for node-routed services. \
              Credential body injection only works for direct (non-node) routing."
+                .to_string(),
+        ));
+    }
+
+    // `lark_token_exchange` performs server-side token exchange against
+    // Lark/Feishu directly from the backend process. Node-routed requests
+    // would have to relay the exchange through the node agent, which is
+    // not implemented. Reject at bind time.
+    if auth_method == "lark_token_exchange" && node_id.is_some() {
+        return Err(AppError::ValidationError(
+            "auth_method 'lark_token_exchange' is not supported for node-routed services. \
+             The tenant token exchange runs server-side and does not flow through nodes."
                 .to_string(),
         ));
     }
@@ -386,7 +398,7 @@ pub async fn update_user_service(
         if effective_auth_key_name.is_empty() {
             return Err(AppError::ValidationError(
                 "auth_key_name is required when auth_method is 'body' \
-                 (e.g. 'app_secret' for Lark tenant token exchange)"
+                 (e.g. 'app_secret' for custom body-auth services)"
                     .to_string(),
             ));
         }
@@ -399,6 +411,22 @@ pub async fn update_user_service(
             return Err(AppError::ValidationError(
                 "auth_method 'body' is not supported for node-routed services. \
                  Credential body injection only works for direct (non-node) routing."
+                    .to_string(),
+            ));
+        }
+    }
+
+    // Same node-routing reject for lark_token_exchange post-update.
+    if effective_auth_method == "lark_token_exchange" {
+        let effective_node_id: Option<&str> = match node_id {
+            Some("") => None,
+            Some(nid) => Some(nid),
+            None => current.node_id.as_deref(),
+        };
+        if effective_node_id.is_some() {
+            return Err(AppError::ValidationError(
+                "auth_method 'lark_token_exchange' is not supported for node-routed services. \
+                 The tenant token exchange runs server-side and does not flow through nodes."
                     .to_string(),
             ));
         }

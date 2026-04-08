@@ -20,6 +20,7 @@ use crate::models::user_service_connection::{
     COLLECTION_NAME as USER_SERVICE_CONNECTIONS, UserServiceConnection,
 };
 use crate::services::delegation_service::DelegatedCredential;
+use crate::services::lark_token_service::{self, TenantTokenCache};
 use crate::services::node_ws_manager::NodeWsManager;
 use crate::services::{
     agent_binding_service, user_api_key_service, user_service_service, user_token_service,
@@ -882,6 +883,8 @@ pub async fn forward_request(
     delegated_credentials: Vec<DelegatedCredential>,
     // The caller's raw NyxID access token, used when auth_method is "nyxid_token".
     caller_token: Option<&str>,
+    // Shared Lark/Feishu tenant token cache (used by `lark_token_exchange`).
+    tenant_token_cache: &TenantTokenCache,
 ) -> AppResult<reqwest::Response> {
     let prepared = prepare_delegated_request(path, query, &delegated_credentials)?;
 
@@ -923,7 +926,13 @@ pub async fn forward_request(
     // Body injection for `body` auth method must happen before the body is
     // attached to the request. We mutate `body` in place; the actual attach
     // happens further down in the existing `match body { ... }` block.
-    let body = if target.auth_method == "body" {
+    //
+    // Injection is skipped for methods that cannot carry a request body
+    // (GET/HEAD/DELETE/OPTIONS). Injecting into those would produce malformed
+    // requests that stricter downstreams (e.g. Cloudflare-fronted APIs) reject
+    // with 400 Bad Request. Callers misusing body auth on such methods will
+    // simply see the downstream's own auth-missing error.
+    let body = if target.auth_method == "body" && method_can_have_body(&method) {
         if target.auth_key_name.is_empty() {
             return Err(AppError::Internal(
                 "Body auth method requires a non-empty auth_key_name".to_string(),
@@ -977,6 +986,31 @@ pub async fn forward_request(
         }
         "body" => {
             // Body injection already happened above; nothing to add to headers.
+        }
+        "lark_token_exchange" => {
+            // Transparent server-side token exchange for Lark / Feishu bot
+            // APIs. The stored credential is a JSON blob containing both
+            // `app_id` and `app_secret`. The proxy POSTs them to Lark's
+            // `/auth/v3/tenant_access_token/internal` endpoint (or reuses a
+            // cached token) and injects the resulting `tenant_access_token`
+            // as `Authorization: Bearer ...` on the outbound request.
+            //
+            // Callers never see `app_secret`, never manage token refresh,
+            // and never touch the exchange endpoint directly -- if they do
+            // hit `/auth/v3/tenant_access_token/internal`, the proxy still
+            // injects its own Bearer header and Lark rejects it, which is
+            // the intended signal that the endpoint is reserved.
+            let (app_id, app_secret) =
+                lark_token_service::parse_tenant_credential(&target.credential)?;
+            let token = lark_token_service::get_cached_tenant_token(
+                tenant_token_cache,
+                client,
+                &target.base_url,
+                &app_id,
+                &app_secret,
+            )
+            .await?;
+            request = request.bearer_auth(&token);
         }
         _ => {
             return Err(AppError::Internal(format!(
@@ -1038,6 +1072,19 @@ pub async fn forward_request(
     })?;
 
     Ok(response)
+}
+
+/// Whether an HTTP method semantically supports a request body.
+///
+/// Used to guard body-auth credential injection: injecting a JSON body on
+/// GET/HEAD/DELETE produces malformed requests that Cloudflare-fronted APIs
+/// (notably Lark) reject at the edge with 400 Bad Request before reaching
+/// the origin server.
+fn method_can_have_body(method: &reqwest::Method) -> bool {
+    matches!(
+        *method,
+        reqwest::Method::POST | reqwest::Method::PUT | reqwest::Method::PATCH
+    )
 }
 
 /// Merge a credential into the top level of a JSON request body.
@@ -1123,6 +1170,13 @@ mod tests {
         StatusCode::OK
     }
 
+    /// Fresh empty tenant token cache for tests that don't exercise
+    /// `lark_token_exchange`. Dedicated tests for the cache itself live
+    /// in `lark_token_service::tests`.
+    fn empty_token_cache() -> TenantTokenCache {
+        TenantTokenCache::new()
+    }
+
     fn make_proxy_target(base_url: String) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
@@ -1206,6 +1260,7 @@ mod tests {
             vec![],
             vec![],
             None,
+            &empty_token_cache(),
         )
         .await
         .expect("proxy request should succeed");
@@ -1251,6 +1306,7 @@ mod tests {
                 credential: "123456:ABC-DEF".to_string(),
             }],
             None,
+            &empty_token_cache(),
         )
         .await
         .expect("proxy request should succeed");
@@ -1319,6 +1375,7 @@ mod tests {
             vec![],
             vec![],
             None,
+            &empty_token_cache(),
         )
         .await
         .expect_err("backslash in requested path should be rejected");
@@ -1372,6 +1429,7 @@ mod tests {
                 vec![],
                 vec![],
                 None,
+                &empty_token_cache(),
             )
             .await
             .expect_err("percent-encoded requested path breaker should be rejected");
@@ -1409,6 +1467,7 @@ mod tests {
             vec![],
             vec![],
             None,
+            &empty_token_cache(),
         )
         .await
         .expect("non-segment dot sequences should be allowed");
@@ -1439,6 +1498,7 @@ mod tests {
                 credential: "bad/token".to_string(),
             }],
             None,
+            &empty_token_cache(),
         )
         .await
         .expect_err("invalid path credential should be rejected");
@@ -1468,6 +1528,7 @@ mod tests {
                     credential: credential.to_string(),
                 }],
                 None,
+                &empty_token_cache(),
             )
             .await
             .expect_err("blank or whitespace path credential should be rejected");
@@ -1497,6 +1558,7 @@ mod tests {
                 credential: "123456:ABC-DEF".to_string(),
             }],
             None,
+            &empty_token_cache(),
         )
         .await
         .expect_err("invalid path prefix should be rejected");
@@ -1526,6 +1588,7 @@ mod tests {
                     credential: "123456:ABC-DEF".to_string(),
                 }],
                 None,
+                &empty_token_cache(),
             )
             .await
             .expect_err("blank or whitespace path prefix should be rejected");
@@ -1555,6 +1618,7 @@ mod tests {
                 credential: "123%2f456".to_string(),
             }],
             None,
+            &empty_token_cache(),
         )
         .await
         .expect_err("percent-encoded path credential should be rejected");
@@ -1609,6 +1673,7 @@ mod tests {
                 credential: "123456:ABC-DEF".to_string(),
             }],
             None,
+            &empty_token_cache(),
         )
         .await
         .expect_err("percent-encoded path prefix should be rejected");
@@ -1669,5 +1734,352 @@ mod tests {
         let err = inject_credential_into_json_body(Some(&body), "app_secret", "secret_value")
             .unwrap_err();
         assert!(err.to_string().contains("JSON object"));
+    }
+
+    // ─── method_can_have_body tests ─────────────────────────────────────
+
+    #[test]
+    fn method_can_have_body_accepts_post_put_patch() {
+        assert!(method_can_have_body(&reqwest::Method::POST));
+        assert!(method_can_have_body(&reqwest::Method::PUT));
+        assert!(method_can_have_body(&reqwest::Method::PATCH));
+    }
+
+    #[test]
+    fn method_can_have_body_rejects_get_head_delete_options() {
+        assert!(!method_can_have_body(&reqwest::Method::GET));
+        assert!(!method_can_have_body(&reqwest::Method::HEAD));
+        assert!(!method_can_have_body(&reqwest::Method::DELETE));
+        assert!(!method_can_have_body(&reqwest::Method::OPTIONS));
+    }
+
+    // ─── lark_token_exchange integration tests ────────────────────────
+
+    use axum::{Json, routing::get};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Clone)]
+    struct LarkMockState {
+        captured_authorization: Arc<std::sync::Mutex<Option<String>>>,
+        token_exchange_count: Arc<AtomicUsize>,
+    }
+
+    async fn lark_token_exchange_handler(
+        State(state): State<LarkMockState>,
+        body: Bytes,
+    ) -> Json<serde_json::Value> {
+        // Sanity-check the request body carries both credentials.
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+        assert!(parsed["app_id"].as_str().is_some());
+        assert!(parsed["app_secret"].as_str().is_some());
+        state.token_exchange_count.fetch_add(1, Ordering::SeqCst);
+        Json(serde_json::json!({
+            "code": 0,
+            "msg": "ok",
+            "tenant_access_token": "t-test-token",
+            "expire": 7200,
+        }))
+    }
+
+    async fn lark_api_handler(
+        State(state): State<LarkMockState>,
+        headers: HeaderMap,
+    ) -> Json<serde_json::Value> {
+        let auth = headers
+            .get(reqwest::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .map(ToString::to_string);
+        *state.captured_authorization.lock().unwrap() = auth;
+        Json(serde_json::json!({"code": 0, "data": {"items": []}}))
+    }
+
+    fn make_lark_proxy_target(base_url: String) -> ProxyTarget {
+        let now = Utc::now();
+        ProxyTarget {
+            base_url: base_url.clone(),
+            auth_method: "lark_token_exchange".to_string(),
+            auth_key_name: String::new(),
+            credential: r#"{"app_id":"cli_test","app_secret":"super-secret"}"#.to_string(),
+            service: DownstreamService {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: "Lark Bot".to_string(),
+                slug: "api-lark-bot".to_string(),
+                description: None,
+                base_url,
+                auth_method: "lark_token_exchange".to_string(),
+                auth_key_name: String::new(),
+                credential_encrypted: vec![],
+                auth_type: None,
+                openapi_spec_url: None,
+                asyncapi_spec_url: None,
+                streaming_supported: false,
+                ssh_config: None,
+                service_type: "http".to_string(),
+                visibility: "public".to_string(),
+                oauth_client_id: None,
+                service_category: "external".to_string(),
+                requires_user_credential: true,
+                is_active: true,
+                created_by: "test".to_string(),
+                identity_propagation_mode: "none".to_string(),
+                identity_include_user_id: false,
+                identity_include_email: false,
+                identity_include_name: false,
+                identity_jwt_audience: None,
+                forward_access_token: false,
+                inject_delegation_token: false,
+                delegation_token_scope: "llm:proxy".to_string(),
+                provider_config_id: None,
+                homepage_url: None,
+                repository_url: None,
+                issues_url: None,
+                capabilities: None,
+                auth_notes: None,
+                known_limitations: None,
+                required_permissions: None,
+                recommended_skills: None,
+                examples_url: None,
+                created_at: now,
+                updated_at: now,
+            },
+        }
+    }
+
+    async fn start_lark_mock() -> (String, LarkMockState, tokio::task::JoinHandle<()>) {
+        let state = LarkMockState {
+            captured_authorization: Arc::new(std::sync::Mutex::new(None)),
+            token_exchange_count: Arc::new(AtomicUsize::new(0)),
+        };
+        let app = Router::new()
+            .route(
+                "/open-apis/auth/v3/tenant_access_token/internal",
+                post(lark_token_exchange_handler),
+            )
+            .route("/open-apis/im/v1/chats", get(lark_api_handler))
+            .with_state(state.clone());
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test app");
+        });
+        (format!("http://{addr}"), state, server)
+    }
+
+    #[tokio::test]
+    async fn lark_token_exchange_injects_bearer_on_downstream_request() {
+        let (base_url, mock, server) = start_lark_mock().await;
+        let cache = TenantTokenCache::new();
+
+        let response = forward_request(
+            &Client::new(),
+            &make_lark_proxy_target(base_url),
+            reqwest::Method::GET,
+            "open-apis/im/v1/chats",
+            None,
+            reqwest::header::HeaderMap::new(),
+            ProxyBody::Buffered(None),
+            vec![],
+            vec![],
+            None,
+            &cache,
+        )
+        .await
+        .expect("lark proxy request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(mock.token_exchange_count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            mock.captured_authorization.lock().unwrap().as_deref(),
+            Some("Bearer t-test-token")
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn lark_token_exchange_caches_across_calls() {
+        let (base_url, mock, server) = start_lark_mock().await;
+        let cache = TenantTokenCache::new();
+        let target = make_lark_proxy_target(base_url);
+
+        // First call triggers a token exchange.
+        forward_request(
+            &Client::new(),
+            &target,
+            reqwest::Method::GET,
+            "open-apis/im/v1/chats",
+            None,
+            reqwest::header::HeaderMap::new(),
+            ProxyBody::Buffered(None),
+            vec![],
+            vec![],
+            None,
+            &cache,
+        )
+        .await
+        .expect("first call");
+
+        // Second call reuses the cached token.
+        forward_request(
+            &Client::new(),
+            &target,
+            reqwest::Method::GET,
+            "open-apis/im/v1/chats",
+            None,
+            reqwest::header::HeaderMap::new(),
+            ProxyBody::Buffered(None),
+            vec![],
+            vec![],
+            None,
+            &cache,
+        )
+        .await
+        .expect("second call");
+
+        assert_eq!(
+            mock.token_exchange_count.load(Ordering::SeqCst),
+            1,
+            "token exchange should happen exactly once across two proxy calls"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn lark_token_exchange_rejects_malformed_credential() {
+        let (base_url, _mock, server) = start_lark_mock().await;
+        let mut target = make_lark_proxy_target(base_url);
+        target.credential = "not valid json".to_string();
+
+        let err = forward_request(
+            &Client::new(),
+            &target,
+            reqwest::Method::GET,
+            "open-apis/im/v1/chats",
+            None,
+            reqwest::header::HeaderMap::new(),
+            ProxyBody::Buffered(None),
+            vec![],
+            vec![],
+            None,
+            &TenantTokenCache::new(),
+        )
+        .await
+        .expect_err("malformed credential should error");
+
+        assert!(
+            err.to_string().contains("lark_token_exchange"),
+            "unexpected error: {err}"
+        );
+        server.abort();
+    }
+
+    // ─── body auth method guard regression tests ─────────────────────
+
+    #[derive(Clone, Default)]
+    struct BodyAuthCaptureState {
+        captured_body: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+    }
+
+    async fn body_capture_get(
+        State(state): State<BodyAuthCaptureState>,
+        body: Bytes,
+    ) -> StatusCode {
+        *state.captured_body.lock().unwrap() = Some(body.to_vec());
+        StatusCode::OK
+    }
+
+    fn make_body_auth_target(base_url: String) -> ProxyTarget {
+        let now = Utc::now();
+        ProxyTarget {
+            base_url: base_url.clone(),
+            auth_method: "body".to_string(),
+            auth_key_name: "app_secret".to_string(),
+            credential: "super-secret".to_string(),
+            service: DownstreamService {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: "Body Auth Service".to_string(),
+                slug: "body-auth-service".to_string(),
+                description: None,
+                base_url,
+                auth_method: "body".to_string(),
+                auth_key_name: "app_secret".to_string(),
+                credential_encrypted: vec![],
+                auth_type: None,
+                openapi_spec_url: None,
+                asyncapi_spec_url: None,
+                streaming_supported: false,
+                ssh_config: None,
+                service_type: "http".to_string(),
+                visibility: "public".to_string(),
+                oauth_client_id: None,
+                service_category: "external".to_string(),
+                requires_user_credential: true,
+                is_active: true,
+                created_by: "test".to_string(),
+                identity_propagation_mode: "none".to_string(),
+                identity_include_user_id: false,
+                identity_include_email: false,
+                identity_include_name: false,
+                identity_jwt_audience: None,
+                forward_access_token: false,
+                inject_delegation_token: false,
+                delegation_token_scope: "llm:proxy".to_string(),
+                provider_config_id: None,
+                homepage_url: None,
+                repository_url: None,
+                issues_url: None,
+                capabilities: None,
+                auth_notes: None,
+                known_limitations: None,
+                required_permissions: None,
+                recommended_skills: None,
+                examples_url: None,
+                created_at: now,
+                updated_at: now,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn body_auth_skips_injection_on_get_request() {
+        let state = BodyAuthCaptureState::default();
+        let app = Router::new()
+            .route("/chats", get(body_capture_get))
+            .with_state(state.clone());
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test app");
+        });
+
+        let response = forward_request(
+            &Client::new(),
+            &make_body_auth_target(format!("http://{addr}")),
+            reqwest::Method::GET,
+            "chats",
+            None,
+            reqwest::header::HeaderMap::new(),
+            ProxyBody::Buffered(None),
+            vec![],
+            vec![],
+            None,
+            &empty_token_cache(),
+        )
+        .await
+        .expect("GET with body auth should forward without body injection");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        // The downstream must receive an empty body -- the secret must NOT
+        // leak into a GET request via the body injection code path.
+        let captured = state.captured_body.lock().unwrap().clone();
+        assert_eq!(captured.as_deref(), Some(&b""[..]));
+
+        server.abort();
     }
 }

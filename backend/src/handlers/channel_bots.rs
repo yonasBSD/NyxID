@@ -104,12 +104,24 @@ pub struct VerifyBotResponse {
 /// Resolve the platform adapter for the given platform identifier.
 ///
 /// Supported platforms: telegram, discord, lark, feishu, openclaw.
-pub fn resolve_adapter(platform: &str) -> AppResult<Box<dyn PlatformAdapter>> {
+///
+/// The Lark and Feishu adapters share a process-wide
+/// [`TenantTokenCache`] that is also used by the proxy's
+/// `lark_token_exchange` auth method. Callers pass the cache from `AppState`
+/// so both code paths deduplicate token exchanges for the same Lark app.
+pub fn resolve_adapter(
+    platform: &str,
+    tenant_token_cache: &std::sync::Arc<crate::services::lark_token_service::TenantTokenCache>,
+) -> AppResult<Box<dyn PlatformAdapter>> {
     match platform {
         "telegram" => Ok(Box::new(TelegramAdapter)),
         "discord" => Ok(Box::new(DiscordAdapter)),
-        "lark" => Ok(Box::new(LarkFamilyAdapter::lark())),
-        "feishu" => Ok(Box::new(LarkFamilyAdapter::feishu())),
+        "lark" => Ok(Box::new(LarkFamilyAdapter::lark(
+            tenant_token_cache.clone(),
+        ))),
+        "feishu" => Ok(Box::new(LarkFamilyAdapter::feishu(
+            tenant_token_cache.clone(),
+        ))),
         "openclaw" => Ok(Box::new(OpenClawAdapter)),
         other => Err(AppError::ValidationError(format!(
             "unsupported platform: {other}. Supported: telegram, discord, lark, feishu, openclaw"
@@ -155,7 +167,7 @@ pub async fn create_bot(
         )));
     }
 
-    let adapter = resolve_adapter(&body.platform)?;
+    let adapter = resolve_adapter(&body.platform, &state.tenant_token_cache)?;
 
     // Validate label length (service also validates, but fail fast here)
     if body.label.is_empty() || body.label.len() > 128 {
@@ -291,7 +303,7 @@ pub async fn delete_bot(
 
     // Fetch the bot to determine platform for adapter resolution
     let bot = channel_bot_service::get_bot_for_user(&state.db, &bot_id, &user_id_str).await?;
-    let adapter = resolve_adapter(&bot.platform)?;
+    let adapter = resolve_adapter(&bot.platform, &state.tenant_token_cache)?;
 
     channel_bot_service::delete_bot(
         &state.db,
@@ -328,7 +340,7 @@ pub async fn verify_bot(
 ) -> AppResult<Json<VerifyBotResponse>> {
     let user_id_str = auth_user.user_id.to_string();
     let bot = channel_bot_service::get_bot_for_user(&state.db, &bot_id, &user_id_str).await?;
-    let adapter = resolve_adapter(&bot.platform)?;
+    let adapter = resolve_adapter(&bot.platform, &state.tenant_token_cache)?;
 
     // Decrypt the token and verify it is still valid with the platform
     let bot_token = channel_bot_service::decrypt_bot_token(&state.encryption_keys, &bot).await?;

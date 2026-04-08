@@ -21,6 +21,7 @@ pub mod group_service;
 pub mod identity_service;
 pub mod invite_code_service;
 pub mod key_service;
+pub mod lark_token_service;
 pub mod llm_gateway_service;
 pub mod llm_usage_service;
 pub mod mcp_service;

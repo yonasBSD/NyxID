@@ -81,6 +81,7 @@ const AUTH_METHOD_DEFAULTS: Record<string, string> = {
   oauth2: "Authorization",
   body: "app_secret",
   bot_bearer: "Authorization",
+  lark_token_exchange: "",
   none: "",
 };
 
@@ -112,15 +113,47 @@ function getCredentialFieldMeta(
   return { label: "API Key / Credential", placeholder: "sk-..." };
 }
 
+// Parse a stored `lark_token_exchange` credential back out into its component
+// app_id / app_secret fields. Returns empty strings on any parse error so
+// the form stays usable even if the underlying JSON is mangled.
+function parseLarkCredential(
+  credential: string,
+): { readonly appId: string; readonly appSecret: string } {
+  if (!credential) return { appId: "", appSecret: "" };
+  try {
+    const parsed = JSON.parse(credential);
+    if (parsed && typeof parsed === "object") {
+      return {
+        appId: typeof parsed.app_id === "string" ? parsed.app_id : "",
+        appSecret: typeof parsed.app_secret === "string" ? parsed.app_secret : "",
+      };
+    }
+  } catch {
+    // Fall through -- treat malformed JSON as empty.
+  }
+  return { appId: "", appSecret: "" };
+}
+
+// Compose the two-field Lark credential back into the single JSON blob
+// that the backend expects in `credential_encrypted`.
+function composeLarkCredential(appId: string, appSecret: string): string {
+  const trimmedId = appId.trim();
+  const trimmedSecret = appSecret.trim();
+  if (!trimmedId && !trimmedSecret) return "";
+  return JSON.stringify({ app_id: trimmedId, app_secret: trimmedSecret });
+}
+
 // Auth key name input should only be shown when the user needs to pick a
-// header/query/body field name. `bot_bearer` is a fixed Authorization format
-// and OAuth flows handle their own token storage.
+// header/query/body field name. `bot_bearer` is a fixed Authorization format,
+// OAuth flows handle their own token storage, and `lark_token_exchange`
+// ignores auth_key_name entirely (the credential is a structured JSON blob).
 function shouldShowAuthKeyName(authMethod: string): boolean {
   return (
     authMethod !== "none" &&
     authMethod !== "oidc" &&
     authMethod !== "oauth2" &&
-    authMethod !== "bot_bearer"
+    authMethod !== "bot_bearer" &&
+    authMethod !== "lark_token_exchange"
   );
 }
 
@@ -500,41 +533,99 @@ function KeyForm({
           </p>
         </div>
 
-        <div className="space-y-1.5">
-          <Label htmlFor="add-key-credential">
-            {credentialMeta.label}
-            {requiresCredential && <span className="text-destructive"> *</span>}
-          </Label>
-          <Input
-            id="add-key-credential"
-            type={requiresCredential ? "password" : "text"}
-            placeholder={
-              requiresCredential
-                ? credentialMeta.placeholder
-                : "No credential required for this service"
-            }
-            value={requiresCredential ? form.credential : ""}
-            onChange={(e) => onChange({ credential: e.target.value })}
-            disabled={!requiresCredential}
-            className={!requiresCredential ? "bg-muted text-muted-foreground" : ""}
-          />
-          {!requiresCredential && (
-            <p className="text-[11px] text-muted-foreground">
-              This service can be used without storing a user credential in NyxID.
-            </p>
-          )}
-          {requiresCredential && form.authMethod === "body" && (
-            <p className="text-[11px] text-muted-foreground">
-              NyxID injects this value into the request JSON body under the
-              field name below.
-            </p>
-          )}
-          {requiresCredential && form.authMethod === "bot_bearer" && (
-            <p className="text-[11px] text-muted-foreground">
-              Sent as <code className="font-mono">Authorization: Bot &lt;token&gt;</code>.
-            </p>
-          )}
-        </div>
+        {form.authMethod === "lark_token_exchange" ? (
+          (() => {
+            const { appId, appSecret } = parseLarkCredential(form.credential);
+            return (
+              <>
+                <div className="space-y-1.5">
+                  <Label htmlFor="add-key-lark-app-id">
+                    App ID
+                    {requiresCredential && (
+                      <span className="text-destructive"> *</span>
+                    )}
+                  </Label>
+                  <Input
+                    id="add-key-lark-app-id"
+                    type="text"
+                    placeholder="cli_a940e30bf3b89eea"
+                    value={appId}
+                    onChange={(e) =>
+                      onChange({
+                        credential: composeLarkCredential(e.target.value, appSecret),
+                      })
+                    }
+                  />
+                  <p className="text-[11px] text-muted-foreground">
+                    Your Lark / Feishu bot app ID. Not secret -- visible in
+                    request URLs and logs.
+                  </p>
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="add-key-lark-app-secret">
+                    App Secret
+                    {requiresCredential && (
+                      <span className="text-destructive"> *</span>
+                    )}
+                  </Label>
+                  <Input
+                    id="add-key-lark-app-secret"
+                    type="password"
+                    placeholder="Enter app secret"
+                    value={appSecret}
+                    onChange={(e) =>
+                      onChange({
+                        credential: composeLarkCredential(appId, e.target.value),
+                      })
+                    }
+                  />
+                  <p className="text-[11px] text-muted-foreground">
+                    NyxID exchanges this server-side for a{" "}
+                    <code className="font-mono">tenant_access_token</code> and
+                    caches it. Your secret never leaves NyxID, and you never
+                    have to refresh tokens.
+                  </p>
+                </div>
+              </>
+            );
+          })()
+        ) : (
+          <div className="space-y-1.5">
+            <Label htmlFor="add-key-credential">
+              {credentialMeta.label}
+              {requiresCredential && <span className="text-destructive"> *</span>}
+            </Label>
+            <Input
+              id="add-key-credential"
+              type={requiresCredential ? "password" : "text"}
+              placeholder={
+                requiresCredential
+                  ? credentialMeta.placeholder
+                  : "No credential required for this service"
+              }
+              value={requiresCredential ? form.credential : ""}
+              onChange={(e) => onChange({ credential: e.target.value })}
+              disabled={!requiresCredential}
+              className={!requiresCredential ? "bg-muted text-muted-foreground" : ""}
+            />
+            {!requiresCredential && (
+              <p className="text-[11px] text-muted-foreground">
+                This service can be used without storing a user credential in NyxID.
+              </p>
+            )}
+            {requiresCredential && form.authMethod === "body" && (
+              <p className="text-[11px] text-muted-foreground">
+                NyxID injects this value into the request JSON body under the
+                field name below.
+              </p>
+            )}
+            {requiresCredential && form.authMethod === "bot_bearer" && (
+              <p className="text-[11px] text-muted-foreground">
+                Sent as <code className="font-mono">Authorization: Bot &lt;token&gt;</code>.
+              </p>
+            )}
+          </div>
+        )}
 
         <div className="space-y-1.5">
           <Label htmlFor="add-key-endpoint">
@@ -581,6 +672,9 @@ function KeyForm({
                   <SelectItem value="basic">Basic Auth</SelectItem>
                   <SelectItem value="body">JSON Body Injection</SelectItem>
                   <SelectItem value="bot_bearer">Bot Token (Discord)</SelectItem>
+                  <SelectItem value="lark_token_exchange">
+                    Lark / Feishu Tenant Token
+                  </SelectItem>
                   <SelectItem value="oauth2">OAuth 2.0</SelectItem>
                   <SelectItem value="oidc">OIDC</SelectItem>
                   <SelectItem value="none">None</SelectItem>

@@ -68,6 +68,11 @@ pub struct DownstreamService {
     /// - `query`: URL query parameter named by `auth_key_name`
     /// - `basic`: HTTP Basic auth, credential is `username:password`
     /// - `body`: merge `{<auth_key_name>: <credential>}` into JSON request body
+    ///   (only applies to methods that carry a body: POST/PUT/PATCH)
+    /// - `lark_token_exchange`: credential is JSON `{app_id, app_secret}`;
+    ///   proxy exchanges it for a `tenant_access_token` via
+    ///   `/open-apis/auth/v3/tenant_access_token/internal`, caches the result
+    ///   per app, and injects it as `Authorization: Bearer <token>`
     /// - `path`: inject credential into URL path (Telegram bot token style)
     /// - `none`: no credential injection
     pub auth_method: String,

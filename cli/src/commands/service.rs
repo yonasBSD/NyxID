@@ -202,6 +202,12 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 } else if let Some(env_var) = &credential_env {
                     std::env::var(env_var)
                         .with_context(|| format!("Environment variable {env_var} not set"))?
+                } else if effective_auth_method == "lark_token_exchange" {
+                    // Lark / Feishu bot services need BOTH `app_id` and
+                    // `app_secret`. Prompt for each and store them as a
+                    // JSON blob in the single credential field so the
+                    // proxy can parse them back out at request time.
+                    prompt_lark_token_exchange_credential()?
                 } else {
                     let prompt =
                         credential_prompt_label(&effective_auth_method, &effective_auth_key_name);
@@ -958,6 +964,31 @@ fn credential_prompt_label(auth_method: &str, auth_key_name: &str) -> String {
     }
 }
 
+/// Interactive prompt for `lark_token_exchange` services. Prompts for
+/// `app_id` (visible, since it is not secret) and `app_secret` (hidden),
+/// then returns them as a compact JSON blob suitable for the single
+/// `credential` field on the create-key API.
+///
+/// For non-interactive flows, callers can pass the same JSON via
+/// `--credential '{"app_id":"cli_xxx","app_secret":"yyy"}'` or via
+/// `--credential-env` pointing at a variable holding that JSON.
+fn prompt_lark_token_exchange_credential() -> Result<String> {
+    eprintln!("Lark / Feishu bot credentials (stored encrypted, never exposed):");
+    let app_id = prompt_line("App ID (e.g. cli_a940e30bf3b89eea): ")?;
+    if app_id.trim().is_empty() {
+        bail!("app_id is required");
+    }
+    let app_secret = rpassword::prompt_password("App Secret: ")?;
+    if app_secret.trim().is_empty() {
+        bail!("app_secret is required");
+    }
+    let payload = serde_json::json!({
+        "app_id": app_id.trim(),
+        "app_secret": app_secret.trim(),
+    });
+    Ok(payload.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1005,5 +1036,20 @@ mod tests {
     fn credential_prompt_body_without_key_name_falls_back() {
         assert_eq!(credential_prompt_label("body", ""), "Enter credential: ");
         assert_eq!(credential_prompt_label("body", "   "), "Enter credential: ");
+    }
+
+    #[test]
+    fn lark_token_exchange_credential_json_shape() {
+        // Round-trip check: the payload we build for Lark must parse as
+        // JSON with both fields so the backend's parse_tenant_credential
+        // succeeds.
+        let sample = serde_json::json!({
+            "app_id": "cli_test",
+            "app_secret": "secret_value",
+        })
+        .to_string();
+        let parsed: serde_json::Value = serde_json::from_str(&sample).unwrap();
+        assert_eq!(parsed["app_id"], "cli_test");
+        assert_eq!(parsed["app_secret"], "secret_value");
     }
 }

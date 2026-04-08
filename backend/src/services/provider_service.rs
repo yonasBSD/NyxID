@@ -1641,18 +1641,20 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
     DefaultServiceSeed {
         provider_slug: "lark-bot",
         service_slug: "api-lark-bot",
-        service_name: "Lark Bot API (Tenant Token Exchange)",
+        service_name: "Lark Bot API (Transparent Tenant Token)",
         base_url: "https://open.larksuite.com",
         injection_method: "bearer",
         injection_key: "Authorization",
-        service_auth_method: Some("body"),
-        service_auth_key_name: Some("app_secret"),
+        service_auth_method: Some("lark_token_exchange"),
+        service_auth_key_name: None,
         description: Some(
-            "Lark bot tenant credentials. NyxID stores your `app_secret` and injects \
-             it into the request body when you call `/open-apis/auth/v3/tenant_access_token/internal`. \
-             Send `{\"app_id\": \"cli_xxx\"}` and NyxID merges in the secret server-side. \
-             Returns a `tenant_access_token` valid for 2 hours that you cache and use as \
-             a Bearer token for subsequent Lark API calls. Your `app_secret` never leaves NyxID.",
+            "Lark bot tenant APIs. NyxID handles token exchange transparently: store your \
+             `app_id` and `app_secret` once, and NyxID POSTs them to `/auth/v3/tenant_access_token/internal`, \
+             caches the resulting `tenant_access_token` (~2h TTL), and injects it as \
+             `Authorization: Bearer <token>` on every outbound request. You never refresh tokens, \
+             never touch the exchange endpoint, and your `app_secret` never leaves NyxID. \
+             Call any Lark open API path (`/open-apis/im/v1/chats`, `/open-apis/contact/v3/users`, etc.) \
+             directly through the proxy.",
         ),
     },
     DefaultServiceSeed {
@@ -1691,17 +1693,17 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
     DefaultServiceSeed {
         provider_slug: "feishu-bot",
         service_slug: "api-feishu-bot",
-        service_name: "Feishu Bot API (Tenant Token Exchange)",
+        service_name: "Feishu Bot API (Transparent Tenant Token)",
         base_url: "https://open.feishu.cn",
         injection_method: "bearer",
         injection_key: "Authorization",
-        service_auth_method: Some("body"),
-        service_auth_key_name: Some("app_secret"),
+        service_auth_method: Some("lark_token_exchange"),
+        service_auth_key_name: None,
         description: Some(
-            "Feishu bot tenant credentials (China region). Same as `api-lark-bot` but for the \
-             Feishu domain. NyxID stores your `app_secret` and injects it into the request body \
-             when you call `/open-apis/auth/v3/tenant_access_token/internal`. \
-             Returns a `tenant_access_token` valid for 2 hours.",
+            "Feishu bot tenant APIs (China region). Same as `api-lark-bot` but for the Feishu domain. \
+             NyxID handles token exchange transparently: store your `app_id` and `app_secret` once, \
+             NyxID caches the `tenant_access_token` and injects it as a Bearer header on every \
+             outbound request. Call any Feishu open API path directly through the proxy.",
         ),
     },
     DefaultServiceSeed {
@@ -1934,7 +1936,56 @@ pub async fn seed_default_services(
          Get a token from @BotFather and store it once -- the proxy injects it as `/bot{token}/` \
          on every request. Use for sending messages, managing webhooks, and any other \
          Telegram bot operations.",
+        // api-lark-bot, shipped in #205 with body auth. Replaced in #220
+        // with the `lark_token_exchange` auth method that performs token
+        // exchange server-side transparently.
+        "Lark bot tenant credentials. NyxID stores your `app_secret` and injects \
+         it into the request body when you call `/open-apis/auth/v3/tenant_access_token/internal`. \
+         Send `{\"app_id\": \"cli_xxx\"}` and NyxID merges in the secret server-side. \
+         Returns a `tenant_access_token` valid for 2 hours that you cache and use as \
+         a Bearer token for subsequent Lark API calls. Your `app_secret` never leaves NyxID.",
+        // api-feishu-bot, same story.
+        "Feishu bot tenant credentials (China region). Same as `api-lark-bot` but for the \
+         Feishu domain. NyxID stores your `app_secret` and injects it into the request body \
+         when you call `/open-apis/auth/v3/tenant_access_token/internal`. \
+         Returns a `tenant_access_token` valid for 2 hours.",
     ];
+
+    // #220 migration: existing api-lark-bot / api-feishu-bot records from
+    // #205 still have `auth_method=body` and `auth_key_name=app_secret`.
+    // Upgrade them to `lark_token_exchange` so the new transparent token
+    // exchange path kicks in. Idempotent: the filter ensures we only touch
+    // records still carrying the old shape, and the update wipes the
+    // now-unused auth_key_name.
+    //
+    // Note: this only updates the catalog `DownstreamService` rows. User
+    // UserService rows pointing at these catalog services still need to be
+    // recreated by the user, because the credential format changed from a
+    // raw `app_secret` string to a JSON `{app_id, app_secret}` blob.
+    for slug in ["api-lark-bot", "api-feishu-bot"] {
+        let res = service_col
+            .update_many(
+                doc! {
+                    "slug": slug,
+                    "auth_method": "body",
+                },
+                doc! {
+                    "$set": {
+                        "auth_method": "lark_token_exchange",
+                        "auth_key_name": "",
+                        "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                    }
+                },
+            )
+            .await?;
+        if res.modified_count > 0 {
+            tracing::info!(
+                slug = slug,
+                modified = res.modified_count,
+                "Migrated catalog service from body auth to lark_token_exchange"
+            );
+        }
+    }
 
     let mut migrated_count: u32 = 0;
     for seed in DEFAULT_SERVICE_SEEDS {
