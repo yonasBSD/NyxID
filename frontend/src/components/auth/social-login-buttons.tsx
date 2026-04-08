@@ -53,9 +53,10 @@ const ALLOWED_PROVIDER_IDS = new Set<string>(SOCIAL_PROVIDERS.map((p) => p.id));
 
 interface SocialLoginButtonsProps {
   readonly returnTo?: string;
+  readonly inviteCode?: string;
 }
 
-export function SocialLoginButtons({ returnTo }: SocialLoginButtonsProps) {
+export function SocialLoginButtons({ returnTo, inviteCode }: SocialLoginButtonsProps) {
   const { data: config } = usePublicConfig();
 
   const enabledProviders = config
@@ -67,13 +68,19 @@ export function SocialLoginButtons({ returnTo }: SocialLoginButtonsProps) {
       return;
     }
     const encodedProvider = encodeURIComponent(provider);
-    let returnUrl = `${window.location.origin}/api/v1/auth/social/${encodedProvider}`;
-    if (!returnUrl.startsWith(window.location.origin)) {
+    const baseUrl = `${window.location.origin}/api/v1/auth/social/${encodedProvider}`;
+    if (!baseUrl.startsWith(window.location.origin)) {
       return;
     }
+    const params = new URLSearchParams();
     if (returnTo) {
-      returnUrl += `?return_to=${encodeURIComponent(returnTo)}`;
+      params.set("return_to", returnTo);
     }
+    if (inviteCode) {
+      params.set("invite_code", inviteCode);
+    }
+    const qs = params.toString();
+    const returnUrl = qs ? `${baseUrl}?${qs}` : baseUrl;
     void openExternal(returnUrl);
   }
 

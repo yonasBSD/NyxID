@@ -246,7 +246,7 @@ export function RegisterForm({ returnTo }: RegisterFormProps) {
         <div className="h-px flex-1 bg-border" />
       </div>
 
-      <SocialLoginButtons returnTo={returnTo} />
+      <SocialLoginButtons returnTo={returnTo} inviteCode={form.watch("inviteCode")} />
 
       <div className="flex items-center justify-center gap-1.5">
         <span className="text-xs text-text-tertiary">
