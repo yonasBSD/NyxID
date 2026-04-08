@@ -9,7 +9,6 @@ import {
   type RegisterFormData,
 } from "@/schemas/auth";
 import { useLogin, useRegister } from "@/hooks/use-auth";
-import { usePublicConfig } from "@/hooks/use-public-config";
 import { ApiError } from "@/lib/api-client";
 import { openExternal } from "@/lib/navigation";
 import {
@@ -138,8 +137,6 @@ export function AuthFlow({
 }: AuthFlowProps) {
   const [panel, setPanel] = useState<AuthPanel>(initialPanel);
   const navigate = useNavigate();
-  const { data: config } = usePublicConfig();
-
   // Refs for focus after slide
   const loginEmailRef = useRef<HTMLInputElement>(null);
   const inviteInputRef = useRef<HTMLInputElement>(null);
@@ -155,19 +152,22 @@ export function AuthFlow({
     undefined,
   );
 
-  const measureActivePanel = useCallback(() => {
-    const el = panelRefs[panel]?.current;
-    if (el) setContainerHeight(el.scrollHeight);
-  }, [panel]);
+  const measureMaxHeight = useCallback(() => {
+    let max = 0;
+    for (const ref of panelRefs) {
+      if (ref.current) max = Math.max(max, ref.current.scrollHeight);
+    }
+    if (max > 0) setContainerHeight(max);
+  }, []);
 
   useEffect(() => {
-    measureActivePanel();
-    // Re-measure if content changes (e.g. validation errors appear)
-    const observer = new ResizeObserver(measureActivePanel);
-    const el = panelRefs[panel]?.current;
-    if (el) observer.observe(el);
+    measureMaxHeight();
+    const observer = new ResizeObserver(measureMaxHeight);
+    for (const ref of panelRefs) {
+      if (ref.current) observer.observe(ref.current);
+    }
     return () => observer.disconnect();
-  }, [panel, measureActivePanel]);
+  }, [measureMaxHeight]);
 
   // -- Forms --
   const loginForm = useForm<LoginFormData>({
@@ -196,12 +196,8 @@ export function AuthFlow({
   const strength = getPasswordStrength(regPassword);
   const isInviteValid = INVITE_PATTERN.test(inviteCode.trim().toUpperCase());
 
-  // Filter social providers by server config
-  const enabledRegisterProviders = config
-    ? REGISTER_PROVIDERS.filter((p) =>
-        config.social_providers.includes(p.id),
-      )
-    : REGISTER_PROVIDERS;
+  // Always show all social providers — backend errors if not configured
+  const enabledRegisterProviders = REGISTER_PROVIDERS;
 
   // -- Slide helpers --
   const TRANSITION_MS = 320;
@@ -296,7 +292,7 @@ export function AuthFlow({
 
   return (
     <div
-      className="-m-8 overflow-hidden rounded-[10px] transition-[height] duration-300 ease-in-out"
+      className="-m-8 overflow-hidden rounded-[10px]"
       style={{ height: containerHeight ? `${containerHeight}px` : "auto" }}
     >
       <div
@@ -403,7 +399,7 @@ export function AuthFlow({
 
               <Button
                 type="submit"
-                className="w-full"
+                className="h-11 w-full bg-gradient-to-br from-violet-400 via-violet-500 to-violet-600 text-sm font-medium shadow-[0_2px_12px_rgba(139,92,246,0.2)] hover:opacity-90 hover:shadow-[0_4px_20px_rgba(139,92,246,0.3)]"
                 isLoading={loginMutation.isPending}
               >
                 Sign In

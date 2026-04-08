@@ -1,5 +1,4 @@
 import { Button } from "@/components/ui/button";
-import { usePublicConfig } from "@/hooks/use-public-config";
 import { openExternal } from "@/lib/navigation";
 
 const SOCIAL_PROVIDERS = [
@@ -57,11 +56,9 @@ interface SocialLoginButtonsProps {
 }
 
 export function SocialLoginButtons({ returnTo, inviteCode }: SocialLoginButtonsProps) {
-  const { data: config } = usePublicConfig();
-
-  const enabledProviders = config
-    ? SOCIAL_PROVIDERS.filter((p) => config.social_providers.includes(p.id))
-    : SOCIAL_PROVIDERS;
+  // Always show all providers — the backend will return an error if OAuth
+  // credentials aren't configured, but the buttons should always be visible.
+  const enabledProviders = SOCIAL_PROVIDERS;
 
   function handleSocialLogin(provider: ProviderId) {
     if (!ALLOWED_PROVIDER_IDS.has(provider)) {
