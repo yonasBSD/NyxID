@@ -81,14 +81,8 @@ export function SocialLoginButtons({ returnTo, inviteCode }: SocialLoginButtonsP
     void openExternal(returnUrl);
   }
 
-  if (enabledProviders.length === 0) {
-    return null;
-  }
-
   return (
-    <div
-      className={`grid gap-3 ${enabledProviders.length <= 2 ? "grid-cols-2" : "grid-cols-3"}`}
-    >
+    <div className="grid grid-cols-3 gap-3">
       {enabledProviders.map((provider) => (
         <Button
           key={provider.id}

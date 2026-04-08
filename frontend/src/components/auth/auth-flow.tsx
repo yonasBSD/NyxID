@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useNavigate, Link } from "@tanstack/react-router";
@@ -21,7 +21,6 @@ import {
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { SocialLoginButtons } from "@/components/auth/social-login-buttons";
 import { toast } from "sonner";
 
 // ---------------------------------------------------------------------------
@@ -136,38 +135,16 @@ export function AuthFlow({
   socialError,
 }: AuthFlowProps) {
   const [panel, setPanel] = useState<AuthPanel>(initialPanel);
+  const [inviteError, setInviteError] = useState(false);
+  const [fadeOpacity, setFadeOpacity] = useState(1);
+  const fadingRef = useRef(false);
   const navigate = useNavigate();
+  const isLogin = panel === 0;
+  const showEmailForm = panel === 2;
   // Refs for focus after slide
   const loginEmailRef = useRef<HTMLInputElement>(null);
   const inviteInputRef = useRef<HTMLInputElement>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
-
-  // Refs for panel height measurement
-  const panelRefs = [
-    useRef<HTMLDivElement>(null),
-    useRef<HTMLDivElement>(null),
-    useRef<HTMLDivElement>(null),
-  ] as const;
-  const [containerHeight, setContainerHeight] = useState<number | undefined>(
-    undefined,
-  );
-
-  const measureMaxHeight = useCallback(() => {
-    let max = 0;
-    for (const ref of panelRefs) {
-      if (ref.current) max = Math.max(max, ref.current.scrollHeight);
-    }
-    if (max > 0) setContainerHeight(max);
-  }, []);
-
-  useEffect(() => {
-    measureMaxHeight();
-    const observer = new ResizeObserver(measureMaxHeight);
-    for (const ref of panelRefs) {
-      if (ref.current) observer.observe(ref.current);
-    }
-    return () => observer.disconnect();
-  }, [measureMaxHeight]);
 
   // -- Forms --
   const loginForm = useForm<LoginFormData>({
@@ -200,31 +177,40 @@ export function AuthFlow({
   const enabledRegisterProviders = REGISTER_PROVIDERS;
 
   // -- Slide helpers --
-  const TRANSITION_MS = 320;
+  const FADE_MS = 200;
 
   function slideToPanel(target: AuthPanel) {
-    setPanel(target);
-    if (target === 0) {
-      void navigate({
-        to: "/login" as string,
-        search: returnTo ? { return_to: returnTo } : {},
-        replace: true,
-      });
-      setTimeout(() => loginEmailRef.current?.focus(), TRANSITION_MS);
-    } else {
-      void navigate({
-        to: "/register" as string,
-        search: returnTo ? { return_to: returnTo } : {},
-        replace: true,
-      });
+    const currentIsLogin = panel === 0;
+    const targetIsLogin = target === 0;
+    const crossingLoginRegister = currentIsLogin !== targetIsLogin;
+
+    if (crossingLoginRegister && !fadingRef.current) {
+      // Sequential fade: out → swap → in
+      fadingRef.current = true;
+      setFadeOpacity(0);
       setTimeout(() => {
-        if (target === 1) {
-          inviteInputRef.current?.focus();
-        } else {
-          nameInputRef.current?.focus();
-        }
-      }, TRANSITION_MS);
+        setPanel(target);
+        const path = target === 0 ? "/login" : "/register";
+        const qs = returnTo
+          ? `?return_to=${encodeURIComponent(returnTo)}`
+          : "";
+        window.history.replaceState(null, "", `${path}${qs}`);
+        // Small delay for React to render new content before fading in
+        requestAnimationFrame(() => {
+          setFadeOpacity(1);
+          fadingRef.current = false;
+        });
+      }, FADE_MS);
+    } else if (!crossingLoginRegister) {
+      // Same view (register methods ↔ email form): instant panel switch
+      setPanel(target);
     }
+
+    setTimeout(() => {
+      if (target === 0) loginEmailRef.current?.focus();
+      else if (target === 1) inviteInputRef.current?.focus();
+      else nameInputRef.current?.focus();
+    }, crossingLoginRegister ? FADE_MS * 2 + 50 : 350);
   }
 
   // -- Login submit --
@@ -275,8 +261,21 @@ export function AuthFlow({
     }
   }
 
+  // -- Invite code gate for Step 2 --
+  function requireInviteCode(): boolean {
+    const code = inviteCode.trim();
+    if (!code) {
+      setInviteError(true);
+      inviteInputRef.current?.focus();
+      return false;
+    }
+    setInviteError(false);
+    return true;
+  }
+
   // -- Register social login (passes invite code) --
   function handleRegisterSocialLogin(providerId: string) {
+    if (!requireInviteCode()) return;
     const params = new URLSearchParams();
     if (returnTo) params.set("return_to", returnTo);
     const code = inviteCode.trim().toUpperCase();
@@ -286,23 +285,19 @@ export function AuthFlow({
     void openExternal(url);
   }
 
-  // -- Transform --
-  const translateX =
-    panel === 0 ? "0%" : panel === 1 ? "-33.3333%" : "-66.6667%";
-
   return (
     <div
       className="-m-8 overflow-hidden rounded-[10px]"
-      style={{ height: containerHeight ? `${containerHeight}px` : "auto" }}
+      style={{
+        opacity: fadeOpacity,
+        transition: `opacity ${FADE_MS}ms ease-in-out`,
+      }}
     >
-      <div
-        className="flex w-[300%] items-start transition-transform duration-300 ease-in-out"
-        style={{ transform: `translateX(${translateX})` }}
-      >
-        {/* ================================================================
-            Panel 0 — Login
-            ================================================================ */}
-        <div ref={panelRefs[0]} className="w-1/3 shrink-0 px-7 pt-8 pb-7">
+      {isLogin ? (
+        /* ================================================================
+           Login View
+           ================================================================ */
+        <div className="px-7 pt-8 pb-7">
           <div className="mb-7 text-center">
             <h1
               className="font-display text-2xl font-semibold tracking-tight"
@@ -414,7 +409,30 @@ export function AuthFlow({
             <div className="h-px flex-1 bg-border" />
           </div>
 
-          <SocialLoginButtons returnTo={returnTo} />
+          <div className="flex flex-col gap-2">
+            {REGISTER_PROVIDERS.map((provider) => (
+              <button
+                key={provider.id}
+                type="button"
+                onClick={() => {
+                  const params = new URLSearchParams();
+                  if (returnTo) params.set("return_to", returnTo);
+                  const qs = params.toString();
+                  const url = `${window.location.origin}/api/v1/auth/social/${encodeURIComponent(provider.id)}${qs ? `?${qs}` : ""}`;
+                  void openExternal(url);
+                }}
+                className="flex h-[46px] cursor-pointer items-center gap-3 rounded-lg border border-border bg-background px-4 text-[13.5px] font-medium text-foreground transition-colors hover:border-border/80 hover:bg-white/[0.03] active:scale-[0.99]"
+              >
+                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-white/[0.06]">
+                  {provider.icon}
+                </span>
+                {provider.label}
+                <span className="ml-auto text-sm text-muted-foreground">
+                  &rsaquo;
+                </span>
+              </button>
+            ))}
+          </div>
 
           {/* Footer */}
           <div className="mt-6 border-t border-border pt-5 text-center text-[13px] text-muted-foreground">
@@ -422,17 +440,23 @@ export function AuthFlow({
             <button
               type="button"
               onClick={() => slideToPanel(1)}
-              className="font-medium text-violet-400 hover:text-violet-300"
+              className="cursor-pointer font-medium text-violet-400 hover:text-violet-300"
             >
               Create account
             </button>
           </div>
         </div>
-
-        {/* ================================================================
-            Panel 1 — Register Methods
-            ================================================================ */}
-        <div ref={panelRefs[1]} className="w-1/3 shrink-0 px-7 pt-8 pb-7">
+      ) : (
+        /* ================================================================
+           Register View (2-panel slider: methods → email form)
+           ================================================================ */
+        <div className="overflow-hidden">
+        <div
+          className="flex w-[200%] items-start transition-transform duration-300 ease-in-out"
+          style={{ transform: showEmailForm ? "translateX(-50%)" : "translateX(0)" }}
+        >
+        {/* Register Panel 1 — Method Selection */}
+        <div className="w-1/2 shrink-0 px-7 pt-8 pb-7">
           <div className="mb-7 text-center">
             <h1
               className="font-display text-2xl font-semibold tracking-tight"
@@ -505,15 +529,48 @@ export function AuthFlow({
                             inviteInputRef as React.MutableRefObject<HTMLInputElement | null>
                           ).current = el;
                         }}
-                        onChange={(e) =>
-                          field.onChange(e.target.value.toUpperCase())
-                        }
+                        onChange={(e) => {
+                          field.onChange(e.target.value.toUpperCase());
+                          if (inviteError) setInviteError(false);
+                        }}
                       />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
                 )}
               />
+              {inviteError && (
+                <p className="mt-2 text-[12px] font-medium text-destructive">
+                  An invite code is required to use NyxID at this time.
+                </p>
+              )}
+              <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
+                NyxID is in closed beta. Need a code? Reach us on{" "}
+                <a
+                  href="https://discord.com/invite/MB5bRa4arr"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="cursor-pointer font-medium text-violet-400 hover:text-violet-300"
+                >
+                  Discord
+                </a>
+                ,{" "}
+                <a
+                  href="https://github.com/ChronoAIProject/NyxID"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="cursor-pointer font-medium text-violet-400 hover:text-violet-300"
+                >
+                  GitHub
+                </a>
+                , or{" "}
+                <a
+                  href="mailto:support@chrono-ai.fun"
+                  className="cursor-pointer font-medium text-violet-400 hover:text-violet-300"
+                >
+                  support@chrono-ai.fun
+                </a>
+              </p>
             </div>
           </Form>
 
@@ -532,7 +589,7 @@ export function AuthFlow({
                   key={provider.id}
                   type="button"
                   onClick={() => handleRegisterSocialLogin(provider.id)}
-                  className="flex h-[46px] items-center gap-3 rounded-lg border border-border bg-background px-4 text-[13.5px] font-medium text-foreground transition-colors hover:border-border/80 hover:bg-white/[0.03] active:scale-[0.99]"
+                  className="flex h-[46px] cursor-pointer items-center gap-3 rounded-lg border border-border bg-background px-4 text-[13.5px] font-medium text-foreground transition-colors hover:border-border/80 hover:bg-white/[0.03] active:scale-[0.99]"
                 >
                   <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-white/[0.06]">
                     {provider.icon}
@@ -546,8 +603,8 @@ export function AuthFlow({
 
               <button
                 type="button"
-                onClick={() => slideToPanel(2)}
-                className="flex h-[46px] items-center gap-3 rounded-lg border border-border bg-background px-4 text-[13.5px] font-medium text-foreground transition-colors hover:border-border/80 hover:bg-white/[0.03] active:scale-[0.99]"
+                onClick={() => { if (requireInviteCode()) slideToPanel(2); }}
+                className="flex h-[46px] cursor-pointer items-center gap-3 rounded-lg border border-border bg-background px-4 text-[13.5px] font-medium text-foreground transition-colors hover:border-border/80 hover:bg-white/[0.03] active:scale-[0.99]"
               >
                 <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-violet-500/10">
                   <svg
@@ -577,19 +634,16 @@ export function AuthFlow({
             <button
               type="button"
               onClick={() => slideToPanel(0)}
-              className="font-medium text-violet-400 hover:text-violet-300"
+              className="cursor-pointer font-medium text-violet-400 hover:text-violet-300"
             >
               Sign in
             </button>
           </div>
         </div>
 
-        {/* ================================================================
-            Panel 2 — Email Registration
-            ================================================================ */}
+        {/* Register Panel 2 — Email Registration */}
         <div
-          ref={panelRefs[2]}
-          className="w-1/3 shrink-0 px-7 pt-8 pb-7"
+          className="w-1/2 shrink-0 px-7 pt-8 pb-7"
           onKeyDown={(e) => {
             if (e.key === "Escape") slideToPanel(1);
           }}
@@ -794,13 +848,15 @@ export function AuthFlow({
             <button
               type="button"
               onClick={() => slideToPanel(0)}
-              className="font-medium text-violet-400 hover:text-violet-300"
+              className="cursor-pointer font-medium text-violet-400 hover:text-violet-300"
             >
               Sign in
             </button>
           </div>
         </div>
-      </div>
+        </div>
+        </div>
+      )}
     </div>
   );
 }
