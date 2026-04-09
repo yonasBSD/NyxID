@@ -633,11 +633,14 @@ The channel-bot block is especially important. Org-owned NyxID API keys can regi
 - soft-deleted channel conversations (is_active = false)
 - channel messages                (all rows for the org)
 - channel event logs              (all rows whose conversation_id belonged to the org)
+- openclaw_channel_mappings       (all rows for the org -- cascade-only, see note)
 - org_memberships (all rows for the org)
 - org_invites    (all rows for the org, redeemed or pending)
 ```
 
 These rows are dead state once the org is gone — no API call could read or mutate them again. Cascading them stops the database from accumulating orphans referencing the deleted org user_id. `channel_event_logs` keys off `conversation_id` rather than `user_id`, so the cascade snapshots the org's conversation ids first and then deletes by id list — without that ordering, the logs would lose their only path back to the org. The audit log lives in its own collection and survives deletion intact.
+
+`openclaw_channel_mappings` is intentionally **cascade-only**, not a blocker. NyxID never registers anything with OpenClaw — the user manually pastes the per-mapping webhook secret into their OpenClaw plugin, and the inbound webhook handler resolves the mapping by `(channel, channel_user_id)` plus an HMAC check against the stored secret hash. After cascade-delete, the next inbound webhook fails the lookup (or the HMAC) and the user re-creates the mapping if they still want it. There is no `DELETE /integrations/openclaw/mappings` endpoint either, so promoting this to a blocker would render any org with a mapping permanently undeletable.
 
 After cascading, the org `User` row itself is hard-deleted.
 

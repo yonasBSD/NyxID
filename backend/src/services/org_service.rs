@@ -175,11 +175,11 @@ pub async fn update_org_user(
 /// invites, decided approval requests (approved/rejected/expired),
 /// expired/revoked approval grants, soft-deleted blocker tombstones
 /// (user services, API keys, service accounts, OAuth clients, bots,
-/// conversations), revoked provider tokens, channel messages, and
-/// channel event logs (joined through the org's conversation ids).
-/// These rows are dead state once the org is gone; no API call could
-/// ever read or mutate them again. The audit log lives in its own
-/// collection and survives intact.
+/// conversations), revoked provider tokens, channel messages, channel
+/// event logs (joined through the org's conversation ids), and
+/// OpenClaw channel mappings. These rows are dead state once the org
+/// is gone; no API call could ever read or mutate them again. The
+/// audit log lives in its own collection and survives intact.
 pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppResult<()> {
     let _ = get_org_user(db, org_user_id).await?;
 
@@ -368,6 +368,18 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
         .await?;
     db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
         .delete_many(doc! { "user_id": org_user_id })
+        .await?;
+    // OpenClaw channel mappings. Hard-deleted, no blocker, no platform-
+    // side cleanup: NyxID never registers anything with OpenClaw -- the
+    // user manually pastes the per-mapping webhook secret into their
+    // OpenClaw plugin. Once we delete the row the next inbound webhook
+    // fails HMAC verification and the user re-creates the mapping if
+    // they want. There's also no `DELETE /integrations/openclaw/mappings`
+    // endpoint today, so cascade-only is the only sensible move; making
+    // this a hard blocker would render any org with a mapping
+    // permanently undeletable.
+    db.collection::<bson::Document>(crate::services::openclaw_channel_service::MAPPINGS_COLLECTION)
+        .delete_many(doc! { "nyxid_user_id": org_user_id })
         .await?;
     // Cascade memberships
     db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
