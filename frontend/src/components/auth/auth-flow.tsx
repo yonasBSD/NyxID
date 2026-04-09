@@ -545,31 +545,16 @@ export function AuthFlow({
                 </p>
               )}
               <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
-                NyxID is in closed beta. Need a code? Reach us on{" "}
+                NyxID is in closed beta.{" "}
                 <a
-                  href="https://discord.com/invite/MB5bRa4arr"
+                  href="https://nyx.chrono-ai.fun/#waitlist"
                   target="_blank"
                   rel="noopener noreferrer"
                   className="cursor-pointer font-medium text-violet-400 hover:text-violet-300"
                 >
-                  Discord
-                </a>
-                ,{" "}
-                <a
-                  href="https://github.com/ChronoAIProject/NyxID"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="cursor-pointer font-medium text-violet-400 hover:text-violet-300"
-                >
-                  GitHub
-                </a>
-                , or{" "}
-                <a
-                  href="mailto:support@chrono-ai.fun"
-                  className="cursor-pointer font-medium text-violet-400 hover:text-violet-300"
-                >
-                  support@chrono-ai.fun
-                </a>
+                  Join the waitlist
+                </a>{" "}
+                to request an invite code.
               </p>
             </div>
           </Form>
