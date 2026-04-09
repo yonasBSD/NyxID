@@ -2,7 +2,7 @@ name: Release
 
 # Creates a GitHub Release with an auto-generated changelog when a `v*` tag is
 # pushed. Container images are built and pushed separately by
-# `publish-images.yml`, which also runs on tag pushes.
+# `publish-images.yml`, which also runs on tag pushes and gates on CI.
 
 on:
   push:
@@ -14,21 +14,15 @@ permissions:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Full CI must pass before the GitHub Release is cut.
-  # ---------------------------------------------------------------------------
-  ci-gate:
-    name: CI Gate
-    uses: ./.github/workflows/ci.yml
-
-  # ---------------------------------------------------------------------------
-  # Create GitHub Release with changelog
+  # Create GitHub Release with changelog. CI gating lives in publish-images.yml
+  # for tag pushes -- the release notes job itself is pure git log + changelog
+  # generation and does not need to re-run CI.
   # ---------------------------------------------------------------------------
   github-release:
     name: GitHub Release
     runs-on: ubuntu-latest
-    needs: ci-gate
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
