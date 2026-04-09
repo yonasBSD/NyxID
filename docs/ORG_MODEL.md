@@ -614,6 +614,7 @@ Each blocker filter uses the same live-state semantics as the corresponding API 
 - *active* developer OAuth clients  ({ created_by, is_active: true })
 - *active* channel bots             ({ user_id, is_active: true })
 - *active* channel conversations    ({ user_id, is_active: true })
+- *active* credential nodes         ({ user_id, is_active: true })
 ```
 
 Legacy `user_service_connections` rows are still treated as live credentials by `proxy_service::user_has_legacy_personal_connection` during the migration window (they outrank org-shared credentials so a personal pre-migration connection never gets silently retargeted by joining an org). An org-owned API key can hit `POST /connections/{id}` because that route sits in the shared router (`api_v1_shared`) which only blocks delegated tokens, so they're a real org-deletion concern. The admin must call `DELETE /connections/{service_id}` first, which soft-deletes the row and clears the credential before the org can be deleted.
@@ -621,6 +622,8 @@ Legacy `user_service_connections` rows are still treated as live credentials by 
 If any of these counts is non-zero, the API returns `409 Conflict` with a list (`"Cannot delete org while it still owns 3 user services, 1 NyxID API key, …"`) and the admin must clean them up first. Without this guard the org user record could disappear while orphaned resources continue to point at it, and `resolve_owner_access` would deny every read/write so nobody could clean them up.
 
 The channel-bot block is especially important. Org-owned NyxID API keys can register bots via `POST /channel-bots` (the human-only router still allows API-key auth on those routes), and the inbound-webhook handler accepts any active bot row by id without a live owner check. If we let the org disappear while a bot was still active, the platform-side webhook would keep firing forever with no way to deregister it. The blocker forces the admin to call `DELETE /channel-bots/{id}` first, which deregisters the webhook on the platform side and soft-deletes the bot + its conversations.
+
+Credential nodes are blocked for the same reason. `node_service::authenticate_node` consults the active node row on every WS reconnect, so a dangling org-owned node would keep accepting agent connections and proxying traffic on behalf of a non-existent org. The admin must call `DELETE /nodes/{id}` first; the node agent fails on its next heartbeat. The cascade also clears outstanding `node_registration_tokens` for the org so the WS registration path cannot mint a fresh node row out from under the about-to-be-deleted org. Bindings owned by the org are cleaned up regardless of which physical node they reference — org-shared services routed through a *personal* node create a `NodeServiceBinding` with `user_id = org_user_id` (so proxy resolution finds it under the effective owner), and those rows would otherwise leak after the org is gone.
 
 ### Cascade-deleted (no admin action required)
 
@@ -641,6 +644,10 @@ The channel-bot block is especially important. Org-owned NyxID API keys can regi
 - channel event logs              (all rows whose conversation_id belonged to the org)
 - openclaw_channel_mappings       (all rows for the org -- cascade-only, see note)
 - notification_channels           (the row for the org -- cascade-only, see note)
+- node_registration_tokens        (all rows for the org)
+- node_service_bindings           (all rows owned by the org -- includes bindings to personal nodes)
+- soft-deleted credential nodes   (is_active = false)
+- user_provider_credentials       (all rows for the org -- cascade-only, see note)
 - org_memberships (all rows for the org)
 - org_invites    (all rows for the org, redeemed or pending)
 ```
@@ -655,6 +662,8 @@ The audit log lives in its own collection and survives deletion intact.
 `openclaw_channel_mappings` is intentionally **cascade-only**, not a blocker. NyxID never registers anything with OpenClaw — the user manually pastes the per-mapping webhook secret into their OpenClaw plugin, and the inbound webhook handler resolves the mapping by `(channel, channel_user_id)` plus an HMAC check against the stored secret hash. After cascade-delete, the next inbound webhook fails the lookup (or the HMAC) and the user re-creates the mapping if they still want it. There is no `DELETE /integrations/openclaw/mappings` endpoint either, so promoting this to a blocker would render any org with a mapping permanently undeletable.
 
 `notification_channels` is also **cascade-only**. An org-owned API key can call any `/notifications/*` endpoint and trip `get_or_create_channel`, which inserts a row keyed by `auth_user.user_id` (the org user_id). The row is dead state from creation: an org cannot meaningfully receive a notification because the approval fan-out targets *person* admin user_ids, not the org itself, so any embedded Telegram link / push device token attached to an org user record never gets read. The cascade clears it on delete; there is no platform-side cleanup beyond letting FCM/APNs garbage-collect dormant subscriptions, which they do automatically.
+
+`user_provider_credentials` is **cascade-only** by `user_id`. The collection holds per-user OAuth client overrides (encrypted client_id + client_secret) for providers that allow user-supplied app credentials. There is no DELETE handler today, so blocking would render any org with a credential row permanently undeletable, and the encrypted blobs are useless without the org user.
 
 After cascading, the org `User` row itself is hard-deleted.
 

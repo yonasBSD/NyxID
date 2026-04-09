@@ -164,26 +164,28 @@ pub async fn update_org_user(
 /// **Blockers** (must be empty before deletion proceeds): *active*
 /// user services / legacy service connections / NyxID API keys /
 /// service accounts / developer OAuth clients / channel bots /
-/// channel conversations (all soft-deleted via `is_active = false`),
-/// *non-revoked* provider tokens, hard-deleted endpoints / external
-/// API keys / per-service approval configs, *active* approval grants,
-/// and *pending* approval requests. The soft-delete filters are
-/// critical here -- without them, an org that ever had a service
-/// would be permanently undeletable, because the soft-deleted row
-/// stays in the collection forever.
+/// channel conversations / credential nodes (all soft-deleted via
+/// `is_active = false`), *non-revoked* provider tokens, hard-deleted
+/// endpoints / external API keys / per-service approval configs,
+/// *active* approval grants, and *pending* approval requests. The
+/// soft-delete filters are critical here -- without them, an org
+/// that ever had a service would be permanently undeletable, because
+/// the soft-deleted row stays in the collection forever.
 ///
 /// **Cascaded** (deleted alongside the org user record): memberships,
 /// invites, decided approval requests (approved/rejected/expired),
 /// expired/revoked approval grants, soft-deleted blocker tombstones
 /// (user services, legacy service connections, API keys, service
-/// accounts, OAuth clients, bots, conversations), agent service
-/// bindings, service-account tokens (joined through the org's owned
-/// SA ids), revoked provider tokens, channel messages, channel event
-/// logs (joined through the org's conversation ids), OpenClaw channel
-/// mappings, and the notification channel row. These rows are dead
-/// state once the org is gone; no API call could ever read or mutate
-/// them again. The audit log lives in its own collection and survives
-/// intact.
+/// accounts, OAuth clients, bots, conversations, nodes), agent
+/// service bindings, service-account tokens (joined through the
+/// org's owned SA ids), revoked provider tokens, channel messages,
+/// channel event logs (joined through the org's conversation ids),
+/// OpenClaw channel mappings, the notification channel row, all
+/// node registration tokens, all node service bindings owned by the
+/// org, and user-provided OAuth client credentials. These rows are
+/// dead state once the org is gone; no API call could ever read or
+/// mutate them again. The audit log lives in its own collection and
+/// survives intact.
 pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppResult<()> {
     let _ = get_org_user(db, org_user_id).await?;
 
@@ -286,6 +288,18 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
             doc! { "user_id": org_user_id, "is_active": true },
             "channel conversations",
         ),
+        (
+            crate::models::node::COLLECTION_NAME,
+            // Soft-deleted via `is_active = false`. An active node row
+            // is what `node_service::authenticate_node` consults on
+            // every WS reconnect, so a dangling org-owned node would
+            // keep accepting agent connections and proxying traffic
+            // on behalf of a non-existent org. The admin must call
+            // `DELETE /nodes/{id}` first, which deactivates the node
+            // and its bindings; the agent fails on next heartbeat.
+            doc! { "user_id": org_user_id, "is_active": true },
+            "credential nodes",
+        ),
     ];
 
     let mut blockers: Vec<String> = Vec::new();
@@ -383,6 +397,43 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
     }
     db.collection::<bson::Document>(crate::models::oauth_client::COLLECTION_NAME)
         .delete_many(doc! { "created_by": org_user_id, "is_active": false })
+        .await?;
+    // Credential nodes. Active nodes are blocked above so what remains
+    // here is soft-deleted node tombstones plus their associated
+    // bindings and any outstanding registration tokens for the org.
+    //
+    // Order matters: clear the registration tokens BEFORE the user
+    // record is deleted at the end of this function, so the WS
+    // registration path (`node_service::register_node`) cannot consume
+    // a still-valid token and create a fresh node row owned by the
+    // about-to-be-deleted org. There is still a small race window
+    // between the cascade and the user delete, but the impact is
+    // limited to a soft-deleted node row that the next admin cleanup
+    // sweep can pick up.
+    //
+    // Bindings owned by the org also need a cascade even when the
+    // physical node is the admin's personal hardware: org-shared
+    // services routed through a personal node create a binding row
+    // with `user_id = org_user_id` (so proxy resolution finds it
+    // under the effective owner). Those rows are useless once the
+    // org is gone but they leak forever otherwise.
+    db.collection::<bson::Document>(crate::models::node_registration_token::COLLECTION_NAME)
+        .delete_many(doc! { "user_id": org_user_id })
+        .await?;
+    db.collection::<bson::Document>(crate::models::node_service_binding::COLLECTION_NAME)
+        .delete_many(doc! { "user_id": org_user_id })
+        .await?;
+    db.collection::<bson::Document>(crate::models::node::COLLECTION_NAME)
+        .delete_many(doc! { "user_id": org_user_id, "is_active": false })
+        .await?;
+    // User-provided OAuth client credentials (per-user override of the
+    // service-level OAuth app). Hard-deleted, no platform-side cleanup,
+    // no DELETE handler that would let the admin clear them ahead of
+    // time. The encrypted blobs are useless without the org user, so
+    // cascade-only by user_id matches the openclaw_channel_mappings
+    // and notification_channels pattern.
+    db.collection::<bson::Document>(crate::models::user_provider_credentials::COLLECTION_NAME)
+        .delete_many(doc! { "user_id": org_user_id })
         .await?;
     // Channel relay state. Active rows are blocked above, so what's left
     // here is soft-deleted bot/conversation tombstones plus any
