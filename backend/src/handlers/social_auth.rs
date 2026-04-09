@@ -442,6 +442,13 @@ pub async fn callback(
                     .await
                     .map_err(|e| {
                         tracing::error!(error = %e, "Social auth session creation failed");
+                        if let Some(ref iid) = reserved_invite_id {
+                            let db = state.db.clone();
+                            let iid = iid.clone();
+                            tokio::spawn(async move {
+                                let _ = invite_code_service::release_reservation(&db, &iid).await;
+                            });
+                        }
                         redirect_with_error(
                             &redirect_target,
                             "social_auth_exchange",
@@ -485,6 +492,13 @@ pub async fn callback(
             .await
             .map_err(|e| {
                 tracing::error!(error = %e, "Social auth session creation failed");
+                if let Some(ref iid) = reserved_invite_id {
+                    let db = state.db.clone();
+                    let iid = iid.clone();
+                    tokio::spawn(async move {
+                        let _ = invite_code_service::release_reservation(&db, &iid).await;
+                    });
+                }
                 redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
             })?;
 
@@ -749,6 +763,13 @@ pub async fn apple_callback(
                     .await
                     .map_err(|e| {
                         tracing::error!(error = %e, "Apple auth session creation failed");
+                        if let Some(ref iid) = reserved_invite_id {
+                            let db = state.db.clone();
+                            let iid = iid.clone();
+                            tokio::spawn(async move {
+                                let _ = invite_code_service::release_reservation(&db, &iid).await;
+                            });
+                        }
                         redirect_with_error(
                             &redirect_target,
                             "social_auth_exchange",
@@ -792,6 +813,13 @@ pub async fn apple_callback(
             .await
             .map_err(|e| {
                 tracing::error!(error = %e, "Apple auth session creation failed");
+                if let Some(ref iid) = reserved_invite_id {
+                    let db = state.db.clone();
+                    let iid = iid.clone();
+                    tokio::spawn(async move {
+                        let _ = invite_code_service::release_reservation(&db, &iid).await;
+                    });
+                }
                 redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
             })?;
 
