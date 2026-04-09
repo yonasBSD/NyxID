@@ -582,9 +582,27 @@ errors like **"Missing access token for authorization"**, **"token_exchange
 auth method requires token_exchange_config"**, or any `99991xxx` Lark
 error that shouldn't happen given your setup, your binding is probably
 stuck on the **old body-injection shape** from an earlier NyxID version.
-The transparent token-exchange flow needs **both** `app_id` and
-`app_secret` stored as a JSON blob, and older bindings only stored the
-`app_secret`. Fix it by deleting the binding and re-adding:
+
+**In both the old and new flows, your `app_secret` is stored encrypted
+on NyxID and never leaves the server after registration.** The only
+thing that changed is how NyxID uses it:
+
+- **Old flow:** NyxID stored only `app_secret`. The *caller* had to
+  explicitly hit `/open-apis/auth/v3/tenant_access_token/internal`; the
+  proxy merged `app_secret` into that request body server-side, handed
+  back a `tenant_access_token`, and the caller was then responsible for
+  caching it and attaching `Authorization: Bearer ...` to every
+  subsequent Lark call.
+- **New flow:** NyxID stores `app_id` **and** `app_secret` together
+  (JSON blob, same AES-256 encryption). NyxID calls the exchange
+  endpoint itself server-to-server, caches the `tenant_access_token`
+  in-process with single-flight dedup, and injects the Bearer header on
+  every outbound Lark request. Callers just hit the real API path.
+
+Older bindings only contain `app_secret` without `app_id`, so the new
+transparent-exchange path can't use them. Fix by deleting the binding
+and re-adding -- this prompts for both fields and stores them in the
+new shape:
 
 ```bash
 # List your bindings and find the stale one (grab its id)
@@ -601,9 +619,10 @@ nyxid service add api-lark-bot
 nyxid proxy request api-lark-bot /open-apis/im/v1/chats -m GET
 ```
 
-No credentials leave your machine during this process -- NyxID
-re-encrypts the pair server-side just like the first time. The same
-recreation steps apply to `api-feishu-bot`.
+You're just re-registering the same secret you already gave NyxID the
+first time -- it travels once from your terminal to NyxID over HTTPS,
+gets re-encrypted at rest, and then stays there. The same recreation
+steps apply to `api-feishu-bot`.
 
 ### Picking the right service for the job
 
