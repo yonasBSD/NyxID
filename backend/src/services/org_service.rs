@@ -182,8 +182,8 @@ pub async fn update_org_user(
 /// `service_provider_requirements` joined through the org's owned
 /// downstream service ids, agent service bindings, service-account
 /// tokens and SA-owned provider tokens (joined through the org's
-/// owned SA ids), refresh_tokens minted by the org's developer
-/// OAuth clients (joined through the org's owned client ids),
+/// owned SA ids), refresh_tokens and consent grants joined through
+/// the org's owned developer OAuth client ids,
 /// oauth_states for in-flight provider connect flows (matched on
 /// `user_id` OR `target_user_id` for org-targeted flows), all
 /// `user_provider_tokens` owned by the org (closes the in-flight
@@ -490,6 +490,16 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
             .map(bson::Bson::String)
             .collect();
         db.collection::<bson::Document>(crate::models::refresh_token::COLLECTION_NAME)
+            .delete_many(doc! { "client_id": { "$in": &oauth_client_id_array } })
+            .await?;
+        // Consent grants users gave to the org's developer apps. Hard-
+        // deleted, no DELETE handler that targets them by client, and
+        // they remain enumerable via `/consents` and the admin
+        // listing after the org is gone (see `handlers/consent.rs`
+        // and `handlers/admin.rs`). Cascade by client_id so deleted
+        // org apps disappear from every user's "Authorized Apps"
+        // surface.
+        db.collection::<bson::Document>(crate::models::consent::COLLECTION_NAME)
             .delete_many(doc! { "client_id": { "$in": &oauth_client_id_array } })
             .await?;
     }

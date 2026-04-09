@@ -643,6 +643,7 @@ Custom catalog services (`POST /services` rows where `created_by = org_user_id`)
 - service_account_tokens          (all rows whose service_account_id belonged to the org)
 - soft-deleted developer OAuth clients (is_active = false)
 - refresh_tokens                  (all rows whose client_id belonged to the org)
+- consents                        (all rows whose client_id belonged to the org)
 - soft-deleted channel bots       (is_active = false)
 - soft-deleted channel conversations (is_active = false)
 - channel messages                (all rows for the org)
@@ -666,7 +667,7 @@ These rows are dead state once the org is gone — no API call could read or mut
 - **`service_account_tokens`** keys off `service_account_id`. The cascade snapshots the org's owned `service_accounts._id` set first, then issues `delete_many({ service_account_id: $in: [...] })`. The standard `service_account_service::delete_service_account` path only marks tokens as `revoked: true` rather than deleting them, so without this cascade the token rows would outlive the org. Mirrors the same cleanup that `admin_user_service::delete_user` already does for normal person users.
 - **SA-owned `user_provider_tokens`** reuse the same SA-id snapshot. `UserProviderToken.user_id` is overloaded to hold either a real user_id or a service-account id (admin-on-behalf provider connect stores tokens under `sa.id` — see `handlers/admin_sa_providers`). After the snapshot is collected, the cascade also issues `delete_many({ user_id: { $in: sa_ids } })` against `user_provider_tokens`, plus the same against `oauth_states.user_id` / `oauth_states.target_user_id` to clean up any in-flight admin-on-behalf flows.
 - **`service_endpoints` and `service_provider_requirements`** key off `service_id`. The cascade snapshots the org's owned `downstream_services._id` set first, then issues `delete_many({ service_id: $in: [...] })` against both child collections. Without that ordering the children would survive the parent service tombstones forever and remain reachable via `endpoints.rs` lookups that gate on `service.created_by` (which now resolves to a deleted user).
-- **`refresh_tokens`** keys off `client_id` (the developer-app OAuth client that minted the refresh token). The cascade snapshots the org's owned `oauth_clients._id` set first, then issues `delete_many({ client_id: $in: [...] })`. This works in concert with the live `is_active` validation in `token_service::refresh_tokens` (see "OAuth refresh-token validation" below) — the snapshot is belt-and-suspenders cleanup so the collection doesn't accumulate dead rows.
+- **`refresh_tokens` and `consents`** both key off `client_id` (the developer-app OAuth client). The cascade snapshots the org's owned `oauth_clients._id` set once and reuses it for both `delete_many({ client_id: $in: [...] })` calls. The refresh-token cascade is belt-and-suspenders on top of the live `is_active` validation in `token_service::refresh_tokens` (see "OAuth refresh-token validation" below). The consent cascade is the only path that removes them — there is no DELETE handler that targets consents by client, and otherwise the rows would remain enumerable on every user's `/consents` page and the admin listing after the issuing org is gone.
 
 ### OAuth refresh-token validation
 
