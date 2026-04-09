@@ -615,6 +615,7 @@ Each blocker filter uses the same live-state semantics as the corresponding API 
 - *active* channel bots             ({ user_id, is_active: true })
 - *active* channel conversations    ({ user_id, is_active: true })
 - *active* credential nodes         ({ user_id, is_active: true })
+- *active* custom catalog services  ({ created_by, is_active: true })
 ```
 
 Legacy `user_service_connections` rows are still treated as live credentials by `proxy_service::user_has_legacy_personal_connection` during the migration window (they outrank org-shared credentials so a personal pre-migration connection never gets silently retargeted by joining an org). An org-owned API key can hit `POST /connections/{id}` because that route sits in the shared router (`api_v1_shared`) which only blocks delegated tokens, so they're a real org-deletion concern. The admin must call `DELETE /connections/{service_id}` first, which soft-deletes the row and clears the credential before the org can be deleted.
@@ -624,6 +625,8 @@ If any of these counts is non-zero, the API returns `409 Conflict` with a list (
 The channel-bot block is especially important. Org-owned NyxID API keys can register bots via `POST /channel-bots` (the human-only router still allows API-key auth on those routes), and the inbound-webhook handler accepts any active bot row by id without a live owner check. If we let the org disappear while a bot was still active, the platform-side webhook would keep firing forever with no way to deregister it. The blocker forces the admin to call `DELETE /channel-bots/{id}` first, which deregisters the webhook on the platform side and soft-deletes the bot + its conversations.
 
 Credential nodes are blocked for the same reason. `node_service::authenticate_node` consults the active node row on every WS reconnect, so a dangling org-owned node would keep accepting agent connections and proxying traffic on behalf of a non-existent org. The admin must call `DELETE /nodes/{id}` first; the node agent fails on its next heartbeat. The cascade also clears outstanding `node_registration_tokens` for the org so the WS registration path cannot mint a fresh node row out from under the about-to-be-deleted org. Bindings owned by the org are cleaned up regardless of which physical node they reference — org-shared services routed through a *personal* node create a `NodeServiceBinding` with `user_id = org_user_id` (so proxy resolution finds it under the effective owner), and those rows would otherwise leak after the org is gone.
+
+Custom catalog services (`POST /services` rows where `created_by = org_user_id`) are also blocked. An *active* row stays visible to every other authenticated user via the normal `/services` listing -- the visibility filter does not depend on the creator being alive -- and once the org user record is gone the built-in `services_helpers::require_admin_or_creator` cleanup gate fails for everyone except a global admin. The blocker forces the admin to call `DELETE /services/{id}` first, which soft-deletes the catalog row and cascades it to user_service_connections. The cascade then removes the soft-deleted catalog row plus its child `service_endpoints` and `service_provider_requirements` rows (joined via the org's owned downstream service ids).
 
 ### Cascade-deleted (no admin action required)
 
@@ -648,16 +651,20 @@ Credential nodes are blocked for the same reason. `node_service::authenticate_no
 - node_registration_tokens        (all rows for the org)
 - node_service_bindings           (all rows owned by the org -- includes bindings to personal nodes)
 - soft-deleted credential nodes   (is_active = false)
+- soft-deleted custom catalog services (created_by == org, is_active = false)
+- service_endpoints                (all rows whose service_id belonged to the org)
+- service_provider_requirements    (all rows whose service_id belonged to the org)
 - user_provider_credentials       (all rows for the org -- cascade-only, see note)
 - org_memberships (all rows for the org)
 - org_invites    (all rows for the org, redeemed or pending)
 ```
 
-These rows are dead state once the org is gone — no API call could read or mutate them again. Cascading them stops the database from accumulating orphans referencing the deleted org user_id. Three collections key off something other than `user_id` and need a snapshot-then-delete pattern:
+These rows are dead state once the org is gone — no API call could read or mutate them again. Cascading them stops the database from accumulating orphans referencing the deleted org user_id. Four collections key off something other than `user_id` and need a snapshot-then-delete pattern:
 
 - **`channel_event_logs`** keys off `conversation_id`. The cascade snapshots the org's conversation ids first, then issues `delete_many({ conversation_id: $in: [...] })`. Without that ordering the logs would lose their only path back to the org.
 - **`service_account_tokens`** keys off `service_account_id`. The cascade snapshots the org's owned `service_accounts._id` set first, then issues `delete_many({ service_account_id: $in: [...] })`. The standard `service_account_service::delete_service_account` path only marks tokens as `revoked: true` rather than deleting them, so without this cascade the token rows would outlive the org. Mirrors the same cleanup that `admin_user_service::delete_user` already does for normal person users.
 - **SA-owned `user_provider_tokens`** reuse the same SA-id snapshot. `UserProviderToken.user_id` is overloaded to hold either a real user_id or a service-account id (admin-on-behalf provider connect stores tokens under `sa.id` — see `handlers/admin_sa_providers`). After the snapshot is collected, the cascade also issues `delete_many({ user_id: { $in: sa_ids } })` against `user_provider_tokens`, plus the same against `oauth_states.user_id` / `oauth_states.target_user_id` to clean up any in-flight admin-on-behalf flows.
+- **`service_endpoints` and `service_provider_requirements`** key off `service_id`. The cascade snapshots the org's owned `downstream_services._id` set first, then issues `delete_many({ service_id: $in: [...] })` against both child collections. Without that ordering the children would survive the parent service tombstones forever and remain reachable via `endpoints.rs` lookups that gate on `service.created_by` (which now resolves to a deleted user).
 
 **OAuth callback race.** Provider connect flows store an `OAuthState` row at initiation time and consume it at callback / device-code-poll time. If a callback for an org-targeted flow lands *after* `delete_org_user` started, it could otherwise mint a fresh `user_provider_tokens` row owned by the about-to-be-deleted org. We close that race in two layers:
 

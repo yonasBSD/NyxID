@@ -164,31 +164,35 @@ pub async fn update_org_user(
 /// **Blockers** (must be empty before deletion proceeds): *active*
 /// user services / legacy service connections / NyxID API keys /
 /// service accounts / developer OAuth clients / channel bots /
-/// channel conversations / credential nodes (all soft-deleted via
-/// `is_active = false`), *non-revoked* provider tokens, hard-deleted
-/// endpoints / external API keys / per-service approval configs,
-/// *active* approval grants, and *pending* approval requests. The
-/// soft-delete filters are critical here -- without them, an org
-/// that ever had a service would be permanently undeletable, because
-/// the soft-deleted row stays in the collection forever.
+/// channel conversations / credential nodes / custom catalog
+/// services (all soft-deleted via `is_active = false`), *non-revoked*
+/// provider tokens, hard-deleted endpoints / external API keys /
+/// per-service approval configs, *active* approval grants, and
+/// *pending* approval requests. The soft-delete filters are critical
+/// here -- without them, an org that ever had a service would be
+/// permanently undeletable, because the soft-deleted row stays in
+/// the collection forever.
 ///
 /// **Cascaded** (deleted alongside the org user record): memberships,
 /// invites, decided approval requests (approved/rejected/expired),
 /// expired/revoked approval grants, soft-deleted blocker tombstones
 /// (user services, legacy service connections, API keys, service
-/// accounts, OAuth clients, bots, conversations, nodes), agent
-/// service bindings, service-account tokens and SA-owned provider
-/// tokens (joined through the org's owned SA ids), oauth_states for
-/// in-flight provider connect flows (matched on `user_id` OR
-/// `target_user_id` for org-targeted flows), all `user_provider_tokens`
-/// owned by the org (closes the in-flight OAuth callback race),
-/// channel messages, channel event logs (joined through the org's
-/// conversation ids), OpenClaw channel mappings, the notification
-/// channel row, all node registration tokens, all node service
-/// bindings owned by the org, and user-provided OAuth client
-/// credentials. These rows are dead state once the org is gone; no
-/// API call could ever read or mutate them again. The audit log lives
-/// in its own collection and survives intact.
+/// accounts, OAuth clients, bots, conversations, nodes, custom
+/// catalog services), `service_endpoints` and
+/// `service_provider_requirements` joined through the org's owned
+/// downstream service ids, agent service bindings, service-account
+/// tokens and SA-owned provider tokens (joined through the org's
+/// owned SA ids), oauth_states for in-flight provider connect flows
+/// (matched on `user_id` OR `target_user_id` for org-targeted flows),
+/// all `user_provider_tokens` owned by the org (closes the in-flight
+/// OAuth callback race), channel messages, channel event logs
+/// (joined through the org's conversation ids), OpenClaw channel
+/// mappings, the notification channel row, all node registration
+/// tokens, all node service bindings owned by the org, and
+/// user-provided OAuth client credentials. These rows are dead state
+/// once the org is gone; no API call could ever read or mutate them
+/// again. The audit log lives in its own collection and survives
+/// intact.
 pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppResult<()> {
     let _ = get_org_user(db, org_user_id).await?;
 
@@ -302,6 +306,20 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
             // and its bindings; the agent fails on next heartbeat.
             doc! { "user_id": org_user_id, "is_active": true },
             "credential nodes",
+        ),
+        (
+            crate::models::downstream_service::COLLECTION_NAME,
+            // Custom catalog entries created via `POST /services` by
+            // an org-owned API key. Soft-deleted via `is_active =
+            // false`. An *active* row stays visible to every other
+            // authenticated user via the normal `/services` listing
+            // (the visibility filter doesn't depend on the creator
+            // being alive), and once the org user is gone the
+            // built-in `require_admin_or_creator` cleanup gate fails
+            // for everyone except a global admin. Force the admin to
+            // call `DELETE /services/{id}` first.
+            doc! { "created_by": org_user_id, "is_active": true },
+            "custom catalog services",
         ),
     ];
 
@@ -483,6 +501,45 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
     db.collection::<bson::Document>(crate::models::user_provider_credentials::COLLECTION_NAME)
         .delete_many(doc! { "user_id": org_user_id })
         .await?;
+    // Custom catalog services created via `POST /services` by an
+    // org-owned API key. Active rows are blocked above, so what's
+    // left here is soft-deleted tombstones plus their child
+    // `service_endpoints` and `service_provider_requirements` rows
+    // (which key off `service_id`, not `created_by`).
+    //
+    // Snapshot owned downstream service ids BEFORE deleting the
+    // tombstones, then use the snapshot to clean up the children.
+    // Without that ordering the children would lose their only path
+    // back to the org. Mirrors the `channel_event_logs` and
+    // `service_account_tokens` patterns above.
+    let owned_service_ids: Vec<String> = db
+        .collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
+        .distinct("_id", doc! { "created_by": org_user_id })
+        .await?
+        .into_iter()
+        .filter_map(|value| match value {
+            bson::Bson::String(id) => Some(id),
+            _ => None,
+        })
+        .collect();
+    db.collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
+        .delete_many(doc! { "created_by": org_user_id, "is_active": false })
+        .await?;
+    if !owned_service_ids.is_empty() {
+        let svc_id_array: Vec<bson::Bson> = owned_service_ids
+            .iter()
+            .cloned()
+            .map(bson::Bson::String)
+            .collect();
+        db.collection::<bson::Document>(crate::models::service_endpoint::COLLECTION_NAME)
+            .delete_many(doc! { "service_id": { "$in": &svc_id_array } })
+            .await?;
+        db.collection::<bson::Document>(
+            crate::models::service_provider_requirement::COLLECTION_NAME,
+        )
+        .delete_many(doc! { "service_id": { "$in": &svc_id_array } })
+        .await?;
+    }
     // Channel relay state. Active rows are blocked above, so what's left
     // here is soft-deleted bot/conversation tombstones plus any
     // append-only message and event-log records that referenced them.
