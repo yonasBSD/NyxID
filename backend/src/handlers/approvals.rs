@@ -653,15 +653,23 @@ pub struct ServiceApprovalConfigQuery {
     pub org_id: Option<String>,
 }
 
-/// Resolve the effective `user_id` for a service approval config
-/// operation. Without `?org_id`, the actor manages their own personal
-/// configs. With `?org_id=X`, the actor must be an admin of X and the
-/// operation targets X's configs.
+/// Resolve the effective `user_id` *and* the caller's `OwnerAccess` for
+/// a service approval config operation.
+///
+/// Without `?org_id`, the actor manages their own personal configs and
+/// `OwnerAccess::Direct` is returned (always passes scope checks).
+///
+/// With `?org_id=X`, the actor must be an admin of X. Returned access
+/// carries the membership's `allowed_service_ids` so per-service scope
+/// gating can run on the catalog id passed in the path. Without that
+/// scope check a scoped admin (`allowed_service_ids = [svc-A]`) could
+/// otherwise toggle the policy on svc-B, bypassing the scope model the
+/// rest of the org-aware handlers enforce.
 async fn resolve_service_config_owner(
     state: &AppState,
     actor: &str,
     org_id: Option<&str>,
-) -> AppResult<String> {
+) -> AppResult<(String, crate::services::org_service::OwnerAccess)> {
     if let Some(org) = org_id {
         let access =
             crate::services::org_service::resolve_owner_access(&state.db, actor, org).await?;
@@ -671,10 +679,49 @@ async fn resolve_service_config_owner(
                     .to_string(),
             ));
         }
-        Ok(org.to_string())
+        Ok((org.to_string(), access))
     } else {
-        Ok(actor.to_string())
+        Ok((
+            actor.to_string(),
+            crate::services::org_service::OwnerAccess::Direct,
+        ))
     }
+}
+
+/// Apply the org membership scope to a single approval-config target.
+/// Translates the catalog `service_id` to the underlying `UserService.id`s
+/// (which is what `OrgMembership.allowed_service_ids` actually stores) and
+/// then runs `allows_any_resource`. Returns `Forbidden` for out-of-scope
+/// targets and `NotFound` when no `UserService` exists yet (an orphan
+/// catalog row -- safer to require an unscoped admin to create the first
+/// policy on it).
+async fn ensure_service_config_in_scope(
+    db: &mongodb::Database,
+    access: &crate::services::org_service::OwnerAccess,
+    owner_user_id: &str,
+    catalog_service_id: &str,
+) -> AppResult<()> {
+    // Direct owners (personal scope) skip the lookup entirely.
+    if matches!(access, crate::services::org_service::OwnerAccess::Direct) {
+        return Ok(());
+    }
+    let user_service_ids = crate::services::user_service_service::user_service_ids_for_catalog(
+        db,
+        owner_user_id,
+        catalog_service_id,
+    )
+    .await?;
+    if user_service_ids.is_empty() {
+        return Err(AppError::NotFound(
+            "no UserService for this catalog id under the target owner".to_string(),
+        ));
+    }
+    if !access.allows_any_resource(&user_service_ids) {
+        return Err(AppError::OrgRoleInsufficient(
+            "your org admin role is scoped to other services and cannot manage this approval policy".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 // --- Per-service approval config handlers ---
@@ -689,21 +736,37 @@ pub async fn list_service_configs(
     Query(query): Query<ServiceApprovalConfigQuery>,
 ) -> AppResult<Json<ServiceApprovalConfigsResponse>> {
     let actor = auth_user.user_id.to_string();
-    let user_id = resolve_service_config_owner(&state, &actor, query.org_id.as_deref()).await?;
+    let (user_id, access) =
+        resolve_service_config_owner(&state, &actor, query.org_id.as_deref()).await?;
 
     let configs = approval_service::list_service_approval_configs(&state.db, &user_id).await?;
 
-    let items: Vec<ServiceApprovalConfigItem> = configs
-        .into_iter()
-        .map(|c| ServiceApprovalConfigItem {
+    // Filter to the membership scope so a scoped admin only sees policies
+    // for services they actually manage. Direct owners short-circuit and
+    // see everything.
+    let mut items: Vec<ServiceApprovalConfigItem> = Vec::with_capacity(configs.len());
+    for c in configs {
+        if !matches!(access, crate::services::org_service::OwnerAccess::Direct) {
+            let user_service_ids =
+                crate::services::user_service_service::user_service_ids_for_catalog(
+                    &state.db,
+                    &user_id,
+                    &c.service_id,
+                )
+                .await?;
+            if !access.allows_any_resource(&user_service_ids) {
+                continue;
+            }
+        }
+        items.push(ServiceApprovalConfigItem {
             service_id: c.service_id,
             service_name: c.service_name,
             approval_required: c.approval_required,
             approval_mode: c.approval_mode,
             created_at: c.created_at.to_rfc3339(),
             updated_at: c.updated_at.to_rfc3339(),
-        })
-        .collect();
+        });
+    }
 
     Ok(Json(ServiceApprovalConfigsResponse { configs: items }))
 }
@@ -720,7 +783,8 @@ pub async fn set_service_config(
     Json(body): Json<SetServiceApprovalConfigRequest>,
 ) -> AppResult<Json<ServiceApprovalConfigItem>> {
     let actor = auth_user.user_id.to_string();
-    let user_id = resolve_service_config_owner(&state, &actor, query.org_id.as_deref()).await?;
+    let (user_id, access) =
+        resolve_service_config_owner(&state, &actor, query.org_id.as_deref()).await?;
 
     if body.approval_required.is_none() && body.approval_mode.is_none() {
         return Err(AppError::ValidationError(
@@ -735,6 +799,10 @@ pub async fn set_service_config(
         .find_one(mongodb::bson::doc! { "_id": &service_id, "is_active": true })
         .await?
         .ok_or_else(|| AppError::NotFound("Service not found".to_string()))?;
+
+    // Per-service scope check: scoped admins can only manage policies for
+    // services in their `allowed_service_ids` set.
+    ensure_service_config_in_scope(&state.db, &access, &user_id, &service_id).await?;
 
     let config = approval_service::set_service_approval_config(
         &state.db,
@@ -784,7 +852,11 @@ pub async fn delete_service_config(
     Query(query): Query<ServiceApprovalConfigQuery>,
 ) -> AppResult<Json<MessageResponse>> {
     let actor = auth_user.user_id.to_string();
-    let user_id = resolve_service_config_owner(&state, &actor, query.org_id.as_deref()).await?;
+    let (user_id, access) =
+        resolve_service_config_owner(&state, &actor, query.org_id.as_deref()).await?;
+
+    // Per-service scope check, same as set_service_config.
+    ensure_service_config_in_scope(&state.db, &access, &user_id, &service_id).await?;
 
     approval_service::delete_service_approval_config(&state.db, &user_id, &service_id).await?;
 

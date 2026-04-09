@@ -359,6 +359,10 @@ All routes are under `/api/v1`. Org-aware mutation handlers gate on the new `org
 | `PATCH` | `/orgs/{id}/members/{member_user_id}` | org admin | Change role or `allowed_service_ids` |
 | `DELETE` | `/orgs/{id}/members/{member_user_id}` | org admin | Revoke membership |
 
+**Last-admin guard.** `PATCH` and `DELETE` on a member refuse to remove the last active admin. An admin who tries to demote or revoke themselves while they are the only admin gets `409 Conflict` with the message "cannot remove or demote the last active admin". The intent is to keep the org recoverable: `DELETE /orgs/{id}` also requires a current admin and would otherwise leave any owned services / keys / policies stranded. Admins who actually want to dissolve the org must `DELETE /orgs/{id}` instead, which cascades memberships once the live blockers are clear.
+
+`POST /orgs` rejects org-owned actors with `OrgCannotAuthenticate` (an org-owned API key cannot create an org), and rolls back the org user insert if the membership-create step fails for any other reason — no matter what, no zero-admin org row is ever left behind.
+
 ### Invites
 
 | Method | Path | Auth | Purpose |
@@ -369,6 +373,8 @@ All routes are under `/api/v1`. Org-aware mutation handlers gate on the new `org
 | `POST` | `/orgs/join/{nonce}` | session | Redeem an invite — caller joins the org |
 
 Invites carry their own `role` and optional `allowed_service_ids`. Once redeemed, the invite is marked `redeemed_by` + `redeemed_at` and the corresponding `OrgMembership` is created (or reactivated if a revoked row exists for the same pair).
+
+**`ttl_hours` is bounded server-side** to `1..=720` (30 days, mirroring the web schema cap). The CLI enforces the same bound as a fail-fast UX. Out-of-range values get `400 ValidationError` instead of falling through to `chrono::Duration::hours`, which panics on integers that don't fit its internal representation.
 
 ### Personal multi-org tiebreaker
 
@@ -569,6 +575,10 @@ If `list_admin_user_ids` returns empty (e.g. the last admin removed themselves),
 3. Otherwise → `Forbidden`.
 
 `notify_user_ids` is **not** consulted here. It is a routing hint captured at creation time and would otherwise let an admin who has since been removed or demoted decide outstanding requests. Live admin status is the only check.
+
+### Service-config CRUD scope
+
+`PUT` / `DELETE` / `GET` on `/approvals/service-configs/{service_id}?org_id=X` enforce the same per-service scope as the decide path. After confirming the actor is an admin of the target org, the handler translates the catalog id in the URL to the underlying `UserService.id`s via `user_service_service::user_service_ids_for_catalog` and checks `OwnerAccess::allows_any_resource`. A scoped admin (`allowed_service_ids = [svc-A]`) gets `OrgRoleInsufficient` when they try to set or delete a policy on `svc-B`. The list endpoint applies the same scope as a filter so a scoped admin only ever sees policies they manage.
 
 ### Grant ownership
 

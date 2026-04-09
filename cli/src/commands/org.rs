@@ -504,6 +504,12 @@ async fn create_invite(
         body["allowed_service_ids"] = serde_json::json!(ids);
     }
     if let Some(hours) = ttl_hours {
+        // Mirror the server-side bound (1..=720, see
+        // `backend/src/handlers/orgs.rs::ORG_INVITE_MAX_TTL_HOURS`) so the
+        // CLI fails fast with a clear message instead of a 400 round-trip.
+        if !(1..=24 * 30).contains(&hours) {
+            anyhow::bail!("--ttl-hours must be between 1 and 720 (30 days)");
+        }
         body["ttl_hours"] = serde_json::json!(hours);
     }
 

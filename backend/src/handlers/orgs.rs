@@ -28,6 +28,14 @@ use crate::models::user::User;
 use crate::mw::auth::AuthUser;
 use crate::services::{audit_service, org_invite_service, org_service};
 
+/// Maximum invite TTL accepted by `POST /orgs/{id}/invites` and the
+/// matching CLI command. Mirrors the 30-day bound the web schema enforces
+/// (`frontend/src/schemas/orgs.ts::createInviteRequestSchema`). Bound at
+/// the API boundary so non-web callers can't slip an out-of-range integer
+/// past `chrono::Duration::hours`, which panics on values that overflow
+/// the internal representation.
+const ORG_INVITE_MAX_TTL_HOURS: i64 = 24 * 30;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Wire types
 // ─────────────────────────────────────────────────────────────────────────────
@@ -240,6 +248,30 @@ async fn require_org_member(
     m.ok_or(AppError::OrgMembershipRequired)
 }
 
+/// Reject if removing the given member's admin role would leave the org
+/// with zero active admins. The check counts admins *other than* the
+/// target so a single-admin org cannot dissolve itself by self-demote or
+/// self-revocation. Admins who really want to dispose of the org must go
+/// through `DELETE /orgs/{id}`, which cascades memberships once live
+/// resources are cleared.
+async fn ensure_not_last_admin(
+    db: &mongodb::Database,
+    org_user_id: &str,
+    target_member_user_id: &str,
+) -> AppResult<()> {
+    let admins = org_service::list_admin_user_ids(db, org_user_id).await?;
+    let other_admins = admins
+        .iter()
+        .filter(|id| id.as_str() != target_member_user_id)
+        .count();
+    if other_admins == 0 {
+        return Err(AppError::Conflict(
+            "cannot remove or demote the last active admin of this org. Promote another member to admin first, or delete the org via DELETE /orgs/{id}.".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Handlers: Org CRUD
 // ─────────────────────────────────────────────────────────────────────────────
@@ -247,6 +279,18 @@ async fn require_org_member(
 /// POST /api/v1/orgs
 ///
 /// Create a new org. Caller becomes the first admin member.
+///
+/// The actor must be a person user. The `/orgs` route is in the
+/// human-only router (`api_v1_human_only`) which rejects delegated and
+/// service-account tokens, but it still allows API-key auth -- and an
+/// API key may be owned by an org. We reject those upfront so we never
+/// get to the membership-create step that would otherwise leave a
+/// freshly inserted org user with zero admins.
+///
+/// As defense-in-depth, the handler ALSO rolls back the org user insert
+/// if the membership-create step fails for any other reason. Without
+/// that, a partial failure would leave a zero-admin org behind that
+/// nobody could reach -- delete_org also requires a current admin.
 pub async fn create_org(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -257,6 +301,15 @@ pub async fn create_org(
 
     let actor = auth_user.user_id.to_string();
 
+    // Reject org-owned actors (API keys whose owner is an org user).
+    let actor_user = state
+        .db
+        .collection::<User>(crate::models::user::COLLECTION_NAME)
+        .find_one(mongodb::bson::doc! { "_id": &actor })
+        .await?
+        .ok_or_else(|| AppError::Unauthorized("actor user not found".to_string()))?;
+    crate::services::auth_service::ensure_person_user(&actor_user)?;
+
     let org = org_service::create_org_user(
         &state.db,
         &body.display_name,
@@ -265,9 +318,37 @@ pub async fn create_org(
     )
     .await?;
 
-    // Add the creator as Admin.
-    let membership =
-        org_service::create_membership(&state.db, &org.id, &actor, OrgRole::Admin, None).await?;
+    // Add the creator as Admin. If this fails (network blip, race, etc.)
+    // roll back the org user insert so we never leave behind an org with
+    // no admins. The membership-create call is the only step between the
+    // org user insert and the audit log; if it succeeds the org is
+    // recoverable, if it fails we restore the pre-insert state.
+    let membership = match org_service::create_membership(
+        &state.db,
+        &org.id,
+        &actor,
+        OrgRole::Admin,
+        None,
+    )
+    .await
+    {
+        Ok(m) => m,
+        Err(create_err) => {
+            if let Err(rollback_err) = state
+                .db
+                .collection::<User>(crate::models::user::COLLECTION_NAME)
+                .delete_one(mongodb::bson::doc! { "_id": &org.id })
+                .await
+            {
+                tracing::error!(
+                    org_user_id = %org.id,
+                    error = %rollback_err,
+                    "Failed to roll back org user after membership-create failure; manual cleanup required"
+                );
+            }
+            return Err(create_err);
+        }
+    };
 
     audit_service::log_async(
         state.db.clone(),
@@ -498,6 +579,17 @@ pub async fn update_member(
         .await?
         .ok_or_else(|| AppError::NotFound("active membership not found".to_string()))?;
 
+    // Last-admin guard: refuse to demote the last active admin away from
+    // the Admin role. Without this, an admin could brick the org by
+    // self-demoting (DELETE /orgs/{id} also requires an admin, so the org
+    // -- and any resources it still owns -- becomes unrecoverable).
+    if let Some(new_role_wire) = body.role.as_ref() {
+        let new_role: OrgRole = (*new_role_wire).into();
+        if current.role == OrgRole::Admin && new_role != OrgRole::Admin {
+            ensure_not_last_admin(&state.db, &org_id, &member_id).await?;
+        }
+    }
+
     let updated = org_service::update_membership(
         &state.db,
         &current.id,
@@ -534,10 +626,17 @@ pub async fn remove_member(
     let actor = auth_user.user_id.to_string();
     require_org_admin(&state.db, &actor, &org_id).await?;
 
-    // An admin removing themselves is allowed but warns -- they may end up
-    // with no admin in the org. The frontend should confirm this before
-    // calling the endpoint. Backend does not enforce a "last admin" rule
-    // because admins may want to dissolve an org.
+    // Last-admin guard: revoking the last active admin would leave the
+    // org unrecoverable -- DELETE /orgs/{id} also requires an admin, so
+    // any owned resources (services, keys, policies) get stranded.
+    // Admins who want to dissolve an org must `DELETE /orgs/{id}` first,
+    // which cascades memberships once the live blockers are clear.
+    let target = org_service::get_active_membership(&state.db, &org_id, &member_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("active membership not found".to_string()))?;
+    if target.role == OrgRole::Admin {
+        ensure_not_last_admin(&state.db, &org_id, &member_id).await?;
+    }
 
     org_service::revoke_membership(&state.db, &org_id, &member_id).await?;
 
@@ -572,7 +671,20 @@ pub async fn create_invite(
     let actor = auth_user.user_id.to_string();
     require_org_admin(&state.db, &actor, &org_id).await?;
 
-    let ttl = body.ttl_hours.map(chrono::Duration::hours);
+    // Bound `ttl_hours` server-side. The web schema caps it at 30 days but
+    // raw API / CLI callers reach this without that gate, and
+    // `chrono::Duration::hours` panics on i64 values that don't fit, so a
+    // hostile or accidental large integer would crash the process. Reject
+    // anything outside (0, 720] hours with a structured error.
+    let ttl = match body.ttl_hours {
+        None => None,
+        Some(h) if (1..=ORG_INVITE_MAX_TTL_HOURS).contains(&h) => Some(chrono::Duration::hours(h)),
+        Some(_) => {
+            return Err(AppError::ValidationError(format!(
+                "ttl_hours must be between 1 and {ORG_INVITE_MAX_TTL_HOURS} (30 days)"
+            )));
+        }
+    };
 
     let invite = org_invite_service::create_invite(
         &state.db,
