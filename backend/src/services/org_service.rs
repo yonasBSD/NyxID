@@ -163,18 +163,23 @@ pub async fn update_org_user(
 ///
 /// **Blockers** (must be empty before deletion proceeds): *active*
 /// user services / NyxID API keys / service accounts / developer OAuth
-/// clients (all soft-deleted via `is_active = false`), *non-revoked*
-/// provider tokens, hard-deleted endpoints / external API keys /
-/// per-service approval configs, *active* approval grants, and
-/// *pending* approval requests. The soft-delete filters are critical
-/// here -- without them, an org that ever had a service would be
-/// permanently undeletable, because the soft-deleted row stays in the
-/// collection forever.
+/// clients / channel bots / channel conversations (all soft-deleted
+/// via `is_active = false`), *non-revoked* provider tokens, hard-deleted
+/// endpoints / external API keys / per-service approval configs,
+/// *active* approval grants, and *pending* approval requests. The
+/// soft-delete filters are critical here -- without them, an org that
+/// ever had a service would be permanently undeletable, because the
+/// soft-deleted row stays in the collection forever.
 ///
 /// **Cascaded** (deleted alongside the org user record): memberships,
-/// invites, decided approval requests (approved/rejected/expired), and
-/// expired/revoked approval grants. These rows are dead state once the
-/// org is gone; no API call could ever read or mutate them again.
+/// invites, decided approval requests (approved/rejected/expired),
+/// expired/revoked approval grants, soft-deleted blocker tombstones
+/// (user services, API keys, service accounts, OAuth clients, bots,
+/// conversations), revoked provider tokens, channel messages, and
+/// channel event logs (joined through the org's conversation ids).
+/// These rows are dead state once the org is gone; no API call could
+/// ever read or mutate them again. The audit log lives in its own
+/// collection and survives intact.
 pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppResult<()> {
     let _ = get_org_user(db, org_user_id).await?;
 
@@ -248,6 +253,26 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
             doc! { "created_by": org_user_id, "is_active": true },
             "developer OAuth clients",
         ),
+        (
+            crate::models::channel_bot::COLLECTION_NAME,
+            // Soft-deleted via `is_active = false`. Active bots have a
+            // live platform webhook pointing at this NyxID instance --
+            // the admin must `DELETE /channel-bots/{id}` first so the
+            // webhook is deregistered on the platform side. After org
+            // deletion there's no API path that can do that cleanup,
+            // so we refuse to leave a dangling integration behind.
+            doc! { "user_id": org_user_id, "is_active": true },
+            "channel bots",
+        ),
+        (
+            crate::models::channel_conversation::COLLECTION_NAME,
+            // Soft-deleted via `is_active = false`. Conversations are
+            // routing rules; an active row is reachable to inbound
+            // webhooks even after the bot itself is deactivated, so
+            // the admin must clean these up alongside the bots.
+            doc! { "user_id": org_user_id, "is_active": true },
+            "channel conversations",
+        ),
     ];
 
     let mut blockers: Vec<String> = Vec::new();
@@ -307,6 +332,42 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
         .await?;
     db.collection::<bson::Document>(crate::models::oauth_client::COLLECTION_NAME)
         .delete_many(doc! { "created_by": org_user_id, "is_active": false })
+        .await?;
+    // Channel relay state. Active rows are blocked above, so what's left
+    // here is soft-deleted bot/conversation tombstones plus any
+    // append-only message and event-log records that referenced them.
+    //
+    // Snapshot conversation_ids BEFORE deleting the conversations, then
+    // use the snapshot to delete `channel_event_logs` (which key off
+    // `conversation_id`, not `user_id`). Without this, deleting the
+    // conversations first would leave the event log with no way back to
+    // the org -- it'd accumulate forever.
+    let conv_ids: Vec<String> = db
+        .collection::<crate::models::channel_conversation::ChannelConversation>(
+            crate::models::channel_conversation::COLLECTION_NAME,
+        )
+        .find(doc! { "user_id": org_user_id })
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?
+        .into_iter()
+        .map(|c| c.id)
+        .collect();
+    if !conv_ids.is_empty() {
+        let conv_id_array: Vec<bson::Bson> =
+            conv_ids.iter().cloned().map(bson::Bson::String).collect();
+        db.collection::<bson::Document>(crate::models::channel_event_log::COLLECTION_NAME)
+            .delete_many(doc! { "conversation_id": { "$in": &conv_id_array } })
+            .await?;
+    }
+    db.collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+        .delete_many(doc! { "user_id": org_user_id })
+        .await?;
+    db.collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+        .delete_many(doc! { "user_id": org_user_id })
+        .await?;
+    db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .delete_many(doc! { "user_id": org_user_id })
         .await?;
     // Cascade memberships
     db.collection::<OrgMembership>(ORG_MEMBERSHIPS)

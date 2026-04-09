@@ -611,9 +611,13 @@ Each blocker filter uses the same live-state semantics as the corresponding API 
 - *pending* approval requests       ({ status: "pending" })
 - *active* service accounts         ({ owner_user_id, is_active: true })
 - *active* developer OAuth clients  ({ created_by, is_active: true })
+- *active* channel bots             ({ user_id, is_active: true })
+- *active* channel conversations    ({ user_id, is_active: true })
 ```
 
 If any of these counts is non-zero, the API returns `409 Conflict` with a list (`"Cannot delete org while it still owns 3 user services, 1 NyxID API key, …"`) and the admin must clean them up first. Without this guard the org user record could disappear while orphaned resources continue to point at it, and `resolve_owner_access` would deny every read/write so nobody could clean them up.
+
+The channel-bot block is especially important. Org-owned NyxID API keys can register bots via `POST /channel-bots` (the human-only router still allows API-key auth on those routes), and the inbound-webhook handler accepts any active bot row by id without a live owner check. If we let the org disappear while a bot was still active, the platform-side webhook would keep firing forever with no way to deregister it. The blocker forces the admin to call `DELETE /channel-bots/{id}` first, which deregisters the webhook on the platform side and soft-deletes the bot + its conversations.
 
 ### Cascade-deleted (no admin action required)
 
@@ -625,11 +629,15 @@ If any of these counts is non-zero, the API returns `409 Conflict` with a list (
 - revoked provider tokens         (status = "revoked")
 - soft-deleted service accounts   (is_active = false)
 - soft-deleted developer OAuth clients (is_active = false)
+- soft-deleted channel bots       (is_active = false)
+- soft-deleted channel conversations (is_active = false)
+- channel messages                (all rows for the org)
+- channel event logs              (all rows whose conversation_id belonged to the org)
 - org_memberships (all rows for the org)
 - org_invites    (all rows for the org, redeemed or pending)
 ```
 
-These rows are dead state once the org is gone — no API call could read or mutate them again. Cascading them stops the database from accumulating orphans referencing the deleted org user_id. The audit log lives in its own collection and survives deletion intact.
+These rows are dead state once the org is gone — no API call could read or mutate them again. Cascading them stops the database from accumulating orphans referencing the deleted org user_id. `channel_event_logs` keys off `conversation_id` rather than `user_id`, so the cascade snapshots the org's conversation ids first and then deletes by id list — without that ordering, the logs would lose their only path back to the org. The audit log lives in its own collection and survives deletion intact.
 
 After cascading, the org `User` row itself is hard-deleted.
 
