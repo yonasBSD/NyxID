@@ -1,14 +1,8 @@
-<!-- TODO: Hero banner
-     Recommended: 1280x640px, dark background, NyxID logo + tagline
-     Place at: assets/banner.png
-     <p align="center">
-       <img src="assets/banner.png" alt="NyxID — Agent Connectivity Gateway" width="100%">
-     </p>
--->
+<p align="center">
+  <img src="assets/banner.png" alt="NyxID — Connect AI agents to any API, anywhere. Securely." width="100%">
+</p>
 
-# NyxID
-
-**Open-source Agent Connectivity Gateway.** Turn your localhost into an MCP server.
+**Connect AI agents to any API, anywhere. Securely.** Open-source Agent Connectivity Gateway.
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![GitHub Stars](https://img.shields.io/github/stars/ChronoAIProject/NyxID)](https://github.com/ChronoAIProject/NyxID)
@@ -17,16 +11,42 @@ NyxID lets your AI agents (Claude Code, Cursor, n8n) reach any API you have,
 public or private, and handles all the credentials so your agent never sees
 a raw key.
 
-```
-Claude Code / Cursor / n8n
-         |
-         v
-      NyxID (cloud gateway)
-         |
-    +----+----+
-    v    v    v
- Public  Internal  localhost
-  APIs    APIs     services
+```mermaid
+flowchart TD
+    %% Top clients
+    A[Claude Code]
+    B[Cursor]
+    C[n8n]
+
+    %% Gateway
+    G[NyxID<br/>Cloud Gateway]
+
+    %% Destinations
+    P[Public APIs]
+    I[Internal APIs]
+    L[Localhost Services]
+
+    %% Flows
+    A --> G
+    B --> G
+    C --> G
+
+    G --> P
+    G --> I
+    G --> L
+
+    %% Styling
+    classDef client fill:#eef2ff,stroke:#6366f1,color:#111827,stroke-width:1.5px;
+    classDef gateway fill:#0f172a,stroke:#38bdf8,color:#ffffff,stroke-width:2px;
+    classDef public fill:#eff6ff,stroke:#3b82f6,color:#111827,stroke-width:1.5px;
+    classDef internal fill:#ecfdf5,stroke:#10b981,color:#111827,stroke-width:1.5px;
+    classDef local fill:#fff7ed,stroke:#f97316,color:#111827,stroke-width:1.5px;
+
+    class A,B,C client;
+    class G gateway;
+    class P public;
+    class I internal;
+    class L local;
 ```
 
 NyxID proxies requests, injects credentials automatically, punches through
@@ -103,18 +123,26 @@ Follow the output to add NyxID to your MCP config. Your agent can now call any A
 
 NyxID's MCP transport (`/mcp`) exposes your connected services as tools automatically. Service endpoints are loaded on-demand and mapped to MCP tools you can call from any MCP client.
 
-### Reach local services (optional)
+### Reach local services — turn localhost into MCP tools (optional)
 
-Have services behind a firewall? Deploy a credential node — it makes an outbound WebSocket connection to NyxID. No port forwarding required.
+Have services behind a firewall? Deploy a credential node to punch through NAT, then expose them as MCP tools your agents can call.
 
 ```bash
+# 1. Connect a node to NyxID (outbound WebSocket, no port forwarding)
 nyxid node register --token <reg-token> --url wss://<your-server>/api/v1/nodes/ws
 nyxid node credentials add --service my-local-api --header Authorization --secret-format bearer
 nyxid node start
+
+# 2. Register the service with NyxID and link it to the node
+nyxid node credentials setup --service my-local-api --url http://localhost:8080
+
+# 3. If the service has an OpenAPI spec, import endpoints as MCP tools
+nyxid catalog endpoints my-local-api
 ```
 
 The node makes an outbound WebSocket connection to NyxID. No port forwarding.
-No VPN. Your AI agents can now reach localhost services through the tunnel.
+No VPN. Once the service is registered and endpoints are imported, your AI
+agents can call it as MCP tools through `nyxid mcp config`.
 
 ## Quick Start (with AI assistant)
 
