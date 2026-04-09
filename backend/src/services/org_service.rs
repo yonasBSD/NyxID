@@ -177,15 +177,18 @@ pub async fn update_org_user(
 /// expired/revoked approval grants, soft-deleted blocker tombstones
 /// (user services, legacy service connections, API keys, service
 /// accounts, OAuth clients, bots, conversations, nodes), agent
-/// service bindings, service-account tokens (joined through the
-/// org's owned SA ids), revoked provider tokens, channel messages,
-/// channel event logs (joined through the org's conversation ids),
-/// OpenClaw channel mappings, the notification channel row, all
-/// node registration tokens, all node service bindings owned by the
-/// org, and user-provided OAuth client credentials. These rows are
-/// dead state once the org is gone; no API call could ever read or
-/// mutate them again. The audit log lives in its own collection and
-/// survives intact.
+/// service bindings, service-account tokens and SA-owned provider
+/// tokens (joined through the org's owned SA ids), oauth_states for
+/// in-flight provider connect flows (matched on `user_id` OR
+/// `target_user_id` for org-targeted flows), all `user_provider_tokens`
+/// owned by the org (closes the in-flight OAuth callback race),
+/// channel messages, channel event logs (joined through the org's
+/// conversation ids), OpenClaw channel mappings, the notification
+/// channel row, all node registration tokens, all node service
+/// bindings owned by the org, and user-provided OAuth client
+/// credentials. These rows are dead state once the org is gone; no
+/// API call could ever read or mutate them again. The audit log lives
+/// in its own collection and survives intact.
 pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppResult<()> {
     let _ = get_org_user(db, org_user_id).await?;
 
@@ -362,16 +365,36 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
     db.collection::<bson::Document>(crate::models::agent_service_binding::COLLECTION_NAME)
         .delete_many(doc! { "user_id": org_user_id })
         .await?;
-    db.collection::<bson::Document>(crate::models::user_provider_token::COLLECTION_NAME)
-        .delete_many(doc! { "user_id": org_user_id, "status": "revoked" })
+    // OAuth states for in-flight provider connect flows. Cascade
+    // EARLY so any callback or device-code poll that arrives after
+    // this point cannot consume a still-valid state row and create a
+    // fresh `user_provider_tokens` entry for the about-to-be-deleted
+    // org. Match on either `user_id` or `target_user_id` because
+    // org-targeted flows store the org id in `target_user_id` (with
+    // `user_id` set to the human admin who initiated the flow).
+    //
+    // The matching `user_provider_tokens` cascade below uses an
+    // unfiltered `user_id` match (rather than the previous "revoked
+    // only" filter) so that any token row that managed to land in
+    // the small race window between this cascade and the user
+    // record delete still gets cleaned up.
+    db.collection::<bson::Document>(crate::models::oauth_state::COLLECTION_NAME)
+        .delete_many(doc! {
+            "$or": [
+                { "user_id": org_user_id },
+                { "target_user_id": org_user_id },
+            ],
+        })
         .await?;
     // Service accounts: snapshot owned ids BEFORE deleting the SA rows
-    // so we can clean up `service_account_tokens` afterwards. The SA
-    // delete path only marks tokens as `revoked: true` -- it doesn't
-    // remove them -- and the token rows key off `service_account_id`,
-    // not `user_id`, so once the SA row is gone there's no path back
-    // from a token to the deleted org. Mirrors the cleanup that
-    // `admin_user_service::delete_user` already does for person users.
+    // so we can clean up `service_account_tokens` AND any SA-owned
+    // `user_provider_tokens` afterwards. The SA delete path only marks
+    // SA tokens as `revoked: true` and never touches provider tokens.
+    // SA-owned provider tokens are stored with `user_id == sa_id`
+    // (see `handlers/admin_sa_providers::store_api_key` etc.), so the
+    // snapshot is the only path back to them once the SA row is gone.
+    // Mirrors the cleanup that `admin_user_service::delete_user` does
+    // for person users.
     let owned_sa_ids: Vec<String> = db
         .collection::<bson::Document>(crate::models::service_account::COLLECTION_NAME)
         .distinct("_id", doc! { "owner_user_id": org_user_id })
@@ -394,7 +417,32 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
         db.collection::<bson::Document>(crate::models::service_account_token::COLLECTION_NAME)
             .delete_many(doc! { "service_account_id": { "$in": &sa_id_array } })
             .await?;
+        // SA-owned provider tokens (user_provider_tokens.user_id is
+        // overloaded with the SA id for SA-owned connections).
+        db.collection::<bson::Document>(crate::models::user_provider_token::COLLECTION_NAME)
+            .delete_many(doc! { "user_id": { "$in": &sa_id_array } })
+            .await?;
+        // Same overload for any in-flight oauth states the SA may
+        // have started but never finished.
+        db.collection::<bson::Document>(crate::models::oauth_state::COLLECTION_NAME)
+            .delete_many(doc! {
+                "$or": [
+                    { "user_id": { "$in": &sa_id_array } },
+                    { "target_user_id": { "$in": &sa_id_array } },
+                ],
+            })
+            .await?;
     }
+    // Drop ALL provider tokens owned by the org, not just revoked ones.
+    // The blocker check above already required no non-revoked tokens at
+    // start time, so what's caught here is the union of (a) the revoked
+    // tombstones we used to clean up and (b) anything that landed in
+    // the race window between the blocker check and this cascade --
+    // most plausibly an in-flight OAuth callback that beat the
+    // `oauth_states` cascade above.
+    db.collection::<bson::Document>(crate::models::user_provider_token::COLLECTION_NAME)
+        .delete_many(doc! { "user_id": org_user_id })
+        .await?;
     db.collection::<bson::Document>(crate::models::oauth_client::COLLECTION_NAME)
         .delete_many(doc! { "created_by": org_user_id, "is_active": false })
         .await?;

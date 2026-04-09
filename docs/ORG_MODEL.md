@@ -634,7 +634,8 @@ Credential nodes are blocked for the same reason. `node_service::authenticate_no
 - soft-deleted legacy connections (is_active = false)
 - soft-deleted NyxID API keys     (is_active = false)
 - agent_service_bindings          (all rows for the org)
-- revoked provider tokens         (status = "revoked")
+- oauth_states                    (user_id OR target_user_id == org user_id, in-flight OAuth/device-code state)
+- user_provider_tokens            (ALL rows for the org user_id, plus rows whose user_id is one of the org's SA ids)
 - soft-deleted service accounts   (is_active = false)
 - service_account_tokens          (all rows whose service_account_id belonged to the org)
 - soft-deleted developer OAuth clients (is_active = false)
@@ -652,10 +653,16 @@ Credential nodes are blocked for the same reason. `node_service::authenticate_no
 - org_invites    (all rows for the org, redeemed or pending)
 ```
 
-These rows are dead state once the org is gone — no API call could read or mutate them again. Cascading them stops the database from accumulating orphans referencing the deleted org user_id. Two collections key off something other than `user_id` and need a snapshot-then-delete pattern:
+These rows are dead state once the org is gone — no API call could read or mutate them again. Cascading them stops the database from accumulating orphans referencing the deleted org user_id. Three collections key off something other than `user_id` and need a snapshot-then-delete pattern:
 
 - **`channel_event_logs`** keys off `conversation_id`. The cascade snapshots the org's conversation ids first, then issues `delete_many({ conversation_id: $in: [...] })`. Without that ordering the logs would lose their only path back to the org.
 - **`service_account_tokens`** keys off `service_account_id`. The cascade snapshots the org's owned `service_accounts._id` set first, then issues `delete_many({ service_account_id: $in: [...] })`. The standard `service_account_service::delete_service_account` path only marks tokens as `revoked: true` rather than deleting them, so without this cascade the token rows would outlive the org. Mirrors the same cleanup that `admin_user_service::delete_user` already does for normal person users.
+- **SA-owned `user_provider_tokens`** reuse the same SA-id snapshot. `UserProviderToken.user_id` is overloaded to hold either a real user_id or a service-account id (admin-on-behalf provider connect stores tokens under `sa.id` — see `handlers/admin_sa_providers`). After the snapshot is collected, the cascade also issues `delete_many({ user_id: { $in: sa_ids } })` against `user_provider_tokens`, plus the same against `oauth_states.user_id` / `oauth_states.target_user_id` to clean up any in-flight admin-on-behalf flows.
+
+**OAuth callback race.** Provider connect flows store an `OAuthState` row at initiation time and consume it at callback / device-code-poll time. If a callback for an org-targeted flow lands *after* `delete_org_user` started, it could otherwise mint a fresh `user_provider_tokens` row owned by the about-to-be-deleted org. We close that race in two layers:
+
+1. The `oauth_states` cascade runs **early** (before the user record delete) so any callback arriving after that point cannot find a state row to consume, and the callback returns a clean `BadRequest`.
+2. The `user_provider_tokens` cascade is now an **unfiltered** `delete_many({ user_id: org_user_id })` rather than the previous "revoked only" filter, so any token that managed to land in the small window between the `oauth_states` cascade and the user delete still gets cleaned up before the org user record disappears.
 
 The audit log lives in its own collection and survives deletion intact.
 
