@@ -161,10 +161,15 @@ pub async fn update_org_user(
 /// to transfer or delete the live ones first, and cascade-delete the
 /// historical state that has no meaning without the org.
 ///
-/// **Blockers** (must be empty before deletion proceeds): user services,
-/// endpoints, external API keys, NyxID API keys, provider tokens,
-/// per-service approval configs, *active* approval grants, *pending*
-/// approval requests, service accounts, developer OAuth clients.
+/// **Blockers** (must be empty before deletion proceeds): *active*
+/// user services / NyxID API keys / service accounts / developer OAuth
+/// clients (all soft-deleted via `is_active = false`), *non-revoked*
+/// provider tokens, hard-deleted endpoints / external API keys /
+/// per-service approval configs, *active* approval grants, and
+/// *pending* approval requests. The soft-delete filters are critical
+/// here -- without them, an org that ever had a service would be
+/// permanently undeletable, because the soft-deleted row stays in the
+/// collection forever.
 ///
 /// **Cascaded** (deleted alongside the org user record): memberships,
 /// invites, decided approval requests (approved/rejected/expired), and
@@ -174,36 +179,46 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
     let _ = get_org_user(db, org_user_id).await?;
 
     // (collection_name, blocker_filter, human_label)
-    // Each blocker_filter is a doc that already includes the owner check.
+    // Each blocker_filter is a doc that already includes the owner check
+    // AND the live-state filter for that collection's delete semantics
+    // (soft vs. hard). See the doc comment above for which collections
+    // use which.
     let now_bson = bson::DateTime::from_chrono(Utc::now());
     let blocker_specs: Vec<(&str, mongodb::bson::Document, &str)> = vec![
         (
             crate::models::user_service::COLLECTION_NAME,
-            doc! { "user_id": org_user_id },
+            // Soft-deleted UserServices stay in the collection with
+            // `is_active = false` -- those must NOT block deletion.
+            doc! { "user_id": org_user_id, "is_active": true },
             "user services",
         ),
         (
             crate::models::user_endpoint::COLLECTION_NAME,
+            // Hard-deleted; no live filter needed.
             doc! { "user_id": org_user_id },
             "endpoints",
         ),
         (
             crate::models::user_api_key::COLLECTION_NAME,
+            // Hard-deleted; no live filter needed.
             doc! { "user_id": org_user_id },
             "external API keys",
         ),
         (
             crate::models::api_key::COLLECTION_NAME,
-            doc! { "user_id": org_user_id },
+            // Soft-deleted via `is_active = false`.
+            doc! { "user_id": org_user_id, "is_active": true },
             "NyxID API keys",
         ),
         (
             crate::models::user_provider_token::COLLECTION_NAME,
-            doc! { "user_id": org_user_id },
+            // Soft-deleted via `status = "revoked"`.
+            doc! { "user_id": org_user_id, "status": { "$ne": "revoked" } },
             "provider tokens",
         ),
         (
             crate::models::service_approval_config::COLLECTION_NAME,
+            // Hard-deleted; no live filter needed.
             doc! { "user_id": org_user_id },
             "approval configs",
         ),
@@ -223,12 +238,14 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
         ),
         (
             crate::models::service_account::COLLECTION_NAME,
-            doc! { "owner_user_id": org_user_id },
+            // Soft-deleted via `is_active = false`.
+            doc! { "owner_user_id": org_user_id, "is_active": true },
             "service accounts",
         ),
         (
             crate::models::oauth_client::COLLECTION_NAME,
-            doc! { "created_by": org_user_id },
+            // Soft-deleted via `is_active = false`.
+            doc! { "created_by": org_user_id, "is_active": true },
             "developer OAuth clients",
         ),
     ];
@@ -270,6 +287,26 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
                 { "expires_at": { "$lte": &now_bson } },
             ],
         })
+        .await?;
+    // Cascade soft-deleted blocker rows. The live blocker check above
+    // already filtered them out, so they're tombstones referencing the
+    // about-to-be-deleted org user_id. Leaving them behind would
+    // accumulate dangling rows in MongoDB; the API can never reach
+    // them after the org user is gone.
+    db.collection::<bson::Document>(crate::models::user_service::COLLECTION_NAME)
+        .delete_many(doc! { "user_id": org_user_id, "is_active": false })
+        .await?;
+    db.collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+        .delete_many(doc! { "user_id": org_user_id, "is_active": false })
+        .await?;
+    db.collection::<bson::Document>(crate::models::user_provider_token::COLLECTION_NAME)
+        .delete_many(doc! { "user_id": org_user_id, "status": "revoked" })
+        .await?;
+    db.collection::<bson::Document>(crate::models::service_account::COLLECTION_NAME)
+        .delete_many(doc! { "owner_user_id": org_user_id, "is_active": false })
+        .await?;
+    db.collection::<bson::Document>(crate::models::oauth_client::COLLECTION_NAME)
+        .delete_many(doc! { "created_by": org_user_id, "is_active": false })
         .await?;
     // Cascade memberships
     db.collection::<OrgMembership>(ORG_MEMBERSHIPS)

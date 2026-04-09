@@ -690,11 +690,25 @@ async fn resolve_service_config_owner(
 
 /// Apply the org membership scope to a single approval-config target.
 /// Translates the catalog `service_id` to the underlying `UserService.id`s
-/// (which is what `OrgMembership.allowed_service_ids` actually stores) and
-/// then runs `allows_any_resource`. Returns `Forbidden` for out-of-scope
-/// targets and `NotFound` when no `UserService` exists yet (an orphan
-/// catalog row -- safer to require an unscoped admin to create the first
-/// policy on it).
+/// (which is what `OrgMembership.allowed_service_ids` actually stores)
+/// and then runs `allows_any_resource`.
+///
+/// Orphan handling matches the list filter exactly so that any config
+/// an admin can *see* is also a config they can *delete*:
+///
+/// - **Unscoped admins** (membership `allowed_service_ids = None`) pass
+///   through orphans because `allows_any_resource(&[])` returns `true`
+///   for unscoped roles. This is what lets an admin remove a stale
+///   org policy whose backing `UserService` was already deleted.
+/// - **Scoped admins** (`allowed_service_ids = Some(...)`) deny orphans
+///   because `allows_any_resource(&[])` returns `false` -- they have no
+///   concrete claim to a service that doesn't exist.
+///
+/// Without the symmetric handling, an admin could land here from
+/// `list_service_configs` (which uses `allows_any_resource` directly,
+/// so unscoped sees orphans), see a stale config, and then hit
+/// `404 NotFound` from a stricter delete path. The list and delete
+/// paths must agree.
 async fn ensure_service_config_in_scope(
     db: &mongodb::Database,
     access: &crate::services::org_service::OwnerAccess,
@@ -711,11 +725,6 @@ async fn ensure_service_config_in_scope(
         catalog_service_id,
     )
     .await?;
-    if user_service_ids.is_empty() {
-        return Err(AppError::NotFound(
-            "no UserService for this catalog id under the target owner".to_string(),
-        ));
-    }
     if !access.allows_any_resource(&user_service_ids) {
         return Err(AppError::OrgRoleInsufficient(
             "your org admin role is scoped to other services and cannot manage this approval policy".to_string(),

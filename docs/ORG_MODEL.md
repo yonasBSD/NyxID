@@ -580,6 +580,8 @@ If `list_admin_user_ids` returns empty (e.g. the last admin removed themselves),
 
 `PUT` / `DELETE` / `GET` on `/approvals/service-configs/{service_id}?org_id=X` enforce the same per-service scope as the decide path. After confirming the actor is an admin of the target org, the handler translates the catalog id in the URL to the underlying `UserService.id`s via `user_service_service::user_service_ids_for_catalog` and checks `OwnerAccess::allows_any_resource`. A scoped admin (`allowed_service_ids = [svc-A]`) gets `OrgRoleInsufficient` when they try to set or delete a policy on `svc-B`. The list endpoint applies the same scope as a filter so a scoped admin only ever sees policies they manage.
 
+**Orphan handling is symmetric across list and delete.** When the catalog id has no backing `UserService` (e.g. the service was already removed but the policy row lingers), `allows_any_resource(&[])` is `true` for unscoped admins and `false` for scoped admins. The list filter uses that directly, and `ensure_service_config_in_scope` matches it -- so an unscoped admin can see *and* delete a stale config, while a scoped admin sees neither. Without this symmetry, an admin could see a config they couldn't remove and the org would accumulate undeletable rows.
+
 ### Grant ownership
 
 In grant mode, an approved org-policy request creates an `ApprovalGrant` under the **org's** `user_id`, not the requesting member's. The next call from any member of the same org reuses the same grant instead of triggering a fresh approval. Org admins can list / revoke org-owned grants via `?org_id=X` on the grants endpoints (or `nyxid approval grants --org <ORG_ID>`).
@@ -596,31 +598,38 @@ Org-policy decisions include `policy_owner_user_id: "<org_user_id>"` in the audi
 
 ### Live blockers (must be empty)
 
+Each blocker filter uses the same live-state semantics as the corresponding API delete path. Soft-deleted rows (those that linger in the collection with `is_active = false` or `status = "revoked"`) are NOT counted as blockers — otherwise an org that ever held a service would be permanently undeletable.
+
 ```text
-- user services
-- endpoints
-- external API keys (UserApiKey)
-- NyxID API keys (ApiKey)
-- provider tokens (UserProviderToken)
-- per-service approval configs
-- *active* approval grants (revoked = false AND expires_at > now)
-- *pending* approval requests (status = "pending")
-- service accounts
-- developer OAuth clients
+- *active* user services            ({ user_id, is_active: true })
+- endpoints                         ({ user_id })                    [hard-deleted]
+- external API keys (UserApiKey)    ({ user_id })                    [hard-deleted]
+- *active* NyxID API keys (ApiKey)  ({ user_id, is_active: true })
+- *non-revoked* provider tokens     ({ user_id, status != "revoked" })
+- per-service approval configs      ({ user_id })                    [hard-deleted]
+- *active* approval grants          ({ revoked: false, expires_at > now })
+- *pending* approval requests       ({ status: "pending" })
+- *active* service accounts         ({ owner_user_id, is_active: true })
+- *active* developer OAuth clients  ({ created_by, is_active: true })
 ```
 
-If any of these are non-zero, the API returns `409 Conflict` with a list (`"Cannot delete org while it still owns 3 user services, 1 NyxID API key, ..."`) and the admin must transfer or delete them first. Without this guard the org user record could disappear while orphaned resources continue to point at it, and `resolve_owner_access` would deny every read/write so nobody could clean them up.
+If any of these counts is non-zero, the API returns `409 Conflict` with a list (`"Cannot delete org while it still owns 3 user services, 1 NyxID API key, …"`) and the admin must clean them up first. Without this guard the org user record could disappear while orphaned resources continue to point at it, and `resolve_owner_access` would deny every read/write so nobody could clean them up.
 
 ### Cascade-deleted (no admin action required)
 
 ```text
 - decided approval requests (status in {approved, rejected, expired})
-- dead approval grants (revoked = true OR expires_at <= now)
+- dead approval grants      (revoked = true OR expires_at <= now)
+- soft-deleted user services      (is_active = false)
+- soft-deleted NyxID API keys     (is_active = false)
+- revoked provider tokens         (status = "revoked")
+- soft-deleted service accounts   (is_active = false)
+- soft-deleted developer OAuth clients (is_active = false)
 - org_memberships (all rows for the org)
-- org_invites (all rows for the org, redeemed or pending)
+- org_invites    (all rows for the org, redeemed or pending)
 ```
 
-These rows are dead state once the org is gone — no API call could read or mutate them again. The audit log lives in its own collection and survives deletion intact.
+These rows are dead state once the org is gone — no API call could read or mutate them again. Cascading them stops the database from accumulating orphans referencing the deleted org user_id. The audit log lives in its own collection and survives deletion intact.
 
 After cascading, the org `User` row itself is hard-deleted.
 
