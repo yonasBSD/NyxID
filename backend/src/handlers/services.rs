@@ -976,6 +976,35 @@ pub async fn delete_service(
         )
         .await?;
 
+    // OIDC services auto-create an `oauth_clients` row at registration
+    // time (see `create_service` -- the `auth_method == "oidc"` branch)
+    // and store its id in `service.oauth_client_id`. The OAuth
+    // authorize / token paths gate purely on `oauth_clients.is_active`,
+    // not on the parent service state, so without this cascade the
+    // supposedly-deleted service would keep accepting OAuth flows
+    // until someone separately discovered the generated app and
+    // deactivated it. The same dangling row would also block
+    // `delete_org_user`, which treats `oauth_clients.is_active = true`
+    // as a live blocker.
+    if let Some(client_id) = service.oauth_client_id.as_deref() {
+        state
+            .db
+            .collection::<OauthClient>(OAUTH_CLIENTS)
+            .update_one(
+                doc! { "_id": client_id },
+                doc! { "$set": {
+                    "is_active": false,
+                    "updated_at": bson::DateTime::from_chrono(now),
+                }},
+            )
+            .await?;
+        tracing::info!(
+            service_id = %service_id,
+            oauth_client_id = %client_id,
+            "OIDC OAuth client deactivated alongside service"
+        );
+    }
+
     tracing::info!(service_id = %service_id, deactivated_by = %auth_user.user_id, "Service deactivated");
 
     // CR-1: Audit log for service deletion
