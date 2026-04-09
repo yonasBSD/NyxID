@@ -261,6 +261,53 @@ nyxid proxy request <slug> <path> -m POST -d @request.json
 echo '{"prompt":"hello"}' | nyxid proxy request <slug> <path> -m POST -d -
 ```
 
+### Calling NyxID from raw HTTP (no CLI)
+
+The CLI is a thin wrapper over the NyxID HTTP API. If you're integrating
+from a service where installing the CLI isn't practical -- an automation
+runtime, a webhook handler, another language -- call the proxy endpoint
+directly. The only Authorization header the client sends is its own
+**NyxID** bearer token; NyxID handles every downstream credential
+(Lark `tenant_access_token`, OpenAI API key, GitHub PAT, etc.) entirely
+server-side.
+
+**Proxy endpoint shapes:**
+
+| Path | When to use |
+|---|---|
+| `POST/GET/... /api/v1/proxy/s/{slug}/{path}` | Slug-based, most common |
+| `POST/GET/... /api/v1/proxy/{user_service_id}/{path}` | UUID-based, when you already have the id from `GET /api/v1/keys` |
+
+**Example -- send a Lark message as a bot (no Lark token management):**
+
+```bash
+curl -X POST "https://nyx-api.chrono-ai.fun/api/v1/proxy/s/api-lark-bot/open-apis/im/v1/messages?receive_id_type=chat_id" \
+  -H "Authorization: Bearer <nyxid_access_token>" \
+  -H "Content-Type: application/json; charset=utf-8" \
+  -d '{"receive_id":"oc_xxx","msg_type":"text","content":"{\"text\":\"hello\"}"}'
+```
+
+What happens server-side on that single request:
+
+1. NyxID auth middleware validates `<nyxid_access_token>` and resolves the user.
+2. Proxy handler looks up the user's `api-lark-bot` binding and loads the catalog `token_exchange_config`.
+3. NyxID checks its in-process cache for this user's Lark `tenant_access_token`. Hit: jump to step 5.
+4. Cache miss: NyxID decrypts `{app_id, app_secret}`, POSTs to Lark's `/auth/v3/tenant_access_token/internal` server-to-server (single-flight per app, so concurrent misses coalesce), caches the result (~2h TTL with 10-min safety margin).
+5. NyxID strips the client's Authorization header, injects `Authorization: Bearer <tenant_access_token>` on the outbound request, and forwards to Lark.
+6. Lark's response is returned to the client unchanged.
+
+**Same pattern for any other service** -- OpenAI, GitHub, Twitter, etc. The client only ever sends its NyxID bearer; NyxID injects the downstream credential for each service according to the service's `auth_method` (bearer, header, body, token_exchange, ...).
+
+**Obtaining the NyxID bearer token:**
+
+- **Interactive user:** `POST /api/v1/auth/login` returns a short-lived access token (~15 min) and a refresh token (~7 days). Refresh via `POST /api/v1/auth/refresh`.
+- **Service / agent:** provision a NyxID API key via `nyxid api-key create --platform <your-platform>` and use it directly as `Authorization: Bearer nyxid_ag_...`. API keys don't expire unless rotated.
+
+**Things the client must NOT send:**
+
+- A second `Authorization` header intended for the downstream (e.g. a Lark `tenant_access_token`). The allowlist strips any forwarded Authorization header by design, and raw HTTP clients that append instead of replace (reqwest's `RequestBuilder::header`, some JVM clients) would put duplicate Authorization lines on the wire and hit Cloudflare 400 at the edge. Let NyxID inject the downstream Authorization header.
+- Downstream credentials (API keys, app secrets, tokens) in the request body or query string. NyxID already has them encrypted at rest and injects them according to the service's `auth_method`.
+
 ### Common service examples
 
 Paths below are relative to each service's base URL. Check `nyxid service show <id> --output json`
