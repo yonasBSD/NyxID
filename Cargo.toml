@@ -3,7 +3,7 @@ members = ["backend", "node-agent", "cli"]
 resolver = "2"
 
 [workspace.package]
-license = "MIT"
+license = "Apache-2.0"
 repository = "https://github.com/ChronoAIProject/NyxID"
 
 [workspace.dependencies]
