@@ -162,22 +162,24 @@ pub async fn update_org_user(
 /// historical state that has no meaning without the org.
 ///
 /// **Blockers** (must be empty before deletion proceeds): *active*
-/// user services / NyxID API keys / service accounts / developer OAuth
-/// clients / channel bots / channel conversations (all soft-deleted
-/// via `is_active = false`), *non-revoked* provider tokens, hard-deleted
-/// endpoints / external API keys / per-service approval configs,
-/// *active* approval grants, and *pending* approval requests. The
-/// soft-delete filters are critical here -- without them, an org that
-/// ever had a service would be permanently undeletable, because the
-/// soft-deleted row stays in the collection forever.
+/// user services / legacy service connections / NyxID API keys /
+/// service accounts / developer OAuth clients / channel bots /
+/// channel conversations (all soft-deleted via `is_active = false`),
+/// *non-revoked* provider tokens, hard-deleted endpoints / external
+/// API keys / per-service approval configs, *active* approval grants,
+/// and *pending* approval requests. The soft-delete filters are
+/// critical here -- without them, an org that ever had a service
+/// would be permanently undeletable, because the soft-deleted row
+/// stays in the collection forever.
 ///
 /// **Cascaded** (deleted alongside the org user record): memberships,
 /// invites, decided approval requests (approved/rejected/expired),
 /// expired/revoked approval grants, soft-deleted blocker tombstones
-/// (user services, API keys, service accounts, OAuth clients, bots,
-/// conversations), revoked provider tokens, channel messages, channel
-/// event logs (joined through the org's conversation ids), and
-/// OpenClaw channel mappings. These rows are dead state once the org
+/// (user services, legacy service connections, API keys, service
+/// accounts, OAuth clients, bots, conversations), revoked provider
+/// tokens, channel messages, channel event logs (joined through the
+/// org's conversation ids), OpenClaw channel mappings, and the
+/// notification channel row. These rows are dead state once the org
 /// is gone; no API call could ever read or mutate them again. The
 /// audit log lives in its own collection and survives intact.
 pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppResult<()> {
@@ -196,6 +198,15 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
             // `is_active = false` -- those must NOT block deletion.
             doc! { "user_id": org_user_id, "is_active": true },
             "user services",
+        ),
+        (
+            crate::models::user_service_connection::COLLECTION_NAME,
+            // Legacy pre-migration credential. Still treated as a live
+            // credential by `proxy_service::user_has_legacy_personal_connection`.
+            // Soft-deleted via `is_active = false`. The admin must call
+            // `DELETE /connections/{service_id}` first.
+            doc! { "user_id": org_user_id, "is_active": true },
+            "legacy service connections",
         ),
         (
             crate::models::user_endpoint::COLLECTION_NAME,
@@ -321,6 +332,9 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
     db.collection::<bson::Document>(crate::models::user_service::COLLECTION_NAME)
         .delete_many(doc! { "user_id": org_user_id, "is_active": false })
         .await?;
+    db.collection::<bson::Document>(crate::models::user_service_connection::COLLECTION_NAME)
+        .delete_many(doc! { "user_id": org_user_id, "is_active": false })
+        .await?;
     db.collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
         .delete_many(doc! { "user_id": org_user_id, "is_active": false })
         .await?;
@@ -380,6 +394,16 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
     // permanently undeletable.
     db.collection::<bson::Document>(crate::services::openclaw_channel_service::MAPPINGS_COLLECTION)
         .delete_many(doc! { "nyxid_user_id": org_user_id })
+        .await?;
+    // Notification channels. Cascade-only -- there's no blocker because
+    // an org user cannot meaningfully receive a notification anyway
+    // (the row is dead state from the moment it was created), and the
+    // embedded device tokens have no platform-side cleanup beyond
+    // letting FCM/APNs garbage-collect dormant subscriptions. The row
+    // would otherwise be created when an org-owned API key hits any
+    // `/notifications/*` endpoint via `get_or_create_channel`.
+    db.collection::<bson::Document>(crate::models::notification_channel::COLLECTION_NAME)
+        .delete_many(doc! { "user_id": org_user_id })
         .await?;
     // Cascade memberships
     db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
