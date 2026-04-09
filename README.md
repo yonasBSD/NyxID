@@ -90,7 +90,7 @@ NAT to reach your local services, and wraps any REST API as MCP tools.
 
 ### Hosted (closed beta, invitation only)
 
-1. Sign up at the [NyxID console](https://nyx.chrono-ai.fun/dashboard) and add the API credentials you want your agents to use. The hosted service is currently in closed beta. [Request an invite](https://github.com/ChronoAIProject/NyxID/issues/new?title=Invite+request&labels=invite-request).
+1. Sign up at the [NyxID console](https://nyx.chrono-ai.fun) and add the API credentials you want your agents to use. The hosted service is currently in closed beta. [Join the waitlist](https://nyx.chrono-ai.fun/#waitlist).
 
 2. Install the CLI and log in:
 
