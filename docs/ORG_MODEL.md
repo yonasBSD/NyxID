@@ -630,8 +630,10 @@ The channel-bot block is especially important. Org-owned NyxID API keys can regi
 - soft-deleted user services      (is_active = false)
 - soft-deleted legacy connections (is_active = false)
 - soft-deleted NyxID API keys     (is_active = false)
+- agent_service_bindings          (all rows for the org)
 - revoked provider tokens         (status = "revoked")
 - soft-deleted service accounts   (is_active = false)
+- service_account_tokens          (all rows whose service_account_id belonged to the org)
 - soft-deleted developer OAuth clients (is_active = false)
 - soft-deleted channel bots       (is_active = false)
 - soft-deleted channel conversations (is_active = false)
@@ -643,7 +645,12 @@ The channel-bot block is especially important. Org-owned NyxID API keys can regi
 - org_invites    (all rows for the org, redeemed or pending)
 ```
 
-These rows are dead state once the org is gone — no API call could read or mutate them again. Cascading them stops the database from accumulating orphans referencing the deleted org user_id. `channel_event_logs` keys off `conversation_id` rather than `user_id`, so the cascade snapshots the org's conversation ids first and then deletes by id list — without that ordering, the logs would lose their only path back to the org. The audit log lives in its own collection and survives deletion intact.
+These rows are dead state once the org is gone — no API call could read or mutate them again. Cascading them stops the database from accumulating orphans referencing the deleted org user_id. Two collections key off something other than `user_id` and need a snapshot-then-delete pattern:
+
+- **`channel_event_logs`** keys off `conversation_id`. The cascade snapshots the org's conversation ids first, then issues `delete_many({ conversation_id: $in: [...] })`. Without that ordering the logs would lose their only path back to the org.
+- **`service_account_tokens`** keys off `service_account_id`. The cascade snapshots the org's owned `service_accounts._id` set first, then issues `delete_many({ service_account_id: $in: [...] })`. The standard `service_account_service::delete_service_account` path only marks tokens as `revoked: true` rather than deleting them, so without this cascade the token rows would outlive the org. Mirrors the same cleanup that `admin_user_service::delete_user` already does for normal person users.
+
+The audit log lives in its own collection and survives deletion intact.
 
 `openclaw_channel_mappings` is intentionally **cascade-only**, not a blocker. NyxID never registers anything with OpenClaw — the user manually pastes the per-mapping webhook secret into their OpenClaw plugin, and the inbound webhook handler resolves the mapping by `(channel, channel_user_id)` plus an HMAC check against the stored secret hash. After cascade-delete, the next inbound webhook fails the lookup (or the HMAC) and the user re-creates the mapping if they still want it. There is no `DELETE /integrations/openclaw/mappings` endpoint either, so promoting this to a blocker would render any org with a mapping permanently undeletable.
 
