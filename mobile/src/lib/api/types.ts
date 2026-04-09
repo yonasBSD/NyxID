@@ -53,7 +53,29 @@ export type PushTokenRegisterResponse = {
 };
 
 export type NotificationSettings = {
+  telegram_connected: boolean;
+  telegram_username: string | null;
+  telegram_enabled: boolean;
+  approval_required: boolean;
+  approval_timeout_secs: number;
   grant_expiry_days: number;
+  push_enabled: boolean;
+  push_device_count: number;
+};
+
+export type TelegramLinkInfo = {
+  link_code: string;
+  bot_username: string;
+  expires_in_secs: number;
+  instructions: string;
+};
+
+export type UpdateNotificationSettingsInput = {
+  telegram_enabled?: boolean;
+  push_enabled?: boolean;
+  approval_required?: boolean;
+  approval_timeout_secs?: number;
+  grant_expiry_days?: number;
 };
 
 export type SubmitDecisionOptions = {
@@ -69,6 +91,7 @@ export type AccountProfile = {
   mfa_enabled: boolean;
   is_admin: boolean;
   is_active: boolean;
+  social_provider?: string | null;
   created_at: string;
   last_login_at?: string | null;
 };

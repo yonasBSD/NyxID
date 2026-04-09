@@ -398,6 +398,7 @@ Every endpoint listed below already accepted a single `user_id`. With the org mo
 | `GET /approvals/service-configs?org_id=` | query param | List org-level approval policies |
 | `PUT /approvals/service-configs/{service_id}?org_id=` | query param | Set an org-level approval policy |
 | `DELETE /approvals/service-configs/{service_id}?org_id=` | query param | Remove an org-level approval policy |
+| `GET /llm/status` | (implicit) | Walks the actor's personal credentials *and* every non-viewer org membership; reports the best-available status (`ready` > `expired` > `not_connected`) per provider so org-shared LLM credentials surface in the dashboard |
 
 The CredentialSource discriminator on `GET /user-services` and `GET /keys` (see [Org-Owned Resources](#org-owned-resources)) is what lets clients distinguish personal items from org-inherited ones in a single response.
 

@@ -1,17 +1,19 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import FontAwesome from "@expo/vector-icons/FontAwesome";
 import * as WebBrowser from "expo-web-browser";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
-import { ActivityIndicator, Linking, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Linking, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import type { RootStackParamList } from "../../app/AppNavigator";
-import { MobileStatusBar } from "../../components/MobileStatusBar";
+
 import { ScreenContainer } from "../../components/ScreenContainer";
 import { SectionBadge } from "../../components/SectionBadge";
 import { ToastKind, ToastOverlay, ToastState } from "../../components/ToastOverlay";
 import { mobileApi } from "../../lib/api/mobileApi";
 import { useAuthSession } from "./AuthSessionContext";
-import { mobileTheme } from "../../theme/mobileTheme";
-import { flowStyles } from "../../theme/flowStyles";
+import { IS_DEV_BUILD } from "../../lib/env";
+import { useTheme } from "../../theme/ThemeContext";
+import type { ThemeColors } from "../../theme/mobileTheme";
+import { createFlowStyles } from "../../theme/flowStyles";
 import { radius, spacing, typeScale } from "../../theme/designTokens";
 
 type SocialProvider = "google" | "github" | "apple";
@@ -106,6 +108,8 @@ function SocialAuthButton({
   loading?: boolean;
   onPress: () => void;
 }) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
   const iconName = provider === "google" ? "google" : provider === "github" ? "github" : "apple";
   const iconColor = "#F9FAFB";
 
@@ -124,9 +128,15 @@ function SocialAuthButton({
 }
 
 export function AuthHomeScreen({ navigation }: Props) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+  const flowStyles = useMemo(() => createFlowStyles(colors), [colors]);
   const [isSocialAuthPending, setIsSocialAuthPending] = useState(false);
   const [pendingSocialProvider, setPendingSocialProvider] = useState<SocialProvider | null>(null);
   const [toast, setToast] = useState<ToastState | null>(null);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [isEmailAuthPending, setIsEmailAuthPending] = useState(false);
   const { signInWithSession } = useAuthSession();
   const isMountedRef = useRef(true);
   const lastHandledSocialUrlRef = useRef<string | null>(null);
@@ -260,15 +270,34 @@ export function AuthHomeScreen({ navigation }: Props) {
     }
   };
 
+  const handleEmailLogin = async () => {
+    if (isEmailAuthPending || !email.trim() || !password) return;
+    setIsEmailAuthPending(true);
+    setToast(null);
+    try {
+      const result = await mobileApi.loginWithPassword({ email: email.trim(), password });
+      await signInWithSession({
+        accessToken: result.accessToken,
+        refreshToken: result.refreshToken,
+        accessTokenExpiresAt: Date.now() + Math.floor(result.expiresIn * 1000),
+      });
+    } catch (error) {
+      showToast(resolveAuthError(error), "error");
+    } finally {
+      if (isMountedRef.current) {
+        setIsEmailAuthPending(false);
+      }
+    }
+  };
+
   return (
     <ScreenContainer>
-      <MobileStatusBar />
       <ScrollView
         style={flowStyles.content}
-        contentContainerStyle={[flowStyles.scrollContent, styles.scrollContentExtra]}
+        contentContainerStyle={[flowStyles.scrollContent, styles.scrollContentExtra, { paddingHorizontal: spacing.xxl }]}
         showsVerticalScrollIndicator={false}
       >
-        <SectionBadge label="SOCIAL ONLY" tone="info" />
+        <SectionBadge label={IS_DEV_BUILD ? "DEV MODE" : "SOCIAL ONLY"} tone="info" />
         <Text style={flowStyles.title}>Continue to NyxID</Text>
         <Text style={flowStyles.subtitle}>Use Google, GitHub, or Apple to continue.</Text>
 
@@ -295,6 +324,48 @@ export function AuthHomeScreen({ navigation }: Props) {
             onPress={() => void startSocialLogin("apple")}
           />
 
+          {IS_DEV_BUILD && (
+            <>
+              <View style={styles.dividerRow}>
+                <View style={styles.dividerLine} />
+                <Text style={styles.dividerText}>OR</Text>
+                <View style={styles.dividerLine} />
+              </View>
+              <TextInput
+                style={styles.devInput}
+                placeholder="Email"
+                placeholderTextColor={colors.textMuted}
+                value={email}
+                onChangeText={setEmail}
+                keyboardType="email-address"
+                autoCapitalize="none"
+                autoComplete="email"
+                editable={!isEmailAuthPending}
+              />
+              <TextInput
+                style={styles.devInput}
+                placeholder="Password"
+                placeholderTextColor={colors.textMuted}
+                value={password}
+                onChangeText={setPassword}
+                secureTextEntry
+                editable={!isEmailAuthPending}
+              />
+              <Pressable
+                onPress={() => void handleEmailLogin()}
+                disabled={isEmailAuthPending || !email.trim() || !password}
+                style={[styles.devSignInButton, (isEmailAuthPending || !email.trim() || !password) && styles.socialAuthButtonDisabled]}
+              >
+                <View style={styles.socialAuthContent}>
+                  {isEmailAuthPending ? (
+                    <ActivityIndicator size="small" color="#F9FAFB" />
+                  ) : null}
+                  <Text style={styles.socialAuthText}>{isEmailAuthPending ? "Signing in..." : "Sign In"}</Text>
+                </View>
+              </Pressable>
+            </>
+          )}
+
           <Text style={styles.legal}>
             By continuing, you agree to{" "}
             <Text style={styles.legalLink} onPress={() => navigation.navigate("TermsOfService")}>
@@ -316,7 +387,7 @@ export function AuthHomeScreen({ navigation }: Props) {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (c: ThemeColors) => StyleSheet.create({
   scrollContentExtra: {
     paddingBottom: spacing.xxxl,
   },
@@ -337,6 +408,41 @@ const styles = StyleSheet.create({
     ...typeScale.caption,
     fontSize: 11,
     textDecorationLine: "underline",
+  },
+  dividerRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginVertical: spacing.sm,
+  },
+  dividerLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: c.border,
+  },
+  dividerText: {
+    color: c.textMuted,
+    ...typeScale.caption,
+    fontSize: 11,
+    marginHorizontal: spacing.sm,
+  },
+  devInput: {
+    backgroundColor: c.cardSoft,
+    borderColor: c.border,
+    borderWidth: 1,
+    borderRadius: radius.md,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.lg,
+    color: c.textPrimary,
+    ...typeScale.caption,
+    fontSize: 13,
+  },
+  devSignInButton: {
+    backgroundColor: c.primary,
+    borderRadius: radius.md,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.lg,
+    alignItems: "center",
+    justifyContent: "center",
   },
   socialAuthButton: {
     backgroundColor: "#0F1422",

@@ -1,3 +1,4 @@
+import { ApiError } from "./ApiError";
 import {
   clearStoredAuthSession,
   loadStoredAuthSession,
@@ -14,11 +15,13 @@ import {
   PageResponse,
   PushTokenRegisterRequest,
   PushTokenRegisterResponse,
+  TelegramLinkInfo,
+  UpdateNotificationSettingsInput,
 } from "./types";
 
 const DEFAULT_API_BASE_URL = "http://localhost:3001/api/v1";
 const DEFAULT_CHALLENGE_DURATION_SEC = 24 * 60 * 60;
-const CHALLENGE_PAGE_SIZE = 100;
+const ACTIVITY_PAGE_SIZE = 20;
 const REFRESH_CONFLICT_RETRY_COUNT = 1;
 const REFRESH_CONFLICT_RETRY_DELAY_MS = 160;
 const PROACTIVE_REFRESH_BUFFER_MS = 2 * 60 * 1000;
@@ -135,9 +138,7 @@ type MessageResponse = {
   message: string;
 };
 
-type BackendNotificationSettingsResponse = {
-  grant_expiry_days: number;
-};
+type BackendNotificationSettingsResponse = NotificationSettings;
 
 function getApiBaseUrl(): string {
   const rawBaseUrl = process.env.EXPO_PUBLIC_API_BASE_URL ?? DEFAULT_API_BASE_URL;
@@ -170,21 +171,24 @@ async function readJsonSafely(response: Response): Promise<unknown> {
   }
 }
 
-function stringifyErrorPayload(payload: unknown, status: number): string {
+function buildApiError(payload: unknown, status: number): ApiError | Error {
   if (payload && typeof payload === "object") {
-    if ("error" in payload && typeof payload.error === "string") {
-      return payload.error;
-    }
-    if ("message" in payload && typeof payload.message === "string") {
-      return payload.message;
-    }
+    const obj = payload as Record<string, unknown>;
+    const errorKey = typeof obj.error === "string" ? obj.error : `request_failed_${status}`;
+    const errorCode = typeof obj.error_code === "number" ? obj.error_code : 0;
+    const message =
+      typeof obj.message === "string" && obj.message.length > 0
+        ? obj.message
+        : errorKey;
+
+    return new ApiError({ errorKey, errorCode, statusCode: status, message });
   }
 
   if (typeof payload === "string" && payload.length > 0) {
-    return payload;
+    return new Error(payload);
   }
 
-  return `request_failed_${status}`;
+  return new Error(`request_failed_${status}`);
 }
 
 function computeAccessTokenExpiresAt(expiresInSec: number): number | undefined {
@@ -373,7 +377,6 @@ async function requestRefreshAccessToken(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ refresh_token: refreshToken, client: "mobile" }),
-      credentials: "include",
     });
 
     const payload = await readJsonSafely(response);
@@ -467,7 +470,7 @@ export async function refreshAccessTokenIfNeeded(): Promise<boolean> {
   return Boolean(refreshed);
 }
 
-async function requestJson<T>(path: string, options: RequestOptions = {}): Promise<T> {
+export async function requestJson<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const method = options.method ?? "GET";
   const requiresAuth = options.requiresAuth ?? true;
   const retryOnAuthFailure = options.retryOnAuthFailure ?? true;
@@ -495,7 +498,6 @@ async function requestJson<T>(path: string, options: RequestOptions = {}): Promi
       method,
       headers,
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
-      credentials: "include",
     });
 
   let response = await send();
@@ -518,7 +520,7 @@ async function requestJson<T>(path: string, options: RequestOptions = {}): Promi
         await clearStoredAuthSession();
       }
     }
-    throw new Error(stringifyErrorPayload(payload, response.status));
+    throw buildApiError(payload, response.status);
   }
 
   return payload as T;
@@ -526,7 +528,7 @@ async function requestJson<T>(path: string, options: RequestOptions = {}): Promi
 
 async function listPendingApprovalRequests(
   page = 1,
-  perPage = CHALLENGE_PAGE_SIZE
+  perPage = ACTIVITY_PAGE_SIZE
 ): Promise<BackendApprovalRequestsResponse> {
   return requestJson<BackendApprovalRequestsResponse>(
     `/approvals/requests?status=pending&page=${page}&per_page=${perPage}`
@@ -534,12 +536,28 @@ async function listPendingApprovalRequests(
 }
 
 export async function getNotificationSettingsRequest(): Promise<NotificationSettings> {
-  const response = await requestJson<BackendNotificationSettingsResponse>(
-    "/notifications/settings"
-  );
-  return {
-    grant_expiry_days: response.grant_expiry_days,
-  };
+  return requestJson<NotificationSettings>("/notifications/settings");
+}
+
+export async function updateNotificationSettingsRequest(
+  body: UpdateNotificationSettingsInput
+): Promise<NotificationSettings> {
+  return requestJson<NotificationSettings>("/notifications/settings", {
+    method: "PUT",
+    body,
+  });
+}
+
+export async function telegramLinkRequest(): Promise<TelegramLinkInfo> {
+  return requestJson<TelegramLinkInfo>("/notifications/telegram/link", {
+    method: "POST",
+  });
+}
+
+export async function telegramDisconnectRequest(): Promise<{ message: string }> {
+  return requestJson<{ message: string }>("/notifications/telegram", {
+    method: "DELETE",
+  });
 }
 
 export async function loginWithPasswordRequest(payload: LoginRequest): Promise<LoginResponse> {
@@ -561,8 +579,32 @@ export async function registerWithPasswordRequest(
   });
 }
 
-export async function listChallengesRequest(): Promise<PageResponse<ChallengeDetail>> {
-  const response = await listPendingApprovalRequests(1, CHALLENGE_PAGE_SIZE);
+export async function listChallengesRequest(
+  page = 1,
+  perPage = ACTIVITY_PAGE_SIZE
+): Promise<PageResponse<ChallengeDetail>> {
+  const response = await listPendingApprovalRequests(page, perPage);
+  return {
+    items: response.requests.map(mapBackendRequestToChallenge),
+    total: response.total,
+    page: response.page,
+    per_page: response.per_page,
+  };
+}
+
+export async function listApprovalRequestsRequest(params?: {
+  status?: string;
+  page?: number;
+  per_page?: number;
+}): Promise<PageResponse<ChallengeDetail>> {
+  const qs = new URLSearchParams();
+  if (params?.status) qs.set("status", params.status);
+  qs.set("page", String(params?.page ?? 1));
+  qs.set("per_page", String(params?.per_page ?? 20));
+
+  const response = await requestJson<BackendApprovalRequestsResponse>(
+    `/approvals/requests?${qs.toString()}`
+  );
   return {
     items: response.requests.map(mapBackendRequestToChallenge),
     total: response.total,
@@ -578,7 +620,8 @@ export async function getChallengeRequest(challengeId: string): Promise<Challeng
     );
     return mapBackendRequestToChallenge(item);
   } catch (error) {
-    if (error instanceof Error && error.message === "not_found") {
+    if ((error instanceof ApiError && error.errorKey === "not_found") ||
+        (error instanceof Error && error.message === "not_found")) {
       throw new Error("challenge_not_found");
     }
     throw error;
@@ -611,9 +654,12 @@ export async function submitChallengeDecisionRequest(
   };
 }
 
-export async function listApprovalsRequest(): Promise<PageResponse<ApprovalItem>> {
+export async function listApprovalsRequest(
+  page = 1,
+  perPage = ACTIVITY_PAGE_SIZE
+): Promise<PageResponse<ApprovalItem>> {
   const response = await requestJson<BackendApprovalGrantsResponse>(
-    "/approvals/grants?page=1&per_page=100"
+    `/approvals/grants?page=${page}&per_page=${perPage}`
   );
 
   return {

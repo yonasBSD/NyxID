@@ -262,6 +262,53 @@ nyxid proxy request <slug> <path> -m POST -d @request.json
 echo '{"prompt":"hello"}' | nyxid proxy request <slug> <path> -m POST -d -
 ```
 
+### Calling NyxID from raw HTTP (no CLI)
+
+The CLI is a thin wrapper over the NyxID HTTP API. If you're integrating
+from a service where installing the CLI isn't practical -- an automation
+runtime, a webhook handler, another language -- call the proxy endpoint
+directly. The only Authorization header the client sends is its own
+**NyxID** bearer token; NyxID handles every downstream credential
+(Lark `tenant_access_token`, OpenAI API key, GitHub PAT, etc.) entirely
+server-side.
+
+**Proxy endpoint shapes:**
+
+| Path | When to use |
+|---|---|
+| `POST/GET/... /api/v1/proxy/s/{slug}/{path}` | Slug-based, most common |
+| `POST/GET/... /api/v1/proxy/{user_service_id}/{path}` | UUID-based, when you already have the id from `GET /api/v1/keys` |
+
+**Example -- send a Lark message as a bot (no Lark token management):**
+
+```bash
+curl -X POST "https://nyx-api.chrono-ai.fun/api/v1/proxy/s/api-lark-bot/open-apis/im/v1/messages?receive_id_type=chat_id" \
+  -H "Authorization: Bearer <nyxid_access_token>" \
+  -H "Content-Type: application/json; charset=utf-8" \
+  -d '{"receive_id":"oc_xxx","msg_type":"text","content":"{\"text\":\"hello\"}"}'
+```
+
+What happens server-side on that single request:
+
+1. NyxID auth middleware validates `<nyxid_access_token>` and resolves the user.
+2. Proxy handler looks up the user's `api-lark-bot` binding and loads the catalog `token_exchange_config`.
+3. NyxID checks its in-process cache for this user's Lark `tenant_access_token`. Hit: jump to step 5.
+4. Cache miss: NyxID decrypts `{app_id, app_secret}`, POSTs to Lark's `/auth/v3/tenant_access_token/internal` server-to-server (single-flight per app, so concurrent misses coalesce), caches the result (~2h TTL with 10-min safety margin).
+5. NyxID strips the client's Authorization header, injects `Authorization: Bearer <tenant_access_token>` on the outbound request, and forwards to Lark.
+6. Lark's response is returned to the client unchanged.
+
+**Same pattern for any other service** -- OpenAI, GitHub, Twitter, etc. The client only ever sends its NyxID bearer; NyxID injects the downstream credential for each service according to the service's `auth_method` (bearer, header, body, token_exchange, ...).
+
+**Obtaining the NyxID bearer token:**
+
+- **Interactive user:** `POST /api/v1/auth/login` returns a short-lived access token (~15 min) and a refresh token (~7 days). Refresh via `POST /api/v1/auth/refresh`.
+- **Service / agent:** provision a NyxID API key via `nyxid api-key create --platform <your-platform>` and use it directly as `Authorization: Bearer nyxid_ag_...`. API keys don't expire unless rotated.
+
+**Things the client must NOT send:**
+
+- A second `Authorization` header intended for the downstream (e.g. a Lark `tenant_access_token`). The allowlist strips any forwarded Authorization header by design, and raw HTTP clients that append instead of replace (reqwest's `RequestBuilder::header`, some JVM clients) would put duplicate Authorization lines on the wire and hit Cloudflare 400 at the edge. Let NyxID inject the downstream Authorization header.
+- Downstream credentials (API keys, app secrets, tokens) in the request body or query string. NyxID already has them encrypted at rest and injects them according to the service's `auth_method`.
+
 ### Common service examples
 
 Paths below are relative to each service's base URL. Check `nyxid service show <id> --output json`
@@ -747,16 +794,23 @@ nyxid proxy request api-telegram-bot getWebhookInfo -m POST -d '{}'
 # NyxID adds it for you. `setWebhook` is correct; `bot/setWebhook` would
 # forward as `bot<token>/bot/setWebhook` and Telegram returns 404.
 
-# Lark bot (tenant token exchange via body injection)
+# Lark bot (tenant token exchange is fully automatic)
 nyxid service add api-lark-bot
-# CLI prompts for app_secret. Then to get a tenant_access_token:
-nyxid proxy request api-lark-bot /open-apis/auth/v3/tenant_access_token/internal \
-  -m POST -d '{"app_id":"cli_xxx"}'
-# NyxID merges {app_secret: "..."} into the body server-side. Returns a
-# 2-hour tenant_access_token which the caller caches and uses as a Bearer
-# token for subsequent Lark API calls. Your app_secret never leaves NyxID.
+# CLI prompts for app_id AND app_secret. NyxID stores both encrypted and
+# handles the tenant_access_token exchange transparently on every call.
+# Just hit the Lark API path directly -- no manual token management:
+nyxid proxy request api-lark-bot /open-apis/im/v1/chats -m GET
 
-# Feishu bot (China region — same as Lark Bot)
+nyxid proxy request api-lark-bot /open-apis/im/v1/messages \
+  -m POST \
+  -H "Content-Type: application/json; charset=utf-8" \
+  -d '{"receive_id":"oc_xxx","msg_type":"text","content":"{\"text\":\"hello\"}"}'
+
+# NyxID caches the tenant_access_token in-process (~2h TTL) and single-
+# flights refreshes per app, so concurrent requests never produce
+# duplicate exchanges. Your app_secret never leaves NyxID.
+
+# Feishu bot (China region — same flow, same automatic token exchange)
 nyxid service add api-feishu-bot
 
 # Discord bot (Bot prefix in Authorization header, persistent token)
@@ -767,23 +821,72 @@ nyxid proxy request api-discord-bot /channels/{channel_id}/messages \
 # NyxID adds `Authorization: Bot <your_token>` automatically.
 ```
 
+### If Lark/Feishu bot calls fail, recreate the binding
+
+If `nyxid proxy request api-lark-bot ...` (or `api-feishu-bot`) returns
+errors like **"Missing access token for authorization"**, **"token_exchange
+auth method requires token_exchange_config"**, or any `99991xxx` Lark
+error that shouldn't happen given your setup, your binding is probably
+stuck on the **old body-injection shape** from an earlier NyxID version.
+
+**In both the old and new flows, your `app_secret` is stored encrypted
+on NyxID and never leaves the server after registration.** The only
+thing that changed is how NyxID uses it:
+
+- **Old flow:** NyxID stored only `app_secret`. The *caller* had to
+  explicitly hit `/open-apis/auth/v3/tenant_access_token/internal`; the
+  proxy merged `app_secret` into that request body server-side, handed
+  back a `tenant_access_token`, and the caller was then responsible for
+  caching it and attaching `Authorization: Bearer ...` to every
+  subsequent Lark call.
+- **New flow:** NyxID stores `app_id` **and** `app_secret` together
+  (JSON blob, same AES-256 encryption). NyxID calls the exchange
+  endpoint itself server-to-server, caches the `tenant_access_token`
+  in-process with single-flight dedup, and injects the Bearer header on
+  every outbound Lark request. Callers just hit the real API path.
+
+Older bindings only contain `app_secret` without `app_id`, so the new
+transparent-exchange path can't use them. Fix by deleting the binding
+and re-adding -- this prompts for both fields and stores them in the
+new shape:
+
+```bash
+# List your bindings and find the stale one (grab its id)
+nyxid service list --output json | jq '.keys[] | select(.slug == "api-lark-bot") | {id, label}'
+
+# Delete it (replace <id> with the id from the previous command; --yes
+# skips the confirmation prompt so this works in agent contexts)
+nyxid service delete <id> --yes
+
+# Re-add -- the new prompt asks for BOTH app_id and app_secret
+nyxid service add api-lark-bot
+
+# Verify the new binding works (should return chats, not a missing-token error)
+nyxid proxy request api-lark-bot /open-apis/im/v1/chats -m GET
+```
+
+You're just re-registering the same secret you already gave NyxID the
+first time -- it travels once from your terminal to NyxID over HTTPS,
+gets re-encrypted at rest, and then stays there. The same recreation
+steps apply to `api-feishu-bot`.
+
 ### Picking the right service for the job
 
 | Slug | Purpose |
 |---|---|
 | `api-lark` | Lark API as a logged-in user (OAuth) |
-| `api-lark-bot` | Lark API as a bot (tenant token exchange) |
+| `api-lark-bot` | Lark API as a bot (automatic tenant token exchange) |
 | `api-feishu` | Feishu API as a logged-in user (OAuth) |
-| `api-feishu-bot` | Feishu API as a bot (tenant token exchange) |
+| `api-feishu-bot` | Feishu API as a bot (automatic tenant token exchange) |
 | `api-telegram-bot` | Telegram Bot API |
 | `api-discord` | Discord API as a logged-in user (OAuth) |
 | `api-discord-bot` | Discord API as a bot (persistent bot token) |
 
-## Channel Bot Relay (DEPRECATED)
+## Channel Bot Relay
 
-> **Deprecated.** Channel mode is being phased out (see ChronoAIProject/NyxID#191). Use the bot-capable service connections above for credentials, and let your agent runtime handle inbound webhooks. This section is kept for users still on the old flow.
+NyxID can bridge messaging platforms (Telegram, Discord, Lark, Feishu) to AI agent callback URLs. Users register their own bots, configure conversation-to-agent routing, and NyxID handles webhook reception, message normalization, and delivery to the agent.
 
-NyxID can bridge messaging platforms (Telegram, Discord, Lark, Feishu) to AI agent callback URLs. Users register their own bots, configure conversation-to-agent routing, and NyxID handles webhook reception, message normalization, and reply delivery.
+NyxID is a **pure passthrough gateway** (ADR-013): it never stores message bodies or attachments. Only routing metadata lives in NyxID; the full conversation history belongs to the downstream agent.
 
 ### Register a bot
 
@@ -844,26 +947,90 @@ For Telegram, `conversation_id` is the `chat.id` (a number like `-1001234567890`
 
 1. User sends message on Telegram/Discord/Lark/Feishu
 2. Platform webhook delivers to NyxID
-3. NyxID verifies signature, resolves route, stores inbound message
-4. NyxID POSTs normalized payload to agent's `callback_url` (with HMAC signature)
-5. Agent replies synchronously (200 + body) or asynchronously (202, then `POST /channel-relay/reply`)
-6. NyxID sends reply back to the platform chat
+3. NyxID verifies signature, resolves route, writes a metadata-only record (per ADR-013, no text or attachments are persisted)
+4. NyxID POSTs the normalized payload to the agent's `callback_url` with an HMAC signature
+5. **Agent must return 202.** Sync replies (200 + body) are no longer supported — any body on a 200 is silently discarded
+6. Agent processes asynchronously, then POSTs the reply to `/channel-relay/reply`
+7. NyxID delivers the reply to the platform chat
 
-The callback payload includes both normalized fields (`content.text`, `sender`, etc.) and the full `raw_platform_data` (original Telegram/Discord/Lark JSON). Most agents use the normalized fields; agents that need platform-specific features (inline keyboards, embeds, interactive cards) can read `raw_platform_data` directly.
+The callback payload includes normalized fields (`content.text`, `sender`, etc.) and the full `raw_platform_data` (original Telegram/Discord/Lark JSON). The callback is the **only** place the message body exists inside NyxID — it's built in-memory from the live webhook parse and once the callback returns, NyxID retains nothing but metadata.
 
 ### Agent-facing endpoints (API-key authenticated)
 
 ```bash
-# Async reply (agent sends response after processing)
+# Async reply — this is the only way for an agent to respond
 POST /api/v1/channel-relay/reply
 { "message_id": "<inbound-msg-id>", "reply": { "text": "..." } }
 
-# Message history
+# Message history (metadata only — `text` and `attachments` are NOT returned per ADR-013)
 GET /api/v1/channel-relay/messages/<conversation_id>?page=1&per_page=50
 
 # Resolve platform sender to NyxID user
 GET /api/v1/channel-relay/resolve-sender?platform=telegram&platform_id=12345
 ```
+
+> **ADR-013 note:** `GET /channel-relay/messages/...` returns only routing metadata (direction, platform, sender ids, delivery status, timestamps). Agents that need conversation bodies must retain their own history.
+
+## HTTP Event Gateway — device/analyzer events
+
+NyxID also accepts push-mode events from external devices and analyzers on the same channel infrastructure. The envelope is converted to a `CallbackPayload` with `platform = "device"` and forwarded through the agent's `callback_url` just like a chat message.
+
+**Endpoint:** `POST /api/v1/channel-events/{conversation_id}`
+**Auth:** Bearer API key (`nyxid_ag_...`) bound to the target conversation
+**Storage:** Metadata only. Event payloads are never persisted (ADR-013).
+**Retry:** None. NyxID is a pure passthrough — the client decides what to do on failure.
+**Rate limit:** 100 events/second per conversation (default, configurable).
+**Idempotency:** Best-effort — same `event_id` within 5 minutes is deduplicated.
+
+### Envelope
+
+```json
+{
+  "event_id": "550e8400-e29b-41d4-a716-446655440000",
+  "source": "camera-analyzer",
+  "type": "person_detected",
+  "timestamp": "2026-04-08T12:00:00Z",
+  "payload": { "room": "living_room", "confidence": 0.95 },
+  "metadata": { "analyzer_version": "1.0" }
+}
+```
+
+### CLI
+
+```bash
+# Push a device event from a shell script
+nyxid channel-event push \
+  --conversation-id <CONVERSATION_ID> \
+  --source camera-analyzer \
+  --type person_detected \
+  --payload-json '{"room":"living_room","confidence":0.95}'
+```
+
+### curl
+
+```bash
+curl -X POST https://<your-nyxid>/api/v1/channel-events/<CONVERSATION_ID> \
+  -H "Authorization: Bearer nyxid_ag_..." \
+  -H "Content-Type: application/json" \
+  -d '{
+    "event_id": "550e8400-e29b-41d4-a716-446655440000",
+    "source": "camera-analyzer",
+    "type": "person_detected",
+    "timestamp": "2026-04-08T12:00:00Z",
+    "payload": {"room": "living_room", "confidence": 0.95}
+  }'
+```
+
+### Response codes
+
+| Status | Meaning |
+|---|---|
+| 200 | Accepted (delivered) or deduplicated |
+| 400 | Invalid envelope shape |
+| 401 | Missing/invalid bearer, or API key is not bound to the conversation |
+| 404 | Conversation not found |
+| 429 | Per-channel rate limit exceeded |
+| 502 | Downstream agent unreachable or returned non-2xx |
 
 ## OpenClaw Integration
 

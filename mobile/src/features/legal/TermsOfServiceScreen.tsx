@@ -1,12 +1,13 @@
+import { useMemo } from "react";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
-import { ScrollView, StyleSheet, Text, View } from "react-native";
+import { ScrollView, StyleSheet, Text, View, type ViewStyle } from "react-native";
 import { RootStackParamList } from "../../app/AppNavigator";
-import { MobileStatusBar } from "../../components/MobileStatusBar";
-import { PrimaryButton } from "../../components/PrimaryButton";
+
+import { BlurBackButton } from "../../components/BlurBackButton";
 import { ScreenContainer } from "../../components/ScreenContainer";
-import { SectionBadge } from "../../components/SectionBadge";
-import { flowStyles } from "../../theme/flowStyles";
-import { mobileTheme } from "../../theme/mobileTheme";
+import { useTheme } from "../../theme/ThemeContext";
+import type { ThemeColors } from "../../theme/mobileTheme";
+import { createFlowStyles } from "../../theme/flowStyles";
 import { spacing, typeScale } from "../../theme/designTokens";
 
 type Props = NativeStackScreenProps<RootStackParamList, "TermsOfService">;
@@ -124,15 +125,20 @@ const TERMS_SECTIONS: TermsSection[] = [
 ];
 
 export function TermsOfServiceScreen({ navigation }: Props) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+  const flowStyles = useMemo(() => createFlowStyles(colors), [colors]);
+
   return (
     <ScreenContainer>
-      <MobileStatusBar />
+      <View style={styles.stickyBack}>
+        <BlurBackButton onPress={() => navigation.goBack()} />
+      </View>
       <ScrollView
         style={flowStyles.content}
-        contentContainerStyle={[flowStyles.scrollContent, styles.scrollContentExtra]}
+        contentContainerStyle={[flowStyles.scrollContent, styles.scrollContentExtra, { paddingHorizontal: spacing.xxl }]}
         showsVerticalScrollIndicator={false}
       >
-        <SectionBadge label="LEGAL" tone="warning" />
         <Text style={flowStyles.title}>Terms of Service</Text>
         <Text style={flowStyles.subtitle}>Effective date: {EFFECTIVE_DATE}</Text>
 
@@ -154,32 +160,36 @@ export function TermsOfServiceScreen({ navigation }: Props) {
           ))}
         </View>
 
-        <View style={flowStyles.actionWrap}>
-          <PrimaryButton label="Back" kind="ghost" onPress={() => navigation.goBack()} />
-        </View>
       </ScrollView>
     </ScreenContainer>
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (c: ThemeColors) => StyleSheet.create({
+  stickyBack: {
+    position: "absolute",
+    top: spacing.xxl,
+    left: spacing.xxl,
+    zIndex: 10,
+  } satisfies ViewStyle,
   scrollContentExtra: {
+    paddingTop: 64,
     paddingBottom: spacing.xxxl,
   },
   sectionWrap: {
     gap: spacing.xs,
   },
   sectionTitle: {
-    color: mobileTheme.textPrimary,
+    color: c.textPrimary,
     ...typeScale.bodyStrong,
   },
   sectionBody: {
-    color: mobileTheme.textSecondary,
+    color: c.textSecondary,
     ...typeScale.caption,
     lineHeight: 18,
   },
   bulletBody: {
-    color: mobileTheme.textSecondary,
+    color: c.textSecondary,
     ...typeScale.caption,
     lineHeight: 18,
   },

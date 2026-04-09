@@ -1321,6 +1321,7 @@ async fn execute_proxy_inner(
         identity_headers,
         delegated,
         caller_token.as_deref(),
+        &state.token_exchange_cache,
     )
     .await?;
 
