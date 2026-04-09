@@ -5,6 +5,9 @@ on:
     branches: [main, dev]
   push:
     branches: [main, dev]
+  # Allow other workflows (publish-images, release) to reuse this one as a
+  # gate via `uses: ./.github/workflows/ci.yml`.
+  workflow_call:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
