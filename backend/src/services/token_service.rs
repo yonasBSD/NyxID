@@ -7,6 +7,7 @@ use crate::crypto::jwt::{self, JwtKeys};
 use crate::crypto::token::{generate_random_token, hash_token};
 use crate::errors::{AppError, AppResult};
 use crate::models::mcp_session::McpSessionStore;
+use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
 use crate::models::refresh_token::{COLLECTION_NAME as REFRESH_TOKENS, RefreshToken};
 use crate::models::session::{COLLECTION_NAME as SESSIONS, Session};
 
@@ -303,6 +304,47 @@ pub async fn refresh_tokens(
         .find_one(doc! { "jti": &claims.jti })
         .await?
         .ok_or_else(|| AppError::Unauthorized("Refresh token not found".to_string()))?;
+
+    // Re-validate the issuing OAuth client. First-party login flows
+    // (`auth_service::login_with_password`, `refresh_session_with_token`)
+    // store `client_id = Uuid::nil()` as a sentinel and have no
+    // `OauthClient` row -- skip the lookup for those. Real OAuth clients
+    // must still exist AND be active; without this check, a refresh
+    // token minted by a developer app would remain usable forever after
+    // the app (or its owning org) is deleted, because the standard
+    // delete path is a soft-delete that leaves the row in the
+    // collection. The auth-code path already filters by `is_active`
+    // (see `oauth_service::exchange_authorization_code`), so this is
+    // the matching gate on the refresh side.
+    if stored.client_id != Uuid::nil().to_string() {
+        let client_active = db
+            .collection::<OauthClient>(OAUTH_CLIENTS)
+            .find_one(doc! { "_id": &stored.client_id, "is_active": true })
+            .await?
+            .is_some();
+        if !client_active {
+            tracing::warn!(
+                jti = %claims.jti,
+                client_id = %stored.client_id,
+                "Refresh attempt against deactivated OAuth client; revoking"
+            );
+            // Revoke the token in place so subsequent retries follow
+            // the existing reuse-detection path instead of leaking the
+            // window between deletion and the next refresh attempt.
+            db.collection::<RefreshToken>(REFRESH_TOKENS)
+                .update_one(
+                    doc! { "_id": &stored.id, "revoked": false },
+                    doc! { "$set": {
+                        "revoked": true,
+                        "revoked_at": bson::DateTime::from_chrono(Utc::now()),
+                    }},
+                )
+                .await?;
+            return Err(AppError::Unauthorized(
+                "Issuing OAuth client is no longer active".to_string(),
+            ));
+        }
+    }
 
     // If the token is revoked, check if this is a post-rotation retry
     // (client retried with old token after restart) vs actual token reuse.

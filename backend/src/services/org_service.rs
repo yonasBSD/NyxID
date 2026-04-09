@@ -182,9 +182,11 @@ pub async fn update_org_user(
 /// `service_provider_requirements` joined through the org's owned
 /// downstream service ids, agent service bindings, service-account
 /// tokens and SA-owned provider tokens (joined through the org's
-/// owned SA ids), oauth_states for in-flight provider connect flows
-/// (matched on `user_id` OR `target_user_id` for org-targeted flows),
-/// all `user_provider_tokens` owned by the org (closes the in-flight
+/// owned SA ids), refresh_tokens minted by the org's developer
+/// OAuth clients (joined through the org's owned client ids),
+/// oauth_states for in-flight provider connect flows (matched on
+/// `user_id` OR `target_user_id` for org-targeted flows), all
+/// `user_provider_tokens` owned by the org (closes the in-flight
 /// OAuth callback race), channel messages, channel event logs
 /// (joined through the org's conversation ids), OpenClaw channel
 /// mappings, the notification channel row, all node registration
@@ -461,9 +463,36 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
     db.collection::<bson::Document>(crate::models::user_provider_token::COLLECTION_NAME)
         .delete_many(doc! { "user_id": org_user_id })
         .await?;
+    // Developer OAuth clients: snapshot owned client ids BEFORE deleting
+    // the client tombstones so we can clean up `refresh_tokens` whose
+    // `client_id` references them. Without this, refresh tokens minted
+    // by an org-owned developer app would linger forever -- the live
+    // validation in `token_service::refresh_tokens` already rejects
+    // them on the next refresh attempt, so this is belt-and-suspenders
+    // cleanup that keeps the collection from accumulating dead rows.
+    let owned_oauth_client_ids: Vec<String> = db
+        .collection::<bson::Document>(crate::models::oauth_client::COLLECTION_NAME)
+        .distinct("_id", doc! { "created_by": org_user_id })
+        .await?
+        .into_iter()
+        .filter_map(|value| match value {
+            bson::Bson::String(id) => Some(id),
+            _ => None,
+        })
+        .collect();
     db.collection::<bson::Document>(crate::models::oauth_client::COLLECTION_NAME)
         .delete_many(doc! { "created_by": org_user_id, "is_active": false })
         .await?;
+    if !owned_oauth_client_ids.is_empty() {
+        let oauth_client_id_array: Vec<bson::Bson> = owned_oauth_client_ids
+            .iter()
+            .cloned()
+            .map(bson::Bson::String)
+            .collect();
+        db.collection::<bson::Document>(crate::models::refresh_token::COLLECTION_NAME)
+            .delete_many(doc! { "client_id": { "$in": &oauth_client_id_array } })
+            .await?;
+    }
     // Credential nodes. Active nodes are blocked above so what remains
     // here is soft-deleted node tombstones plus their associated
     // bindings and any outstanding registration tokens for the org.

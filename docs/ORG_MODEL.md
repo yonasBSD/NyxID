@@ -642,6 +642,7 @@ Custom catalog services (`POST /services` rows where `created_by = org_user_id`)
 - soft-deleted service accounts   (is_active = false)
 - service_account_tokens          (all rows whose service_account_id belonged to the org)
 - soft-deleted developer OAuth clients (is_active = false)
+- refresh_tokens                  (all rows whose client_id belonged to the org)
 - soft-deleted channel bots       (is_active = false)
 - soft-deleted channel conversations (is_active = false)
 - channel messages                (all rows for the org)
@@ -659,12 +660,22 @@ Custom catalog services (`POST /services` rows where `created_by = org_user_id`)
 - org_invites    (all rows for the org, redeemed or pending)
 ```
 
-These rows are dead state once the org is gone — no API call could read or mutate them again. Cascading them stops the database from accumulating orphans referencing the deleted org user_id. Four collections key off something other than `user_id` and need a snapshot-then-delete pattern:
+These rows are dead state once the org is gone — no API call could read or mutate them again. Cascading them stops the database from accumulating orphans referencing the deleted org user_id. Five collections key off something other than `user_id` and need a snapshot-then-delete pattern:
 
 - **`channel_event_logs`** keys off `conversation_id`. The cascade snapshots the org's conversation ids first, then issues `delete_many({ conversation_id: $in: [...] })`. Without that ordering the logs would lose their only path back to the org.
 - **`service_account_tokens`** keys off `service_account_id`. The cascade snapshots the org's owned `service_accounts._id` set first, then issues `delete_many({ service_account_id: $in: [...] })`. The standard `service_account_service::delete_service_account` path only marks tokens as `revoked: true` rather than deleting them, so without this cascade the token rows would outlive the org. Mirrors the same cleanup that `admin_user_service::delete_user` already does for normal person users.
 - **SA-owned `user_provider_tokens`** reuse the same SA-id snapshot. `UserProviderToken.user_id` is overloaded to hold either a real user_id or a service-account id (admin-on-behalf provider connect stores tokens under `sa.id` — see `handlers/admin_sa_providers`). After the snapshot is collected, the cascade also issues `delete_many({ user_id: { $in: sa_ids } })` against `user_provider_tokens`, plus the same against `oauth_states.user_id` / `oauth_states.target_user_id` to clean up any in-flight admin-on-behalf flows.
 - **`service_endpoints` and `service_provider_requirements`** key off `service_id`. The cascade snapshots the org's owned `downstream_services._id` set first, then issues `delete_many({ service_id: $in: [...] })` against both child collections. Without that ordering the children would survive the parent service tombstones forever and remain reachable via `endpoints.rs` lookups that gate on `service.created_by` (which now resolves to a deleted user).
+- **`refresh_tokens`** keys off `client_id` (the developer-app OAuth client that minted the refresh token). The cascade snapshots the org's owned `oauth_clients._id` set first, then issues `delete_many({ client_id: $in: [...] })`. This works in concert with the live `is_active` validation in `token_service::refresh_tokens` (see "OAuth refresh-token validation" below) — the snapshot is belt-and-suspenders cleanup so the collection doesn't accumulate dead rows.
+
+### OAuth refresh-token validation
+
+Two paths in the OAuth subsystem need a live check on the issuing client so a deleted (or org-deleted) developer app cannot keep minting user tokens:
+
+- **`oauth_service::exchange_authorization_code`** filters the OAuth client lookup by `is_active: true`. Auth codes already issued against a soft-deleted client cannot be exchanged, so the window for a stale code to mint a fresh token after delete is closed.
+- **`token_service::refresh_tokens`** re-validates the issuing client on every refresh. After loading the stored refresh-token row, when `stored.client_id != Uuid::nil()` (the first-party login sentinel), the function looks up the `OauthClient` by id with `is_active: true` and rejects with `Unauthorized` if the client is missing or deactivated. The stored refresh row is also flipped to `revoked: true` so subsequent retries follow the existing reuse-detection path. First-party login refresh flows (`auth_service::login_with_password` / `refresh_session_with_token`) bypass this check entirely because they never had an `OauthClient` row to begin with.
+
+Together, these two checks make refresh tokens minted by an org-owned developer app stop working **immediately** when the app is deleted (whether explicitly via `DELETE /developer/oauth-clients/{id}` or transitively via `DELETE /orgs/{id}`), instead of remaining valid for the JWT TTL.
 
 **OAuth callback race.** Provider connect flows store an `OAuthState` row at initiation time and consume it at callback / device-code-poll time. If a callback for an org-targeted flow lands *after* `delete_org_user` started, it could otherwise mint a fresh `user_provider_tokens` row owned by the about-to-be-deleted org. We close that race in two layers:
 
