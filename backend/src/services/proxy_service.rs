@@ -2273,4 +2273,104 @@ mod tests {
 
         server.abort();
     }
+
+    // ─── old HTTP flow regression test (PR #220 backward-compat) ─────
+
+    async fn body_capture_post(
+        State(state): State<BodyAuthCaptureState>,
+        body: Bytes,
+    ) -> StatusCode {
+        *state.captured_body.lock().unwrap() = Some(body.to_vec());
+        StatusCode::OK
+    }
+
+    #[tokio::test]
+    async fn body_auth_still_merges_secret_into_post_body_after_refactor() {
+        // Regression: the #220 refactor introduced the generic
+        // `token_exchange` auth method and migrated the `api-lark-bot`
+        // catalog row. Users who had already run `nyxid service add
+        // api-lark-bot` under #205 still have UserService rows with
+        // `auth_method: "body"` and UserApiKey rows with a raw
+        // `app_secret` string. Their existing integration hits the
+        // proxy POSTing `{"app_id": "cli_xxx"}` to the Lark token
+        // exchange endpoint and expects NyxID to merge `app_secret`
+        // into the body server-side -- that's the whole contract of
+        // the #205 body-injection flow.
+        //
+        // This test replays that exact request shape end-to-end
+        // through `forward_request` and asserts the downstream sees
+        // the merged body. If someone later rips out the body-auth
+        // arm thinking it's obsolete, this test fails.
+        let state = BodyAuthCaptureState::default();
+        let app = Router::new()
+            .route(
+                "/open-apis/auth/v3/tenant_access_token/internal",
+                post(body_capture_post),
+            )
+            .with_state(state.clone());
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test app");
+        });
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            "application/json".parse().unwrap(),
+        );
+
+        let response = forward_request(
+            &Client::new(),
+            &make_body_auth_target(format!("http://{addr}")),
+            reqwest::Method::POST,
+            "open-apis/auth/v3/tenant_access_token/internal",
+            None,
+            headers,
+            ProxyBody::Buffered(Some(bytes::Bytes::from_static(br#"{"app_id":"cli_xxx"}"#))),
+            vec![],
+            vec![],
+            None,
+            &empty_token_cache(),
+        )
+        .await
+        .expect("POST with body auth should merge credential into JSON body");
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // The downstream must see the merged body. `app_secret` comes
+        // from `make_body_auth_target` which uses "super-secret".
+        let captured_raw = state.captured_body.lock().unwrap().clone();
+        let captured_bytes = captured_raw.expect("downstream captured a body");
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&captured_bytes).expect("downstream body is valid JSON");
+        assert_eq!(parsed["app_id"], "cli_xxx");
+        assert_eq!(parsed["app_secret"], "super-secret");
+
+        server.abort();
+    }
+
+    #[test]
+    fn build_minimal_downstream_service_preserves_body_auth_method() {
+        // Regression: existing UserService rows with auth_method=body
+        // (from the #205 api-lark-bot seed) must keep their auth_method
+        // when the proxy builds the synthetic DownstreamService at
+        // request time. If the resolver accidentally promoted them to
+        // token_exchange based on the catalog row, their existing
+        // credential (raw app_secret string, not JSON) would fail to
+        // parse and the proxy would 500.
+        let mut user_service = make_user_service_token_exchange();
+        user_service.auth_method = "body".to_string();
+        user_service.auth_key_name = "app_secret".to_string();
+        let endpoint = make_endpoint();
+
+        let svc = build_minimal_downstream_service(&user_service, &endpoint, Utc::now(), None);
+
+        assert_eq!(svc.auth_method, "body");
+        assert_eq!(svc.auth_key_name, "app_secret");
+        assert!(svc.token_exchange_config.is_none());
+    }
 }
