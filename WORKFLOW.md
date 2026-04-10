@@ -139,6 +139,12 @@ pipeline:
         4. Move the issue to in-progress:
            `gh issue edit {{ issue.identifier }} --remove-label todo --add-label in-progress`
 
+        ## CRITICAL: Triage boundaries
+        - You are a TRIAGE agent. Your ONLY job is to assess, label, plan (if complex), and transition.
+        - Do NOT write code, create branches, open PRs, or implement anything.
+        - Do NOT read source files beyond what is needed to determine routing labels.
+        - Once you have added labels and moved the issue to in-progress, STOP IMMEDIATELY.
+
         {{ default_prompt }}
       transition_to: in-progress
 
