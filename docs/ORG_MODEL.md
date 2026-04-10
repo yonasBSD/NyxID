@@ -251,6 +251,8 @@ curl -H "Authorization: Bearer $TOKEN" \
 
 Access check mirrors the auto-resolution: direct owners always pass, org admins must pass `allowed_service_ids` scope, org members must also have `role.can_proxy()`, and viewers are denied. If the specified `UserService.id` doesn't exist or the actor doesn't have proxy access, the endpoint returns `404`.
 
+**Route constraint.** The selected UserService must match the service named in the URL path. The slug handler verifies `UserService.slug == {slug}` and the catalog-id handler verifies `UserService.catalog_service_id == {service_id}`. If they don't match the endpoint returns `400 BadRequest` with a clear error — this prevents a caller from using `_nyxid_via` on a `/proxy/s/llm-openai/...` URL to silently proxy through an `api-github` credential.
+
 The `_nyxid_via` query parameter is **stripped** from the forwarded request before it reaches the downstream service (via `strip_internal_query_params` in `execute_proxy_inner`). Downstream services never see NyxID routing metadata.
 
 **CLI support:** `nyxid proxy request <slug> <path> --via-service <USER_SERVICE_ID>` appends the query param automatically.

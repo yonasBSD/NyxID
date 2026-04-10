@@ -283,7 +283,7 @@ server-side.
 |---|---|
 | `POST/GET/... /api/v1/proxy/s/{slug}/{path}` | Slug-based, most common |
 | `POST/GET/... /api/v1/proxy/{user_service_id}/{path}` | UUID-based, when you already have the id from `GET /api/v1/keys` |
-| `...?_nyxid_via=<user_service_id>` | Optional query param on either path. Bypasses auto-resolution and uses the specified UserService directly. Useful when both personal and org credentials exist for the same slug. |
+| `...?_nyxid_via=<user_service_id>` | Optional query param on either path. Bypasses auto-resolution and uses the specified UserService directly. The selected UserService must match the route's slug or service_id (returns 400 otherwise). Useful when both personal and org credentials exist for the same slug. Stripped before forwarding to downstream. |
 
 **Example -- send a Lark message as a bot (no Lark token management):**
 
