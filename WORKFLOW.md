@@ -32,8 +32,8 @@ git:
 hooks:
   after_create: |
     git clone --depth 1 git@github.com:ChronoAIProject/NyxID.git .
-    (cd backend && source "$HOME/.cargo/env" 2>/dev/null && cargo build)
-    (cd frontend && npm install)
+    (cd backend && source "$HOME/.cargo/env" 2>/dev/null && cargo build) || true
+    (cd frontend && npm install) || true
     # Mempalace: mine the project once into a shared palace at ~/.mempalace/.
     # The marker file prevents re-mining when later issues reuse the palace.
     MP="python3 -m mempalace"
