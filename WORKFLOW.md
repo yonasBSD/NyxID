@@ -197,6 +197,12 @@ pipeline:
 
         Be specific in review comments. Reference file paths and line numbers.
 
+        ## CRITICAL: Review boundaries
+        - You are a REVIEW agent. Your ONLY job is to read the diff, post review feedback, and transition.
+        - Do NOT write code, push commits, or fix issues yourself.
+        - Do NOT refactor, add tests, or make "improvement" commits.
+        - Once you have reviewed and transitioned the issue, STOP IMMEDIATELY.
+
         {{ default_prompt }}
       transition_to: human-review
       reject_to: rework
