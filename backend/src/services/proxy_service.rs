@@ -698,16 +698,47 @@ async fn user_has_legacy_personal_connection(
 /// - **Org member (non-viewer):** allowed if `role.can_proxy()` AND
 ///   `allowed_service_ids` scope passes.
 /// - **Viewer / Forbidden:** denied.
+///
+/// `expected_slug` and `expected_catalog_service_id` constrain the
+/// override to the service named in the route path. Without this check
+/// a caller could pass a UserService ID for a *different* service than
+/// the one the URL names, silently proxying through an unrelated
+/// credential. At least one of the two must be `Some`; the function
+/// rejects the resolution when the found UserService doesn't match.
 pub async fn resolve_proxy_target_by_user_service_id(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
     actor_user_id: &str,
     user_service_id: &str,
+    expected_slug: Option<&str>,
+    expected_catalog_service_id: Option<&str>,
 ) -> AppResult<Option<UserServiceResolution>> {
     let svc = match user_service_service::find_user_service_by_id(db, user_service_id).await? {
         Some(s) => s,
         None => return Ok(None),
     };
+
+    // Verify the selected UserService matches the route's identity.
+    // The slug handler passes expected_slug; the catalog-id handler
+    // passes expected_catalog_service_id. Both must match if provided.
+    if let Some(slug) = expected_slug
+        && svc.slug != slug
+    {
+        return Err(AppError::BadRequest(format!(
+            "_nyxid_via UserService '{user_service_id}' has slug '{}', \
+             but the route requested '{slug}'",
+            svc.slug
+        )));
+    }
+    if let Some(catalog_id) = expected_catalog_service_id {
+        let svc_catalog = svc.catalog_service_id.as_deref().unwrap_or("");
+        if svc_catalog != catalog_id {
+            return Err(AppError::BadRequest(format!(
+                "_nyxid_via UserService '{user_service_id}' belongs to catalog \
+                 service '{svc_catalog}', but the route requested '{catalog_id}'"
+            )));
+        }
+    }
 
     // Access gate: resolve the actor's relationship to the service owner.
     let access =

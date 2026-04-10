@@ -231,12 +231,16 @@ pub async fn proxy_request(
     let via_service = extract_via_service(&request);
 
     // Direct resolution by UserService ID if ?_nyxid_via= is present.
+    // Constrained to the catalog service_id in the route path so the
+    // override cannot silently proxy through a different service.
     if let Some(ref us_id) = via_service {
         if let Some(resolved) = proxy_service::resolve_proxy_target_by_user_service_id(
             &state.db,
             &state.encryption_keys,
             &user_id_str,
             us_id,
+            None,
+            Some(&service_id),
         )
         .await?
         {
@@ -355,12 +359,16 @@ pub async fn proxy_request_by_slug(
     let via_service = extract_via_service(&request);
 
     // Direct resolution by UserService ID if ?_nyxid_via= is present.
+    // Constrained to the slug in the route path so the override cannot
+    // silently proxy through a different service.
     if let Some(ref us_id) = via_service {
         if let Some(resolved) = proxy_service::resolve_proxy_target_by_user_service_id(
             &state.db,
             &state.encryption_keys,
             &user_id_str,
             us_id,
+            Some(&slug),
+            None,
         )
         .await?
         {
