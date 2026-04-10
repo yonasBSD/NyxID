@@ -103,11 +103,13 @@ The services/connections/providers system was unified into 3 user-managed collec
 **New user collections:**
 - `user_endpoints` -- target URLs (custom or auto-provisioned from catalog)
 - `user_api_keys` -- external credentials (API keys, OAuth tokens, bearer tokens)
-- `user_services` -- proxy routing config (binds endpoint + key + auth method + optional node)
+- `user_services` -- proxy routing config (binds endpoint + key + auth method + optional node + identity propagation + custom User-Agent override)
 
 **Orchestration:** `unified_key_service` auto-provisions all 3 records from a single `POST /api/v1/keys` request, using catalog defaults or user-provided values.
 
 **Proxy resolution:** New path checks `UserService` first (by slug + user_id), falls back to old `DownstreamService` + `UserProviderToken` path for unmigrated users.
+
+**Proxy User-Agent:** By default, the client's `User-Agent` header is forwarded as-is (passthrough). When `UserService.custom_user_agent` or `DownstreamService.custom_user_agent` is set, it overrides the client UA on outgoing requests. Applied in all four proxy paths: direct HTTP, node HTTP, direct WS, node WS. Use this for downstreams whose WAFs block SDK-specific UA strings (e.g. `OpenAI/Python`).
 
 **ApiKey scope fields** (absorbed from deleted `AgentGroup` model): `allowed_service_ids`, `allowed_node_ids`, `allow_all_services`, `allow_all_nodes`. Enforced at proxy time via `key_service`.
 

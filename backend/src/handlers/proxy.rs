@@ -1072,6 +1072,13 @@ async fn execute_proxy_inner(
         enriched_headers.extend(identity_headers.iter().cloned());
         enriched_headers.extend(prepared.delegated_headers.iter().cloned());
 
+        // Override User-Agent if the service specifies a custom one.
+        // By default (None), the client's User-Agent is forwarded as-is.
+        if let Some(ref ua) = target.service.custom_user_agent {
+            enriched_headers.retain(|(name, _)| !name.eq_ignore_ascii_case("user-agent"));
+            enriched_headers.push(("user-agent".to_string(), ua.clone()));
+        }
+
         // Forward the caller's NyxID access token when the service is configured for it.
         if target.service.forward_access_token
             && let Some(ref token) = caller_token
@@ -1984,6 +1991,13 @@ async fn connect_downstream_ws(
         }
     }
 
+    // Override User-Agent if the service specifies a custom one.
+    if let Some(ref ua) = target.service.custom_user_agent
+        && let Ok(hv) = reqwest::header::HeaderValue::from_str(ua)
+    {
+        headers.insert(reqwest::header::USER_AGENT, hv);
+    }
+
     let mut ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
     ws_config.max_message_size = Some(WS_PASSTHROUGH_MAX_MESSAGE_SIZE);
     ws_config.max_frame_size = Some(WS_PASSTHROUGH_MAX_MESSAGE_SIZE);
@@ -2308,6 +2322,12 @@ async fn handle_ws_passthrough_via_node(
     let mut enriched_headers = forward_headers.to_vec();
     enriched_headers.extend(identity_headers.iter().cloned());
     enriched_headers.extend(prepared.delegated_headers.iter().cloned());
+
+    // Override User-Agent if the service specifies a custom one.
+    if let Some(ref ua) = target.service.custom_user_agent {
+        enriched_headers.retain(|(name, _)| !name.eq_ignore_ascii_case("user-agent"));
+        enriched_headers.push(("user-agent".to_string(), ua.clone()));
+    }
 
     let all_node_ids: Vec<&str> = std::iter::once(node_route.node_id.as_str())
         .chain(node_route.fallback_node_ids.iter().map(|id| id.as_str()))

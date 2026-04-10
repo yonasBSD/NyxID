@@ -63,6 +63,8 @@ pub struct UpdateUserServiceRequest {
     pub forward_access_token: Option<bool>,
     pub inject_delegation_token: Option<bool>,
     pub delegation_token_scope: Option<String>,
+    /// Custom User-Agent override. Set to "" to clear, Some(value) to set.
+    pub custom_user_agent: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -89,6 +91,8 @@ pub struct UserServiceResponse {
     pub forward_access_token: bool,
     pub inject_delegation_token: bool,
     pub delegation_token_scope: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_user_agent: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     /// Provenance: personal credentials, or inherited from an org membership.
@@ -265,6 +269,7 @@ pub async fn update_user_service(
         body.node_priority,
         body.is_active,
         identity.as_ref(),
+        body.custom_user_agent.as_deref(),
     )
     .await?;
 
@@ -370,6 +375,7 @@ fn user_service_with_source_response(item: UserServiceWithSource) -> UserService
         forward_access_token: svc.forward_access_token,
         inject_delegation_token: svc.inject_delegation_token,
         delegation_token_scope: svc.delegation_token_scope,
+        custom_user_agent: svc.custom_user_agent,
         created_at: svc.created_at.to_rfc3339(),
         updated_at: svc.updated_at.to_rfc3339(),
         credential_source: source.into(),

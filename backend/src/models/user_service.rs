@@ -53,6 +53,12 @@ pub struct UserService {
     #[serde(default = "default_delegation_token_scope")]
     pub delegation_token_scope: String,
 
+    /// Custom User-Agent header to send to the downstream service.
+    /// When set, overrides the client's User-Agent instead of forwarding it.
+    /// When None, the client's User-Agent is forwarded as-is (passthrough).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_user_agent: Option<String>,
+
     pub is_active: bool,
 
     /// Source tracking for migration idempotency
@@ -110,6 +116,7 @@ mod tests {
             forward_access_token: false,
             inject_delegation_token: true,
             delegation_token_scope: "llm:proxy".to_string(),
+            custom_user_agent: None,
             is_active: true,
             source: None,
             source_id: None,
@@ -151,6 +158,7 @@ mod tests {
             forward_access_token: false,
             inject_delegation_token: false,
             delegation_token_scope: "llm:proxy".to_string(),
+            custom_user_agent: None,
             is_active: true,
             source: None,
             source_id: None,
@@ -187,6 +195,7 @@ mod tests {
             forward_access_token: true,
             inject_delegation_token: true,
             delegation_token_scope: "custom:scope".to_string(),
+            custom_user_agent: None,
             is_active: true,
             source: None,
             source_id: None,
@@ -236,6 +245,7 @@ mod tests {
             forward_access_token: false,
             inject_delegation_token: false,
             delegation_token_scope: "llm:proxy".to_string(),
+            custom_user_agent: None,
             is_active: true,
             source: None,
             source_id: None,

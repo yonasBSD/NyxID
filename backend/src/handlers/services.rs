@@ -157,6 +157,8 @@ pub struct ServiceResponse {
     pub examples_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recommended_skills: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_user_agent: Option<String>,
     pub created_by: String,
     pub created_at: String,
     pub updated_at: String,
@@ -197,6 +199,8 @@ pub struct UpdateServiceRequest {
     pub required_permissions: Option<Vec<String>>,
     pub examples_url: Option<String>,
     pub recommended_skills: Option<Vec<String>>,
+    /// Custom User-Agent override for this service. Set to "" to clear.
+    pub custom_user_agent: Option<String>,
     /// Replace the declarative token exchange config on a `token_exchange`
     /// service. Validated through the generic helpers before being
     /// persisted so typos in the template / injection format surface at
@@ -891,6 +895,7 @@ pub async fn create_service(
         required_permissions: body.required_permissions.clone(),
         examples_url: body.examples_url.clone(),
         recommended_skills: body.recommended_skills.clone(),
+        custom_user_agent: None,
         token_exchange_config,
         created_at: now,
         updated_at: now,
@@ -1437,6 +1442,24 @@ pub async fn update_service(
         let bson_skills = bson::to_bson(skills)
             .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?;
         set_doc.insert("recommended_skills", bson_skills);
+    }
+    if let Some(ref ua) = body.custom_user_agent {
+        let trimmed = ua.trim();
+        if trimmed.is_empty() {
+            set_doc.insert("custom_user_agent", bson::Bson::Null);
+        } else {
+            if trimmed.len() > 256 {
+                return Err(AppError::ValidationError(
+                    "custom_user_agent must not exceed 256 characters".to_string(),
+                ));
+            }
+            if trimmed.bytes().any(|b| b < 0x20 && b != b'\t') {
+                return Err(AppError::ValidationError(
+                    "custom_user_agent must not contain control characters".to_string(),
+                ));
+            }
+            set_doc.insert("custom_user_agent", trimmed);
+        }
     }
 
     if set_doc.is_empty() {

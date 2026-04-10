@@ -317,6 +317,7 @@ function ServiceSection({
   authKeyName,
   isActive,
   serviceId,
+  customUserAgent,
   readOnly = false,
 }: {
   readonly slug: string;
@@ -324,9 +325,12 @@ function ServiceSection({
   readonly authKeyName: string;
   readonly isActive: boolean;
   readonly serviceId: string;
+  readonly customUserAgent?: string | null;
   readonly readOnly?: boolean;
 }) {
   const updateService = useUpdateUserService();
+  const [editingUa, setEditingUa] = useState(false);
+  const [uaDraft, setUaDraft] = useState(customUserAgent ?? "");
 
   function toggleActive() {
     updateService.mutate(
@@ -338,6 +342,29 @@ function ServiceSection({
         onError: (err) => {
           const message =
             err instanceof ApiError ? err.message : "Failed to update service";
+          toast.error(message);
+        },
+      },
+    );
+  }
+
+  function saveUserAgent() {
+    updateService.mutate(
+      { serviceId, custom_user_agent: uaDraft.trim() || "" },
+      {
+        onSuccess: () => {
+          setEditingUa(false);
+          toast.success(
+            uaDraft.trim()
+              ? "Custom User-Agent saved"
+              : "Custom User-Agent cleared",
+          );
+        },
+        onError: (err) => {
+          const message =
+            err instanceof ApiError
+              ? err.message
+              : "Failed to update User-Agent";
           toast.error(message);
         },
       },
@@ -372,6 +399,64 @@ function ServiceSection({
             <span className="font-medium text-foreground">Auth key:</span>{" "}
             {authKeyName}
           </div>
+        </div>
+
+        <div className="space-y-1">
+          <Label className="text-xs text-muted-foreground">User-Agent</Label>
+          {editingUa ? (
+            <div className="flex items-center gap-2">
+              <Input
+                value={uaDraft}
+                onChange={(e) => setUaDraft(e.target.value)}
+                placeholder="Passthrough (default)"
+                className="h-8 text-xs"
+                maxLength={256}
+              />
+              <Button
+                size="icon"
+                variant="ghost"
+                className="h-8 w-8"
+                onClick={saveUserAgent}
+                disabled={updateService.isPending}
+              >
+                <Check className="h-3.5 w-3.5" />
+              </Button>
+              <Button
+                size="icon"
+                variant="ghost"
+                className="h-8 w-8"
+                onClick={() => {
+                  setEditingUa(false);
+                  setUaDraft(customUserAgent ?? "");
+                }}
+              >
+                <X className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2">
+              <span className="text-xs">
+                {customUserAgent || (
+                  <span className="text-muted-foreground">
+                    Passthrough (default)
+                  </span>
+                )}
+              </span>
+              {!readOnly && (
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className="h-6 w-6"
+                  onClick={() => {
+                    setUaDraft(customUserAgent ?? "");
+                    setEditingUa(true);
+                  }}
+                >
+                  <Pencil className="h-3 w-3" />
+                </Button>
+              )}
+            </div>
+          )}
         </div>
 
         {!readOnly && (
@@ -1237,6 +1322,7 @@ export function KeyDetailPage() {
             authKeyName={keyInfo.auth_key_name}
             isActive={keyInfo.is_active}
             serviceId={keyInfo.id}
+            customUserAgent={keyInfo.custom_user_agent}
             readOnly={readOnly}
           />
 
