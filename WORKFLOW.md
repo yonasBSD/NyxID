@@ -94,6 +94,7 @@ agents:
     model: gpt-5.4
     reasoning_effort: xhigh
     approval_policy: never
+    thread_sandbox: danger-full-access
     network_access: true
     turn_timeout_ms: 3600000
     read_timeout_ms: 60000
