@@ -10,7 +10,7 @@ import { TermsOfServiceScreen } from "../features/legal/TermsOfServiceScreen";
 import { PrivacyPolicyScreen } from "../features/legal/PrivacyPolicyScreen";
 import { FullScreenLoading } from "../components/FullScreenLoading";
 import { BottomNavV2, type BottomNavV2Tab } from "../components/BottomNavV2";
-import { NyxFAB } from "../components/NyxFAB";
+// import { NyxFAB } from "../components/NyxFAB"; // TODO: re-enable when chat is ready
 import { useTheme } from "../theme/ThemeContext";
 import { spacing } from "../theme/designTokens";
 
@@ -36,6 +36,8 @@ function resolveActiveMainTab(routeName?: string): BottomNavV2Tab {
   if (routeName === "Activity") return "activity";
   if (routeName === "ActivityDetail") return "activity";
   if (routeName === "AccountSettings") return "account";
+  if (routeName === "TermsOfService") return "account";
+  if (routeName === "PrivacyPolicy") return "account";
   return "activity";
 }
 
@@ -108,10 +110,12 @@ export function AppNavigator({ currentRouteName, onMainTabPress, onNyxPress }: A
           />
           <View style={[styles.bottomWrap, { backgroundColor: colors.bg }]}>
             <View style={styles.navContainer}>
-              <BottomNavV2 active={activeMainTab} onTabPress={(tab) => onMainTabPress?.(tab)} onFabPress={onNyxPress} />
+              <BottomNavV2 active={activeMainTab} onTabPress={(tab) => onMainTabPress?.(tab)} />
+              {/* TODO: re-enable when chat is ready
               <View style={styles.fabPosition}>
                 <NyxFAB onPress={onNyxPress} />
               </View>
+              */}
             </View>
           </View>
         </View>

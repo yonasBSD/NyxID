@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Animated, LayoutChangeEvent, Pressable, StyleSheet, Text, View } from "react-native";
 import Svg, { Path, Circle } from "react-native-svg";
 import { useTheme } from "../theme/ThemeContext";
@@ -39,15 +39,17 @@ export function BottomNavV2({ active, onTabPress, onFabPress }: BottomNavV2Props
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const translateX = useRef(new Animated.Value(0)).current;
-  const tabWidth = useRef(0);
+  const [tabWidth, setTabWidth] = useState(0);
   const containerWidth = useRef(0);
 
   const activeIndex = active === "activity" ? 0 : 1;
 
+  const showFab = Boolean(onFabPress);
+
   const computeOffset = (index: number) => {
     if (index === 0) return 0;
-    // second tab starts after: tabWidth + GAP + FAB_WIDTH + GAP
-    return tabWidth.current + GAP + FAB_WIDTH + GAP;
+    if (showFab) return tabWidth + GAP + FAB_WIDTH + GAP;
+    return tabWidth + GAP;
   };
 
   useEffect(() => {
@@ -57,17 +59,21 @@ export function BottomNavV2({ active, onTabPress, onFabPress }: BottomNavV2Props
       tension: 300,
       friction: 30,
     }).start();
-  }, [activeIndex, translateX]);
+  }, [activeIndex, tabWidth, translateX]);
 
   const onLayout = (e: LayoutChangeEvent) => {
     const w = e.nativeEvent.layout.width;
     containerWidth.current = w;
-    // inner width = total - 2*padding
     const inner = w - 2 * PADDING;
-    // inner = tabWidth + GAP + FAB_WIDTH + GAP + tabWidth
-    // tabWidth = (inner - FAB_WIDTH - 2*GAP) / 2
-    tabWidth.current = (inner - FAB_WIDTH - 2 * GAP) / 2;
-    translateX.setValue(computeOffset(activeIndex));
+    const newTabWidth = showFab
+      ? (inner - FAB_WIDTH - 2 * GAP) / 2
+      : (inner - GAP) / 2;
+    setTabWidth(newTabWidth);
+    // Use newTabWidth directly since setState is async
+    const offset = activeIndex === 0 ? 0
+      : showFab ? newTabWidth + GAP + FAB_WIDTH + GAP
+      : newTabWidth + GAP;
+    translateX.setValue(offset);
   };
 
   return (
@@ -76,7 +82,7 @@ export function BottomNavV2({ active, onTabPress, onFabPress }: BottomNavV2Props
         style={[
           styles.activeHighlight,
           {
-            width: tabWidth.current || "35%",
+            width: tabWidth || "35%",
             transform: [{ translateX }],
           },
         ]}
@@ -89,9 +95,11 @@ export function BottomNavV2({ active, onTabPress, onFabPress }: BottomNavV2Props
         <Text style={[styles.text, active === "activity" && styles.textActive]}>Activity</Text>
       </Pressable>
 
-      <Pressable style={styles.fabSpacer} onPress={onFabPress}>
-        <Text style={styles.fabLabel}>Ask Nyx</Text>
-      </Pressable>
+      {showFab && (
+        <Pressable style={styles.fabSpacer} onPress={onFabPress}>
+          <Text style={styles.fabLabel}>Ask Nyx</Text>
+        </Pressable>
+      )}
 
       <Pressable
         style={styles.item}

@@ -16,7 +16,6 @@ import {
 import Animated, {
   useSharedValue,
   useAnimatedStyle,
-  withSpring,
   withTiming,
   runOnJS,
 } from "react-native-reanimated";
@@ -134,7 +133,7 @@ function ChallengeDetailSheet({
       translateY.value = SHEET_HEIGHT;
       setModalVisible(true);
       requestAnimationFrame(() => {
-        translateY.value = withSpring(0, { damping: 28, stiffness: 300 });
+        translateY.value = withTiming(0, { duration: 300 });
       });
     } else if (modalVisible) {
       // Animate out, then hide the modal
@@ -177,7 +176,7 @@ function ChallengeDetailSheet({
               }
             });
           } else {
-            translateY.value = withSpring(0, { damping: 28, stiffness: 300 });
+            translateY.value = withTiming(0, { duration: 250 });
           }
         }),
     [onClose, translateY]
@@ -712,9 +711,9 @@ const createSheetStyles = (c: ThemeColors) => StyleSheet.create({
   },
   stateNotice: {
     borderRadius: radius.sm,
-    backgroundColor: "rgba(245,158,11,0.1)",
+    backgroundColor: c.warningSoft,
     borderWidth: 1,
-    borderColor: "rgba(245,158,11,0.25)",
+    borderColor: c.warningSoft,
     padding: spacing.lg,
   },
   stateNoticeText: {

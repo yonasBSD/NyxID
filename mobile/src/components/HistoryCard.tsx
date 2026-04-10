@@ -63,14 +63,22 @@ export function HistoryCard({ item, onPress }: HistoryCardProps) {
 }
 
 export function HistorySectionHeader({ title }: { title: string }) {
-  const { colors } = useTheme();
+  const { colors, mode } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
+
+  const inner = <Text style={styles.sectionHeader}>{title}</Text>;
 
   return (
     <View style={styles.sectionHeaderRow}>
-      <BlurView intensity={60} tint="dark" style={styles.sectionHeaderBlur}>
-        <Text style={styles.sectionHeader}>{title}</Text>
-      </BlurView>
+      {mode === "dark" ? (
+        <BlurView intensity={60} tint="dark" style={styles.sectionHeaderBlur}>
+          {inner}
+        </BlurView>
+      ) : (
+        <View style={styles.sectionHeaderBlur}>
+          {inner}
+        </View>
+      )}
     </View>
   );
 }
@@ -114,12 +122,14 @@ const createStyles = (c: ThemeColors) =>
       paddingVertical: spacing.xs,
       borderRadius: 6,
       overflow: "hidden",
-      backgroundColor: "rgba(15,10,30,0.5)",
+      backgroundColor: c.cardSoft,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
     },
     sectionHeader: {
       fontSize: 11,
       fontWeight: "600",
-      color: c.textMuted,
+      color: c.textSecondary,
       textTransform: "uppercase",
       letterSpacing: 0.4,
     },
