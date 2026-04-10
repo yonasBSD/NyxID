@@ -32,8 +32,8 @@ git:
 hooks:
   after_create: |
     git clone --depth 1 git@github.com:ChronoAIProject/NyxID.git .
-    cd backend && source "$HOME/.cargo/env" 2>/dev/null && cargo build
-    cd ../frontend && npm install
+    (cd backend && source "$HOME/.cargo/env" 2>/dev/null && cargo build)
+    (cd frontend && npm install)
     # Mempalace: mine the project once into a shared palace at ~/.mempalace/.
     # The marker file prevents re-mining when later issues reuse the palace.
     MP="python3 -m mempalace"
@@ -58,8 +58,8 @@ hooks:
       git checkout main && git pull
       git checkout -b "$BRANCH" origin/main
     fi
-    cd backend && source "$HOME/.cargo/env" 2>/dev/null && cargo build
-    cd ../frontend && npm install
+    (cd backend && source "$HOME/.cargo/env" 2>/dev/null && cargo build)
+    (cd frontend && npm install)
     # Mempalace: load relevant memories into a workspace file every agent can read.
     MP="python3 -m mempalace"
     mkdir -p .symphony
@@ -77,7 +77,7 @@ hooks:
     if [ -d .symphony/coordination ]; then
       $MP mine .symphony/coordination --mode general 2>/dev/null || true
     fi
-  timeout_ms: 300000
+  timeout_ms: 600000
 
 agent:
   default: codex
