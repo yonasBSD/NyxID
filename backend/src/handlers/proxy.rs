@@ -155,6 +155,25 @@ fn collect_forward_headers(
         .collect()
 }
 
+/// Extract `?via_service=<user_service_id>` from the request URI.
+///
+/// When present, the proxy handler bypasses the auto-resolution cascade
+/// and uses the specified UserService directly. The caller gets the id
+/// from `GET /api/v1/user-services` or `GET /api/v1/keys`.
+///
+/// The param is intentionally NOT stripped from the URI before forwarding
+/// downstream. REST APIs ignore unknown query params, and stripping would
+/// require reconstructing the entire axum `Request`, which is heavyweight.
+/// If this ever matters, the downstream-facing proxy can strip it in
+/// `proxy_service::forward_request`.
+fn extract_via_service(request: &Request<Body>) -> Option<String> {
+    request.uri().query().and_then(|q| {
+        q.split('&')
+            .find_map(|pair| pair.strip_prefix("via_service="))
+            .map(|v| urlencoding::decode(v).unwrap_or_default().to_string())
+    })
+}
+
 fn append_query_param(url: &str, param_name: &str, param_value: &str) -> String {
     let separator = if url.contains('?') { "&" } else { "?" };
     let encoded_name = urlencoding::encode(param_name);
@@ -182,6 +201,14 @@ fn append_query_param(url: &str, param_name: &str, param_value: &str) -> String 
 /// Forward the request to the downstream service with credential injection,
 /// identity propagation, and delegated provider credentials.
 /// Tries the new UserService path first (by catalog_service_id), falls back to old.
+///
+/// Accepts an optional `?via_service=<user_service_id>` query param that
+/// bypasses the auto-resolution cascade and uses the specified UserService
+/// directly. The caller gets the id from `GET /api/v1/user-services` or
+/// `GET /api/v1/keys`, which list both personal and org-inherited services
+/// tagged with `credential_source`. This lets a user who has both a
+/// personal and an org credential for the same service explicitly choose
+/// which one to use for a given request.
 pub async fn proxy_request(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -191,6 +218,52 @@ pub async fn proxy_request(
     auth_user.ensure_rest_proxy_access()?;
 
     let user_id_str = auth_user.user_id.to_string();
+    let via_service = extract_via_service(&request);
+
+    // Direct resolution by UserService ID if ?via_service= is present.
+    if let Some(ref us_id) = via_service {
+        if let Some(resolved) = proxy_service::resolve_proxy_target_by_user_service_id(
+            &state.db,
+            &state.encryption_keys,
+            &user_id_str,
+            us_id,
+        )
+        .await?
+        {
+            let effective_service_id = resolved.target.service.id.clone();
+            if let Some(routing) = &resolved.org_routing {
+                audit_org_routing(
+                    &state,
+                    &auth_user,
+                    routing,
+                    &resolved.user_service_id,
+                    &effective_service_id,
+                );
+            }
+            return execute_proxy_inner(
+                &state,
+                &auth_user,
+                &effective_service_id,
+                &path,
+                request,
+                Some(PreResolved {
+                    target: resolved.target,
+                    node_id: resolved.node_id,
+                    user_service_id: Some(resolved.user_service_id),
+                    has_server_credential: resolved.has_server_credential,
+                    effective_owner_id: resolved
+                        .org_routing
+                        .as_ref()
+                        .map(|r| r.org_user_id.clone())
+                        .unwrap_or_else(|| user_id_str.clone()),
+                }),
+            )
+            .await;
+        }
+        return Err(AppError::NotFound(format!(
+            "UserService '{us_id}' not found or not accessible"
+        )));
+    }
 
     // Try new UserService path first (lookup by catalog_service_id)
     if let Some(resolved) = proxy_service::resolve_proxy_target_from_user_service(
@@ -258,6 +331,8 @@ pub async fn proxy_request(
 /// Resolve the service by slug, then forward via the shared proxy pipeline.
 /// Tries the new UserService path first (by slug), then falls back to old
 /// DownstreamService resolution.
+///
+/// Accepts `?via_service=<user_service_id>` — see `proxy_request` doc.
 pub async fn proxy_request_by_slug(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -267,6 +342,52 @@ pub async fn proxy_request_by_slug(
     auth_user.ensure_rest_proxy_access()?;
 
     let user_id_str = auth_user.user_id.to_string();
+    let via_service = extract_via_service(&request);
+
+    // Direct resolution by UserService ID if ?via_service= is present.
+    if let Some(ref us_id) = via_service {
+        if let Some(resolved) = proxy_service::resolve_proxy_target_by_user_service_id(
+            &state.db,
+            &state.encryption_keys,
+            &user_id_str,
+            us_id,
+        )
+        .await?
+        {
+            let effective_service_id = resolved.target.service.id.clone();
+            if let Some(routing) = &resolved.org_routing {
+                audit_org_routing(
+                    &state,
+                    &auth_user,
+                    routing,
+                    &resolved.user_service_id,
+                    &effective_service_id,
+                );
+            }
+            return execute_proxy_inner(
+                &state,
+                &auth_user,
+                &effective_service_id,
+                &path,
+                request,
+                Some(PreResolved {
+                    target: resolved.target,
+                    node_id: resolved.node_id,
+                    user_service_id: Some(resolved.user_service_id),
+                    has_server_credential: resolved.has_server_credential,
+                    effective_owner_id: resolved
+                        .org_routing
+                        .as_ref()
+                        .map(|r| r.org_user_id.clone())
+                        .unwrap_or_else(|| user_id_str.clone()),
+                }),
+            )
+            .await;
+        }
+        return Err(AppError::NotFound(format!(
+            "UserService '{us_id}' not found or not accessible"
+        )));
+    }
 
     // Try new UserService path first (by slug)
     if let Some(resolved) = proxy_service::resolve_proxy_target_from_user_service(

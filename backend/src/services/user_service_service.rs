@@ -272,6 +272,21 @@ pub async fn list_user_services_with_sources(
     Ok(out)
 }
 
+/// Look up a `UserService` by id alone, WITHOUT ownership filtering.
+///
+/// Used by the `?via_service=` proxy path, which needs to load the row
+/// first and then separately check access via `resolve_owner_access`.
+/// Returns `None` if no active row exists with this id.
+pub async fn find_user_service_by_id(
+    db: &mongodb::Database,
+    service_id: &str,
+) -> AppResult<Option<UserService>> {
+    Ok(db
+        .collection::<UserService>(COLLECTION_NAME)
+        .find_one(doc! { "_id": service_id, "is_active": true })
+        .await?)
+}
+
 /// Get single user service by ID, verifying ownership.
 pub async fn get_user_service(
     db: &mongodb::Database,

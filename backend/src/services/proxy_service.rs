@@ -682,6 +682,86 @@ async fn user_has_legacy_personal_connection(
 /// channel handlers) that need to know whose approval policy applies
 /// without doing the full credential resolution.
 ///
+/// Resolve a proxy target from a specific `UserService` id, bypassing
+/// the auto-resolution cascade. Used when the caller passes
+/// `?via_service=<user_service_id>` on the proxy route.
+///
+/// The caller gets the id from `GET /api/v1/user-services` or
+/// `GET /api/v1/keys`, which already list both personal and org-
+/// inherited services tagged with `credential_source`. This endpoint
+/// lets them explicitly choose which credential to use when both
+/// exist for the same slug.
+///
+/// Access check mirrors what the auto-resolution cascade enforces:
+/// - **Direct owner:** always allowed.
+/// - **Org admin:** allowed if `allowed_service_ids` scope passes.
+/// - **Org member (non-viewer):** allowed if `role.can_proxy()` AND
+///   `allowed_service_ids` scope passes.
+/// - **Viewer / Forbidden:** denied.
+pub async fn resolve_proxy_target_by_user_service_id(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    actor_user_id: &str,
+    user_service_id: &str,
+) -> AppResult<Option<UserServiceResolution>> {
+    let svc = match user_service_service::find_user_service_by_id(db, user_service_id).await? {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+
+    // Access gate: resolve the actor's relationship to the service owner.
+    let access =
+        crate::services::org_service::resolve_owner_access(db, actor_user_id, &svc.user_id).await?;
+    let allowed = match &access {
+        crate::services::org_service::OwnerAccess::Direct => true,
+        crate::services::org_service::OwnerAccess::AsOrgAdmin { .. } => {
+            access.allows_resource(&svc.id)
+        }
+        crate::services::org_service::OwnerAccess::AsOrgMember { role, .. } => {
+            role.can_proxy() && access.allows_resource(&svc.id)
+        }
+        crate::services::org_service::OwnerAccess::Forbidden => false,
+    };
+    if !allowed {
+        return Err(AppError::OrgRoleInsufficient(
+            "you do not have proxy access to this service".to_string(),
+        ));
+    }
+
+    // Build the org_routing context if the service is org-owned.
+    let org_routing = if svc.user_id != actor_user_id {
+        // The service belongs to an org; build the routing context from
+        // the OwnerAccess that we already resolved above. We know the
+        // access is at least AsOrgAdmin or AsOrgMember (Viewer was
+        // rejected), so we can extract the membership_id.
+        let (org_user_id, membership_id) = match &access {
+            crate::services::org_service::OwnerAccess::AsOrgAdmin {
+                org_user_id,
+                membership_id,
+                ..
+            }
+            | crate::services::org_service::OwnerAccess::AsOrgMember {
+                org_user_id,
+                membership_id,
+                ..
+            } => (org_user_id.clone(), membership_id.clone()),
+            _ => unreachable!("Direct and Forbidden already handled"),
+        };
+        Some(OrgRouting {
+            org_user_id,
+            member_user_id: actor_user_id.to_string(),
+            membership_id,
+        })
+    } else {
+        None
+    };
+
+    let owner_id = svc.user_id.clone();
+    Ok(Some(
+        finish_resolution(db, encryption_keys, &owner_id, svc, org_routing).await?,
+    ))
+}
+
 /// Mirrors `resolve_proxy_target_from_user_service` exactly so that the
 /// approval policy resolution sees the *same* effective owner the proxy
 /// would actually pick at request time. In particular it:
