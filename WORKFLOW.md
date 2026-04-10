@@ -60,12 +60,13 @@ hooks:
     fi
     (cd backend && source "$HOME/.cargo/env" 2>/dev/null && cargo build)
     (cd frontend && npm install)
-    # Mempalace: load relevant memories into a workspace file every agent can read.
+    # Mempalace: load wake-up context (L0+L1) and search for issue-relevant memories.
     MP="python3 -m mempalace"
     mkdir -p .symphony
+    $MP wake-up > .symphony/mempalace_wakeup.md 2>/dev/null || true
     $MP search "issue ${SYMPHONY_ISSUE_NUMBER}" --limit 10 \
       > .symphony/mempalace_context.md 2>/dev/null || true
-    # Register MCP server so Claude Code gets interactive read/write on top.
+    # Register MCP server so Claude Code gets interactive search/store via 19 tools.
     if command -v claude >/dev/null 2>&1; then
       claude mcp add --scope local mempalace -- python3 -m mempalace.mcp_server 2>/dev/null || true
     fi
@@ -388,6 +389,23 @@ If you are blocked by missing requirements, missing credentials, broken infrastr
 1. Update the workpad with the exact blocker, what you tried, and the smallest useful next action for a human or later agent.
 2. Leave the repo in a clean understandable state.
 3. Stop. Do not keep retrying the same dead end.
+
+## MemPalace — Cross-Session Memory
+
+You have access to a persistent memory system. Use it to recall prior decisions and to store what you learn for future agents.
+
+**At session start:**
+1. Read `.symphony/mempalace_wakeup.md` if it exists — it contains identity and critical project facts (L0+L1, ~170 tokens).
+2. Read `.symphony/mempalace_context.md` if it exists — it contains memories relevant to this issue from prior sessions.
+
+**During your work:**
+- Before making architectural decisions or choosing between approaches, search memory first: use `mempalace_search` (MCP) or `mempalace_kg_query` for entity/decision history. Do not guess — verify against memory.
+- Use `mempalace_search` with wing/room filters when you know the domain (e.g., wing="NyxID", room="auth" for authentication decisions).
+
+**At session end (before stopping):**
+- Store any decisions, patterns, or findings that would help future agents: use `mempalace_diary_write` for role-specific notes (e.g., reviewer findings) or `mempalace_add_drawer` for project-wide facts.
+- For entity relationships or decisions, use `mempalace_kg_add` with subject-predicate-object triples.
+- Do not store ephemeral task progress — the workpad handles that.
 
 ## Project Context
 
