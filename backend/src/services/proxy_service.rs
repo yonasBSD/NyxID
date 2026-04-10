@@ -474,12 +474,36 @@ pub struct UserServiceResolution {
     pub node_id: Option<String>,
     pub user_service_id: String,
     pub has_server_credential: bool,
+    /// Set when the resolved UserService was reached via org membership
+    /// (the actor has no personal copy). `None` means personal credentials.
+    pub org_routing: Option<OrgRouting>,
+}
+
+/// Audit metadata for proxy calls that resolved through an org membership
+/// instead of the actor's own credentials.
+#[derive(Debug, Clone)]
+pub struct OrgRouting {
+    pub org_user_id: String,
+    pub member_user_id: String,
+    pub membership_id: String,
 }
 
 /// Resolve proxy target from the new UserService model.
 ///
-/// Returns `Ok(Some(UserServiceResolution))` if a UserService exists
-/// for this user+slug/catalog_service_id.
+/// Resolution order (critical -- see ChronoAIProject/NyxID#209 Codex review):
+///
+/// 1. **Personal new-path `UserService`** (short-circuit). Most common case.
+/// 2. **Legacy personal guard.** If the user has a pre-migration personal
+///    `UserServiceConnection` or `UserProviderToken` for this slug, return
+///    `Ok(None)` so the handler runs its legacy path. The legacy personal
+///    connection must outrank any org-shared credential the user might
+///    inherit; otherwise joining an org silently retargets the user's own
+///    creds, or worse, blocks them with a 403 when the org membership is
+///    viewer / scope-restricted.
+/// 3. **Org fallback.** Bounded by a wall-clock timeout. Only runs when
+///    the user has *no* personal connection of any kind.
+///
+/// Returns `Ok(Some(UserServiceResolution))` when a target is resolved.
 /// Returns `Ok(None)` to signal the caller should fall back to old resolution.
 pub async fn resolve_proxy_target_from_user_service(
     db: &mongodb::Database,
@@ -489,20 +513,380 @@ pub async fn resolve_proxy_target_from_user_service(
     slug: Option<&str>,
     catalog_service_id: Option<&str>,
 ) -> AppResult<Option<UserServiceResolution>> {
-    // Find the UserService
-    let user_service = if let Some(slug) = slug {
-        user_service_service::find_by_slug(db, user_id, slug).await?
-    } else if let Some(csid) = catalog_service_id {
-        user_service_service::find_by_catalog_service_id(db, user_id, csid).await?
-    } else {
+    // 1. Personal lookup (short-circuit for the common case).
+    let personal = lookup_user_service(db, user_id, slug, catalog_service_id).await?;
+    if let Some(us) = personal {
+        return Ok(Some(
+            finish_resolution(db, encryption_keys, user_id, us, None).await?,
+        ));
+    }
+
+    // 2. Legacy personal guard. Preserves the invariant that pre-migration
+    //    personal connections beat org-shared credentials. See function doc.
+    if user_has_legacy_personal_connection(db, user_id, slug, catalog_service_id).await? {
         return Ok(None);
+    }
+
+    // 3. Org fallback. Bounded by a wall-clock timeout so a degraded Mongo
+    //    doesn't make every proxy 404 hang.
+    let memberships =
+        match crate::services::org_service::find_active_memberships_with_timeout(db, user_id).await
+        {
+            Ok(rows) => rows,
+            Err(crate::errors::AppError::OrgQueryTimeout) => return Err(AppError::OrgQueryTimeout),
+            Err(e) => return Err(e),
+        };
+    if memberships.is_empty() {
+        return Ok(None);
+    }
+
+    // 3. Walk memberships in priority order. find_active_memberships_with_timeout
+    //    has already moved primary_org_id to the front.
+    let mut role_denied = false;
+    for membership in &memberships {
+        let org_us =
+            lookup_user_service(db, &membership.org_user_id, slug, catalog_service_id).await?;
+        let Some(org_us) = org_us else {
+            continue;
+        };
+
+        // Role check: Viewer cannot proxy.
+        if !membership.role.can_proxy() {
+            role_denied = true;
+            tracing::debug!(
+                user_id = %user_id,
+                org_user_id = %membership.org_user_id,
+                role = ?membership.role,
+                "Org membership role insufficient for proxy"
+            );
+            continue;
+        }
+
+        // Scope check: allowed_service_ids may restrict access to a subset.
+        if !membership.allows_service(&org_us.id) {
+            role_denied = true;
+            tracing::debug!(
+                user_id = %user_id,
+                org_user_id = %membership.org_user_id,
+                user_service_id = %org_us.id,
+                "User not in allowed_service_ids scope for this org membership"
+            );
+            continue;
+        }
+
+        let routing = OrgRouting {
+            org_user_id: membership.org_user_id.clone(),
+            member_user_id: user_id.to_string(),
+            membership_id: membership.id.clone(),
+        };
+        return Ok(Some(
+            finish_resolution(
+                db,
+                encryption_keys,
+                &membership.org_user_id,
+                org_us,
+                Some(routing),
+            )
+            .await?,
+        ));
+    }
+
+    // No org service matched. If at least one was found but blocked by role
+    // or scope, surface that as a 403 instead of a generic 404 -- the user
+    // gets a clearer error and the audit trail captures the denial.
+    if role_denied {
+        return Err(AppError::OrgRoleInsufficient(
+            "your role in the owning org does not permit using this service".to_string(),
+        ));
+    }
+    Ok(None)
+}
+
+/// Return true when the user has a legacy (pre-migration) personal
+/// connection for the given service slug or catalog_service_id.
+///
+/// "Legacy personal connection" means one of:
+///
+/// - a row in `user_service_connections` keyed by the corresponding
+///   `DownstreamService.id`, OR
+/// - a row in `user_provider_tokens` keyed by the service's
+///   `provider_config_id` with a non-revoked status.
+///
+/// Used by the proxy resolver to defer to the legacy path BEFORE running
+/// the org fallback. Legacy personal credentials must outrank org-shared
+/// ones during migration; otherwise joining an org silently retargets a
+/// user's own creds or hits an org scope/role 403.
+///
+/// Expensive? One indexed lookup in `downstream_services` plus at most one
+/// count on each of `user_service_connections` / `user_provider_tokens`.
+/// The short-circuits keep the common "no legacy at all" case to ~2 round
+/// trips. Users fully migrated to `UserService` never hit this path.
+async fn user_has_legacy_personal_connection(
+    db: &mongodb::Database,
+    user_id: &str,
+    slug: Option<&str>,
+    catalog_service_id: Option<&str>,
+) -> AppResult<bool> {
+    // Resolve to a DownstreamService so we can look up the legacy tables.
+    let downstream: Option<DownstreamService> = if let Some(csid) = catalog_service_id {
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! { "_id": csid })
+            .await?
+    } else if let Some(s) = slug {
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! { "slug": s, "is_active": true })
+            .await?
+    } else {
+        return Ok(false);
     };
 
-    let user_service = match user_service {
-        Some(us) => us,
+    let Some(downstream) = downstream else {
+        return Ok(false);
+    };
+
+    // 1. Direct user -> service connection (covers `UserServiceConnection`
+    //    credentials in the legacy path).
+    let conn_count = db
+        .collection::<UserServiceConnection>(USER_SERVICE_CONNECTIONS)
+        .count_documents(doc! {
+            "user_id": user_id,
+            "service_id": &downstream.id,
+        })
+        .await?;
+    if conn_count > 0 {
+        return Ok(true);
+    }
+
+    // 2. Provider token (covers legacy provider-backed services like the
+    //    old OpenAI/Anthropic connections that used UserProviderToken).
+    if let Some(provider_config_id) = &downstream.provider_config_id {
+        let token_count = db
+            .collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+            .count_documents(doc! {
+                "user_id": user_id,
+                "provider_config_id": provider_config_id,
+                "status": { "$in": ["active", "expired", "refresh_failed"] },
+            })
+            .await?;
+        if token_count > 0 {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+/// Find the effective owner of a `UserService` that matches the given
+/// slug or catalog service id, scanning the actor's personal scope first
+/// and then any org memberships. Used by callers (e.g. SSH tunnel,
+/// channel handlers) that need to know whose approval policy applies
+/// without doing the full credential resolution.
+///
+/// Resolve a proxy target from a specific `UserService` id, bypassing
+/// the auto-resolution cascade. Used when the caller passes
+/// `?_nyxid_via=<user_service_id>` on the proxy route.
+///
+/// The caller gets the id from `GET /api/v1/user-services` or
+/// `GET /api/v1/keys`, which already list both personal and org-
+/// inherited services tagged with `credential_source`. This endpoint
+/// lets them explicitly choose which credential to use when both
+/// exist for the same slug.
+///
+/// Access check mirrors what the auto-resolution cascade enforces:
+/// - **Direct owner:** always allowed.
+/// - **Org admin:** allowed if `allowed_service_ids` scope passes.
+/// - **Org member (non-viewer):** allowed if `role.can_proxy()` AND
+///   `allowed_service_ids` scope passes.
+/// - **Viewer / Forbidden:** denied.
+///
+/// `expected_slug` and `expected_catalog_service_id` constrain the
+/// override to the service named in the route path. Without this check
+/// a caller could pass a UserService ID for a *different* service than
+/// the one the URL names, silently proxying through an unrelated
+/// credential. At least one of the two must be `Some`; the function
+/// rejects the resolution when the found UserService doesn't match.
+pub async fn resolve_proxy_target_by_user_service_id(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    actor_user_id: &str,
+    user_service_id: &str,
+    expected_slug: Option<&str>,
+    expected_catalog_service_id: Option<&str>,
+) -> AppResult<Option<UserServiceResolution>> {
+    let svc = match user_service_service::find_user_service_by_id(db, user_service_id).await? {
+        Some(s) => s,
         None => return Ok(None),
     };
 
+    // Verify the selected UserService matches the route's identity.
+    // The slug handler passes expected_slug; the catalog-id handler
+    // passes expected_catalog_service_id. Both must match if provided.
+    if let Some(slug) = expected_slug
+        && svc.slug != slug
+    {
+        return Err(AppError::BadRequest(format!(
+            "_nyxid_via UserService '{user_service_id}' has slug '{}', \
+             but the route requested '{slug}'",
+            svc.slug
+        )));
+    }
+    if let Some(catalog_id) = expected_catalog_service_id {
+        let svc_catalog = svc.catalog_service_id.as_deref().unwrap_or("");
+        if svc_catalog != catalog_id {
+            return Err(AppError::BadRequest(format!(
+                "_nyxid_via UserService '{user_service_id}' belongs to catalog \
+                 service '{svc_catalog}', but the route requested '{catalog_id}'"
+            )));
+        }
+    }
+
+    // Access gate: resolve the actor's relationship to the service owner.
+    let access =
+        crate::services::org_service::resolve_owner_access(db, actor_user_id, &svc.user_id).await?;
+    let allowed = match &access {
+        crate::services::org_service::OwnerAccess::Direct => true,
+        crate::services::org_service::OwnerAccess::AsOrgAdmin { .. } => {
+            access.allows_resource(&svc.id)
+        }
+        crate::services::org_service::OwnerAccess::AsOrgMember { role, .. } => {
+            role.can_proxy() && access.allows_resource(&svc.id)
+        }
+        crate::services::org_service::OwnerAccess::Forbidden => false,
+    };
+    if !allowed {
+        return Err(AppError::OrgRoleInsufficient(
+            "you do not have proxy access to this service".to_string(),
+        ));
+    }
+
+    // Build the org_routing context if the service is org-owned.
+    let org_routing = if svc.user_id != actor_user_id {
+        // The service belongs to an org; build the routing context from
+        // the OwnerAccess that we already resolved above. We know the
+        // access is at least AsOrgAdmin or AsOrgMember (Viewer was
+        // rejected), so we can extract the membership_id.
+        let (org_user_id, membership_id) = match &access {
+            crate::services::org_service::OwnerAccess::AsOrgAdmin {
+                org_user_id,
+                membership_id,
+                ..
+            }
+            | crate::services::org_service::OwnerAccess::AsOrgMember {
+                org_user_id,
+                membership_id,
+                ..
+            } => (org_user_id.clone(), membership_id.clone()),
+            _ => unreachable!("Direct and Forbidden already handled"),
+        };
+        Some(OrgRouting {
+            org_user_id,
+            member_user_id: actor_user_id.to_string(),
+            membership_id,
+        })
+    } else {
+        None
+    };
+
+    let owner_id = svc.user_id.clone();
+    Ok(Some(
+        finish_resolution(db, encryption_keys, &owner_id, svc, org_routing).await?,
+    ))
+}
+
+/// Mirrors `resolve_proxy_target_from_user_service` exactly so that the
+/// approval policy resolution sees the *same* effective owner the proxy
+/// would actually pick at request time. In particular it:
+///
+/// 1. Returns the actor when there is a personal `UserService`.
+/// 2. Returns the actor when the actor has a legacy personal connection
+///    (`UserServiceConnection` or `UserProviderToken`) -- those still
+///    outrank org-shared credentials during migration.
+/// 3. Walks active memberships in `primary_org_id`-priority order
+///    (`find_active_memberships_with_timeout`) and applies the same
+///    role + scope filters as the proxy resolver.
+/// 4. Returns `None` when no UserService is found anywhere; in that
+///    case the caller falls back to the actor's own approval policy.
+///
+/// Does NOT decrypt credentials or load endpoints. Pure ownership lookup.
+pub async fn find_effective_service_owner(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    slug: Option<&str>,
+    catalog_service_id: Option<&str>,
+) -> AppResult<Option<String>> {
+    // 1. Personal lookup (short-circuit).
+    if let Some(svc) = lookup_user_service(db, actor_user_id, slug, catalog_service_id).await? {
+        return Ok(Some(svc.user_id));
+    }
+
+    // 2. Legacy personal guard. Same invariant as the proxy resolver:
+    //    pre-migration personal connections outrank org-shared
+    //    credentials. Returning the actor here keeps the approval policy
+    //    aligned with the legacy path.
+    if user_has_legacy_personal_connection(db, actor_user_id, slug, catalog_service_id).await? {
+        return Ok(Some(actor_user_id.to_string()));
+    }
+
+    // 3. Org fallback in priority order. Use the same timeout-bounded
+    //    membership lookup as the proxy resolver so the priority moves
+    //    `primary_org_id` to the front. We swallow `OrgQueryTimeout`
+    //    because this is called outside the proxy hot path -- the
+    //    caller still gets a deterministic answer (None) and the proxy
+    //    will surface the timeout itself if it bites later.
+    let memberships =
+        match crate::services::org_service::find_active_memberships_with_timeout(db, actor_user_id)
+            .await
+        {
+            Ok(rows) => rows,
+            Err(crate::errors::AppError::OrgQueryTimeout) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+    for membership in memberships {
+        let Some(org_us) =
+            lookup_user_service(db, &membership.org_user_id, slug, catalog_service_id).await?
+        else {
+            continue;
+        };
+        // Mirror the proxy resolver's role + scope filters.
+        if !membership.role.can_proxy() {
+            continue;
+        }
+        if !membership.allows_service(&org_us.id) {
+            continue;
+        }
+        return Ok(Some(org_us.user_id));
+    }
+
+    Ok(None)
+}
+
+/// Look up a `UserService` for the given owner by either slug or catalog
+/// service id. Pure data access, no decryption or side effects.
+async fn lookup_user_service(
+    db: &mongodb::Database,
+    owner_id: &str,
+    slug: Option<&str>,
+    catalog_service_id: Option<&str>,
+) -> AppResult<Option<crate::models::user_service::UserService>> {
+    if let Some(slug) = slug {
+        user_service_service::find_by_slug(db, owner_id, slug).await
+    } else if let Some(csid) = catalog_service_id {
+        user_service_service::find_by_catalog_service_id(db, owner_id, csid).await
+    } else {
+        Ok(None)
+    }
+}
+
+/// Given a found `UserService`, load its endpoint and credential and build
+/// the resolution result. The `effective_owner_id` is the user_id that owns
+/// the resources -- either the actor (personal path) or the org (org path).
+async fn finish_resolution(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    effective_owner_id: &str,
+    user_service: crate::models::user_service::UserService,
+    org_routing: Option<OrgRouting>,
+) -> AppResult<UserServiceResolution> {
     // Load the endpoint
     let endpoint = db
         .collection::<UserEndpoint>(USER_ENDPOINTS)
@@ -524,7 +908,7 @@ pub async fn resolve_proxy_target_from_user_service(
         let minimal_service =
             build_minimal_downstream_service(&user_service, &endpoint, now, token_exchange_config);
 
-        return Ok(Some(UserServiceResolution {
+        return Ok(UserServiceResolution {
             target: ProxyTarget {
                 base_url: endpoint.url.clone(),
                 auth_method: user_service.auth_method.clone(),
@@ -535,7 +919,8 @@ pub async fn resolve_proxy_target_from_user_service(
             node_id: user_service.node_id.clone(),
             user_service_id: user_service.id.clone(),
             has_server_credential: true,
-        }));
+            org_routing,
+        });
     }
 
     // Load the api key (required for auth services)
@@ -560,7 +945,8 @@ pub async fn resolve_proxy_target_from_user_service(
         })?;
 
     let api_key =
-        maybe_refresh_provider_backed_api_key(db, encryption_keys, user_id, api_key).await?;
+        maybe_refresh_provider_backed_api_key(db, encryption_keys, effective_owner_id, api_key)
+            .await?;
 
     // Node-routed services: resolve what we can but don't block on API key status
     // since the node agent handles credential injection locally.
@@ -584,7 +970,7 @@ pub async fn resolve_proxy_target_from_user_service(
         let minimal_service =
             build_minimal_downstream_service(&user_service, &endpoint, now, token_exchange_config);
 
-        return Ok(Some(UserServiceResolution {
+        return Ok(UserServiceResolution {
             target: ProxyTarget {
                 base_url: endpoint.url.clone(),
                 auth_method: user_service.auth_method.clone(),
@@ -595,7 +981,8 @@ pub async fn resolve_proxy_target_from_user_service(
             node_id: user_service.node_id.clone(),
             user_service_id: user_service.id.clone(),
             has_server_credential,
-        }));
+            org_routing,
+        });
     }
 
     if api_key.status != "active" {
@@ -623,7 +1010,7 @@ pub async fn resolve_proxy_target_from_user_service(
     let minimal_service =
         build_minimal_downstream_service(&user_service, &endpoint, now, token_exchange_config);
 
-    Ok(Some(UserServiceResolution {
+    Ok(UserServiceResolution {
         target: ProxyTarget {
             base_url: endpoint.url.clone(),
             auth_method: user_service.auth_method.clone(),
@@ -634,7 +1021,8 @@ pub async fn resolve_proxy_target_from_user_service(
         node_id: user_service.node_id.clone(),
         user_service_id: user_service.id.clone(),
         has_server_credential: true,
-    }))
+        org_routing,
+    })
 }
 
 /// Resolve a per-agent credential override for the given API key + service.

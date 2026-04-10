@@ -252,10 +252,17 @@ pub async fn exchange_authorization_code(
         return Err(AppError::InvalidRedirectUri);
     }
 
-    // Validate client_secret for confidential clients
+    // Validate client_secret for confidential clients. Reject auth
+    // codes against soft-deleted clients (`is_active = false`) so an
+    // already-issued code cannot be exchanged after the developer
+    // app -- or its owning org -- has been deleted. The legacy
+    // delete path on `oauth_clients` is a soft-delete, so the row
+    // can linger with `is_active = false` until the org cascade
+    // sweeps it; without this filter the code window is up to the
+    // auth-code TTL after the delete.
     let client = db
         .collection::<OauthClient>(OAUTH_CLIENTS)
-        .find_one(doc! { "_id": client_id })
+        .find_one(doc! { "_id": client_id, "is_active": true })
         .await?
         .ok_or_else(|| AppError::BadRequest("OAuth client not found".to_string()))?;
 

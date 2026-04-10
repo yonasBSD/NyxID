@@ -132,6 +132,24 @@ pub async fn list_bindings(
     Ok(bindings)
 }
 
+/// Look up a single binding by ID, scoped to a key + owner. Used by
+/// the per-binding scope check on org-owned API keys before deletion.
+pub async fn get_binding(
+    db: &mongodb::Database,
+    user_id: &str,
+    api_key_id: &str,
+    binding_id: &str,
+) -> AppResult<AgentServiceBinding> {
+    db.collection::<AgentServiceBinding>(AGENT_BINDINGS)
+        .find_one(doc! {
+            "_id": binding_id,
+            "api_key_id": api_key_id,
+            "user_id": user_id,
+        })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Binding not found".to_string()))
+}
+
 /// Delete a binding by ID.
 pub async fn delete_binding(
     db: &mongodb::Database,

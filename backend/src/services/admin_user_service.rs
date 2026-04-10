@@ -83,11 +83,17 @@ pub async fn create_user(
         ));
     }
 
-    // Check email uniqueness (case-insensitive)
+    // Check email uniqueness (case-insensitive). Scoped to person accounts
+    // because the new partial-unique index on `users.email` only constrains
+    // `user_type = "person"`, and orgs are allowed to share contact emails
+    // with persons.
     let normalized = email.to_lowercase();
     let existing = db
         .collection::<User>(USERS)
-        .find_one(doc! { "email": &normalized })
+        .find_one(doc! {
+            "email": &normalized,
+            "user_type": "person",
+        })
         .await?;
 
     if existing.is_some() {
@@ -131,6 +137,8 @@ pub async fn create_user(
         mfa_enabled: false,
         social_provider: None,
         social_provider_id: None,
+        user_type: crate::models::user::UserType::Person,
+        primary_org_id: None,
         created_at: now,
         updated_at: now,
         last_login_at: None,
@@ -194,11 +202,17 @@ pub async fn update_user(
             ));
         }
 
-        // Check uniqueness (case-insensitive)
+        // Check uniqueness (case-insensitive). Scoped to person accounts so
+        // that an org's contact email does not spuriously block a person
+        // rename, matching the partial-unique `users.email` index.
         let normalized = new_email.to_lowercase();
         let existing_with_email = db
             .collection::<User>(USERS)
-            .find_one(doc! { "email": &normalized, "_id": { "$ne": user_id } })
+            .find_one(doc! {
+                "email": &normalized,
+                "user_type": "person",
+                "_id": { "$ne": user_id },
+            })
             .await?;
 
         if existing_with_email.is_some() {

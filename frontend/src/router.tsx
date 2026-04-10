@@ -61,6 +61,9 @@ import {
   ChannelBotsPage,
   ChannelBotDetailPage,
   ChannelConversationDetailPage,
+  OrgsPage,
+  OrgDetailPage,
+  OrgJoinPage,
 } from "@/pages/lazy";
 
 // ── Route tree ──
@@ -405,6 +408,24 @@ const channelConversationDetailRoute = createRoute({
   component: ChannelConversationDetailPage,
 });
 
+const orgsRoute = createRoute({
+  path: "/orgs",
+  getParentRoute: () => dashboardLayout,
+  component: OrgsPage,
+});
+
+const orgDetailRoute = createRoute({
+  path: "/orgs/$orgId",
+  getParentRoute: () => dashboardLayout,
+  component: OrgDetailPage,
+});
+
+const orgJoinRoute = createRoute({
+  path: "/orgs/join/$nonce",
+  getParentRoute: () => dashboardLayout,
+  component: OrgJoinPage,
+});
+
 const adminLayout = createRoute({
   path: "/admin",
   getParentRoute: () => dashboardLayout,
@@ -528,6 +549,9 @@ const routeTree = rootRoute.addChildren([
     channelBotsRoute,
     channelBotDetailRoute,
     channelConversationDetailRoute,
+    orgsRoute,
+    orgJoinRoute,
+    orgDetailRoute,
     adminLayout.addChildren([
       adminUsersRoute,
       adminUserDetailRoute,

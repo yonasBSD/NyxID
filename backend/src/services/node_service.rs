@@ -214,6 +214,39 @@ pub async fn get_node(db: &mongodb::Database, user_id: &str, node_id: &str) -> A
         .ok_or_else(|| AppError::NodeNotFound("Node not found".to_string()))
 }
 
+/// Look up a node and verify the actor has write access to it -- either as
+/// the direct owner or as an admin of the org that owns it.
+///
+/// Used by `user_service_service::create_user_service` and
+/// `update_user_service` so that an admin can route an org-owned service
+/// through their personal node (where they're the direct owner) without
+/// having to also re-register the node under the org. The check is
+/// actor-based rather than service-owner based: it's the human (or API
+/// key) making the request who needs node access, not the service's
+/// effective owner.
+///
+/// Returns `NodeNotFound` for any of: missing row, inactive node, or
+/// actor without write access (no metadata leak).
+pub async fn ensure_node_writable_by_actor(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    node_id: &str,
+) -> AppResult<Node> {
+    let node = db
+        .collection::<Node>(NODES)
+        .find_one(doc! { "_id": node_id, "is_active": true })
+        .await?
+        .ok_or_else(|| AppError::NodeNotFound("Node not found".to_string()))?;
+
+    let access =
+        crate::services::org_service::resolve_owner_access(db, actor_user_id, &node.user_id)
+            .await?;
+    if !access.can_write() {
+        return Err(AppError::NodeNotFound("Node not found".to_string()));
+    }
+    Ok(node)
+}
+
 /// List all active nodes for a user.
 pub async fn list_user_nodes(db: &mongodb::Database, user_id: &str) -> AppResult<Vec<Node>> {
     let nodes: Vec<Node> = db
@@ -525,9 +558,18 @@ fn decode_node_signing_secret(
 ///
 /// Call this after creating or updating a `UserService` with a node routing change.
 /// Creates a binding when `node_id` is set, deactivates the old one when it changes.
+///
+/// `user_id` is the *binding owner* -- for org-shared services this is the
+/// org's user_id, so that proxy-time routing (which queries bindings by the
+/// effective service owner) finds it. `actor_user_id` is the human (or API
+/// key) that actually owns the node and is performing the operation; it is
+/// used to validate that the actor is allowed to bind this node. Both are
+/// the same value for personal services. For org services they differ:
+/// the actor is an org admin and the node is their personal node.
 pub async fn sync_node_binding_for_user_service(
     db: &mongodb::Database,
     user_id: &str,
+    actor_user_id: &str,
     catalog_service_id: Option<&str>,
     new_node_id: Option<&str>,
     old_node_id: Option<&str>,
@@ -537,9 +579,12 @@ pub async fn sync_node_binding_for_user_service(
     };
 
     // Validate the new node before mutating bindings so an invalid update does not
-    // tear down the previous route.
+    // tear down the previous route. The node is owned by the *actor*, not the
+    // binding owner -- a personal node may be referenced by an org-owned service
+    // when the actor is an admin of that org. Use the actor-based access check
+    // so the actor's org admin role on the node owner is honored.
     if let Some(new_nid) = new_node_id.filter(|nid| !nid.is_empty()) {
-        get_node(db, user_id, new_nid).await?;
+        ensure_node_writable_by_actor(db, actor_user_id, new_nid).await?;
     }
 
     // Deactivate old binding if the node changed or was cleared.

@@ -14,7 +14,7 @@ use crate::errors::{AppError, AppResult};
 use crate::models::agent_service_binding::{
     AgentServiceBinding, COLLECTION_NAME as AGENT_SERVICE_BINDINGS,
 };
-use crate::models::api_key::ApiKey;
+use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
 use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
@@ -23,12 +23,71 @@ use crate::models::node::{COLLECTION_NAME as NODES, Node};
 use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::mw::auth::AuthUser;
-use crate::services::key_service;
+use crate::services::{key_service, org_service};
 
 // --- Request / Response types ---
 
 fn default_true() -> bool {
     true
+}
+
+/// Resolve the effective owner for an ApiKey mutation. Returns the owner's
+/// user_id so the caller passes it to `key_service::*` for downstream
+/// filtering. Blocks non-admin org members (who get
+/// `OrgRoleInsufficient`).
+///
+/// `OrgMembership.allowed_service_ids` is keyed by `UserService.id`, but
+/// a NyxID `ApiKey` is an *agent identity*, not a service -- it has its
+/// own `allowed_service_ids` scope that bounds which services its
+/// bearer can call at runtime. The membership scope is therefore not
+/// applied at the resource level here; org admins manage every
+/// org-owned API key as a unit.
+///
+/// Used by update / delete / rotate / per-key read handlers.
+async fn resolve_api_key_write_owner(
+    state: &AppState,
+    actor: &str,
+    key_id: &str,
+) -> AppResult<String> {
+    let key = state
+        .db
+        .collection::<ApiKey>(API_KEYS)
+        .find_one(doc! { "_id": key_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
+
+    let access = org_service::resolve_owner_access(&state.db, actor, &key.user_id).await?;
+    if !access.can_read() {
+        return Err(AppError::NotFound("API key not found".to_string()));
+    }
+    if !access.can_write() {
+        return Err(AppError::OrgRoleInsufficient(
+            "you do not have permission to modify this API key".to_string(),
+        ));
+    }
+    Ok(key.user_id)
+}
+
+/// Read variant: allows all active members (not just admins) to view an
+/// org-owned ApiKey's metadata. See `resolve_api_key_write_owner` for
+/// why the membership scope is not applied at the resource level.
+async fn resolve_api_key_read_owner(
+    state: &AppState,
+    actor: &str,
+    key_id: &str,
+) -> AppResult<String> {
+    let key = state
+        .db
+        .collection::<ApiKey>(API_KEYS)
+        .find_one(doc! { "_id": key_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
+
+    let access = org_service::resolve_owner_access(&state.db, actor, &key.user_id).await?;
+    if !access.can_read() {
+        return Err(AppError::NotFound("API key not found".to_string()));
+    }
+    Ok(key.user_id)
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -50,6 +109,13 @@ pub struct CreateApiKeyRequest {
     pub rate_limit_burst: Option<u32>,
     pub platform: Option<String>,
     pub callback_url: Option<String>,
+    /// When set, create this NyxID agent API key under the given org. The
+    /// resulting `ApiKey.user_id` is the org's user id, making the key
+    /// visible to every org admin for management. Callers using the key
+    /// (via `NYXID_ACCESS_TOKEN`) authenticate as the org -- proxy calls
+    /// see org-owned services directly. The caller must be an admin of
+    /// the target org.
+    pub target_org_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -134,6 +200,13 @@ pub struct ApiKeyResponse {
     pub callback_url: Option<String>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub bindings_count: u64,
+    /// Provenance: whether this key is owned directly by the caller or
+    /// inherited from an org the caller is a member of. Mirrors the
+    /// `credential_source` field on `/user-services`. Used by the frontend
+    /// to filter the binding/scope pickers to services owned by the same
+    /// owner (personal agent keys bind to personal services, org agent
+    /// keys bind to the same org's services).
+    pub credential_source: crate::handlers::user_services_handler::CredentialSourceResponse,
 }
 
 fn is_zero(v: &u64) -> bool {
@@ -153,6 +226,13 @@ fn default_usage_days() -> u32 {
 pub struct ApiKeyUsageQuery {
     #[serde(default = "default_usage_days")]
     pub days: u32,
+}
+
+#[derive(Debug, Deserialize, ToSchema, Default)]
+pub struct ApiKeyListQuery {
+    /// When set, list keys owned by the given org instead of the caller's
+    /// personal scope. The caller must be an admin of that org.
+    pub org_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -206,8 +286,80 @@ pub struct DeleteApiKeyResponse {
 /// Nodes in two `$in` queries instead of N+1 individual lookups.
 async fn enrich_api_keys_batch(
     state: &AppState,
+    actor_user_id: &str,
     keys: &[ApiKey],
 ) -> AppResult<Vec<ApiKeyResponse>> {
+    use crate::handlers::user_services_handler::{CredentialSourceResponse, OrgRoleResponse};
+    use crate::services::user_service_service::CredentialSource;
+
+    // Compute credential_source per key. Most batches contain keys from a
+    // single owner (personal OR a single org), so cache by owner id to
+    // avoid quadratic resolve_owner_access calls.
+    let unique_owners: Vec<String> = keys
+        .iter()
+        .map(|k| k.user_id.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    let mut source_cache: HashMap<String, CredentialSourceResponse> = HashMap::new();
+    for owner in &unique_owners {
+        if owner == actor_user_id {
+            source_cache.insert(owner.clone(), CredentialSourceResponse::Personal);
+            continue;
+        }
+        // Not the actor -- either an org they belong to, or (shouldn't
+        // reach here under the handler gating) something inaccessible. We
+        // don't fail here because the handler already authorized access;
+        // this is just metadata for the response.
+        let access = org_service::resolve_owner_access(&state.db, actor_user_id, owner).await?;
+        let source_enum: CredentialSource = match access {
+            org_service::OwnerAccess::Direct => CredentialSource::Personal,
+            org_service::OwnerAccess::AsOrgAdmin { org_user_id, .. } => {
+                let org = state
+                    .db
+                    .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+                    .find_one(doc! { "_id": &org_user_id })
+                    .await?;
+                let org_name = org
+                    .and_then(|u| u.display_name)
+                    .unwrap_or_else(|| "Unnamed Org".to_string());
+                CredentialSource::Org {
+                    org_user_id,
+                    org_name,
+                    role: crate::models::org_membership::OrgRole::Admin,
+                    allowed: true,
+                }
+            }
+            org_service::OwnerAccess::AsOrgMember {
+                org_user_id, role, ..
+            } => {
+                let org = state
+                    .db
+                    .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+                    .find_one(doc! { "_id": &org_user_id })
+                    .await?;
+                let org_name = org
+                    .and_then(|u| u.display_name)
+                    .unwrap_or_else(|| "Unnamed Org".to_string());
+                let allowed = role.can_proxy();
+                CredentialSource::Org {
+                    org_user_id,
+                    org_name,
+                    role,
+                    allowed,
+                }
+            }
+            org_service::OwnerAccess::Forbidden => {
+                // Shouldn't happen -- handler already gated access.
+                CredentialSource::Personal
+            }
+        };
+        // Suppress unused lint by using OrgRoleResponse type import above.
+        let _ = OrgRoleResponse::Admin;
+        source_cache.insert(owner.clone(), source_enum.into());
+    }
+
     let key_ids: Vec<&str> = keys.iter().map(|k| k.id.as_str()).collect();
 
     // Collect all referenced IDs across all keys
@@ -379,6 +531,10 @@ async fn enrich_api_keys_batch(
                 platform: key.platform.clone(),
                 callback_url: key.callback_url.clone(),
                 bindings_count: binding_counts.get(&key.id).copied().unwrap_or(0),
+                credential_source: source_cache
+                    .get(&key.user_id)
+                    .cloned()
+                    .unwrap_or(CredentialSourceResponse::Personal),
             }
         })
         .collect();
@@ -704,13 +860,28 @@ async fn build_api_key_usage(
     tag = "API Keys"
 )]
 /// GET /api/v1/api-keys
+///
+/// Defaults to listing the caller's personal API keys. Pass `?org_id=X`
+/// to list keys owned by an org (the caller must be an admin of that org).
 pub async fn list_keys(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    Query(query): Query<ApiKeyListQuery>,
 ) -> AppResult<Json<ApiKeyListResponse>> {
-    let user_id_str = auth_user.user_id.to_string();
+    let actor = auth_user.user_id.to_string();
+    let user_id_str = if let Some(target_org_id) = query.org_id.as_deref() {
+        let access = org_service::resolve_owner_access(&state.db, &actor, target_org_id).await?;
+        if !access.can_write() {
+            return Err(AppError::OrgRoleInsufficient(
+                "admin access to the target org is required to list its API keys".to_string(),
+            ));
+        }
+        target_org_id.to_string()
+    } else {
+        actor.clone()
+    };
     let keys = key_service::list_api_keys(&state.db, &user_id_str).await?;
-    let items = enrich_api_keys_batch(&state, &keys).await?;
+    let items = enrich_api_keys_batch(&state, &actor, &keys).await?;
     Ok(Json(ApiKeyListResponse { keys: items }))
 }
 
@@ -733,9 +904,10 @@ pub async fn get_key(
     auth_user: AuthUser,
     Path(key_id): Path<String>,
 ) -> AppResult<Json<ApiKeyResponse>> {
-    let user_id_str = auth_user.user_id.to_string();
+    let actor = auth_user.user_id.to_string();
+    let user_id_str = resolve_api_key_read_owner(&state, &actor, &key_id).await?;
     let key = key_service::get_api_key(&state.db, &user_id_str, &key_id).await?;
-    let enriched = enrich_api_keys_batch(&state, &[key]).await?;
+    let enriched = enrich_api_keys_batch(&state, &actor, &[key]).await?;
     Ok(Json(enriched.into_iter().next().unwrap()))
 }
 
@@ -787,7 +959,8 @@ pub async fn get_key_usage(
     Path(key_id): Path<String>,
     Query(query): Query<ApiKeyUsageQuery>,
 ) -> AppResult<Json<ApiKeyUsageResponse>> {
-    let user_id_str = auth_user.user_id.to_string();
+    let actor = auth_user.user_id.to_string();
+    let user_id_str = resolve_api_key_read_owner(&state, &actor, &key_id).await?;
     let days = query.days.clamp(1, 30);
     let key = key_service::get_api_key(&state.db, &user_id_str, &key_id).await?;
     let mut usage = build_api_key_usage(&state, &user_id_str, &[key], days).await?;
@@ -847,7 +1020,26 @@ pub async fn create_key(
         .map(parse_expires_at)
         .transpose()?;
 
-    let user_id_str = auth_user.user_id.to_string();
+    let actor = auth_user.user_id.to_string();
+
+    // If `target_org_id` is set, write the key under the org's user_id so
+    // every admin of that org can manage it and every consumer of the key
+    // authenticates as the org. The caller must be an admin of the target.
+    // `allowed_service_ids`/`allowed_node_ids` scopes are then validated
+    // against the org's owned resources, which is the intended behavior --
+    // an org-owned API key can only scope to org-owned services.
+    let user_id_str = if let Some(target_org_id) = body.target_org_id.as_deref() {
+        let access = org_service::resolve_owner_access(&state.db, &actor, target_org_id).await?;
+        if !access.can_write() {
+            return Err(AppError::OrgRoleInsufficient(
+                "you must be an admin of the target org to create API keys under it".to_string(),
+            ));
+        }
+        target_org_id.to_string()
+    } else {
+        actor
+    };
+
     let created = key_service::create_api_key(
         &state.db,
         &user_id_str,
@@ -905,7 +1097,8 @@ pub async fn update_key(
     Path(key_id): Path<String>,
     Json(body): Json<UpdateApiKeyRequest>,
 ) -> AppResult<Json<ApiKeyResponse>> {
-    let user_id_str = auth_user.user_id.to_string();
+    let actor = auth_user.user_id.to_string();
+    let user_id_str = resolve_api_key_write_owner(&state, &actor, &key_id).await?;
 
     let updated = key_service::update_api_key_scope(
         &state.db,
@@ -925,7 +1118,7 @@ pub async fn update_key(
     )
     .await?;
 
-    let enriched = enrich_api_keys_batch(&state, &[updated]).await?;
+    let enriched = enrich_api_keys_batch(&state, &actor, &[updated]).await?;
     Ok(Json(enriched.into_iter().next().unwrap()))
 }
 
@@ -948,7 +1141,8 @@ pub async fn delete_key(
     auth_user: AuthUser,
     Path(key_id): Path<String>,
 ) -> AppResult<Json<DeleteApiKeyResponse>> {
-    let user_id_str = auth_user.user_id.to_string();
+    let actor = auth_user.user_id.to_string();
+    let user_id_str = resolve_api_key_write_owner(&state, &actor, &key_id).await?;
     key_service::delete_api_key(&state.db, &user_id_str, &key_id).await?;
 
     Ok(Json(DeleteApiKeyResponse {
@@ -975,7 +1169,8 @@ pub async fn rotate_key(
     auth_user: AuthUser,
     Path(key_id): Path<String>,
 ) -> AppResult<Json<CreateApiKeyResponse>> {
-    let user_id_str = auth_user.user_id.to_string();
+    let actor = auth_user.user_id.to_string();
+    let user_id_str = resolve_api_key_write_owner(&state, &actor, &key_id).await?;
     let created = key_service::rotate_api_key(&state.db, &user_id_str, &key_id).await?;
 
     Ok(Json(CreateApiKeyResponse {

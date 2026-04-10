@@ -91,6 +91,41 @@ struct PreResolved {
     /// The UserService ID for API key scope checks.
     user_service_id: Option<String>,
     has_server_credential: bool,
+    /// The user_id that owns the resolved UserService. For personal
+    /// resolutions this is the actor; for org-routed resolutions this is
+    /// the org's user_id. Used to scope NodeServiceBinding fallback
+    /// lookups so the failover list reflects the org's bindings, not
+    /// just the calling member's personal bindings.
+    effective_owner_id: String,
+}
+
+/// Emit a single audit entry recording that this proxy call was routed via
+/// an org's shared credential. The request itself produces additional
+/// audit entries via execute_proxy_inner; this is the org-attribution side.
+fn audit_org_routing(
+    state: &AppState,
+    auth_user: &AuthUser,
+    routing: &proxy_service::OrgRouting,
+    user_service_id: &str,
+    service_id: &str,
+) {
+    audit_service::log_async(
+        state.db.clone(),
+        Some(auth_user.user_id.to_string()),
+        "proxy_routed_via_org".to_string(),
+        Some(serde_json::json!({
+            "routed_via": "org",
+            "service_id": service_id,
+            "user_service_id": user_service_id,
+            "org_user_id": routing.org_user_id,
+            "member_user_id": routing.member_user_id,
+            "membership_id": routing.membership_id,
+        })),
+        None,
+        None,
+        auth_user.api_key_id.clone(),
+        auth_user.api_key_name.clone(),
+    );
 }
 
 struct DownstreamWsConnection {
@@ -120,6 +155,35 @@ fn collect_forward_headers(
         .collect()
 }
 
+/// Extract `?_nyxid_via=<user_service_id>` from the request URI.
+///
+/// When present, the proxy handler bypasses the auto-resolution cascade
+/// and uses the specified UserService directly. The caller gets the id
+/// from `GET /api/v1/user-services` or `GET /api/v1/keys`.
+fn extract_via_service(request: &Request<Body>) -> Option<String> {
+    request.uri().query().and_then(|q| {
+        q.split('&')
+            .find_map(|pair| pair.strip_prefix("_nyxid_via="))
+            .map(|v| urlencoding::decode(v).unwrap_or_default().to_string())
+    })
+}
+
+/// Strip NyxID-internal query params before forwarding to downstream.
+///
+/// Currently strips `_nyxid_via` (the explicit credential-selection
+/// param added by this PR). Future NyxID-internal params should be
+/// added to the filter here so downstream services never see them.
+fn strip_internal_query_params(raw: &str) -> String {
+    const INTERNAL_PARAMS: &[&str] = &["_nyxid_via"];
+    raw.split('&')
+        .filter(|pair| {
+            let key = pair.split('=').next().unwrap_or("");
+            !INTERNAL_PARAMS.contains(&key)
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
 fn append_query_param(url: &str, param_name: &str, param_value: &str) -> String {
     let separator = if url.contains('?') { "&" } else { "?" };
     let encoded_name = urlencoding::encode(param_name);
@@ -147,6 +211,14 @@ fn append_query_param(url: &str, param_name: &str, param_value: &str) -> String 
 /// Forward the request to the downstream service with credential injection,
 /// identity propagation, and delegated provider credentials.
 /// Tries the new UserService path first (by catalog_service_id), falls back to old.
+///
+/// Accepts an optional `?_nyxid_via=<user_service_id>` query param that
+/// bypasses the auto-resolution cascade and uses the specified UserService
+/// directly. The caller gets the id from `GET /api/v1/user-services` or
+/// `GET /api/v1/keys`, which list both personal and org-inherited services
+/// tagged with `credential_source`. This lets a user who has both a
+/// personal and an org credential for the same service explicitly choose
+/// which one to use for a given request.
 pub async fn proxy_request(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -156,6 +228,56 @@ pub async fn proxy_request(
     auth_user.ensure_rest_proxy_access()?;
 
     let user_id_str = auth_user.user_id.to_string();
+    let via_service = extract_via_service(&request);
+
+    // Direct resolution by UserService ID if ?_nyxid_via= is present.
+    // Constrained to the catalog service_id in the route path so the
+    // override cannot silently proxy through a different service.
+    if let Some(ref us_id) = via_service {
+        if let Some(resolved) = proxy_service::resolve_proxy_target_by_user_service_id(
+            &state.db,
+            &state.encryption_keys,
+            &user_id_str,
+            us_id,
+            None,
+            Some(&service_id),
+        )
+        .await?
+        {
+            let effective_service_id = resolved.target.service.id.clone();
+            if let Some(routing) = &resolved.org_routing {
+                audit_org_routing(
+                    &state,
+                    &auth_user,
+                    routing,
+                    &resolved.user_service_id,
+                    &effective_service_id,
+                );
+            }
+            return execute_proxy_inner(
+                &state,
+                &auth_user,
+                &effective_service_id,
+                &path,
+                request,
+                Some(PreResolved {
+                    target: resolved.target,
+                    node_id: resolved.node_id,
+                    user_service_id: Some(resolved.user_service_id),
+                    has_server_credential: resolved.has_server_credential,
+                    effective_owner_id: resolved
+                        .org_routing
+                        .as_ref()
+                        .map(|r| r.org_user_id.clone())
+                        .unwrap_or_else(|| user_id_str.clone()),
+                }),
+            )
+            .await;
+        }
+        return Err(AppError::NotFound(format!(
+            "UserService '{us_id}' not found or not accessible"
+        )));
+    }
 
     // Try new UserService path first (lookup by catalog_service_id)
     if let Some(resolved) = proxy_service::resolve_proxy_target_from_user_service(
@@ -169,6 +291,15 @@ pub async fn proxy_request(
     .await?
     {
         let effective_service_id = resolved.target.service.id.clone();
+        if let Some(routing) = &resolved.org_routing {
+            audit_org_routing(
+                &state,
+                &auth_user,
+                routing,
+                &resolved.user_service_id,
+                &effective_service_id,
+            );
+        }
         return execute_proxy_inner(
             &state,
             &auth_user,
@@ -180,6 +311,11 @@ pub async fn proxy_request(
                 node_id: resolved.node_id,
                 user_service_id: Some(resolved.user_service_id),
                 has_server_credential: resolved.has_server_credential,
+                effective_owner_id: resolved
+                    .org_routing
+                    .as_ref()
+                    .map(|r| r.org_user_id.clone())
+                    .unwrap_or_else(|| user_id_str.clone()),
             }),
         )
         .await;
@@ -209,6 +345,8 @@ pub async fn proxy_request(
 /// Resolve the service by slug, then forward via the shared proxy pipeline.
 /// Tries the new UserService path first (by slug), then falls back to old
 /// DownstreamService resolution.
+///
+/// Accepts `?_nyxid_via=<user_service_id>` — see `proxy_request` doc.
 pub async fn proxy_request_by_slug(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -218,6 +356,56 @@ pub async fn proxy_request_by_slug(
     auth_user.ensure_rest_proxy_access()?;
 
     let user_id_str = auth_user.user_id.to_string();
+    let via_service = extract_via_service(&request);
+
+    // Direct resolution by UserService ID if ?_nyxid_via= is present.
+    // Constrained to the slug in the route path so the override cannot
+    // silently proxy through a different service.
+    if let Some(ref us_id) = via_service {
+        if let Some(resolved) = proxy_service::resolve_proxy_target_by_user_service_id(
+            &state.db,
+            &state.encryption_keys,
+            &user_id_str,
+            us_id,
+            Some(&slug),
+            None,
+        )
+        .await?
+        {
+            let effective_service_id = resolved.target.service.id.clone();
+            if let Some(routing) = &resolved.org_routing {
+                audit_org_routing(
+                    &state,
+                    &auth_user,
+                    routing,
+                    &resolved.user_service_id,
+                    &effective_service_id,
+                );
+            }
+            return execute_proxy_inner(
+                &state,
+                &auth_user,
+                &effective_service_id,
+                &path,
+                request,
+                Some(PreResolved {
+                    target: resolved.target,
+                    node_id: resolved.node_id,
+                    user_service_id: Some(resolved.user_service_id),
+                    has_server_credential: resolved.has_server_credential,
+                    effective_owner_id: resolved
+                        .org_routing
+                        .as_ref()
+                        .map(|r| r.org_user_id.clone())
+                        .unwrap_or_else(|| user_id_str.clone()),
+                }),
+            )
+            .await;
+        }
+        return Err(AppError::NotFound(format!(
+            "UserService '{us_id}' not found or not accessible"
+        )));
+    }
 
     // Try new UserService path first (by slug)
     if let Some(resolved) = proxy_service::resolve_proxy_target_from_user_service(
@@ -231,6 +419,15 @@ pub async fn proxy_request_by_slug(
     .await?
     {
         let effective_service_id = resolved.target.service.id.clone();
+        if let Some(routing) = &resolved.org_routing {
+            audit_org_routing(
+                &state,
+                &auth_user,
+                routing,
+                &resolved.user_service_id,
+                &effective_service_id,
+            );
+        }
         return execute_proxy_inner(
             &state,
             &auth_user,
@@ -242,6 +439,11 @@ pub async fn proxy_request_by_slug(
                 node_id: resolved.node_id,
                 user_service_id: Some(resolved.user_service_id),
                 has_server_credential: resolved.has_server_credential,
+                effective_owner_id: resolved
+                    .org_routing
+                    .as_ref()
+                    .map(|r| r.org_user_id.clone())
+                    .unwrap_or_else(|| user_id_str.clone()),
             }),
         )
         .await;
@@ -408,13 +610,25 @@ async fn execute_proxy_inner(
     let user_id_str = auth_user.user_id.to_string();
     let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
 
+    // The user_id that owns the resolved UserService, when known. For
+    // personal services or for legacy fallback paths this stays None and
+    // approval policy resolution falls back to the actor's settings.
+    // Captured outside the resolution match so the downstream approval
+    // block can apply the org-aware cascade.
+    let mut effective_owner_for_approval: Option<String> = None;
+
     // Resolve target and node routing
     let (node_route, target, has_server_credential, _resolved_user_service_id) =
         if let Some(mut pre) = pre_resolved {
-            // New UserService path: target already resolved
+            effective_owner_for_approval = Some(pre.effective_owner_id.clone());
+            // New UserService path: target already resolved.
+            // Use the resolved service's effective owner (the org's user_id
+            // for org-routed calls, the actor for personal) when looking up
+            // the node fallback list, so the failover candidates reflect
+            // the org's bindings rather than just the actor's personal ones.
             let mut node_route = build_pre_resolved_node_route(
                 state,
-                &user_id_str,
+                &pre.effective_owner_id,
                 service_id,
                 pre.node_id.as_deref(),
             )
@@ -481,7 +695,14 @@ async fn execute_proxy_inner(
     // Extract method, query, headers BEFORE body consumption.
     let method = request.method().clone();
     let method_str = method.as_str().to_string();
-    let query = request.uri().query().map(String::from);
+    // Strip NyxID-only routing params (e.g. `_nyxid_via`) from the
+    // query string before forwarding. Downstream services should never
+    // see NyxID-internal parameters.
+    let query = request
+        .uri()
+        .query()
+        .map(strip_internal_query_params)
+        .filter(|q| !q.is_empty());
     let all_headers = request.headers().clone();
 
     // Extract the caller's raw Bearer token for nyxid_token passthrough.
@@ -502,15 +723,23 @@ async fn execute_proxy_inner(
     let ws_forward_headers = collect_forward_headers(&all_headers, ALLOWED_WS_FORWARD_HEADERS);
 
     // === Request body handling ===
-    // Check whether approval is needed (DB call, does not need the body).
-    let requires_approval = approval_service::requires_approval_for_service(
+    // Resolve approval policy with org-cascade. The "service owner" (the
+    // user_id that owns the resolved UserService) determines whether an
+    // org policy applies. For the legacy DownstreamService fallback path
+    // where no PreResolved was supplied, the service owner is the actor
+    // (no org context available).
+    let service_owner_for_approval = effective_owner_for_approval
+        .as_deref()
+        .unwrap_or(&approval_owner_user_id);
+    let approval_resolution = approval_service::resolve_org_aware_approval(
         &state.db,
         &approval_owner_user_id,
+        service_owner_for_approval,
         service_id,
     )
     .await?;
     let enforce_approval =
-        should_enforce_runtime_approval(requires_approval, &auth_user.auth_method);
+        should_enforce_runtime_approval(approval_resolution.required, &auth_user.auth_method);
 
     // For WebSocket upgrades, skip body buffering -- WS handshakes have no
     // meaningful body, and consuming it would prevent the protocol upgrade.
@@ -533,30 +762,64 @@ async fn execute_proxy_inner(
         })?;
         let requester_id = auth_user.approval_requester_id();
 
-        let approval_mode =
-            approval_service::resolve_approval_mode(&state.db, &approval_owner_user_id, service_id)
-                .await?;
+        // The "primary owner" of the request is whoever the policy came
+        // from -- the org for org-policy, the actor otherwise. Grants are
+        // scoped under this owner so the next call from the same actor
+        // (under the same policy) reuses the existing grant.
+        let primary_owner = &approval_resolution.primary_owner_user_id;
 
         // In grant mode, check for existing grant first.
         // In per_request mode, skip grant check -- every request needs fresh approval.
-        let has_grant =
-            if approval_mode == crate::models::service_approval_config::ApprovalMode::Grant {
-                approval_service::check_approval(
-                    &state.db,
-                    &approval_owner_user_id,
-                    service_id,
-                    requester_type,
-                    &requester_id,
-                )
-                .await?
-            } else {
-                false
-            };
+        let has_grant = if approval_resolution.mode
+            == crate::models::service_approval_config::ApprovalMode::Grant
+        {
+            approval_service::check_approval(
+                &state.db,
+                primary_owner,
+                service_id,
+                requester_type,
+                &requester_id,
+            )
+            .await?
+        } else {
+            false
+        };
 
         if !has_grant {
+            // Compute the notification recipients. For an actor-policy
+            // request the actor is the only recipient. For an org-policy
+            // request the recipients are every active admin of the
+            // owning org. If the org has no admins we MUST fail closed:
+            // falling back to the actor would let a normal member
+            // self-approve their own org-gated request (and in grant mode
+            // mint an org-wide grant) since `decide_request` authorizes
+            // anyone in `notify_user_ids`.
+            let notify_user_ids: Vec<String> = if approval_resolution.from_org_policy {
+                let mut admins =
+                    crate::services::org_service::list_admin_user_ids(&state.db, primary_owner)
+                        .await?;
+                admins.sort();
+                admins.dedup();
+                if admins.is_empty() {
+                    return Err(AppError::OrgApprovalNoAdmin(format!(
+                        "Org {primary_owner} has an approval policy on this service but no active admins to decide. Add an admin to the org and retry."
+                    )));
+                }
+                admins
+            } else {
+                vec![approval_owner_user_id.clone()]
+            };
+
+            // Use the FIRST recipient's notification channel for the
+            // primary timeout (subsequent recipients still get notified
+            // independently in fan-out). The recipient list is guaranteed
+            // non-empty: the org branch errors out above if there are no
+            // admins, and the actor branch always pushes the actor.
+            let timeout_recipient = notify_user_ids.first().cloned().ok_or_else(|| {
+                AppError::Internal("approval recipient list unexpectedly empty".to_string())
+            })?;
             let channel =
-                notification_service::get_or_create_channel(&state.db, &approval_owner_user_id)
-                    .await?;
+                notification_service::get_or_create_channel(&state.db, &timeout_recipient).await?;
 
             let action_desc = action_description::build_action_description(
                 &method_str,
@@ -575,7 +838,7 @@ async fn execute_proxy_inner(
                 &state.http_client,
                 state.fcm_auth.as_deref(),
                 state.apns_auth.as_deref(),
-                &approval_owner_user_id,
+                primary_owner,
                 service_id,
                 &target.service.name,
                 &target.service.slug,
@@ -584,8 +847,9 @@ async fn execute_proxy_inner(
                 None,
                 &format!("proxy:{} {}", method_str, path),
                 Some(&action_desc),
-                approval_mode.clone(),
+                approval_resolution.mode.clone(),
                 timeout_secs,
+                notify_user_ids,
             )
             .await?;
 

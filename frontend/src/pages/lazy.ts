@@ -200,3 +200,12 @@ export const ChannelConversationDetailPage = lazy(() =>
     default: m.ChannelConversationDetailPage,
   })),
 );
+export const OrgsPage = lazy(() =>
+  import("@/pages/orgs").then((m) => ({ default: m.OrgsPage })),
+);
+export const OrgDetailPage = lazy(() =>
+  import("@/pages/org-detail").then((m) => ({ default: m.OrgDetailPage })),
+);
+export const OrgJoinPage = lazy(() =>
+  import("@/pages/org-join").then((m) => ({ default: m.OrgJoinPage })),
+);

@@ -31,6 +31,14 @@ export interface ApiKey {
   readonly rate_limit_per_second: number | null;
   readonly rate_limit_burst: number | null;
   readonly bindings_count: number;
+  /**
+   * Provenance: whether this NyxID API key is owned directly by the
+   * caller (Personal) or by an org the caller belongs to. Used by the
+   * scope and binding pickers to filter user services to those owned by
+   * the same owner. Optional for backward compatibility with backends
+   * that pre-date the org model.
+   */
+  readonly credential_source?: import("@/schemas/orgs").CredentialSource;
 }
 
 export interface AllowedServiceInfo {

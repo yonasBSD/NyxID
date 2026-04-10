@@ -15,6 +15,7 @@ use crate::models::notification_channel::{COLLECTION_NAME as CHANNELS, Notificat
 use crate::models::service_approval_config::{
     ApprovalMode, COLLECTION_NAME as SERVICE_APPROVAL_CONFIGS, ServiceApprovalConfig,
 };
+use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::services::notification_service;
 use crate::services::push_service::{ApnsAuth, FcmAuth};
 
@@ -39,27 +40,101 @@ pub async fn user_requires_approval(db: &Database, user_id: &str) -> AppResult<b
         .unwrap_or(false))
 }
 
-/// Check whether approval is required for a specific service.
+// `requires_approval_for_service` was removed in favor of the org-aware
+// `resolve_org_aware_approval` below. Callers should use that function so
+// the org-policy cascade applies for org-shared services.
+
+/// Outcome of resolving the approval policy for a proxy call. Captures
+/// who the request "belongs" to (`primary_owner_user_id`), what mode it
+/// runs in, and whether it triggered at all.
 ///
-/// Resolution order:
-/// 1. If a `ServiceApprovalConfig` exists for (user, service), use its value.
-/// 2. Otherwise, fall back to the global `notification_channels.approval_required`.
-pub async fn requires_approval_for_service(
+/// **Resolution semantics** (used by [`resolve_org_aware_approval`]):
+///
+/// 1. If the service is **org-owned** AND the org has set a per-service
+///    `ServiceApprovalConfig`, that config wins absolutely. The org admin
+///    has made an explicit choice for the shared resource. The request
+///    `primary_owner_user_id` is the org's user_id; grants live under the
+///    org so the next call from the same actor reuses it.
+/// 2. Otherwise -- personal service, OR org-owned without an org policy --
+///    the actor's per-service or global setting applies (existing behavior).
+///    The request `primary_owner_user_id` is the actor.
+///
+/// This is the cleanest semantic: the resource owner's policy is
+/// authoritative when set, and falls back to the actor's preference when
+/// the owner has not configured one.
+#[derive(Debug, Clone)]
+pub struct ApprovalResolution {
+    pub required: bool,
+    pub mode: ApprovalMode,
+    /// User the request is created under. For org-policy requests this
+    /// is the org user_id; for actor-policy requests this is the actor.
+    pub primary_owner_user_id: String,
+    /// True when resolution came from the org's per-service config rather
+    /// than the actor's settings. The proxy handler uses this to populate
+    /// `notify_user_ids` with the org's admin list instead of `[actor]`.
+    pub from_org_policy: bool,
+}
+
+/// Resolve the effective approval policy for a proxy call, accounting for
+/// org-owned services that may carry their own per-service approval config.
+///
+/// `actor_user_id` is the human/API key making the call. `service_owner_user_id`
+/// is the user_id that owns the resolved `UserService` -- the actor for
+/// personal services, the org for org-shared ones.
+pub async fn resolve_org_aware_approval(
     db: &Database,
-    user_id: &str,
+    actor_user_id: &str,
+    service_owner_user_id: &str,
     service_id: &str,
-) -> AppResult<bool> {
-    // Check per-service override first
-    let per_service = db
+) -> AppResult<ApprovalResolution> {
+    // Step 1: if the resolved service is org-owned and the org has a
+    // policy, use it. We detect "org-owned" by looking up the owner's
+    // `user_type`, NOT by comparing `actor_user_id` to
+    // `service_owner_user_id` -- for org-owned NyxID API keys and
+    // service accounts, both are the org id, but the request still
+    // needs to fan out to the org's admins instead of being treated as
+    // a self-decided personal request.
+    let service_owner_is_org = db
+        .collection::<User>(USERS)
+        .find_one(doc! { "_id": service_owner_user_id })
+        .await?
+        .is_some_and(|u| u.user_type.is_org());
+    if service_owner_is_org
+        && let Some(org_config) = db
+            .collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
+            .find_one(doc! {
+                "user_id": service_owner_user_id,
+                "service_id": service_id,
+            })
+            .await?
+    {
+        return Ok(ApprovalResolution {
+            required: org_config.approval_required,
+            mode: org_config.approval_mode,
+            primary_owner_user_id: service_owner_user_id.to_string(),
+            from_org_policy: true,
+        });
+    }
+
+    // Step 2: fall back to the actor's policy (existing behavior).
+    let actor_config = db
         .collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
-        .find_one(doc! { "user_id": user_id, "service_id": service_id })
+        .find_one(doc! { "user_id": actor_user_id, "service_id": service_id })
         .await?;
 
-    let global = user_requires_approval(db, user_id).await?;
-    Ok(resolve_approval_requirement(
-        per_service.map(|c| c.approval_required),
-        Some(global),
-    ))
+    let (required, mode) = if let Some(cfg) = actor_config {
+        (cfg.approval_required, cfg.approval_mode)
+    } else {
+        let global = user_requires_approval(db, actor_user_id).await?;
+        (global, ApprovalMode::default())
+    };
+
+    Ok(ApprovalResolution {
+        required,
+        mode,
+        primary_owner_user_id: actor_user_id.to_string(),
+        from_org_policy: false,
+    })
 }
 
 async fn user_global_approval_setting(db: &Database, user_id: &str) -> AppResult<Option<bool>> {
@@ -70,6 +145,10 @@ async fn user_global_approval_setting(db: &Database, user_id: &str) -> AppResult
     Ok(channel.map(|c| c.approval_required))
 }
 
+/// Pure resolution helper kept for unit-testable semantics. Used to be the
+/// final step of the now-removed `requires_approval_for_service`. Tests
+/// still exercise it directly.
+#[cfg(test)]
 fn resolve_approval_requirement(per_service: Option<bool>, global: Option<bool>) -> bool {
     per_service.or(global).unwrap_or(false)
 }
@@ -106,6 +185,18 @@ pub async fn check_approval(
 /// `(user, service, requester)` tuple.
 /// Per-request mode always creates a distinct pending request so concurrent
 /// calls cannot piggyback on a single approval.
+///
+/// `notify_user_ids` is the list of users who will be notified and are
+/// authorized to decide the request. For personal approvals this is
+/// `[user_id]`. For org-policy approvals (where the org owns the resource
+/// and has set a per-service approval config) this is the org's admin
+/// user_ids resolved at request creation time. The list is persisted on
+/// the request so the decide endpoint can authorize without re-resolving
+/// org membership at decision time.
+///
+/// If `notify_user_ids` is empty the function defaults to `[user_id]` --
+/// preserves the existing single-recipient semantic for callers that
+/// don't yet thread org context through.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_approval_request(
     db: &Database,
@@ -124,7 +215,14 @@ pub async fn create_approval_request(
     action_description: Option<&str>,
     approval_mode: ApprovalMode,
     timeout_secs: u32,
+    notify_user_ids: Vec<String>,
 ) -> AppResult<ApprovalRequest> {
+    let notify_user_ids = if notify_user_ids.is_empty() {
+        vec![user_id.to_string()]
+    } else {
+        notify_user_ids
+    };
+
     let collection = db.collection::<ApprovalRequest>(REQUESTS);
     let idempotency_key = compute_pending_request_idempotency_key(
         &approval_mode,
@@ -175,6 +273,7 @@ pub async fn create_approval_request(
             decided_at: None,
             decision_channel: None,
             decision_idempotency_key: None,
+            notify_user_ids: notify_user_ids.clone(),
             created_at: now,
         };
 
@@ -195,47 +294,86 @@ pub async fn create_approval_request(
     let request = inserted_request
         .ok_or_else(|| AppError::Conflict("Approval request conflict, please retry".to_string()))?;
 
-    // Send notification
-    match notification_service::send_approval_notification(
-        db,
-        config,
-        http_client,
-        fcm_auth,
-        apns_auth,
-        user_id,
-        &request,
-    )
-    .await
-    {
-        Ok(result) => {
-            // Update the request with notification details
-            let channel_name = result.channels.join(",");
-            let update = doc! {
-                "$set": {
-                    "notification_channel": &channel_name,
-                    "telegram_chat_id": result.telegram_chat_id,
-                    "telegram_message_id": result.telegram_message_id,
+    // Fan out notifications to every recipient. The first recipient with a
+    // configured channel "wins" the telegram_chat_id / telegram_message_id
+    // slots on the request (so the existing edit-on-decision flow works for
+    // at least one recipient). Other recipients get their own messages but
+    // their channel/message ids are not stored on the request -- the
+    // decision-time edit will only update one of them. Trade-off accepted
+    // for now; a fuller fix would store per-recipient delivery state.
+    let mut all_channels: Vec<String> = Vec::new();
+    let mut primary_chat_id: Option<i64> = None;
+    let mut primary_message_id: Option<i64> = None;
+    let mut delivered_to_anyone = false;
+    let mut last_err: Option<AppError> = None;
+
+    for recipient in &notify_user_ids {
+        match notification_service::send_approval_notification(
+            db,
+            config,
+            http_client,
+            fcm_auth,
+            apns_auth,
+            recipient,
+            &request,
+        )
+        .await
+        {
+            Ok(result) => {
+                delivered_to_anyone = true;
+                for ch in result.channels {
+                    if !all_channels.contains(&ch) {
+                        all_channels.push(ch);
+                    }
                 }
-            };
-            collection
-                .update_one(doc! { "_id": &request.id }, update)
-                .await?;
-
-            // Return the updated request
-            let updated = collection
-                .find_one(doc! { "_id": &request.id })
-                .await?
-                .unwrap_or(request);
-
-            Ok(updated)
-        }
-        Err(e) => {
-            tracing::warn!("Failed to send approval notification: {e}");
-            // Still return the request even if notification failed --
-            // user can approve via web UI
-            Ok(request)
+                if primary_chat_id.is_none() {
+                    primary_chat_id = result.telegram_chat_id;
+                    primary_message_id = result.telegram_message_id;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    recipient = %recipient,
+                    error = %e,
+                    "Approval notification failed for one recipient"
+                );
+                last_err = Some(e);
+            }
         }
     }
+
+    if !delivered_to_anyone {
+        // All recipients failed: log but still return the request so the
+        // user can approve via the web UI. Mirrors the previous behavior
+        // when the single recipient had no channel configured.
+        if let Some(err) = last_err {
+            tracing::warn!(
+                request_id = %request.id,
+                error = %err,
+                "Approval notification failed for all recipients"
+            );
+        }
+        return Ok(request);
+    }
+
+    let channel_name = all_channels.join(",");
+    let update = doc! {
+        "$set": {
+            "notification_channel": &channel_name,
+            "telegram_chat_id": primary_chat_id,
+            "telegram_message_id": primary_message_id,
+        }
+    };
+    collection
+        .update_one(doc! { "_id": &request.id }, update)
+        .await?;
+
+    let updated = collection
+        .find_one(doc! { "_id": &request.id })
+        .await?
+        .unwrap_or(request);
+
+    Ok(updated)
 }
 
 /// Create a tool approval request (from an external caller such as Aevatar).
@@ -305,6 +443,10 @@ pub async fn create_tool_approval_request(
         decided_at: None,
         decision_channel: None,
         decision_idempotency_key: None,
+        // Tool approvals are always personal: the agent calling
+        // `POST /api/v1/approvals/requests` is asking the actor to
+        // approve a specific tool invocation. Org cascade does not apply.
+        notify_user_ids: vec![user_id.to_string()],
         created_at: now,
     };
 
@@ -1104,6 +1246,7 @@ mod tests {
             tool_arguments: None,
             is_destructive: None,
             approval_mode: ApprovalMode::PerRequest,
+            notify_user_ids: vec![],
             created_at: now,
         }
     }

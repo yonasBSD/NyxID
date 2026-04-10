@@ -74,11 +74,26 @@ pub async fn create_connection(config: &AppConfig) -> Result<DbHandle, mongodb::
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
     // ── users ──
     let users = db.collection::<mongodb::bson::Document>("users");
+    // Backfill user_type before changing the email index. Without this, legacy
+    // rows would not be matched by the new partial-unique filter and a
+    // duplicate person email could slip in (the index wouldn't see the legacy row).
+    backfill_user_type(db).await?;
+    // Migration: drop legacy non-partial unique index on email so the new
+    // partial-unique index (filtered to user_type=person) can be created.
+    // Org users do not need a unique email; they often share contact emails
+    // or have none at all. The drop is best-effort -- on fresh DBs the index
+    // does not exist yet, which is fine.
+    let _ = users.drop_index("email_1").await;
     users
         .create_index(
             IndexModel::builder()
                 .keys(doc! { "email": 1 })
-                .options(IndexOptions::builder().unique(true).build())
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .partial_filter_expression(doc! { "user_type": "person" })
+                        .build(),
+                )
                 .build(),
         )
         .await?;
@@ -959,6 +974,65 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    // ── org_memberships ──
+    let org_memberships = db.collection::<Document>("org_memberships");
+    // Lookup: "all active orgs for this member" -- proxy fallback path
+    org_memberships
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "member_user_id": 1, "revoked_at": 1 })
+                .build(),
+        )
+        .await?;
+    // Uniqueness: a person can only have one membership row per org
+    org_memberships
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "org_user_id": 1, "member_user_id": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    // Lookup: "list members of this org" (filterable by revoked_at)
+    org_memberships
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "org_user_id": 1, "revoked_at": 1 })
+                .build(),
+        )
+        .await?;
+
+    // ── org_invites ──
+    let org_invites = db.collection::<Document>("org_invites");
+    org_invites
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "nonce": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    // TTL: invites are removed automatically after expiry
+    org_invites
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Duration::from_secs(0))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    org_invites
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "org_user_id": 1 })
+                .build(),
+        )
+        .await?;
+
     backfill_downstream_service_types(db).await?;
     purge_legacy_channel_message_content(db).await?;
 
@@ -1032,6 +1106,29 @@ async fn purge_legacy_channel_message_content(db: &Database) -> Result<(), mongo
         tracing::warn!(
             error = %err,
             "Failed to write schema_migrations marker; purge will re-run on next boot"
+        );
+    }
+
+    Ok(())
+}
+
+/// Backfill `user_type = "person"` on legacy user rows that pre-date the
+/// org-model migration. Required before creating the partial-unique email
+/// index, because the index only matches docs that satisfy the filter --
+/// rows missing the field are invisible to the index.
+async fn backfill_user_type(db: &Database) -> Result<(), mongodb::error::Error> {
+    let users = db.collection::<Document>("users");
+    let result = users
+        .update_many(
+            doc! { "user_type": { "$exists": false } },
+            doc! { "$set": { "user_type": "person" } },
+        )
+        .await?;
+
+    if result.modified_count > 0 {
+        tracing::info!(
+            count = result.modified_count,
+            "Backfilled missing user_type to 'person'"
         );
     }
 

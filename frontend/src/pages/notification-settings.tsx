@@ -242,7 +242,7 @@ export function NotificationSettingsPage() {
 
   async function handleDeleteServiceConfig(serviceId: string) {
     try {
-      await deleteConfigMutation.mutateAsync(serviceId);
+      await deleteConfigMutation.mutateAsync({ serviceId });
       toast.success("Per-service override removed");
     } catch (err) {
       toast.error(

@@ -19,6 +19,7 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
             allow_all_nodes,
             platform,
             callback_url,
+            org,
             auth,
         } => {
             let mut api = ApiClient::from_auth(&auth)?;
@@ -73,6 +74,9 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
             if let Some(ref url) = callback_url {
                 body["callback_url"] = Value::String(url.clone());
             }
+            if let Some(ref org_id) = org {
+                body["target_org_id"] = Value::String(org_id.clone());
+            }
 
             let result: Value = api.post("/api-keys", &body).await?;
 
@@ -100,9 +104,13 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
             Ok(())
         }
 
-        ApiKeyCommands::List { auth } => {
+        ApiKeyCommands::List { org, auth } => {
             let mut api = ApiClient::from_auth(&auth)?;
-            let keys: Value = api.get("/api-keys").await?;
+            let path = match org {
+                Some(ref id) => format!("/api-keys?org_id={}", urlencoding::encode(id)),
+                None => "/api-keys".to_string(),
+            };
+            let keys: Value = api.get(&path).await?;
 
             match auth.output {
                 OutputFormat::Json => {

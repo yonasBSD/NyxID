@@ -105,6 +105,20 @@ pub struct ApprovalRequest {
     #[serde(default)]
     pub decision_idempotency_key: Option<String>,
 
+    /// Users who were notified of this approval request and are authorized
+    /// to decide on it. For personal approvals this is `[user_id]`. For
+    /// org-policy approvals (where the org has set a `service_approval_config`
+    /// on a shared service) this is the list of admin user_ids of the
+    /// owning org at the time the request was created. The decide endpoint
+    /// allows any user in this list to approve/reject in addition to
+    /// `request.user_id` (for backward compat with pre-org rows where this
+    /// field is empty).
+    ///
+    /// Default `vec![]` so legacy rows deserialize cleanly; the decide
+    /// endpoint treats an empty list as "fall back to user_id only".
+    #[serde(default)]
+    pub notify_user_ids: Vec<String>,
+
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
 }
@@ -146,6 +160,7 @@ mod tests {
             decided_at: None,
             decision_channel: None,
             decision_idempotency_key: None,
+            notify_user_ids: vec![],
             created_at: Utc::now(),
         }
     }

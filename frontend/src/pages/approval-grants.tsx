@@ -42,7 +42,7 @@ export function ApprovalGrantsPage() {
   async function handleRevoke() {
     if (!revokeGrantId) return;
     try {
-      await revokeMutation.mutateAsync(revokeGrantId);
+      await revokeMutation.mutateAsync({ grantId: revokeGrantId });
       toast.success("Grant revoked");
     } catch (err) {
       toast.error(

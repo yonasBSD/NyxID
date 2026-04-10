@@ -53,6 +53,7 @@ async fn run() -> Result<()> {
         Commands::Catalog { command } => commands::catalog::run(command).await,
         Commands::Service { command } => commands::service::run(command).await,
         Commands::ApiKey { command } => commands::api_key::run(command).await,
+        Commands::Org { command } => commands::org::run(command).await,
         Commands::Node { command } => commands::node::run(command).await,
 
         // C8-C10: Proxy

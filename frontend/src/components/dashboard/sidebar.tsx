@@ -20,6 +20,7 @@ import {
   Cable,
   Radio,
   Ticket,
+  Building2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth-store";
@@ -29,6 +30,7 @@ import { PortalMarkLogo } from "@/components/shared/portal-mark-logo";
 const NAV_ITEMS = [
   { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard" },
   { to: "/keys", icon: Cable, label: "AI Services" },
+  { to: "/orgs", icon: Building2, label: "Organizations" },
   { to: "/nodes", icon: HardDrive, label: "Nodes" },
   { to: "/channel-bots", icon: Radio, label: "Channel Bots" },
   { to: "/settings", icon: Settings, label: "Settings" },

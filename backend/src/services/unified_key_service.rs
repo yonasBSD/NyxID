@@ -186,6 +186,10 @@ pub struct KeyView {
     pub ssh_ca_public_key: Option<String>,
     pub ssh_allowed_principals: Option<Vec<String>>,
     pub ssh_certificate_ttl_minutes: Option<u32>,
+    /// Provenance: personal credentials, or inherited from an org membership.
+    /// Defaults to `Personal` for backward compatibility with single-key paths
+    /// (`get_key`, post-create) which always operate on personally-owned keys.
+    pub credential_source: user_service_service::CredentialSource,
 }
 
 /// Validate that a catalog `token_exchange` service gets a properly
@@ -299,11 +303,18 @@ async fn find_existing_provider_token(
 }
 
 /// POST /api/v1/keys -- auto-provision endpoint + api_key + service from catalog or custom.
+///
+/// `user_id` is the *effective owner* of the new key (the actor for personal,
+/// the org's user_id for `target_org_id`-scoped creation). `actor_user_id`
+/// is the human/API key actually making the request -- used for the node
+/// permission check inside `user_service_service::create_user_service` so
+/// that an admin can route an org service through their personal node.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_key(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
     user_id: &str,
+    actor_user_id: &str,
     service_slug: Option<&str>,
     endpoint_url: Option<&str>,
     credential: &str,
@@ -511,6 +522,7 @@ pub async fn create_key(
         let service = user_service_service::create_user_service(
             db,
             user_id,
+            actor_user_id,
             &unique_slug,
             &endpoint.id,
             api_key.as_ref().map(|k| k.id.as_str()),
@@ -526,9 +538,20 @@ pub async fn create_key(
         )
         .await?;
 
-        // Auto-sync NodeServiceBinding for the catalog service.
-        node_service::sync_node_binding_for_user_service(db, user_id, Some(&svc.id), node_id, None)
-            .await?;
+        // Auto-sync NodeServiceBinding for the catalog service. The binding
+        // is owned by the org (when target_org_id is set), but the node is
+        // owned by the actor making the request -- pass both so the node
+        // permission check uses the actor while the binding row is created
+        // under the org.
+        node_service::sync_node_binding_for_user_service(
+            db,
+            user_id,
+            actor_user_id,
+            Some(&svc.id),
+            node_id,
+            None,
+        )
+        .await?;
 
         let (
             ssh_host,
@@ -672,6 +695,7 @@ pub async fn create_key(
         let service = user_service_service::create_user_service(
             db,
             user_id,
+            actor_user_id,
             &unique_slug,
             &endpoint.id,
             Some(&api_key.id),
@@ -687,9 +711,18 @@ pub async fn create_key(
         )
         .await?;
 
-        // Auto-sync NodeServiceBinding for the custom SSH service.
-        node_service::sync_node_binding_for_user_service(db, user_id, Some(&ds_id), node_id, None)
-            .await?;
+        // Auto-sync NodeServiceBinding for the custom SSH service. See
+        // comment in the catalog branch above for why both user_id and
+        // actor_user_id are passed.
+        node_service::sync_node_binding_for_user_service(
+            db,
+            user_id,
+            actor_user_id,
+            Some(&ds_id),
+            node_id,
+            None,
+        )
+        .await?;
 
         Ok(CreateKeyResult {
             endpoint,
@@ -766,6 +799,7 @@ pub async fn create_key(
         let service = user_service_service::create_user_service(
             db,
             user_id,
+            actor_user_id,
             &unique_slug,
             &endpoint.id,
             api_key.as_ref().map(|k| k.id.as_str()),
@@ -782,7 +816,15 @@ pub async fn create_key(
         .await?;
 
         // Auto-sync NodeServiceBinding (no-op for custom HTTP without catalog_service_id).
-        node_service::sync_node_binding_for_user_service(db, user_id, None, node_id, None).await?;
+        node_service::sync_node_binding_for_user_service(
+            db,
+            user_id,
+            actor_user_id,
+            None,
+            node_id,
+            None,
+        )
+        .await?;
 
         Ok(CreateKeyResult {
             endpoint,
@@ -924,8 +966,11 @@ pub async fn auto_provision_no_auth_services(
 
         let source_id = auto_provision_source_id(user_id, &svc.id);
         let catalog_identity = identity_config_from_downstream_service(svc);
+        // Auto-provision is always personal (node_id = None), so the actor
+        // and the effective owner are the same.
         match user_service_service::create_user_service(
             db,
+            user_id,
             user_id,
             &unique_slug,
             &endpoint.id,
@@ -963,15 +1008,25 @@ pub async fn auto_provision_no_auth_services(
     Ok(())
 }
 
-/// GET /api/v1/keys -- list all keys as combined views.
+/// GET /api/v1/keys -- list all keys (personal + org-inherited) as combined views.
+///
+/// Each returned `KeyView` carries a `credential_source` tag matching the
+/// `/user-services` endpoint. Org-inherited services appear after the user's
+/// personal ones, grouped per org. Viewer-role org services are returned with
+/// `credential_source.allowed = false` so the frontend can render them as
+/// read-only.
 pub async fn list_keys(db: &mongodb::Database, user_id: &str) -> AppResult<Vec<KeyView>> {
-    let services = user_service_service::list_user_services(db, user_id).await?;
-    if services.is_empty() {
+    let tagged = user_service_service::list_user_services_with_sources(db, user_id).await?;
+    if tagged.is_empty() {
         return Ok(vec![]);
     }
 
-    // Batch-load endpoints
-    let endpoint_ids: Vec<&str> = services.iter().map(|s| s.endpoint_id.as_str()).collect();
+    // Batch-load endpoints. Endpoints are looked up by `_id` only, so personal
+    // and org-owned endpoints can be fetched in the same query.
+    let endpoint_ids: Vec<&str> = tagged
+        .iter()
+        .map(|t| t.service.endpoint_id.as_str())
+        .collect();
     let endpoints: Vec<UserEndpoint> = db
         .collection::<UserEndpoint>(crate::models::user_endpoint::COLLECTION_NAME)
         .find(doc! { "_id": { "$in": &endpoint_ids } })
@@ -981,10 +1036,10 @@ pub async fn list_keys(db: &mongodb::Database, user_id: &str) -> AppResult<Vec<K
     let ep_map: HashMap<&str, &UserEndpoint> =
         endpoints.iter().map(|e| (e.id.as_str(), e)).collect();
 
-    // Batch-load api keys (only for services that have one)
-    let api_key_ids: Vec<&str> = services
+    // Batch-load api keys (only for services that have one).
+    let api_key_ids: Vec<&str> = tagged
         .iter()
-        .filter_map(|s| s.api_key_id.as_deref())
+        .filter_map(|t| t.service.api_key_id.as_deref())
         .collect();
     let api_keys: Vec<UserApiKey> = if api_key_ids.is_empty() {
         vec![]
@@ -997,10 +1052,10 @@ pub async fn list_keys(db: &mongodb::Database, user_id: &str) -> AppResult<Vec<K
     };
     let ak_map: HashMap<&str, &UserApiKey> = api_keys.iter().map(|k| (k.id.as_str(), k)).collect();
 
-    // Batch-load catalog services (for names + SSH config)
-    let catalog_ids: Vec<&str> = services
+    // Batch-load catalog services (for names + SSH config).
+    let catalog_ids: Vec<&str> = tagged
         .iter()
-        .filter_map(|s| s.catalog_service_id.as_deref())
+        .filter_map(|t| t.service.catalog_service_id.as_deref())
         .collect();
     let catalog_services: Vec<DownstreamService> = if catalog_ids.is_empty() {
         vec![]
@@ -1016,15 +1071,16 @@ pub async fn list_keys(db: &mongodb::Database, user_id: &str) -> AppResult<Vec<K
         .map(|s| (s.id.as_str(), s))
         .collect();
 
-    let views = services
-        .iter()
-        .filter_map(|svc| {
-            let ep = ep_map.get(svc.endpoint_id.as_str())?;
-            let ak = svc
+    let views = tagged
+        .into_iter()
+        .filter_map(|t| {
+            let ep = ep_map.get(t.service.endpoint_id.as_str())?;
+            let ak = t
+                .service
                 .api_key_id
                 .as_deref()
                 .and_then(|id| ak_map.get(id).copied());
-            Some(build_key_view(svc, ep, ak, &cat_map))
+            Some(build_key_view(&t.service, ep, ak, &cat_map, t.source))
         })
         .collect();
 
@@ -1060,7 +1116,17 @@ pub async fn get_key(
         .into_iter()
         .collect();
 
-    Ok(build_key_view(&svc, &ep, ak.as_ref(), &cat_map))
+    // get_key returns the personal view by default. The handler is responsible
+    // for tagging the response with the actual credential_source when the
+    // request was authenticated as an org member -- see resolve_key_read_owner
+    // in handlers/keys.rs.
+    Ok(build_key_view(
+        &svc,
+        &ep,
+        ak.as_ref(),
+        &cat_map,
+        user_service_service::CredentialSource::Personal,
+    ))
 }
 
 pub async fn reconcile_provider_key_for_service_routing(
@@ -1125,17 +1191,29 @@ pub async fn reconcile_provider_key_for_service_routing(
 }
 
 /// DELETE /api/v1/keys/:id -- revoke key.
-pub async fn revoke_key(db: &mongodb::Database, user_id: &str, service_id: &str) -> AppResult<()> {
+///
+/// `actor_user_id` is forwarded to `deactivate_user_service` for symmetry
+/// with the create/update path; it is not actually consulted because
+/// deactivation does not change the node_id.
+pub async fn revoke_key(
+    db: &mongodb::Database,
+    user_id: &str,
+    actor_user_id: &str,
+    service_id: &str,
+) -> AppResult<()> {
     let svc = user_service_service::get_user_service(db, user_id, service_id).await?;
-    user_service_service::deactivate_user_service(db, user_id, service_id).await?;
+    user_service_service::deactivate_user_service(db, user_id, actor_user_id, service_id).await?;
     if let Some(ref ak_id) = svc.api_key_id {
         user_api_key_service::revoke_api_key(db, user_id, ak_id).await?;
     }
 
-    // Deactivate the node binding if this service was node-routed.
+    // Deactivate the node binding if this service was node-routed. The
+    // delete path clears the node, so the actor only matters for the
+    // (skipped) node validation -- pass it for symmetry.
     node_service::sync_node_binding_for_user_service(
         db,
         user_id,
+        actor_user_id,
         svc.catalog_service_id.as_deref(),
         None, // cleared
         svc.node_id.as_deref(),
@@ -1150,6 +1228,7 @@ fn build_key_view(
     ep: &UserEndpoint,
     ak: Option<&UserApiKey>,
     cat_map: &HashMap<&str, &DownstreamService>,
+    credential_source: user_service_service::CredentialSource,
 ) -> KeyView {
     let catalog_ds = svc
         .catalog_service_id
@@ -1225,6 +1304,7 @@ fn build_key_view(
         ssh_ca_public_key,
         ssh_allowed_principals,
         ssh_certificate_ttl_minutes,
+        credential_source,
     }
 }
 
@@ -1393,7 +1473,13 @@ mod tests {
             updated_at: Utc::now(),
         };
 
-        let view = build_key_view(&service, &endpoint, None, &HashMap::new());
+        let view = build_key_view(
+            &service,
+            &endpoint,
+            None,
+            &HashMap::new(),
+            crate::services::user_service_service::CredentialSource::Personal,
+        );
         assert_eq!(view.label, "Public service");
         assert_eq!(view.credential_type, "none");
         assert_eq!(view.status, "active");

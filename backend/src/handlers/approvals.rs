@@ -129,10 +129,75 @@ fn to_approval_request_item(
     }
 }
 
+/// Legacy strict ownership check kept for the existing unit tests. The
+/// runtime path now uses `ensure_caller_can_decide` to support org-policy
+/// approvals.
+#[cfg(test)]
 fn ensure_request_owned_by_user(request_user_id: &str, auth_user_id: &str) -> AppResult<()> {
     if request_user_id != auth_user_id {
         return Err(AppError::Forbidden(
             "You are not authorized to view this approval request".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Authorize a caller against an approval request that may belong to an
+/// org. The caller is allowed if either of the following holds:
+///
+/// 1. They are the literal `request.user_id` owner (personal request).
+/// 2. They are *currently* an admin of the org that owns the request
+///    AND that admin's `allowed_service_ids` scope (if any) covers the
+///    `UserService` backing the request.
+///
+/// `request.notify_user_ids` is intentionally NOT consulted here. It
+/// is only a routing hint captured at request creation time, so for
+/// org-policy requests it would otherwise let an admin who has since
+/// been removed or demoted decide outstanding requests. The live
+/// `resolve_owner_access` check is the single source of truth.
+///
+/// `request.service_id` is a catalog `DownstreamService.id`, but
+/// `OrgMembership.allowed_service_ids` lives in the `UserService.id`
+/// space. We translate by looking up the `UserService` row that the
+/// request was filed against (`user_id = request.user_id`,
+/// `catalog_service_id = request.service_id`).
+async fn ensure_caller_can_decide(
+    db: &mongodb::Database,
+    request: &crate::models::approval_request::ApprovalRequest,
+    auth_user_id: &str,
+) -> AppResult<()> {
+    if request.user_id == auth_user_id {
+        return Ok(());
+    }
+
+    // Check whether the request owner is an org and the caller is one of
+    // its admins. `resolve_owner_access` returns Forbidden for non-org
+    // owners or non-member callers, which collapses both "ex-admin" and
+    // "stranger" into the same denial path.
+    let access =
+        crate::services::org_service::resolve_owner_access(db, auth_user_id, &request.user_id)
+            .await?;
+    if !access.can_write() {
+        return Err(AppError::Forbidden(
+            "You are not authorized to act on this approval request".to_string(),
+        ));
+    }
+
+    // Translate the catalog service id stored on the request into the
+    // UserService.id(s) used by the org membership scope, then gate on
+    // `allows_any_resource`. Empty result means the request was filed
+    // against a UserService that no longer exists -- safer to require
+    // an unscoped admin to decide it.
+    let user_service_ids = crate::services::user_service_service::user_service_ids_for_catalog(
+        db,
+        &request.user_id,
+        &request.service_id,
+    )
+    .await?;
+    if !access.allows_any_resource(&user_service_ids) {
+        return Err(AppError::Forbidden(
+            "Your org admin role is scoped to other services and cannot decide on this approval request".to_string(),
         ));
     }
 
@@ -146,12 +211,29 @@ pub struct ApprovalRequestsQuery {
     pub status: Option<String>,
     pub page: Option<u64>,
     pub per_page: Option<u64>,
+    /// When set, list approval requests scoped to the given org instead of
+    /// the caller's personal scope. The caller must be an admin of that
+    /// org. Without this filter the endpoint returns the actor's personal
+    /// approval history (existing behavior).
+    pub org_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct GrantsQuery {
     pub page: Option<u64>,
     pub per_page: Option<u64>,
+    /// When set, list grants owned by the given org instead of the
+    /// caller's personal scope. The caller must be an admin of that
+    /// org. Org-policy approvals create grants under the org's user_id,
+    /// so this is the only way for org admins to see them.
+    pub org_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RevokeGrantQuery {
+    /// When set, revoke a grant owned by the given org. The caller
+    /// must be an admin of that org.
+    pub org_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -168,7 +250,7 @@ pub async fn list_requests(
     auth_user: AuthUser,
     Query(query): Query<ApprovalRequestsQuery>,
 ) -> AppResult<Json<ApprovalRequestsResponse>> {
-    let user_id = auth_user.user_id.to_string();
+    let actor = auth_user.user_id.to_string();
 
     if let Some(ref status) = query.status
         && !["pending", "approved", "rejected", "expired"].contains(&status.as_str())
@@ -178,12 +260,29 @@ pub async fn list_requests(
         ));
     }
 
+    // org_id query param scopes the listing to org-policy approvals.
+    // The caller must be an admin of the target org.
+    let listing_user_id = if let Some(target_org_id) = query.org_id.as_deref() {
+        let access =
+            crate::services::org_service::resolve_owner_access(&state.db, &actor, target_org_id)
+                .await?;
+        if !access.can_write() {
+            return Err(AppError::OrgRoleInsufficient(
+                "admin access to the target org is required to list its approval history"
+                    .to_string(),
+            ));
+        }
+        target_org_id.to_string()
+    } else {
+        actor
+    };
+
     let page = query.page.unwrap_or(1).max(1);
     let per_page = query.per_page.unwrap_or(20).min(100);
 
     let (requests, total) = approval_service::list_requests(
         &state.db,
-        &user_id,
+        &listing_user_id,
         query.status.as_deref(),
         page,
         per_page,
@@ -203,7 +302,9 @@ pub async fn list_requests(
 
 /// GET /api/v1/approvals/requests/{request_id}
 ///
-/// Returns approval request detail for the current user.
+/// Returns approval request detail for the current user. Org admins can
+/// view requests created under their org's policy in addition to their
+/// own personal requests.
 pub async fn get_request_by_id(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -212,7 +313,7 @@ pub async fn get_request_by_id(
     let user_id = auth_user.user_id.to_string();
     let request = approval_service::get_request(&state.db, &request_id).await?;
 
-    ensure_request_owned_by_user(&request.user_id, &user_id)?;
+    ensure_caller_can_decide(&state.db, &request, &user_id).await?;
 
     Ok(Json(to_approval_request_item(request)))
 }
@@ -236,13 +337,33 @@ pub async fn get_request_status(
     })?;
     let requester_id = auth_user.approval_requester_id();
 
-    if request.user_id != owner_user_id
-        || request.requester_type != requester_type
-        || request.requester_id != requester_id
-    {
+    // Requester binding must always match -- this is the defense against
+    // an unrelated API key polling someone else's request.
+    if request.requester_type != requester_type || request.requester_id != requester_id {
         return Err(AppError::Forbidden(
             "You are not authorized to view this approval request".to_string(),
         ));
+    }
+
+    // Owner check: the strict legacy path required `request.user_id == owner_user_id`
+    // (the actor's effective approval owner). Org-policy requests live
+    // under the org's user_id, so the strict check would block legitimate
+    // polling by the agent that triggered the request. Allow either:
+    // - the legacy match, OR
+    // - the actor has any access to the owning org (member or admin),
+    //   which means the request was created on their behalf via cascade.
+    if request.user_id != owner_user_id {
+        let access = crate::services::org_service::resolve_owner_access(
+            &state.db,
+            &owner_user_id,
+            &request.user_id,
+        )
+        .await?;
+        if !access.can_read() {
+            return Err(AppError::Forbidden(
+                "You are not authorized to view this approval request".to_string(),
+            ));
+        }
     }
 
     Ok(Json(ApprovalStatusResponse {
@@ -348,13 +469,10 @@ pub async fn decide_request(
         .map(str::trim)
         .filter(|value| !value.is_empty());
 
-    // Verify the request belongs to this user
+    // Verify the caller can act on this request -- direct owner, named
+    // recipient, or current admin of the owning org.
     let request = approval_service::get_request(&state.db, &request_id).await?;
-    if request.user_id != user_id {
-        return Err(crate::errors::AppError::Forbidden(
-            "You can only decide on your own approval requests".to_string(),
-        ));
-    }
+    ensure_caller_can_decide(&state.db, &request, &user_id).await?;
 
     if let Some(duration_sec) = body.duration_sec
         && duration_sec <= 0
@@ -407,12 +525,30 @@ pub async fn list_grants(
     auth_user: AuthUser,
     Query(query): Query<GrantsQuery>,
 ) -> AppResult<Json<ApprovalGrantsResponse>> {
-    let user_id = auth_user.user_id.to_string();
+    let actor = auth_user.user_id.to_string();
     let page = query.page.unwrap_or(1).max(1);
     let per_page = query.per_page.unwrap_or(20).min(100);
 
+    // org_id query param scopes the listing to grants owned by an org
+    // (created when an org-policy approval is granted in grant mode).
+    // Caller must be an admin of the target org.
+    let listing_user_id = if let Some(target_org_id) = query.org_id.as_deref() {
+        let access =
+            crate::services::org_service::resolve_owner_access(&state.db, &actor, target_org_id)
+                .await?;
+        if !access.can_write() {
+            return Err(AppError::OrgRoleInsufficient(
+                "admin access to the target org is required to list its approval grants"
+                    .to_string(),
+            ));
+        }
+        target_org_id.to_string()
+    } else {
+        actor
+    };
+
     let (grants, total) =
-        approval_service::list_grants(&state.db, &user_id, page, per_page).await?;
+        approval_service::list_grants(&state.db, &listing_user_id, page, per_page).await?;
 
     let items: Vec<ApprovalGrantItem> = grants
         .into_iter()
@@ -441,16 +577,39 @@ pub async fn revoke_grant(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Path(grant_id): Path<String>,
+    Query(query): Query<RevokeGrantQuery>,
 ) -> AppResult<Json<MessageResponse>> {
-    let user_id = auth_user.user_id.to_string();
+    let actor = auth_user.user_id.to_string();
 
-    approval_service::revoke_grant(&state.db, &user_id, &grant_id).await?;
+    // Same pattern as list_grants: when org_id is supplied, the grant
+    // is expected to be owned by the org and the caller must be an
+    // admin of that org. Without this branch, org-policy grants would
+    // be unrevokable through the API.
+    let owner_user_id = if let Some(target_org_id) = query.org_id.as_deref() {
+        let access =
+            crate::services::org_service::resolve_owner_access(&state.db, &actor, target_org_id)
+                .await?;
+        if !access.can_write() {
+            return Err(AppError::OrgRoleInsufficient(
+                "admin access to the target org is required to revoke its approval grants"
+                    .to_string(),
+            ));
+        }
+        target_org_id.to_string()
+    } else {
+        actor.clone()
+    };
+
+    approval_service::revoke_grant(&state.db, &owner_user_id, &grant_id).await?;
 
     audit_service::log_async(
         state.db.clone(),
-        Some(user_id),
+        Some(actor),
         "approval_grant_revoked".to_string(),
-        Some(serde_json::json!({ "grant_id": grant_id })),
+        Some(serde_json::json!({
+            "grant_id": grant_id,
+            "owner_user_id": owner_user_id,
+        })),
         None,
         None,
         None,
@@ -485,44 +644,156 @@ pub struct SetServiceApprovalConfigRequest {
     pub approval_mode: Option<ApprovalMode>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct ServiceApprovalConfigQuery {
+    /// When set, the operation targets the given org's policy instead of
+    /// the caller's personal scope. The caller must be an admin of that
+    /// org. Used by the per-service approval CRUD endpoints so an org
+    /// admin can set/list/delete policies on org-shared services.
+    pub org_id: Option<String>,
+}
+
+/// Resolve the effective `user_id` *and* the caller's `OwnerAccess` for
+/// a service approval config operation.
+///
+/// Without `?org_id`, the actor manages their own personal configs and
+/// `OwnerAccess::Direct` is returned (always passes scope checks).
+///
+/// With `?org_id=X`, the actor must be an admin of X. Returned access
+/// carries the membership's `allowed_service_ids` so per-service scope
+/// gating can run on the catalog id passed in the path. Without that
+/// scope check a scoped admin (`allowed_service_ids = [svc-A]`) could
+/// otherwise toggle the policy on svc-B, bypassing the scope model the
+/// rest of the org-aware handlers enforce.
+async fn resolve_service_config_owner(
+    state: &AppState,
+    actor: &str,
+    org_id: Option<&str>,
+) -> AppResult<(String, crate::services::org_service::OwnerAccess)> {
+    if let Some(org) = org_id {
+        let access =
+            crate::services::org_service::resolve_owner_access(&state.db, actor, org).await?;
+        if !access.can_write() {
+            return Err(AppError::OrgRoleInsufficient(
+                "admin access to the target org is required to set per-service approval policy"
+                    .to_string(),
+            ));
+        }
+        Ok((org.to_string(), access))
+    } else {
+        Ok((
+            actor.to_string(),
+            crate::services::org_service::OwnerAccess::Direct,
+        ))
+    }
+}
+
+/// Apply the org membership scope to a single approval-config target.
+/// Translates the catalog `service_id` to the underlying `UserService.id`s
+/// (which is what `OrgMembership.allowed_service_ids` actually stores)
+/// and then runs `allows_any_resource`.
+///
+/// Orphan handling matches the list filter exactly so that any config
+/// an admin can *see* is also a config they can *delete*:
+///
+/// - **Unscoped admins** (membership `allowed_service_ids = None`) pass
+///   through orphans because `allows_any_resource(&[])` returns `true`
+///   for unscoped roles. This is what lets an admin remove a stale
+///   org policy whose backing `UserService` was already deleted.
+/// - **Scoped admins** (`allowed_service_ids = Some(...)`) deny orphans
+///   because `allows_any_resource(&[])` returns `false` -- they have no
+///   concrete claim to a service that doesn't exist.
+///
+/// Without the symmetric handling, an admin could land here from
+/// `list_service_configs` (which uses `allows_any_resource` directly,
+/// so unscoped sees orphans), see a stale config, and then hit
+/// `404 NotFound` from a stricter delete path. The list and delete
+/// paths must agree.
+async fn ensure_service_config_in_scope(
+    db: &mongodb::Database,
+    access: &crate::services::org_service::OwnerAccess,
+    owner_user_id: &str,
+    catalog_service_id: &str,
+) -> AppResult<()> {
+    // Direct owners (personal scope) skip the lookup entirely.
+    if matches!(access, crate::services::org_service::OwnerAccess::Direct) {
+        return Ok(());
+    }
+    let user_service_ids = crate::services::user_service_service::user_service_ids_for_catalog(
+        db,
+        owner_user_id,
+        catalog_service_id,
+    )
+    .await?;
+    if !access.allows_any_resource(&user_service_ids) {
+        return Err(AppError::OrgRoleInsufficient(
+            "your org admin role is scoped to other services and cannot manage this approval policy".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 // --- Per-service approval config handlers ---
 
 /// GET /api/v1/approvals/service-configs
 ///
-/// List all per-service approval overrides for the current user.
+/// List per-service approval overrides for the current user, or for the
+/// org passed via `?org_id=X` (caller must be admin of that org).
 pub async fn list_service_configs(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    Query(query): Query<ServiceApprovalConfigQuery>,
 ) -> AppResult<Json<ServiceApprovalConfigsResponse>> {
-    let user_id = auth_user.user_id.to_string();
+    let actor = auth_user.user_id.to_string();
+    let (user_id, access) =
+        resolve_service_config_owner(&state, &actor, query.org_id.as_deref()).await?;
 
     let configs = approval_service::list_service_approval_configs(&state.db, &user_id).await?;
 
-    let items: Vec<ServiceApprovalConfigItem> = configs
-        .into_iter()
-        .map(|c| ServiceApprovalConfigItem {
+    // Filter to the membership scope so a scoped admin only sees policies
+    // for services they actually manage. Direct owners short-circuit and
+    // see everything.
+    let mut items: Vec<ServiceApprovalConfigItem> = Vec::with_capacity(configs.len());
+    for c in configs {
+        if !matches!(access, crate::services::org_service::OwnerAccess::Direct) {
+            let user_service_ids =
+                crate::services::user_service_service::user_service_ids_for_catalog(
+                    &state.db,
+                    &user_id,
+                    &c.service_id,
+                )
+                .await?;
+            if !access.allows_any_resource(&user_service_ids) {
+                continue;
+            }
+        }
+        items.push(ServiceApprovalConfigItem {
             service_id: c.service_id,
             service_name: c.service_name,
             approval_required: c.approval_required,
             approval_mode: c.approval_mode,
             created_at: c.created_at.to_rfc3339(),
             updated_at: c.updated_at.to_rfc3339(),
-        })
-        .collect();
+        });
+    }
 
     Ok(Json(ServiceApprovalConfigsResponse { configs: items }))
 }
 
 /// PUT /api/v1/approvals/service-configs/{service_id}
 ///
-/// Set a per-service approval override. Creates or updates.
+/// Set a per-service approval override. Creates or updates. Pass
+/// `?org_id=X` to set the policy on org X's behalf (caller must be admin).
 pub async fn set_service_config(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Path(service_id): Path<String>,
+    Query(query): Query<ServiceApprovalConfigQuery>,
     Json(body): Json<SetServiceApprovalConfigRequest>,
 ) -> AppResult<Json<ServiceApprovalConfigItem>> {
-    let user_id = auth_user.user_id.to_string();
+    let actor = auth_user.user_id.to_string();
+    let (user_id, access) =
+        resolve_service_config_owner(&state, &actor, query.org_id.as_deref()).await?;
 
     if body.approval_required.is_none() && body.approval_mode.is_none() {
         return Err(AppError::ValidationError(
@@ -538,6 +809,10 @@ pub async fn set_service_config(
         .await?
         .ok_or_else(|| AppError::NotFound("Service not found".to_string()))?;
 
+    // Per-service scope check: scoped admins can only manage policies for
+    // services in their `allowed_service_ids` set.
+    ensure_service_config_in_scope(&state.db, &access, &user_id, &service_id).await?;
+
     let config = approval_service::set_service_approval_config(
         &state.db,
         &user_id,
@@ -550,11 +825,12 @@ pub async fn set_service_config(
 
     audit_service::log_async(
         state.db.clone(),
-        Some(user_id),
+        Some(actor),
         "service_approval_config_set".to_string(),
         Some(serde_json::json!({
             "service_id": service_id,
             "service_name": service.name,
+            "policy_owner_user_id": user_id,
             "approval_required": config.approval_required,
             "approval_mode": config.approval_mode.as_str(),
         })),
@@ -577,20 +853,30 @@ pub async fn set_service_config(
 /// DELETE /api/v1/approvals/service-configs/{service_id}
 ///
 /// Remove a per-service approval override (revert to global default).
+/// Pass `?org_id=X` to remove the policy on org X's behalf (admin only).
 pub async fn delete_service_config(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Path(service_id): Path<String>,
+    Query(query): Query<ServiceApprovalConfigQuery>,
 ) -> AppResult<Json<MessageResponse>> {
-    let user_id = auth_user.user_id.to_string();
+    let actor = auth_user.user_id.to_string();
+    let (user_id, access) =
+        resolve_service_config_owner(&state, &actor, query.org_id.as_deref()).await?;
+
+    // Per-service scope check, same as set_service_config.
+    ensure_service_config_in_scope(&state.db, &access, &user_id, &service_id).await?;
 
     approval_service::delete_service_approval_config(&state.db, &user_id, &service_id).await?;
 
     audit_service::log_async(
         state.db.clone(),
-        Some(user_id),
+        Some(actor),
         "service_approval_config_deleted".to_string(),
-        Some(serde_json::json!({ "service_id": service_id })),
+        Some(serde_json::json!({
+            "service_id": service_id,
+            "policy_owner_user_id": user_id,
+        })),
         None,
         None,
         None,
@@ -634,6 +920,7 @@ mod tests {
             decided_at: None,
             decision_channel: None,
             decision_idempotency_key: None,
+            notify_user_ids: vec![],
             created_at: Utc::now(),
         }
     }

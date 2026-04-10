@@ -123,7 +123,19 @@ pub async fn llm_proxy_request(
         .await
         .map_err(|e| AppError::BadRequest(format!("Failed to read request body: {e}")))?;
 
-    // Check approval if user has it enabled
+    // Check approval if user has it enabled. The two-tier resolver above
+    // doesn't surface its `org_routing` back to this scope, so we look up
+    // the effective owner separately via `find_effective_service_owner`,
+    // which mirrors the same personal-then-org cascade and returns the
+    // identity the proxy would actually pick. Cheap second lookup; the
+    // alternative is rewiring the resolver to return the org context.
+    let owner_for_approval = proxy_service::find_effective_service_owner(
+        &state.db,
+        &user_id_str,
+        None,
+        Some(&service_id),
+    )
+    .await?;
     check_llm_approval(
         &state,
         &auth_user,
@@ -136,6 +148,7 @@ pub async fn llm_proxy_request(
         } else {
             Some(&body_bytes)
         },
+        owner_for_approval.as_deref(),
     )
     .await?;
 
@@ -351,6 +364,12 @@ pub async fn gateway_request(
     //      credential into `target` (via auth_method + credential).
     //   2. Fall back to the legacy `DownstreamService` path for users who
     //      still have `UserProviderToken` records.
+    //
+    // Capture `effective_owner_for_approval` along the way so the approval
+    // check below can apply the org-aware cascade -- for org-routed
+    // resolutions the owner is the org's user_id, otherwise it falls
+    // through to the actor.
+    let mut effective_owner_for_approval: Option<String> = None;
     let (target, resolved_via_user_service) =
         match proxy_service::resolve_proxy_target_from_user_service(
             &state.db,
@@ -362,7 +381,38 @@ pub async fn gateway_request(
         )
         .await?
         {
-            Some(resolution) => (resolution.target, true),
+            Some(resolution) => {
+                effective_owner_for_approval = Some(
+                    resolution
+                        .org_routing
+                        .as_ref()
+                        .map(|r| r.org_user_id.clone())
+                        .unwrap_or_else(|| user_id_str.clone()),
+                );
+                // Audit org-routed LLM gateway calls so the org's owner can
+                // see who is using shared credentials. Mirrors the pattern
+                // in handlers/proxy.rs.
+                if let Some(routing) = &resolution.org_routing {
+                    audit_service::log_async(
+                        state.db.clone(),
+                        Some(auth_user.user_id.to_string()),
+                        "llm_gateway_routed_via_org".to_string(),
+                        Some(serde_json::json!({
+                            "routed_via": "org",
+                            "service_id": service_id,
+                            "user_service_id": resolution.user_service_id,
+                            "org_user_id": routing.org_user_id,
+                            "member_user_id": routing.member_user_id,
+                            "membership_id": routing.membership_id,
+                        })),
+                        None,
+                        None,
+                        auth_user.api_key_id.clone(),
+                        auth_user.api_key_name.clone(),
+                    );
+                }
+                (resolution.target, true)
+            }
             None => {
                 let legacy = proxy_service::resolve_proxy_target(
                     &state.db,
@@ -375,7 +425,8 @@ pub async fn gateway_request(
             }
         };
 
-    // Check approval if user has it enabled
+    // Check approval if user has it enabled (uses cascade if the service
+    // turned out to be org-owned).
     check_llm_approval(
         &state,
         &auth_user,
@@ -388,6 +439,7 @@ pub async fn gateway_request(
         } else {
             Some(&body_bytes)
         },
+        effective_owner_for_approval.as_deref(),
     )
     .await?;
 
@@ -995,6 +1047,12 @@ fn parse_next_sse_event(buffer: &mut String) -> Option<sse_parser::SseEvent> {
 }
 
 /// Check approval for LLM proxy request.
+///
+/// `service_owner_user_id` is the user_id that owns the resolved
+/// `UserService` (the actor for personal credentials, an org for
+/// org-shared credentials). When `None`, the caller couldn't determine
+/// the owner -- the function falls back to the actor's policy only.
+#[allow(clippy::too_many_arguments)]
 async fn check_llm_approval(
     state: &AppState,
     auth_user: &AuthUser,
@@ -1003,16 +1061,19 @@ async fn check_llm_approval(
     path: &str,
     method_str: &str,
     body: Option<&[u8]>,
+    service_owner_user_id: Option<&str>,
 ) -> AppResult<()> {
     let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
-    let requires_approval = approval_service::requires_approval_for_service(
+    let owner_for_resolution = service_owner_user_id.unwrap_or(&approval_owner_user_id);
+    let approval_resolution = approval_service::resolve_org_aware_approval(
         &state.db,
         &approval_owner_user_id,
+        owner_for_resolution,
         service_id,
     )
     .await?;
 
-    if should_bypass_approval_flow(requires_approval, &auth_user.auth_method) {
+    if should_bypass_approval_flow(approval_resolution.required, &auth_user.auth_method) {
         return Ok(());
     }
 
@@ -1021,17 +1082,16 @@ async fn check_llm_approval(
         .ok_or_else(|| AppError::Forbidden("Session auth does not require approval".to_string()))?;
     let requester_id = auth_user.approval_requester_id();
 
-    let approval_mode =
-        approval_service::resolve_approval_mode(&state.db, &approval_owner_user_id, service_id)
-            .await?;
+    let primary_owner = &approval_resolution.primary_owner_user_id;
 
     // In grant mode, check for existing grant first.
     // In per_request mode, skip grant check -- every request needs fresh approval.
-    let has_grant = if approval_mode == crate::models::service_approval_config::ApprovalMode::Grant
+    let has_grant = if approval_resolution.mode
+        == crate::models::service_approval_config::ApprovalMode::Grant
     {
         approval_service::check_approval(
             &state.db,
-            &approval_owner_user_id,
+            primary_owner,
             service_id,
             requester_type,
             &requester_id,
@@ -1045,8 +1105,30 @@ async fn check_llm_approval(
         return Ok(());
     }
 
+    // Compute notification recipients (see proxy.rs for the same pattern).
+    // Org policy with no admins MUST fail closed -- otherwise the
+    // requesting member would end up in `notify_user_ids` and could
+    // self-approve their own org-gated request.
+    let notify_user_ids: Vec<String> = if approval_resolution.from_org_policy {
+        let mut admins =
+            crate::services::org_service::list_admin_user_ids(&state.db, primary_owner).await?;
+        admins.sort();
+        admins.dedup();
+        if admins.is_empty() {
+            return Err(AppError::OrgApprovalNoAdmin(format!(
+                "Org {primary_owner} has an approval policy on this service but no active admins to decide. Add an admin to the org and retry."
+            )));
+        }
+        admins
+    } else {
+        vec![approval_owner_user_id.clone()]
+    };
+
+    let timeout_recipient = notify_user_ids.first().cloned().ok_or_else(|| {
+        AppError::Internal("approval recipient list unexpectedly empty".to_string())
+    })?;
     let channel =
-        notification_service::get_or_create_channel(&state.db, &approval_owner_user_id).await?;
+        notification_service::get_or_create_channel(&state.db, &timeout_recipient).await?;
 
     let action_desc = action_description::build_action_description(method_str, path, body);
 
@@ -1057,7 +1139,7 @@ async fn check_llm_approval(
         &state.http_client,
         state.fcm_auth.as_deref(),
         state.apns_auth.as_deref(),
-        &approval_owner_user_id,
+        primary_owner,
         service_id,
         &service.name,
         &service.slug,
@@ -1066,8 +1148,9 @@ async fn check_llm_approval(
         None,
         &format!("llm:{} {}", method_str, path),
         Some(&action_desc),
-        approval_mode.clone(),
+        approval_resolution.mode.clone(),
         timeout_secs,
+        notify_user_ids,
     )
     .await?;
 

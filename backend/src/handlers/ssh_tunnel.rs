@@ -785,42 +785,75 @@ pub(crate) async fn authorize_ssh_access(
     }
     ssh_service::ensure_ssh_service(&service)?;
 
-    let requires_approval = approval_service::requires_approval_for_service(
+    // SSH services may be org-owned. Look up the effective owner so the
+    // approval cascade applies the org policy when set.
+    let effective_owner = crate::services::proxy_service::find_effective_service_owner(
         &state.db,
         &approval_owner_user_id,
+        None,
+        Some(service_id),
+    )
+    .await?;
+    let owner_for_resolution = effective_owner
+        .as_deref()
+        .unwrap_or(&approval_owner_user_id);
+    let approval_resolution = approval_service::resolve_org_aware_approval(
+        &state.db,
+        &approval_owner_user_id,
+        owner_for_resolution,
         service_id,
     )
     .await?;
 
-    if requires_approval && auth_user.auth_method != AuthMethod::Session {
+    if approval_resolution.required && auth_user.auth_method != AuthMethod::Session {
         let requester_type = auth_user.approval_requester_type().ok_or_else(|| {
             AppError::Forbidden("Session auth does not require approval".to_string())
         })?;
 
-        let approval_mode =
-            approval_service::resolve_approval_mode(&state.db, &approval_owner_user_id, service_id)
-                .await?;
+        let primary_owner = &approval_resolution.primary_owner_user_id;
 
         // In grant mode, check for existing grant first.
         // In per_request mode, skip grant check -- every request needs fresh approval.
-        let has_grant =
-            if approval_mode == crate::models::service_approval_config::ApprovalMode::Grant {
-                approval_service::check_approval(
-                    &state.db,
-                    &approval_owner_user_id,
-                    service_id,
-                    requester_type,
-                    &auth_user.approval_requester_id(),
-                )
-                .await?
-            } else {
-                false
-            };
+        let has_grant = if approval_resolution.mode
+            == crate::models::service_approval_config::ApprovalMode::Grant
+        {
+            approval_service::check_approval(
+                &state.db,
+                primary_owner,
+                service_id,
+                requester_type,
+                &auth_user.approval_requester_id(),
+            )
+            .await?
+        } else {
+            false
+        };
 
         if !has_grant {
+            // Org policy with no admins MUST fail closed -- otherwise the
+            // requesting member would end up in `notify_user_ids` and could
+            // self-approve their own org-gated request.
+            let notify_user_ids: Vec<String> = if approval_resolution.from_org_policy {
+                let mut admins =
+                    crate::services::org_service::list_admin_user_ids(&state.db, primary_owner)
+                        .await?;
+                admins.sort();
+                admins.dedup();
+                if admins.is_empty() {
+                    return Err(AppError::OrgApprovalNoAdmin(format!(
+                        "Org {primary_owner} has an approval policy on this service but no active admins to decide. Add an admin to the org and retry."
+                    )));
+                }
+                admins
+            } else {
+                vec![approval_owner_user_id.clone()]
+            };
+
+            let timeout_recipient = notify_user_ids.first().cloned().ok_or_else(|| {
+                AppError::Internal("approval recipient list unexpectedly empty".to_string())
+            })?;
             let channel =
-                notification_service::get_or_create_channel(&state.db, &approval_owner_user_id)
-                    .await?;
+                notification_service::get_or_create_channel(&state.db, &timeout_recipient).await?;
             let timeout_secs = channel.approval_timeout_secs;
             let approval_request = approval_service::create_approval_request(
                 &state.db,
@@ -828,7 +861,7 @@ pub(crate) async fn authorize_ssh_access(
                 &state.http_client,
                 state.fcm_auth.as_deref(),
                 state.apns_auth.as_deref(),
-                &approval_owner_user_id,
+                primary_owner,
                 service_id,
                 &service.name,
                 &service.slug,
@@ -837,8 +870,9 @@ pub(crate) async fn authorize_ssh_access(
                 None,
                 "ssh:tunnel",
                 None,
-                approval_mode.clone(),
+                approval_resolution.mode.clone(),
                 timeout_secs,
+                notify_user_ids,
             )
             .await?;
 

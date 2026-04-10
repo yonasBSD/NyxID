@@ -180,6 +180,30 @@ pub enum AppError {
 
     #[error("Channel platform error: {0}")]
     ChannelPlatformError(String),
+
+    #[error("Organization accounts cannot authenticate directly")]
+    OrgCannotAuthenticate,
+
+    #[error("Organization membership query timed out")]
+    OrgQueryTimeout,
+
+    #[error("Organization not found: {0}")]
+    OrgNotFound(String),
+
+    #[error("Organization membership required")]
+    OrgMembershipRequired,
+
+    #[error("Organization role insufficient: {0}")]
+    OrgRoleInsufficient(String),
+
+    #[error("Organization invite invalid: {0}")]
+    OrgInviteInvalid(String),
+
+    #[error("Organization invite expired")]
+    OrgInviteExpired,
+
+    #[error("Organization approval policy has no admins to decide: {0}")]
+    OrgApprovalNoAdmin(String),
 }
 
 impl AppError {
@@ -230,6 +254,14 @@ impl AppError {
             Self::ChannelWebhookVerificationFailed(_) => StatusCode::UNAUTHORIZED,
             Self::ChannelRelayFailed(_) => StatusCode::BAD_GATEWAY,
             Self::ChannelPlatformError(_) => StatusCode::BAD_GATEWAY,
+            Self::OrgCannotAuthenticate => StatusCode::FORBIDDEN,
+            Self::OrgQueryTimeout => StatusCode::SERVICE_UNAVAILABLE,
+            Self::OrgNotFound(_) => StatusCode::NOT_FOUND,
+            Self::OrgMembershipRequired => StatusCode::FORBIDDEN,
+            Self::OrgRoleInsufficient(_) => StatusCode::FORBIDDEN,
+            Self::OrgInviteInvalid(_) => StatusCode::BAD_REQUEST,
+            Self::OrgInviteExpired => StatusCode::GONE,
+            Self::OrgApprovalNoAdmin(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::Internal(_) | Self::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -285,6 +317,14 @@ impl AppError {
             Self::ChannelWebhookVerificationFailed(_) => 10003,
             Self::ChannelRelayFailed(_) => 10004,
             Self::ChannelPlatformError(_) => 10005,
+            Self::OrgCannotAuthenticate => 1403,
+            Self::OrgQueryTimeout => 8100,
+            Self::OrgNotFound(_) => 8101,
+            Self::OrgMembershipRequired => 8102,
+            Self::OrgRoleInsufficient(_) => 8103,
+            Self::OrgInviteInvalid(_) => 8104,
+            Self::OrgInviteExpired => 8105,
+            Self::OrgApprovalNoAdmin(_) => 8106,
         }
     }
 
@@ -370,6 +410,14 @@ impl AppError {
             Self::ChannelWebhookVerificationFailed(_) => "channel_webhook_verification_failed",
             Self::ChannelRelayFailed(_) => "channel_relay_failed",
             Self::ChannelPlatformError(_) => "channel_platform_error",
+            Self::OrgCannotAuthenticate => "org_cannot_authenticate",
+            Self::OrgQueryTimeout => "org_query_timeout",
+            Self::OrgNotFound(_) => "org_not_found",
+            Self::OrgMembershipRequired => "org_membership_required",
+            Self::OrgRoleInsufficient(_) => "org_role_insufficient",
+            Self::OrgInviteInvalid(_) => "org_invite_invalid",
+            Self::OrgInviteExpired => "org_invite_expired",
+            Self::OrgApprovalNoAdmin(_) => "org_approval_no_admin",
         }
     }
 }

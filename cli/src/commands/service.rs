@@ -22,6 +22,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             credential,
             credential_env,
             scopes,
+            org,
             auth,
         } => {
             let mut api = ApiClient::from_auth(&auth)?;
@@ -65,6 +66,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                     slug,
                     via_node.as_deref(),
                     &additional_scopes,
+                    org.as_deref(),
                     &auth,
                 )
                 .await;
@@ -77,6 +79,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                     slug,
                     via_node.as_deref(),
                     &additional_scopes,
+                    org.as_deref(),
                     &auth,
                 )
                 .await;
@@ -235,6 +238,12 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                     );
                 }
                 body.insert("credential".into(), Value::String(cred_value));
+            }
+
+            // Org-scoped creation: the caller must be an admin of the target
+            // org. The backend enforces this via resolve_owner_access.
+            if let Some(ref org_id) = org {
+                body.insert("target_org_id".into(), Value::String(org_id.clone()));
             }
 
             let result: Value = api.post("/keys", &body).await?;
@@ -650,6 +659,7 @@ async fn run_oauth_add(
     slug: Option<String>,
     via_node: Option<&str>,
     additional_scopes: &[String],
+    target_org_id: Option<&str>,
     auth: &crate::cli::AuthArgs,
 ) -> Result<()> {
     let slug = slug.ok_or_else(|| anyhow::anyhow!("Catalog slug is required for --oauth"))?;
@@ -661,19 +671,16 @@ async fn run_oauth_add(
         .map(str::to_string)
         .unwrap_or_else(|| slug.clone());
 
-    let key_body = if let Some(node_id) = via_node {
-        serde_json::json!({
-            "service_slug": slug,
-            "label": label,
-            "node_id": node_id,
-        })
-    } else {
-        serde_json::json!({
-            "service_slug": slug,
-            "label": label,
-        })
-    };
-    let key_result: Value = api.post("/keys", &key_body).await?;
+    let mut key_body = serde_json::Map::new();
+    key_body.insert("service_slug".into(), Value::String(slug.clone()));
+    key_body.insert("label".into(), Value::String(label));
+    if let Some(node_id) = via_node {
+        key_body.insert("node_id".into(), Value::String(node_id.to_string()));
+    }
+    if let Some(org_id) = target_org_id {
+        key_body.insert("target_org_id".into(), Value::String(org_id.to_string()));
+    }
+    let key_result: Value = api.post("/keys", &Value::Object(key_body)).await?;
     let key_id = key_result["id"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Created key response did not include an id"))?;
@@ -706,6 +713,14 @@ async fn run_oauth_add(
             urlencoding::encode(&additional_scopes.join(","))
         ));
     }
+    // Org-targeted OAuth: the provider token must be stored under the org's
+    // user_id so `sync_provider_token_to_api_keys` picks up the placeholder
+    // UserApiKey we just created under the same org id. Without this query
+    // param, the token would land on the admin's personal scope and the
+    // org-owned UserApiKey would stay pending_auth forever.
+    if let Some(org_id) = target_org_id {
+        initiate_path.push_str(&format!("&target_org_id={}", urlencoding::encode(org_id)));
+    }
     let initiate: Value = api.get(&initiate_path).await?;
     let authorization_url = initiate["authorization_url"].as_str().ok_or_else(|| {
         anyhow::anyhow!("OAuth initiate response did not include authorization_url")
@@ -732,6 +747,7 @@ async fn run_device_code_add(
     slug: Option<String>,
     via_node: Option<&str>,
     additional_scopes: &[String],
+    target_org_id: Option<&str>,
     auth: &crate::cli::AuthArgs,
 ) -> Result<()> {
     let slug = slug.ok_or_else(|| anyhow::anyhow!("Catalog slug is required for --device-code"))?;
@@ -742,19 +758,16 @@ async fn run_device_code_add(
         .as_str()
         .map(str::to_string)
         .unwrap_or_else(|| slug.clone());
-    let key_body = if let Some(node_id) = via_node {
-        serde_json::json!({
-            "service_slug": slug,
-            "label": label,
-            "node_id": node_id,
-        })
-    } else {
-        serde_json::json!({
-            "service_slug": slug,
-            "label": label,
-        })
-    };
-    let key_result: Value = api.post("/keys", &key_body).await?;
+    let mut key_body = serde_json::Map::new();
+    key_body.insert("service_slug".into(), Value::String(slug.clone()));
+    key_body.insert("label".into(), Value::String(label));
+    if let Some(node_id) = via_node {
+        key_body.insert("node_id".into(), Value::String(node_id.to_string()));
+    }
+    if let Some(org_id) = target_org_id {
+        key_body.insert("target_org_id".into(), Value::String(org_id.to_string()));
+    }
+    let key_result: Value = api.post("/keys", &Value::Object(key_body)).await?;
     let key_id = key_result["id"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Created key response did not include an id"))?;
@@ -772,13 +785,23 @@ async fn run_device_code_add(
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("No provider found for slug: {slug}"))?;
 
-    // Initiate device code flow
+    // Initiate device code flow. Include `target_org_id` when present so the
+    // provider token lands under the org's user_id (see the OAuth branch
+    // above for the invariant).
     let mut initiate_path = format!("/providers/{provider_id}/connect/device-code/initiate");
+    let mut first_param = true;
+    let mut append = |path: &mut String, key: &str, val: &str| {
+        path.push(if first_param { '?' } else { '&' });
+        first_param = false;
+        path.push_str(key);
+        path.push('=');
+        path.push_str(&urlencoding::encode(val));
+    };
     if !additional_scopes.is_empty() {
-        initiate_path.push_str(&format!(
-            "?scope={}",
-            urlencoding::encode(&additional_scopes.join(","))
-        ));
+        append(&mut initiate_path, "scope", &additional_scopes.join(","));
+    }
+    if let Some(org_id) = target_org_id {
+        append(&mut initiate_path, "target_org_id", org_id);
     }
     let initiate: Value = api.post(&initiate_path, &serde_json::json!({})).await?;
 

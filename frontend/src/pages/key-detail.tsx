@@ -79,10 +79,12 @@ function EndpointSection({
   endpointUrl,
   endpointId,
   nodeRouted,
+  readOnly = false,
 }: {
   readonly endpointUrl: string;
   readonly endpointId: string;
   readonly nodeRouted: boolean;
+  readonly readOnly?: boolean;
 }) {
   const [editing, setEditing] = useState(false);
   const [url, setUrl] = useState(endpointUrl);
@@ -146,26 +148,30 @@ function EndpointSection({
         ) : isEmpty && nodeRouted ? (
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <span>Resolved by node agent</span>
-            <Button
-              size="icon"
-              variant="ghost"
-              onClick={() => setEditing(true)}
-            >
-              <Pencil className="h-4 w-4" />
-            </Button>
+            {!readOnly && (
+              <Button
+                size="icon"
+                variant="ghost"
+                onClick={() => setEditing(true)}
+              >
+                <Pencil className="h-4 w-4" />
+              </Button>
+            )}
           </div>
         ) : (
           <div className="flex items-center justify-between gap-2">
             <code className="truncate rounded bg-muted px-2 py-1 font-mono text-sm">
               {endpointUrl}
             </code>
-            <Button
-              size="icon"
-              variant="ghost"
-              onClick={() => setEditing(true)}
-            >
-              <Pencil className="h-4 w-4" />
-            </Button>
+            {!readOnly && (
+              <Button
+                size="icon"
+                variant="ghost"
+                onClick={() => setEditing(true)}
+              >
+                <Pencil className="h-4 w-4" />
+              </Button>
+            )}
           </div>
         )}
       </CardContent>
@@ -180,6 +186,7 @@ function ApiKeySection({
   expiresAt,
   lastUsedAt,
   errorMessage,
+  readOnly = false,
 }: {
   readonly apiKeyId: string;
   readonly credentialType: string;
@@ -187,6 +194,7 @@ function ApiKeySection({
   readonly expiresAt: string | null;
   readonly lastUsedAt: string | null;
   readonly errorMessage: string | null;
+  readonly readOnly?: boolean;
 }) {
   const [rotating, setRotating] = useState(false);
   const [newCredential, setNewCredential] = useState("");
@@ -246,7 +254,12 @@ function ApiKeySection({
           </p>
         )}
 
-        {credentialType === "node_managed" ? (
+        {readOnly ? (
+          <p className="text-xs text-muted-foreground">
+            This credential is shared from an org. Ask an admin of the owning
+            org to rotate or replace it.
+          </p>
+        ) : credentialType === "node_managed" ? (
           <p className="text-xs text-muted-foreground">
             This credential is managed on the node agent. Update it on the node
             instead of storing it in NyxID.
@@ -304,12 +317,14 @@ function ServiceSection({
   authKeyName,
   isActive,
   serviceId,
+  readOnly = false,
 }: {
   readonly slug: string;
   readonly authMethod: string;
   readonly authKeyName: string;
   readonly isActive: boolean;
   readonly serviceId: string;
+  readonly readOnly?: boolean;
 }) {
   const updateService = useUpdateUserService();
 
@@ -359,14 +374,16 @@ function ServiceSection({
           </div>
         </div>
 
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={toggleActive}
-          disabled={updateService.isPending}
-        >
-          {isActive ? "Deactivate" : "Activate"}
-        </Button>
+        {!readOnly && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={toggleActive}
+            disabled={updateService.isPending}
+          >
+            {isActive ? "Deactivate" : "Activate"}
+          </Button>
+        )}
       </CardContent>
     </Card>
   );
@@ -375,9 +392,11 @@ function ServiceSection({
 function RoutingSection({
   nodeId,
   serviceId,
+  readOnly = false,
 }: {
   readonly nodeId: string | null;
   readonly serviceId: string;
+  readonly readOnly?: boolean;
 }) {
   const [picking, setPicking] = useState(false);
   const { data: nodes } = useNodes();
@@ -422,7 +441,7 @@ function RoutingSection({
           </Badge>
         </div>
 
-        {picking ? (
+        {!readOnly && picking ? (
           <div className="space-y-2">
             <Label className="text-xs">Select routing</Label>
             <Select
@@ -458,11 +477,11 @@ function RoutingSection({
               Cancel
             </Button>
           </div>
-        ) : (
+        ) : !readOnly ? (
           <Button size="sm" variant="outline" onClick={() => setPicking(true)}>
             {nodeId ? "Change Route" : "Route via Node"}
           </Button>
-        )}
+        ) : null}
       </CardContent>
     </Card>
   );
@@ -881,13 +900,24 @@ function DeleteKeyDialog({
 function LabelEditor({
   keyId,
   currentLabel,
+  readOnly = false,
 }: {
   readonly keyId: string;
   readonly currentLabel: string;
+  readonly readOnly?: boolean;
 }) {
   const [editing, setEditing] = useState(false);
   const [label, setLabel] = useState(currentLabel);
   const updateKey = useUpdateKey();
+
+  // Non-admin org members see the label but cannot edit it.
+  if (readOnly) {
+    return (
+      <h2 className="font-display text-3xl font-normal tracking-tight md:text-5xl">
+        {currentLabel}
+      </h2>
+    );
+  }
 
   function handleSave() {
     const trimmed = label.trim();
@@ -1021,6 +1051,15 @@ export function KeyDetailPage() {
   const hasCertAuth = isSsh && keyInfo.ssh_ca_public_key !== null;
   const sshServiceId = keyInfo.catalog_service_id;
 
+  // Mutation gating: personal credentials and org-admin access allow edits.
+  // Members, viewers, and scope-blocked rows are read-only. The backend
+  // ownership helpers reject non-admin writes with 403 / NotFound, so every
+  // edit control needs to match those rules -- otherwise the user gets
+  // a confusing toast error after every attempt.
+  const source = keyInfo.credential_source;
+  const isOrgSource = source?.type === "org";
+  const readOnly = isOrgSource && source.role !== "admin";
+
   const sshConfig: SshServiceConfig | null =
     isSsh && keyInfo.ssh_host && keyInfo.ssh_port !== null
       ? {
@@ -1051,7 +1090,11 @@ export function KeyDetailPage() {
                 {keyInfo.label}
               </h2>
             ) : (
-              <LabelEditor keyId={keyInfo.id} currentLabel={keyInfo.label} />
+              <LabelEditor
+                keyId={keyInfo.id}
+                currentLabel={keyInfo.label}
+                readOnly={readOnly}
+              />
             )}
             <div className="flex items-center gap-2">
               <p className="text-sm text-muted-foreground">
@@ -1084,7 +1127,7 @@ export function KeyDetailPage() {
                 Terminal
               </Button>
             )}
-            {!keyInfo.auto_connected && (
+            {!keyInfo.auto_connected && !readOnly && (
               <Button
                 variant="destructive"
                 size="sm"
@@ -1096,6 +1139,24 @@ export function KeyDetailPage() {
             )}
           </div>
         </div>
+        {readOnly && source?.type === "org" && (
+          <Card className="border-info/40 bg-info/5">
+            <CardContent className="flex items-start gap-3 py-3">
+              <Shield className="mt-0.5 h-4 w-4 shrink-0 text-info" />
+              <div className="text-xs">
+                <p className="font-medium text-foreground">
+                  Shared from {source.org_name}
+                </p>
+                <p className="text-muted-foreground">
+                  You are a {source.role} of this organization and can
+                  {source.allowed
+                    ? " use this credential through the proxy, but only admins can modify it."
+                    : " see this service but not use it. Ask an admin to grant you member access."}
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+        )}
       </div>
 
       {keyInfo.auto_connected ? (
@@ -1145,6 +1206,7 @@ export function KeyDetailPage() {
             endpointUrl={keyInfo.endpoint_url}
             endpointId={keyInfo.endpoint_id}
             nodeRouted={keyInfo.node_id !== null}
+            readOnly={readOnly}
           />
 
           {keyInfo.service_type === "ssh" &&
@@ -1165,6 +1227,7 @@ export function KeyDetailPage() {
               expiresAt={keyInfo.expires_at}
               lastUsedAt={keyInfo.last_used_at}
               errorMessage={keyInfo.error_message}
+              readOnly={readOnly}
             />
           ) : null}
 
@@ -1174,9 +1237,14 @@ export function KeyDetailPage() {
             authKeyName={keyInfo.auth_key_name}
             isActive={keyInfo.is_active}
             serviceId={keyInfo.id}
+            readOnly={readOnly}
           />
 
-          <RoutingSection nodeId={keyInfo.node_id} serviceId={keyInfo.id} />
+          <RoutingSection
+            nodeId={keyInfo.node_id}
+            serviceId={keyInfo.id}
+            readOnly={readOnly}
+          />
 
           {keyInfo.node_id && !isSsh && (
           <NodeSetupHelper

@@ -7,9 +7,11 @@ use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
+use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
 use crate::models::user_provider_token::{
     COLLECTION_NAME as USER_PROVIDER_TOKENS, UserProviderToken,
 };
+use crate::services::{org_service, user_service_service};
 
 // ---------------------------------------------------------------------------
 // Response types
@@ -60,6 +62,20 @@ pub async fn resolve_llm_service_by_slug(
 }
 
 /// Get the LLM gateway status for a user.
+///
+/// Reports per-provider availability across **every credential the actor
+/// can reach**:
+///
+/// - Personal `UserService` + `UserApiKey` (the new path)
+/// - Org-shared `UserService` + `UserApiKey` for any org the actor is a
+///   non-viewer member of, subject to the membership's `allowed_service_ids`
+///   scope (mirrors the proxy resolver's role + scope filters)
+/// - Personal legacy `UserProviderToken` (pre-migration users)
+///
+/// The reported status is the *best* across all reachable credentials --
+/// `ready` > `expired` > `not_connected`. The org-membership lookup is
+/// silently degraded to "personal only" on `OrgQueryTimeout` because this
+/// is an informational endpoint and shouldn't 503 the dashboard.
 pub async fn get_llm_status(
     db: &mongodb::Database,
     user_id: &str,
@@ -73,8 +89,41 @@ pub async fn get_llm_status(
         .try_collect()
         .await?;
 
-    // Get all user tokens (non-revoked)
-    let tokens: Vec<UserProviderToken> = db
+    // Build the list of (user_id, optional membership) tuples whose
+    // credentials this actor can use. The actor's own user_id has no
+    // membership (unrestricted personal access). Org user_ids carry the
+    // membership so we can apply role + `allowed_service_ids` filters.
+    let mut credential_owners: Vec<CredentialOwner> =
+        vec![CredentialOwner::Personal(user_id.to_string())];
+    match org_service::find_active_memberships_with_timeout(db, user_id).await {
+        Ok(memberships) => {
+            for m in memberships {
+                if !m.role.can_proxy() {
+                    continue; // viewers cannot use org credentials
+                }
+                credential_owners.push(CredentialOwner::Org {
+                    org_user_id: m.org_user_id,
+                    allowed_service_ids: m.allowed_service_ids,
+                });
+            }
+        }
+        Err(AppError::OrgQueryTimeout) => {
+            // Degrade gracefully: an informational endpoint should not 503
+            // because the org-fallback query was slow. Personal credentials
+            // are still reported.
+            tracing::warn!(
+                user_id = %user_id,
+                "Org membership query timed out while computing LLM status; \
+                 reporting personal credentials only"
+            );
+        }
+        Err(e) => return Err(e),
+    }
+
+    // Pre-fetch the legacy provider tokens for the actor in one round-trip.
+    // The new (UserService) path is queried per credential owner below;
+    // legacy tokens are only owned by the actor.
+    let legacy_tokens: Vec<UserProviderToken> = db
         .collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
         .find(doc! { "user_id": user_id, "status": { "$in": ["active", "expired"] } })
         .await?
@@ -111,20 +160,39 @@ pub async fn get_llm_status(
             None => continue,
         };
 
-        let user_token = tokens
-            .iter()
-            .find(|t| t.provider_config_id == *provider_config_id);
-
-        let status = match user_token {
-            Some(t) if t.status == "active" => "ready",
-            Some(t) if t.status == "expired" => "expired",
-            _ => "not_connected",
-        };
+        // Walk every credential owner the actor can use, then fall back
+        // to the legacy provider token. Stop at the first `Ready`.
+        let mut best = LlmStatusRank::NotConnected;
+        for owner in &credential_owners {
+            let candidate = lookup_user_service_status(db, owner, &service.id).await?;
+            if candidate > best {
+                best = candidate;
+            }
+            if matches!(best, LlmStatusRank::Ready) {
+                break;
+            }
+        }
+        if !matches!(best, LlmStatusRank::Ready) {
+            // Legacy fallback: actor's own UserProviderToken.
+            if let Some(token) = legacy_tokens
+                .iter()
+                .find(|t| t.provider_config_id == *provider_config_id)
+            {
+                let legacy = match token.status.as_str() {
+                    "active" => LlmStatusRank::Ready,
+                    "expired" => LlmStatusRank::Expired,
+                    _ => LlmStatusRank::NotConnected,
+                };
+                if legacy > best {
+                    best = legacy;
+                }
+            }
+        }
 
         statuses.push(LlmProviderStatus {
             provider_slug: provider.slug.clone(),
             provider_name: provider.name.clone(),
-            status: status.to_string(),
+            status: best.as_api_str().to_string(),
             proxy_url: format!("{base}/api/v1/llm/{}/v1", provider.slug),
         });
     }
@@ -154,6 +222,96 @@ pub async fn get_llm_status(
             "rerank-*".to_string(),
             "deepseek-*".to_string(),
         ],
+    })
+}
+
+/// A potential source of LLM credentials reachable by the caller.
+enum CredentialOwner {
+    /// The caller's own user_id. No scope filter.
+    Personal(String),
+    /// An org the caller belongs to as a non-viewer. The optional
+    /// `allowed_service_ids` is the membership scope (None = unrestricted).
+    Org {
+        org_user_id: String,
+        allowed_service_ids: Option<Vec<String>>,
+    },
+}
+
+impl CredentialOwner {
+    fn user_id(&self) -> &str {
+        match self {
+            CredentialOwner::Personal(id) => id,
+            CredentialOwner::Org { org_user_id, .. } => org_user_id,
+        }
+    }
+
+    fn allows(&self, user_service_id: &str) -> bool {
+        match self {
+            CredentialOwner::Personal(_) => true,
+            CredentialOwner::Org {
+                allowed_service_ids: None,
+                ..
+            } => true,
+            CredentialOwner::Org {
+                allowed_service_ids: Some(ids),
+                ..
+            } => ids.iter().any(|id| id == user_service_id),
+        }
+    }
+}
+
+/// Internal status rank used to pick the *best* available credential
+/// across personal + org sources. Higher = better.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum LlmStatusRank {
+    NotConnected,
+    Expired,
+    Ready,
+}
+
+impl LlmStatusRank {
+    fn as_api_str(self) -> &'static str {
+        match self {
+            LlmStatusRank::Ready => "ready",
+            LlmStatusRank::Expired => "expired",
+            LlmStatusRank::NotConnected => "not_connected",
+        }
+    }
+}
+
+/// Resolve the best `LlmStatusRank` for one credential owner against one
+/// catalog service id. Returns `NotConnected` when the owner has no
+/// matching `UserService`, the service is out of scope, or the linked
+/// `UserApiKey` is in a non-usable state.
+async fn lookup_user_service_status(
+    db: &mongodb::Database,
+    owner: &CredentialOwner,
+    catalog_service_id: &str,
+) -> AppResult<LlmStatusRank> {
+    let Some(us) =
+        user_service_service::find_by_catalog_service_id(db, owner.user_id(), catalog_service_id)
+            .await?
+    else {
+        return Ok(LlmStatusRank::NotConnected);
+    };
+    if !owner.allows(&us.id) {
+        return Ok(LlmStatusRank::NotConnected);
+    }
+    let Some(api_key_id) = us.api_key_id.as_deref() else {
+        // No-auth services have no api_key but are always reachable.
+        return Ok(LlmStatusRank::Ready);
+    };
+    let Some(ak) = db
+        .collection::<UserApiKey>(USER_API_KEYS)
+        .find_one(doc! { "_id": api_key_id, "user_id": owner.user_id() })
+        .await?
+    else {
+        return Ok(LlmStatusRank::NotConnected);
+    };
+    Ok(match ak.status.as_str() {
+        "active" => LlmStatusRank::Ready,
+        "expired" | "refresh_failed" => LlmStatusRank::Expired,
+        _ => LlmStatusRank::NotConnected,
     })
 }
 

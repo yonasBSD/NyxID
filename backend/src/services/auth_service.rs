@@ -5,11 +5,24 @@ use uuid::Uuid;
 use crate::crypto::password;
 use crate::crypto::token::{generate_random_token, hash_token};
 use crate::errors::{AppError, AppResult};
-use crate::models::user::{COLLECTION_NAME as USERS, User};
+use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
 use crate::services::role_service;
 
 /// Maximum password length to prevent Argon2 DoS via extremely long passwords.
 const MAX_PASSWORD_LENGTH: usize = 128;
+
+/// Reject any auth flow that lands on an org-type user.
+///
+/// Org users (`user_type = Org`) exist purely as the owner record for shared
+/// resources. They have no password, no MFA, no email verification flow,
+/// and must never be allowed to log in. This guard is called from every
+/// path that loads a user during an authentication operation.
+pub fn ensure_person_user(user: &User) -> AppResult<()> {
+    match user.user_type {
+        UserType::Person => Ok(()),
+        UserType::Org => Err(AppError::OrgCannotAuthenticate),
+    }
+}
 
 /// Result of a successful registration.
 pub struct RegisterResult {
@@ -54,10 +67,15 @@ pub async fn register_user(
         )));
     }
 
-    // Check for existing user - return fake success to prevent email enumeration
+    // Check for existing person user - return fake success to prevent email
+    // enumeration. We deliberately scope to user_type=person so that an org
+    // happening to share an email does not block person registration.
     let existing = db
         .collection::<User>(USERS)
-        .find_one(doc! { "email": email.to_lowercase() })
+        .find_one(doc! {
+            "email": email.to_lowercase(),
+            "user_type": "person",
+        })
         .await?;
 
     if existing.is_some() {
@@ -104,6 +122,8 @@ pub async fn register_user(
         mfa_enabled: false,
         social_provider: None,
         social_provider_id: None,
+        user_type: crate::models::user::UserType::Person,
+        primary_org_id: None,
         created_at: now,
         updated_at: now,
         last_login_at: None,
@@ -137,9 +157,17 @@ pub async fn authenticate_user(
 
     let user = db
         .collection::<User>(USERS)
-        .find_one(doc! { "email": email.to_lowercase() })
+        .find_one(doc! {
+            "email": email.to_lowercase(),
+            "user_type": "person",
+        })
         .await?
         .ok_or_else(|| AppError::AuthenticationFailed("Invalid email or password".to_string()))?;
+
+    // Belt-and-suspenders: the partial-unique email index already excludes
+    // org users, but we double-check here so any code path that bypassed
+    // the index filter still gets blocked.
+    ensure_person_user(&user)?;
 
     if !user.is_active {
         return Err(AppError::Forbidden("Account is deactivated".to_string()));
@@ -186,6 +214,8 @@ pub async fn verify_email(db: &mongodb::Database, token: &str) -> AppResult<Stri
         .await?
         .ok_or_else(|| AppError::BadRequest("Invalid or expired verification token".to_string()))?;
 
+    ensure_person_user(&user)?;
+
     if user.email_verified {
         return Err(AppError::BadRequest("Email already verified".to_string()));
     }
@@ -216,13 +246,22 @@ pub async fn initiate_password_reset(
 ) -> AppResult<Option<String>> {
     let user = db
         .collection::<User>(USERS)
-        .find_one(doc! { "email": email.to_lowercase() })
+        .find_one(doc! {
+            "email": email.to_lowercase(),
+            "user_type": "person",
+        })
         .await?;
 
     // Always return Ok to prevent email enumeration
     let Some(user) = user else {
         return Ok(None);
     };
+
+    // The query already filters to person, but be defensive against
+    // hand-crafted documents that bypass the index filter.
+    if user.user_type.is_org() {
+        return Ok(None);
+    }
 
     let reset_token = generate_random_token();
     let reset_token_hash = hash_token(&reset_token);
@@ -272,6 +311,8 @@ pub async fn reset_password(
         .await?
         .ok_or_else(|| AppError::BadRequest("Invalid or expired reset token".to_string()))?;
 
+    ensure_person_user(&user)?;
+
     // Check token expiration
     if let Some(expires_at) = user.password_reset_expires_at {
         if expires_at < Utc::now() {
@@ -310,9 +351,14 @@ pub async fn promote_user_to_admin(db: &mongodb::Database, email: &str) -> AppRe
 
     let user = db
         .collection::<User>(USERS)
-        .find_one(doc! { "email": &normalized })
+        .find_one(doc! {
+            "email": &normalized,
+            "user_type": "person",
+        })
         .await?
         .ok_or_else(|| AppError::NotFound(format!("No user found with email: {}", normalized)))?;
+
+    ensure_person_user(&user)?;
 
     if user.is_admin {
         return Err(AppError::Conflict(format!(
@@ -336,4 +382,51 @@ pub async fn promote_user_to_admin(db: &mongodb::Database, email: &str) -> AppRe
     tracing::info!(user_id = %user.id, email = %normalized, "User promoted to admin");
 
     Ok(user.id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_person() -> User {
+        let now = Utc::now();
+        User {
+            id: Uuid::new_v4().to_string(),
+            email: "alice@example.com".to_string(),
+            password_hash: Some("$argon2id$hash".to_string()),
+            display_name: Some("Alice".to_string()),
+            avatar_url: None,
+            email_verified: true,
+            email_verification_token: None,
+            password_reset_token: None,
+            password_reset_expires_at: None,
+            is_active: true,
+            is_admin: false,
+            role_ids: vec![],
+            group_ids: vec![],
+            invite_code_id: None,
+            mfa_enabled: false,
+            social_provider: None,
+            social_provider_id: None,
+            user_type: UserType::Person,
+            primary_org_id: None,
+            created_at: now,
+            updated_at: now,
+            last_login_at: None,
+        }
+    }
+
+    #[test]
+    fn ensure_person_user_allows_person() {
+        let user = make_person();
+        assert!(ensure_person_user(&user).is_ok());
+    }
+
+    #[test]
+    fn ensure_person_user_rejects_org() {
+        let mut user = make_person();
+        user.user_type = UserType::Org;
+        let err = ensure_person_user(&user).expect_err("must reject org");
+        assert!(matches!(err, AppError::OrgCannotAuthenticate));
+    }
 }
