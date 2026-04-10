@@ -97,7 +97,7 @@ agents:
     turn_sandbox_policy: danger-full-access
     network_access: true
     turn_timeout_ms: 3600000
-    read_timeout_ms: 30000
+    read_timeout_ms: 60000
     stall_timeout_ms: 600000
   claude:
     agent_type: claude-cli
@@ -108,6 +108,8 @@ agents:
     max_turns: 25
     network_access: true
     turn_timeout_ms: 7200000
+    read_timeout_ms: 60000
+    stall_timeout_ms: 600000
 
 pipeline:
   stages:
