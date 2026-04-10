@@ -80,11 +80,11 @@ pub async fn run(command: ProxyCommands) -> Result<()> {
                 format!("/proxy/s/{service}/{trimmed_path}")
             };
 
-            // Append ?via_service= so the server uses a specific
+            // Append ?_nyxid_via= so the server uses a specific
             // UserService instead of the auto-resolution cascade.
             if let Some(ref us_id) = via_service {
                 let sep = if proxy_path.contains('?') { "&" } else { "?" };
-                proxy_path.push_str(&format!("{sep}via_service={}", urlencoding::encode(us_id)));
+                proxy_path.push_str(&format!("{sep}_nyxid_via={}", urlencoding::encode(us_id)));
             }
 
             // Parse headers

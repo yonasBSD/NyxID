@@ -231,9 +231,9 @@ flowchart TD
 
 ## Proxy Credential Resolution
 
-### Explicit service selection (`?via_service=`)
+### Explicit service selection (`?_nyxid_via=`)
 
-Both proxy endpoints (`/api/v1/proxy/{service_id}/{path}` and `/api/v1/proxy/s/{slug}/{path}`) accept an optional query parameter `?via_service=<user_service_id>`. When present, the proxy **skips** the auto-resolution cascade and loads the specified `UserService` directly from `proxy_service::resolve_proxy_target_by_user_service_id`.
+Both proxy endpoints (`/api/v1/proxy/{service_id}/{path}` and `/api/v1/proxy/s/{slug}/{path}`) accept an optional query parameter `?_nyxid_via=<user_service_id>`. When present, the proxy **skips** the auto-resolution cascade and loads the specified `UserService` directly from `proxy_service::resolve_proxy_target_by_user_service_id`.
 
 The caller gets the `UserService.id` from `GET /api/v1/user-services` or `GET /api/v1/keys`, which already list both personal and org-inherited services tagged with `credential_source`. This lets a user who has both a personal and an org credential for the same slug explicitly choose which one to use on a given request:
 
@@ -245,17 +245,17 @@ nyxid service list --output json
 
 # Use the org credential explicitly
 curl -H "Authorization: Bearer $TOKEN" \
-  "https://nyx.example.com/api/v1/proxy/s/llm-openai/v1/chat/completions?via_service=def456" \
+  "https://nyx.example.com/api/v1/proxy/s/llm-openai/v1/chat/completions?_nyxid_via=def456" \
   -d '...'
 ```
 
 Access check mirrors the auto-resolution: direct owners always pass, org admins must pass `allowed_service_ids` scope, org members must also have `role.can_proxy()`, and viewers are denied. If the specified `UserService.id` doesn't exist or the actor doesn't have proxy access, the endpoint returns `404`.
 
-The `via_service` query parameter is **stripped** from the forwarded request before it reaches the downstream service (via `strip_internal_query_params` in `execute_proxy_inner`). Downstream services never see NyxID routing metadata.
+The `_nyxid_via` query parameter is **stripped** from the forwarded request before it reaches the downstream service (via `strip_internal_query_params` in `execute_proxy_inner`). Downstream services never see NyxID routing metadata.
 
 **CLI support:** `nyxid proxy request <slug> <path> --via-service <USER_SERVICE_ID>` appends the query param automatically.
 
-When `?via_service=` is absent, the auto-resolution cascade fires as usual (personal > legacy > org fallback).
+When `?_nyxid_via=` is absent, the auto-resolution cascade fires as usual (personal > legacy > org fallback).
 
 ### Auto-resolution cascade
 

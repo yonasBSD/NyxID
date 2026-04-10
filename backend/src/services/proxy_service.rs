@@ -684,7 +684,7 @@ async fn user_has_legacy_personal_connection(
 ///
 /// Resolve a proxy target from a specific `UserService` id, bypassing
 /// the auto-resolution cascade. Used when the caller passes
-/// `?via_service=<user_service_id>` on the proxy route.
+/// `?_nyxid_via=<user_service_id>` on the proxy route.
 ///
 /// The caller gets the id from `GET /api/v1/user-services` or
 /// `GET /api/v1/keys`, which already list both personal and org-

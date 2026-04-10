@@ -274,7 +274,7 @@ pub async fn list_user_services_with_sources(
 
 /// Look up a `UserService` by id alone, WITHOUT ownership filtering.
 ///
-/// Used by the `?via_service=` proxy path, which needs to load the row
+/// Used by the `?_nyxid_via=` proxy path, which needs to load the row
 /// first and then separately check access via `resolve_owner_access`.
 /// Returns `None` if no active row exists with this id.
 pub async fn find_user_service_by_id(

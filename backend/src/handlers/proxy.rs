@@ -155,7 +155,7 @@ fn collect_forward_headers(
         .collect()
 }
 
-/// Extract `?via_service=<user_service_id>` from the request URI.
+/// Extract `?_nyxid_via=<user_service_id>` from the request URI.
 ///
 /// When present, the proxy handler bypasses the auto-resolution cascade
 /// and uses the specified UserService directly. The caller gets the id
@@ -163,18 +163,18 @@ fn collect_forward_headers(
 fn extract_via_service(request: &Request<Body>) -> Option<String> {
     request.uri().query().and_then(|q| {
         q.split('&')
-            .find_map(|pair| pair.strip_prefix("via_service="))
+            .find_map(|pair| pair.strip_prefix("_nyxid_via="))
             .map(|v| urlencoding::decode(v).unwrap_or_default().to_string())
     })
 }
 
 /// Strip NyxID-internal query params before forwarding to downstream.
 ///
-/// Currently strips `via_service` (the explicit credential-selection
+/// Currently strips `_nyxid_via` (the explicit credential-selection
 /// param added by this PR). Future NyxID-internal params should be
 /// added to the filter here so downstream services never see them.
 fn strip_internal_query_params(raw: &str) -> String {
-    const INTERNAL_PARAMS: &[&str] = &["via_service"];
+    const INTERNAL_PARAMS: &[&str] = &["_nyxid_via"];
     raw.split('&')
         .filter(|pair| {
             let key = pair.split('=').next().unwrap_or("");
@@ -212,7 +212,7 @@ fn append_query_param(url: &str, param_name: &str, param_value: &str) -> String 
 /// identity propagation, and delegated provider credentials.
 /// Tries the new UserService path first (by catalog_service_id), falls back to old.
 ///
-/// Accepts an optional `?via_service=<user_service_id>` query param that
+/// Accepts an optional `?_nyxid_via=<user_service_id>` query param that
 /// bypasses the auto-resolution cascade and uses the specified UserService
 /// directly. The caller gets the id from `GET /api/v1/user-services` or
 /// `GET /api/v1/keys`, which list both personal and org-inherited services
@@ -230,7 +230,7 @@ pub async fn proxy_request(
     let user_id_str = auth_user.user_id.to_string();
     let via_service = extract_via_service(&request);
 
-    // Direct resolution by UserService ID if ?via_service= is present.
+    // Direct resolution by UserService ID if ?_nyxid_via= is present.
     if let Some(ref us_id) = via_service {
         if let Some(resolved) = proxy_service::resolve_proxy_target_by_user_service_id(
             &state.db,
@@ -342,7 +342,7 @@ pub async fn proxy_request(
 /// Tries the new UserService path first (by slug), then falls back to old
 /// DownstreamService resolution.
 ///
-/// Accepts `?via_service=<user_service_id>` — see `proxy_request` doc.
+/// Accepts `?_nyxid_via=<user_service_id>` — see `proxy_request` doc.
 pub async fn proxy_request_by_slug(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -354,7 +354,7 @@ pub async fn proxy_request_by_slug(
     let user_id_str = auth_user.user_id.to_string();
     let via_service = extract_via_service(&request);
 
-    // Direct resolution by UserService ID if ?via_service= is present.
+    // Direct resolution by UserService ID if ?_nyxid_via= is present.
     if let Some(ref us_id) = via_service {
         if let Some(resolved) = proxy_service::resolve_proxy_target_by_user_service_id(
             &state.db,
@@ -687,7 +687,7 @@ async fn execute_proxy_inner(
     // Extract method, query, headers BEFORE body consumption.
     let method = request.method().clone();
     let method_str = method.as_str().to_string();
-    // Strip NyxID-only routing params (e.g. `via_service`) from the
+    // Strip NyxID-only routing params (e.g. `_nyxid_via`) from the
     // query string before forwarding. Downstream services should never
     // see NyxID-internal parameters.
     let query = request

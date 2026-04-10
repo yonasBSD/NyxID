@@ -283,7 +283,7 @@ server-side.
 |---|---|
 | `POST/GET/... /api/v1/proxy/s/{slug}/{path}` | Slug-based, most common |
 | `POST/GET/... /api/v1/proxy/{user_service_id}/{path}` | UUID-based, when you already have the id from `GET /api/v1/keys` |
-| `...?via_service=<user_service_id>` | Optional query param on either path. Bypasses auto-resolution and uses the specified UserService directly. Useful when both personal and org credentials exist for the same slug. |
+| `...?_nyxid_via=<user_service_id>` | Optional query param on either path. Bypasses auto-resolution and uses the specified UserService directly. Useful when both personal and org credentials exist for the same slug. |
 
 **Example -- send a Lark message as a bot (no Lark token management):**
 
@@ -551,7 +551,7 @@ nyxid proxy request llm-openai /chat/completions -m POST \
   -d '{"model":"gpt-4","messages":[{"role":"user","content":"Hello"}]}'
 ```
 
-The `?via_service=` param is stripped before forwarding to the downstream service, so the downstream never sees NyxID routing metadata.
+The `?_nyxid_via=` param is stripped before forwarding to the downstream service, so the downstream never sees NyxID routing metadata.
 
 When listing services for the user, **always print the `credential_source` field** so the user can tell which credentials are theirs and which are shared. Viewer-role items have `credential_source.allowed = false`; do not attempt to proxy through them -- the request will return `8103 org_role_insufficient`.
 
