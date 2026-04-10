@@ -162,6 +162,7 @@ pipeline:
     - state: in-progress
       agent: claude
       role: implementer
+      scope: ./
       transition_to: code-review
 
     # Code review by Codex
