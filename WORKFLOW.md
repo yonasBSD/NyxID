@@ -126,11 +126,11 @@ pipeline:
 
         ## Your job
         1. Read the issue carefully and assess what needs to change.
-        2. Determine which parts of the codebase are affected:
+        2. Determine which parts of the codebase are affected and add EXACTLY ONE routing combination:
            - Backend only (Rust/Axum) -> add label `backend`
            - Frontend only (React/TypeScript) -> add label `frontend`
-           - Both -> add both labels (agents will work in parallel)
-           - Unclear -> add neither (fullstack fallback agent will handle it)
+           - Both backend and frontend -> add both `backend` AND `frontend` labels (agents will work in parallel)
+           - Unclear / spans everything / CLI / mobile / SDK -> add label `fullstack`
         3. Assess complexity:
            - **Complex** (multiple layers, API changes, DB schema, new features spanning backend+frontend):
              Create a Symphony Workpad comment with an implementation plan covering affected layers, API contracts, and DB changes. Do NOT write code.
@@ -158,11 +158,12 @@ pipeline:
       scope: frontend/
       transition_to: code-review
 
-    # Fullstack fallback (triage didn't add backend/frontend labels)
+    # Fullstack (triage adds "fullstack" label for cross-cutting work)
     - state: in-progress
       agent: claude
       role: implementer
-      scope: ./
+      when_labels: [fullstack]
+      scope: .nyxid/
       transition_to: code-review
 
     # Code review by Codex
