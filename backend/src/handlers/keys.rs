@@ -236,6 +236,8 @@ pub struct KeyResponse {
     pub forward_access_token: bool,
     pub inject_delegation_token: bool,
     pub delegation_token_scope: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_user_agent: Option<String>,
     pub auto_connected: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
@@ -289,6 +291,8 @@ pub struct UpdateKeyRequest {
     pub forward_access_token: Option<bool>,
     pub inject_delegation_token: Option<bool>,
     pub delegation_token_scope: Option<String>,
+    /// Custom User-Agent override. Set to "" to clear, Some(value) to set.
+    pub custom_user_agent: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -631,6 +635,7 @@ pub async fn update_key(
             None,
             body.is_active,
             identity.as_ref(),
+            body.custom_user_agent.as_deref(),
         )
         .await?;
 
@@ -737,6 +742,7 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
         forward_access_token: result.service.forward_access_token,
         inject_delegation_token: result.service.inject_delegation_token,
         delegation_token_scope: result.service.delegation_token_scope.clone(),
+        custom_user_agent: result.service.custom_user_agent.clone(),
         auto_connected: false,
         expires_at: result
             .api_key
@@ -784,6 +790,7 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         forward_access_token: view.forward_access_token,
         inject_delegation_token: view.inject_delegation_token,
         delegation_token_scope: view.delegation_token_scope,
+        custom_user_agent: view.custom_user_agent,
         auto_connected: view.auto_connected,
         expires_at: view.expires_at,
         last_used_at: view.last_used_at,

@@ -265,6 +265,12 @@ pub struct DownstreamService {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recommended_skills: Option<Vec<String>>,
 
+    /// Custom User-Agent header to send to the downstream service.
+    /// When set, overrides the client's User-Agent instead of forwarding it.
+    /// When None, the client's User-Agent is forwarded as-is (passthrough).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_user_agent: Option<String>,
+
     /// Declarative token exchange config. Required when `auth_method` is
     /// `token_exchange`, ignored otherwise. See [`TokenExchangeConfig`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -361,6 +367,7 @@ pub mod test_helpers {
             required_permissions: None,
             examples_url: None,
             recommended_skills: None,
+            custom_user_agent: None,
             token_exchange_config: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -456,6 +463,7 @@ mod tests {
             required_permissions: Some(vec!["read:api".to_string()]),
             examples_url: Some("https://github.com/example/repo/tree/main/examples".to_string()),
             recommended_skills: Some(vec!["example/skill".to_string()]),
+            custom_user_agent: None,
             token_exchange_config: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -515,6 +523,7 @@ mod tests {
             required_permissions: None,
             examples_url: None,
             recommended_skills: None,
+            custom_user_agent: None,
             token_exchange_config: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),

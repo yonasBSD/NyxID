@@ -40,6 +40,7 @@ export const userServiceResponseSchema = z.object({
   forward_access_token: z.boolean(),
   inject_delegation_token: z.boolean(),
   delegation_token_scope: z.string(),
+  custom_user_agent: z.string().nullable().optional(),
   created_at: z.string(),
   updated_at: z.string(),
   credential_source: credentialSourceSchema,

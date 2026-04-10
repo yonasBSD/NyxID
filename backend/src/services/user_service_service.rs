@@ -526,6 +526,7 @@ pub async fn create_user_service(
         forward_access_token: identity.forward_access_token,
         inject_delegation_token: identity.inject_delegation_token,
         delegation_token_scope: identity.delegation_token_scope,
+        custom_user_agent: None,
         is_active: true,
         source: source.map(str::to_string),
         source_id: source_id.map(str::to_string),
@@ -558,6 +559,7 @@ pub async fn update_user_service(
     node_priority: Option<i32>,
     is_active: Option<bool>,
     identity: Option<&IdentityConfig>,
+    custom_user_agent: Option<&str>,
 ) -> AppResult<()> {
     let current = get_user_service(db, user_id, service_id).await?;
     let mut set_doc = doc! {
@@ -659,6 +661,24 @@ pub async fn update_user_service(
         set_doc.insert("inject_delegation_token", id_config.inject_delegation_token);
         set_doc.insert("delegation_token_scope", &id_config.delegation_token_scope);
     }
+    if let Some(ua) = custom_user_agent {
+        let trimmed = ua.trim();
+        if trimmed.is_empty() {
+            set_doc.insert("custom_user_agent", bson::Bson::Null);
+        } else {
+            if trimmed.len() > 256 {
+                return Err(AppError::ValidationError(
+                    "custom_user_agent must not exceed 256 characters".to_string(),
+                ));
+            }
+            if trimmed.bytes().any(|b| b < 0x20 && b != b'\t') {
+                return Err(AppError::ValidationError(
+                    "custom_user_agent must not contain control characters".to_string(),
+                ));
+            }
+            set_doc.insert("custom_user_agent", trimmed);
+        }
+    }
 
     let result = db
         .collection::<UserService>(COLLECTION_NAME)
@@ -696,6 +716,7 @@ pub async fn deactivate_user_service(
         None,
         None,
         Some(false),
+        None,
         None,
     )
     .await

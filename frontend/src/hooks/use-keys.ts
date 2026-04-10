@@ -155,6 +155,7 @@ interface UpdateUserServiceParams {
   readonly node_id?: string;
   readonly node_priority?: number;
   readonly is_active?: boolean;
+  readonly custom_user_agent?: string;
 }
 
 export function useUpdateUserService() {

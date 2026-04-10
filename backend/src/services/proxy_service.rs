@@ -1266,6 +1266,7 @@ fn build_minimal_downstream_service(
         required_permissions: None,
         examples_url: None,
         recommended_skills: None,
+        custom_user_agent: user_service.custom_user_agent.clone(),
         token_exchange_config,
         created_at: now,
         updated_at: now,
@@ -1361,12 +1362,25 @@ pub async fn forward_request(
 
     let mut request = client.request(method.clone(), &url);
 
-    // Copy only allowed headers (allowlist approach)
+    // Copy only allowed headers (allowlist approach).
+    // When a custom User-Agent is configured for this service, skip the
+    // client's User-Agent so we can inject the override below without
+    // producing duplicate header values.
+    let has_custom_ua = target.service.custom_user_agent.is_some();
     for (name, value) in headers.iter() {
         let name_lower = name.as_str().to_lowercase();
+        if has_custom_ua && name_lower == "user-agent" {
+            continue;
+        }
         if ALLOWED_FORWARD_HEADERS.contains(&name_lower.as_str()) {
             request = request.header(name, value);
         }
+    }
+
+    // Override User-Agent if the service specifies a custom one.
+    // By default (None), the client's User-Agent is forwarded as-is.
+    if let Some(ref ua) = target.service.custom_user_agent {
+        request = request.header("user-agent", ua.as_str());
     }
 
     // Inject identity propagation headers
@@ -1611,6 +1625,7 @@ mod tests {
         path: String,
         query: Option<String>,
         content_type: Option<String>,
+        user_agent: Option<String>,
         body: Vec<u8>,
     }
 
@@ -1625,6 +1640,10 @@ mod tests {
             query: uri.query().map(ToString::to_string),
             content_type: headers
                 .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(ToString::to_string),
+            user_agent: headers
+                .get(reqwest::header::USER_AGENT)
                 .and_then(|value| value.to_str().ok())
                 .map(ToString::to_string),
             body: body.to_vec(),
@@ -1686,6 +1705,7 @@ mod tests {
                 required_permissions: None,
                 examples_url: None,
                 recommended_skills: None,
+                custom_user_agent: None,
                 token_exchange_config: None,
                 created_at: now,
                 updated_at: now,
@@ -1735,6 +1755,106 @@ mod tests {
         assert_eq!(captured.path, "/upload");
         assert_eq!(captured.content_type.as_deref(), Some("application/zip"));
         assert_eq!(captured.body, b"PK\x03\x04");
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn forward_request_passes_through_user_agent_by_default() {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let app = Router::new()
+            .route("/api/v1/test", post(capture_request))
+            .with_state(sender);
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test app");
+        });
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::USER_AGENT,
+            "OpenAI/Python 2.30.0".parse().unwrap(),
+        );
+
+        let target = make_proxy_target(format!("http://{addr}"));
+        let response = forward_request(
+            &Client::new(),
+            &target,
+            reqwest::Method::POST,
+            "api/v1/test",
+            None,
+            headers,
+            ProxyBody::Buffered(Some(Bytes::from_static(b"{}"))),
+            vec![],
+            vec![],
+            None,
+            &empty_token_cache(),
+        )
+        .await
+        .expect("proxy request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let captured = receiver.recv().await.expect("captured request");
+        assert_eq!(
+            captured.user_agent.as_deref(),
+            Some("OpenAI/Python 2.30.0"),
+            "client User-Agent should be forwarded when no custom_user_agent is set"
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn forward_request_overrides_user_agent_when_service_has_custom() {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let app = Router::new()
+            .route("/api/v1/test", post(capture_request))
+            .with_state(sender);
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test app");
+        });
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::USER_AGENT,
+            "OpenAI/Python 2.30.0".parse().unwrap(),
+        );
+
+        let mut target = make_proxy_target(format!("http://{addr}"));
+        target.service.custom_user_agent = Some("NyxID-Proxy/1.0".to_string());
+
+        let response = forward_request(
+            &Client::new(),
+            &target,
+            reqwest::Method::POST,
+            "api/v1/test",
+            None,
+            headers,
+            ProxyBody::Buffered(Some(Bytes::from_static(b"{}"))),
+            vec![],
+            vec![],
+            None,
+            &empty_token_cache(),
+        )
+        .await
+        .expect("proxy request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let captured = receiver.recv().await.expect("captured request");
+        assert_eq!(
+            captured.user_agent.as_deref(),
+            Some("NyxID-Proxy/1.0"),
+            "custom_user_agent should replace the client's User-Agent"
+        );
 
         server.abort();
     }
@@ -2335,6 +2455,7 @@ mod tests {
                 required_permissions: None,
                 recommended_skills: None,
                 examples_url: None,
+                custom_user_agent: None,
                 token_exchange_config: Some(make_lark_token_exchange_config()),
                 created_at: now,
                 updated_at: now,
@@ -2496,6 +2617,7 @@ mod tests {
             forward_access_token: false,
             inject_delegation_token: false,
             delegation_token_scope: "llm:proxy".to_string(),
+            custom_user_agent: None,
             is_active: true,
             source: None,
             source_id: None,
@@ -2615,6 +2737,7 @@ mod tests {
                 required_permissions: None,
                 recommended_skills: None,
                 examples_url: None,
+                custom_user_agent: None,
                 token_exchange_config: None,
                 created_at: now,
                 updated_at: now,

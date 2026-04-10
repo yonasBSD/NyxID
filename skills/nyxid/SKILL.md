@@ -1121,6 +1121,7 @@ nyxid mcp config --tool vscode                         # generate MCP config for
 - `1001 unauthorized` -- token/key invalid or expired (run `nyxid login` to re-authenticate)
 - `1002 forbidden` -- missing scope or service not configured
 - `8003 node_proxy_error` -- node agent proxy failed (check `nyxid node list`)
+- **403 from downstream with no NyxID error code** -- the downstream service itself rejected the request. A common cause is WAF rules blocking your User-Agent header (e.g. `OpenAI/Python 2.30.0`). The user can set a per-service custom User-Agent override via the frontend (key detail page > Service > User-Agent) or via API: `PATCH /api/v1/user-services/{id}` with `{"custom_user_agent": "MyApp/1.0"}`. Set to `""` to clear and revert to passthrough.
 
 ## Working Rules
 
@@ -1131,6 +1132,7 @@ nyxid mcp config --tool vscode                         # generate MCP config for
 - Keep request bodies minimal and service-correct.
 - Never try to extract or display the user's stored provider credentials.
 - If multiple AI agents share a machine, each should have its own `NYXID_ACCESS_TOKEN`. Never share a single API key across multiple agents -- it defeats audit isolation and makes revocation impossible without disrupting all agents.
+- Your User-Agent header is forwarded to downstream services by default (passthrough). Some downstreams block SDK-specific User-Agent strings -- see the 403 troubleshooting note in "Approval and Errors" above.
 
 ## External Endpoints
 

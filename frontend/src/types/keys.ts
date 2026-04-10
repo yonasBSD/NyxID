@@ -16,6 +16,7 @@ export interface KeyInfo {
   readonly node_id: string | null;
   readonly node_priority: number;
   readonly is_active: boolean;
+  readonly custom_user_agent?: string | null;
   readonly auto_connected: boolean;
   readonly expires_at: string | null;
   readonly last_used_at: string | null;
