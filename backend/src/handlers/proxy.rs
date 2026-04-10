@@ -160,18 +160,28 @@ fn collect_forward_headers(
 /// When present, the proxy handler bypasses the auto-resolution cascade
 /// and uses the specified UserService directly. The caller gets the id
 /// from `GET /api/v1/user-services` or `GET /api/v1/keys`.
-///
-/// The param is intentionally NOT stripped from the URI before forwarding
-/// downstream. REST APIs ignore unknown query params, and stripping would
-/// require reconstructing the entire axum `Request`, which is heavyweight.
-/// If this ever matters, the downstream-facing proxy can strip it in
-/// `proxy_service::forward_request`.
 fn extract_via_service(request: &Request<Body>) -> Option<String> {
     request.uri().query().and_then(|q| {
         q.split('&')
             .find_map(|pair| pair.strip_prefix("via_service="))
             .map(|v| urlencoding::decode(v).unwrap_or_default().to_string())
     })
+}
+
+/// Strip NyxID-internal query params before forwarding to downstream.
+///
+/// Currently strips `via_service` (the explicit credential-selection
+/// param added by this PR). Future NyxID-internal params should be
+/// added to the filter here so downstream services never see them.
+fn strip_internal_query_params(raw: &str) -> String {
+    const INTERNAL_PARAMS: &[&str] = &["via_service"];
+    raw.split('&')
+        .filter(|pair| {
+            let key = pair.split('=').next().unwrap_or("");
+            !INTERNAL_PARAMS.contains(&key)
+        })
+        .collect::<Vec<_>>()
+        .join("&")
 }
 
 fn append_query_param(url: &str, param_name: &str, param_value: &str) -> String {
@@ -677,7 +687,14 @@ async fn execute_proxy_inner(
     // Extract method, query, headers BEFORE body consumption.
     let method = request.method().clone();
     let method_str = method.as_str().to_string();
-    let query = request.uri().query().map(String::from);
+    // Strip NyxID-only routing params (e.g. `via_service`) from the
+    // query string before forwarding. Downstream services should never
+    // see NyxID-internal parameters.
+    let query = request
+        .uri()
+        .query()
+        .map(strip_internal_query_params)
+        .filter(|q| !q.is_empty());
     let all_headers = request.headers().clone();
 
     // Extract the caller's raw Bearer token for nyxid_token passthrough.

@@ -61,13 +61,14 @@ pub async fn run(command: ProxyCommands) -> Result<()> {
             headers,
             stream,
             by_id,
+            via_service,
             auth,
         } => {
             let mut api = ApiClient::from_auth(&auth)?;
 
             // Build proxy path
             let trimmed_path = path.trim_start_matches('/');
-            let proxy_path = if by_id {
+            let mut proxy_path = if by_id {
                 if trimmed_path.is_empty() {
                     format!("/proxy/{service}")
                 } else {
@@ -78,6 +79,13 @@ pub async fn run(command: ProxyCommands) -> Result<()> {
             } else {
                 format!("/proxy/s/{service}/{trimmed_path}")
             };
+
+            // Append ?via_service= so the server uses a specific
+            // UserService instead of the auto-resolution cascade.
+            if let Some(ref us_id) = via_service {
+                let sep = if proxy_path.contains('?') { "&" } else { "?" };
+                proxy_path.push_str(&format!("{sep}via_service={}", urlencoding::encode(us_id)));
+            }
 
             // Parse headers
             let parsed_headers: Vec<(String, String)> = headers

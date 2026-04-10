@@ -1325,6 +1325,12 @@ pub enum ProxyCommands {
         /// Use service ID instead of slug
         #[arg(long)]
         by_id: bool,
+        /// Use a specific UserService ID instead of auto-resolution.
+        /// Get the ID from `nyxid service list --output json`.
+        /// When both personal and org credentials exist for the same
+        /// slug, this lets you choose which one the proxy uses.
+        #[arg(long, value_name = "USER_SERVICE_ID")]
+        via_service: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },

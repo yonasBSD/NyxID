@@ -251,6 +251,10 @@ curl -H "Authorization: Bearer $TOKEN" \
 
 Access check mirrors the auto-resolution: direct owners always pass, org admins must pass `allowed_service_ids` scope, org members must also have `role.can_proxy()`, and viewers are denied. If the specified `UserService.id` doesn't exist or the actor doesn't have proxy access, the endpoint returns `404`.
 
+The `via_service` query parameter is **stripped** from the forwarded request before it reaches the downstream service (via `strip_internal_query_params` in `execute_proxy_inner`). Downstream services never see NyxID routing metadata.
+
+**CLI support:** `nyxid proxy request <slug> <path> --via-service <USER_SERVICE_ID>` appends the query param automatically.
+
 When `?via_service=` is absent, the auto-resolution cascade fires as usual (personal > legacy > org fallback).
 
 ### Auto-resolution cascade

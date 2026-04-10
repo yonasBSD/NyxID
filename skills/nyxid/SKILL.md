@@ -260,6 +260,11 @@ nyxid proxy request <slug> <path> -m POST -d @request.json
 
 # Read body from stdin
 echo '{"prompt":"hello"}' | nyxid proxy request <slug> <path> -m POST -d -
+
+# Explicit credential selection: when the user has both a personal and
+# an org credential for the same slug, use --via-service to pick which
+# one the proxy uses. Get the UserService ID from `nyxid service list`.
+nyxid proxy request <slug> <path> -m POST --via-service <USER_SERVICE_ID> -d '<body>'
 ```
 
 ### Calling NyxID from raw HTTP (no CLI)
@@ -278,6 +283,7 @@ server-side.
 |---|---|
 | `POST/GET/... /api/v1/proxy/s/{slug}/{path}` | Slug-based, most common |
 | `POST/GET/... /api/v1/proxy/{user_service_id}/{path}` | UUID-based, when you already have the id from `GET /api/v1/keys` |
+| `...?via_service=<user_service_id>` | Optional query param on either path. Bypasses auto-resolution and uses the specified UserService directly. Useful when both personal and org credentials exist for the same slug. |
 
 **Example -- send a Lark message as a bot (no Lark token management):**
 
@@ -531,7 +537,21 @@ nyxid org set-primary --clear                # unset (revert to earliest-joined)
 
 ### Working with org services in agents
 
-For an AI agent making proxy requests, **nothing changes**. The agent calls `nyxid proxy request <slug> ...` exactly as before. NyxID looks up the credential -- personal first, then org -- and injects it. The audit log records `routed_via: "personal"` or `routed_via: "org"` (with `org_user_id` and `member_user_id`) so the org admin can see who used what.
+For an AI agent making proxy requests, **nothing changes by default**. The agent calls `nyxid proxy request <slug> ...` exactly as before. NyxID looks up the credential -- personal first, then org -- and injects it. The audit log records `routed_via: "personal"` or `routed_via: "org"` (with `org_user_id` and `member_user_id`) so the org admin can see who used what.
+
+If the user has both a personal and an org credential for the same slug and wants to explicitly choose which one the proxy uses, pass `--via-service <USER_SERVICE_ID>`:
+
+```bash
+# List services to see both personal and org entries with their IDs
+nyxid service list --output json
+
+# Use the org credential explicitly (bypasses personal-first auto-resolution)
+nyxid proxy request llm-openai /chat/completions -m POST \
+  --via-service <ORG_USER_SERVICE_ID> \
+  -d '{"model":"gpt-4","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+The `?via_service=` param is stripped before forwarding to the downstream service, so the downstream never sees NyxID routing metadata.
 
 When listing services for the user, **always print the `credential_source` field** so the user can tell which credentials are theirs and which are shared. Viewer-role items have `credential_source.allowed = false`; do not attempt to proxy through them -- the request will return `8103 org_role_insufficient`.
 
