@@ -3434,39 +3434,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nyxid-node"
-version = "0.1.1"
-dependencies = [
- "aes-gcm",
- "base64 0.22.1",
- "chrono",
- "clap",
- "directories",
- "futures",
- "hex",
- "hmac",
- "keyring",
- "nix 0.29.0",
- "pty-process",
- "rand 0.8.5",
- "reqwest",
- "rpassword",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-tungstenite 0.26.2",
- "toml",
- "tracing",
- "tracing-subscriber",
- "urlencoding",
- "uuid",
- "zeroize",
-]
-
-[[package]]
 name = "once_cell"
 version = "1.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,5 +1,5 @@
 [workspace]
-members = ["backend", "node-agent", "cli"]
+members = ["backend", "cli"]
 resolver = "2"
 
 [workspace.package]

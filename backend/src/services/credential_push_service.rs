@@ -186,6 +186,15 @@ fn build_credential_params(
             param_value: None,
             target_url,
         },
+        "path" => CredentialUpdateParams {
+            service_slug: svc.slug.clone(),
+            injection_method: "path_prefix".to_string(),
+            header_name: Some(svc.auth_key_name.clone()),
+            header_value: Some(credential.to_string()),
+            param_name: None,
+            param_value: None,
+            target_url,
+        },
         _ => CredentialUpdateParams {
             service_slug: svc.slug.clone(),
             injection_method: "header".to_string(),

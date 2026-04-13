@@ -2124,6 +2124,31 @@ fn process_credential_update(
                 backend,
             )
         }
+        "path_prefix" => {
+            let prefix = parsed["header_name"].as_str().unwrap_or("bot");
+            let credential = match parsed["header_value"].as_str() {
+                Some(v) => v,
+                None => {
+                    tracing::warn!(slug = %service_slug, "credential_update missing header_value for path_prefix");
+                    return Some(build_credential_ack(
+                        service_slug,
+                        "error",
+                        Some("missing header_value"),
+                    ));
+                }
+            };
+            let target_url = parsed["target_url"].as_str();
+
+            update_path_prefix_credential(
+                service_slug,
+                prefix,
+                credential,
+                target_url,
+                credential_sender,
+                config_path,
+                backend,
+            )
+        }
         other => {
             tracing::warn!(method = %other, "Unknown injection_method in credential_update");
             return Some(build_credential_ack(
@@ -2198,6 +2223,25 @@ fn update_query_param_credential(
     config.save(config_path)?;
 
     // 2. Rebuild credential store from updated config and push to watch channel
+    let new_store = CredentialStore::from_config_with_backend(&config, backend)?;
+    credential_sender.update(new_store);
+
+    Ok(())
+}
+
+fn update_path_prefix_credential(
+    service_slug: &str,
+    prefix: &str,
+    credential: &str,
+    target_url: Option<&str>,
+    credential_sender: &Arc<SharedCredentialsSender>,
+    config_path: &std::path::Path,
+    backend: &SecretBackend,
+) -> Result<()> {
+    let mut config = NodeConfig::load(config_path)?;
+    config.add_path_prefix_credential_via(service_slug, prefix, credential, target_url, backend)?;
+    config.save(config_path)?;
+
     let new_store = CredentialStore::from_config_with_backend(&config, backend)?;
     credential_sender.update(new_store);
 
