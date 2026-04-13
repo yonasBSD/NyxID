@@ -593,8 +593,8 @@ function buildClaudeCodeConfig(mcpUrl: string): string {
     {
       mcpServers: {
         nyxid: {
-          command: "npx",
-          args: ["-y", "@anthropic-ai/mcp-proxy", mcpUrl],
+          type: "http",
+          url: mcpUrl,
         },
       },
     },
@@ -729,7 +729,7 @@ function McpTab() {
                 Or add manually
               </p>
               <Badge variant="outline" className="text-[10px]">
-                .claude/settings.json
+                .claude/settings.json or .mcp.json
               </Badge>
             </div>
             <div className="relative">
