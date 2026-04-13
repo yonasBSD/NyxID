@@ -916,20 +916,17 @@ async fn handle_meta_search(
         return tool_result(request_id, "Search query too long (max 200 chars)", true);
     }
 
-    // Load ALL user tools (not just activated)
-    let services = match mcp_service::load_user_tools(
-        &state.db,
-        state.node_ws_manager.as_ref(),
-        user_id,
-    )
-    .await
-    {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!("Failed to load tools for search: {e}");
-            return tool_result(request_id, "Failed to load tools", true);
-        }
-    };
+    // Load ALL user tools including non-executable (for discovery)
+    let services =
+        match mcp_service::load_user_tools_all(&state.db, state.node_ws_manager.as_ref(), user_id)
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("Failed to load tools for search: {e}");
+                return tool_result(request_id, "Failed to load tools", true);
+            }
+        };
 
     // Search across ALL tools (does NOT activate services -- use nyx__call_tool
     // to invoke discovered tools, which auto-activates on first call)
