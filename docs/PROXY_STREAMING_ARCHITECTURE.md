@@ -347,8 +347,8 @@ Two changes combined: switch data chunks to binary frames (eliminates 33% base64
 
 | File | Change |
 |------|--------|
-| `node-agent/src/proxy_executor.rs` | Expand `is_streaming` to media types + large responses; send chunks as `Binary(request_id + raw_bytes)` instead of JSON+base64 |
-| `node-agent/src/ws_client.rs` | Change channel from `mpsc::Sender<String>` to `mpsc::Sender<NodeWsMessage>` enum (Text/Binary); writer dispatches `Message::Text` or `Message::Binary` |
+| `cli/src/node/proxy_executor.rs` | Expand `is_streaming` to media types + large responses; send chunks as `Binary(request_id + raw_bytes)` instead of JSON+base64 |
+| `cli/src/node/ws_client.rs` | Change channel from `mpsc::Sender<String>` to `mpsc::Sender<NodeWsMessage>` enum (Text/Binary); writer dispatches `Message::Text` or `Message::Binary` |
 | `backend/src/handlers/node_ws.rs` | Handle `Message::Binary` alongside `Message::Text` in reader loop |
 | `backend/src/services/node_ws_manager.rs` | Add `Binary(Vec<u8>)` to `NodeOutboundMessage`; parse binary frames (36-byte request_id prefix); increase `STREAM_BUFFER_CAPACITY` to 1024 |
 | `backend/src/handlers/proxy.rs` (line 730) | Only strip `content-length` for SSE, preserve for media/ranged |

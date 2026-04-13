@@ -783,27 +783,9 @@ if node.metrics.total_requests > 10 {
 
 ---
 
-## Node Agent Crate (`node-agent/`)
+## Node Agent Code
 
-The node agent is now part of the `nyxid` CLI (`cli/` crate). The `node-agent/` crate remains as a deprecated wrapper.
-
-### Crate Structure
-
-```
-node-agent/
-  Cargo.toml
-  src/
-    main.rs              # CLI entry point, command dispatch
-    cli.rs               # Clap subcommand definitions
-    config.rs            # TOML config loading, secret storage backend selection
-    ws_client.rs         # WebSocket connection + reconnection loop
-    proxy_executor.rs    # HTTP request execution, credential injection, SSE streaming
-    credential_store.rs  # In-memory decrypted credential store
-    signing.rs           # HMAC-SHA256 verification, replay guard
-    metrics.rs           # Local atomic counters (total_requests, success_count, error_count)
-    encryption.rs        # AES-256-GCM local encryption, keyfile management (0600 mode)
-    error.rs             # Error enum with thiserror
-```
+The node agent lives in the `nyxid` CLI (`cli/src/node/`). The former standalone `node-agent/` crate has been removed.
 
 ### Key Dependencies
 
