@@ -24,7 +24,7 @@ export function SshServiceInstructions({
   const keyPlaceholder = "<your-key>";
   const keyHint = "~/.ssh/id_ed25519, ~/.ssh/id_rsa, etc.";
 
-  const installCommand = "cargo install --path backend";
+  const installCommand = "cargo install --path cli";
   const loginCommand = `nyxid login --base-url ${nyxidBaseUrl}`;
   const apiKeyCommand = 'export NYXID_ACCESS_TOKEN="nyx_..."';
 
@@ -53,7 +53,7 @@ export function SshServiceInstructions({
   const nodeWsUrl =
     publicConfig?.node_ws_url ??
     `${nyxidBaseUrl.replace("http://", "ws://").replace("https://", "wss://")}/api/v1/nodes/ws`;
-  const nodeInstallCommand = "cargo install --path node-agent";
+  const nodeInstallCommand = "cargo install --path cli";
   const nodeRegisterCommand = `nyxid node register --token <token-from-nodes-page> --url ${nodeWsUrl}`;
   const nodeStartCommand = "nyxid node start";
 

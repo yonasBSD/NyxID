@@ -135,7 +135,7 @@ pub async fn execute_proxy_request(
                         request_id,
                         &format!(
                             "No target URL configured for service '{service_slug}'. \
-                             Run: nyxid-node credentials add --service {service_slug} --url <URL> ..."
+                             Run: nyxid node credentials add --service {service_slug} --url <URL> ..."
                         ),
                         502,
                         false,
