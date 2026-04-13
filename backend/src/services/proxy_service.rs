@@ -1338,7 +1338,20 @@ pub async fn forward_request(
     // Shared generic token exchange cache (used by `token_exchange`).
     token_exchange_cache: &TokenExchangeCache,
 ) -> AppResult<reqwest::Response> {
-    let prepared = prepare_delegated_request(path, query, &delegated_credentials)?;
+    // When auth_method is "path", the credential must be injected as a URL
+    // path prefix (e.g. /bot<token>/sendMessage). Synthesize a
+    // DelegatedCredential so build_forward_path handles the prefix the same
+    // way it does for provider-delegated path credentials.
+    let mut all_delegated = delegated_credentials;
+    if target.auth_method == "path" && !target.credential.is_empty() {
+        all_delegated.push(DelegatedCredential {
+            provider_slug: String::new(),
+            injection_method: "path".to_string(),
+            injection_key: target.auth_key_name.clone(),
+            credential: target.credential.clone(),
+        });
+    }
+    let prepared = prepare_delegated_request(path, query, &all_delegated)?;
 
     // TODO(SEC-H1): Re-validate the resolved IP at proxy time to prevent DNS rebinding.
     // Currently base_url is only validated at service creation/update time. An attacker
@@ -1451,6 +1464,10 @@ pub async fn forward_request(
         }
         "body" => {
             // Body injection already happened above; nothing to add to headers.
+        }
+        "path" => {
+            // Path injection already handled above via synthesized
+            // DelegatedCredential + build_forward_path.
         }
         "token_exchange" => {
             // Declarative server-side token exchange. The service's

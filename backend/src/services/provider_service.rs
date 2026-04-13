@@ -16,6 +16,7 @@ use crate::models::service_provider_requirement::{
 };
 use crate::models::user_provider_credentials::COLLECTION_NAME as USER_PROVIDER_CREDENTIALS;
 use crate::models::user_provider_token::COLLECTION_NAME as USER_PROVIDER_TOKENS;
+use crate::models::user_service::COLLECTION_NAME as USER_SERVICES;
 
 const SEEDED_USER_CREDENTIAL_OAUTH_PROVIDER_SLUGS: &[&str] = &[
     "google",
@@ -1426,7 +1427,7 @@ struct DefaultServiceSeed {
     /// injected directly via the proxy `body`/`bot_bearer`/etc. methods.
     service_auth_method: Option<&'static str>,
     /// Optional override for `DownstreamService.auth_key_name`. Required
-    /// when `service_auth_method` is `body`, `header`, or `query`.
+    /// when `service_auth_method` is `body`, `header`, `query`, or `path`.
     service_auth_key_name: Option<&'static str>,
     /// Optional rich description for the catalog entry. When `None`, a
     /// generic description is generated from the service name.
@@ -1673,8 +1674,8 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         base_url: "https://api.telegram.org",
         injection_method: "path",
         injection_key: "bot",
-        service_auth_method: None,
-        service_auth_key_name: None,
+        service_auth_method: Some("path"),
+        service_auth_key_name: Some("bot"),
         description: Some(
             "Telegram Bot API. Get a token from @BotFather and store it once. Pass only the \
              Bot API method name in the proxy path (e.g. `sendMessage`, `setWebhook`, \
@@ -2014,6 +2015,83 @@ pub async fn seed_default_services(
                 slug = slug,
                 modified = res.modified_count,
                 "Migrated catalog service to declarative token_exchange auth"
+            );
+        }
+    }
+
+    // #274 migration: api-telegram-bot was originally seeded as a
+    // provider-managed service (`auth_method = "none"` + a
+    // ServiceProviderRequirement with `injection_method = "path"`). The
+    // streamlined `/keys` flow stores the user's bot token on `UserApiKey`,
+    // not `UserProviderToken`, so the stale requirement made the proxy ask
+    // for a provider connection and ignored the direct credential. Move the
+    // catalog row and any existing user service rows to direct path auth, and
+    // remove the requirement so delegated provider lookup no longer runs.
+    let telegram_services: Vec<DownstreamService> = service_col
+        .find(doc! { "slug": "api-telegram-bot", "created_by": "system" })
+        .await?
+        .try_collect()
+        .await?;
+    let telegram_service_ids: Vec<String> =
+        telegram_services.iter().map(|svc| svc.id.clone()).collect();
+
+    if !telegram_service_ids.is_empty() {
+        let now = Utc::now();
+        let res = service_col
+            .update_many(
+                doc! {
+                    "_id": { "$in": &telegram_service_ids },
+                    "$or": [
+                        { "auth_method": { "$ne": "path" } },
+                        { "auth_key_name": { "$ne": "bot" } },
+                    ],
+                },
+                doc! {
+                    "$set": {
+                        "auth_method": "path",
+                        "auth_key_name": "bot",
+                        "updated_at": bson::DateTime::from_chrono(now),
+                    }
+                },
+            )
+            .await?;
+        if res.modified_count > 0 {
+            tracing::info!(
+                modified = res.modified_count,
+                "Migrated Telegram Bot catalog service to direct path auth"
+            );
+        }
+
+        let req_res = req_col
+            .delete_many(doc! { "service_id": { "$in": &telegram_service_ids } })
+            .await?;
+        if req_res.deleted_count > 0 {
+            tracing::info!(
+                deleted = req_res.deleted_count,
+                "Removed stale Telegram Bot provider requirements"
+            );
+        }
+
+        let user_res = db
+            .collection::<mongodb::bson::Document>(USER_SERVICES)
+            .update_many(
+                doc! {
+                    "catalog_service_id": { "$in": &telegram_service_ids },
+                    "auth_method": { "$ne": "path" },
+                },
+                doc! {
+                    "$set": {
+                        "auth_method": "path",
+                        "auth_key_name": "bot",
+                        "updated_at": bson::DateTime::from_chrono(now),
+                    }
+                },
+            )
+            .await?;
+        if user_res.modified_count > 0 {
+            tracing::info!(
+                modified = user_res.modified_count,
+                "Migrated Telegram Bot user services to direct path auth"
             );
         }
     }
@@ -2595,8 +2673,21 @@ pub async fn delete_provider(db: &mongodb::Database, provider_id: &str) -> AppRe
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_telegram_bot_token, normalize_telegram_bot_username};
+    use super::{
+        DEFAULT_SERVICE_SEEDS, normalize_telegram_bot_token, normalize_telegram_bot_username,
+    };
     use crate::errors::AppError;
+
+    #[test]
+    fn telegram_bot_seed_uses_direct_path_auth() {
+        let seed = DEFAULT_SERVICE_SEEDS
+            .iter()
+            .find(|seed| seed.service_slug == "api-telegram-bot")
+            .expect("api-telegram-bot seed should exist");
+
+        assert_eq!(seed.service_auth_method, Some("path"));
+        assert_eq!(seed.service_auth_key_name, Some("bot"));
+    }
 
     #[test]
     fn normalize_telegram_bot_username_trims_whitespace_and_at_prefix() {

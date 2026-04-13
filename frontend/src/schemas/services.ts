@@ -8,6 +8,7 @@ export const AUTH_TYPES = [
   "bearer",
   "bot_bearer",
   "body",
+  "path",
   "oidc",
 ] as const;
 

@@ -20,6 +20,7 @@ describe("constants", () => {
       "bearer",
       "bot_bearer",
       "body",
+      "path",
       "oidc",
     ]);
   });
