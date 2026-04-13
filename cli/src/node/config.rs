@@ -191,6 +191,34 @@ impl CredentialConfig {
             oauth_client_id_param_name: None,
         }
     }
+
+    /// Create a path_prefix credential config.
+    /// Reuses `header_name` for the prefix and `header_value_encrypted` for
+    /// the credential, keeping the TOML schema flat.
+    pub fn new_path_prefix(
+        prefix: String,
+        credential_encrypted: Option<String>,
+        target_url: Option<String>,
+    ) -> Self {
+        Self {
+            injection_method: "path_prefix".to_string(),
+            target_url,
+            header_name: Some(prefix),
+            header_value_encrypted: credential_encrypted,
+            param_name: None,
+            param_value_encrypted: None,
+            oauth_managed: false,
+            oauth_token_url: None,
+            oauth_access_token_encrypted: None,
+            oauth_refresh_token_encrypted: None,
+            oauth_token_expires_at: None,
+            oauth_client_id_encrypted: None,
+            oauth_client_secret_encrypted: None,
+            oauth_scopes: None,
+            oauth_token_endpoint_auth_method: None,
+            oauth_client_id_param_name: None,
+        }
+    }
 }
 
 impl NodeConfig {
@@ -351,6 +379,27 @@ impl NodeConfig {
             service_slug.to_string(),
             CredentialConfig::new_query_param(
                 param_name.to_string(),
+                encrypted,
+                target_url.map(String::from),
+            ),
+        );
+        Ok(())
+    }
+
+    /// Add a path-prefix credential using the configured secret backend.
+    pub fn add_path_prefix_credential_via(
+        &mut self,
+        service_slug: &str,
+        prefix: &str,
+        credential: &str,
+        target_url: Option<&str>,
+        backend: &SecretBackend,
+    ) -> Result<()> {
+        let encrypted = backend.store_credential_value(service_slug, credential)?;
+        self.credentials.insert(
+            service_slug.to_string(),
+            CredentialConfig::new_path_prefix(
+                prefix.to_string(),
                 encrypted,
                 target_url.map(String::from),
             ),

@@ -135,7 +135,7 @@ pub async fn execute_proxy_request(
                         request_id,
                         &format!(
                             "No target URL configured for service '{service_slug}'. \
-                             Run: nyxid-node credentials add --service {service_slug} --url <URL> ..."
+                             Run: nyxid node credentials add --service {service_slug} --url <URL> ..."
                         ),
                         502,
                         false,
@@ -154,11 +154,15 @@ pub async fn execute_proxy_request(
     } else {
         format!("/{path}")
     };
-    let mut url = format!(
-        "{}{}",
-        effective_base_url.trim_end_matches('/'),
+
+    // Path-prefix injection: prepend /{prefix}{credential} to the URL path
+    let final_path = if let Some((prefix, credential)) = cred.path_prefix() {
+        format!("/{prefix}{credential}{normalized_path}")
+    } else {
         normalized_path
-    );
+    };
+
+    let mut url = format!("{}{}", effective_base_url.trim_end_matches('/'), final_path);
     if let Some(q) = query
         && !q.is_empty()
     {

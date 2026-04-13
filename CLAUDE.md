@@ -94,8 +94,6 @@ Key files:
 - `handlers/openclaw_channel.rs` -- Webhook endpoint + mapping CRUD
 - `models/user_provider_token.rs` -- `gateway_url` field for per-user instance URLs
 - `models/provider_config.rs` -- `requires_gateway_url` flag for self-hosted providers
-- `node-agent/src/main.rs` -- `cmd_openclaw_connect/status/disconnect` commands
-
 ### 8. Streamlined Services Architecture
 
 The services/connections/providers system was unified into 3 user-managed collections with a single orchestration layer. Old collections are kept for backward compatibility during migration.
@@ -193,21 +191,6 @@ cli/src/
 |-- api_client.rs        # HTTP client for NyxID API calls
 |-- auth.rs              # Token storage and retrieval (file-based session)
 |-- output.rs            # Table/JSON output formatting
-
-node-agent/src/
-|-- main.rs              # Deprecation wrapper (prints warning, delegates to nyxid node subcommand)
-|-- cli.rs               # Clap subcommand definitions (deprecated, use nyxid node instead)
-|-- config.rs            # TOML config (server url, node id, encrypted auth token, signing secret, credentials)
-|-- ws_client.rs         # WebSocket connection loop, exponential backoff reconnection, graceful shutdown
-|-- proxy_executor.rs    # HTTP request execution, credential injection, SSE streaming detection
-|-- credential_store.rs  # In-memory decrypted credential store (header or query_param injection)
-|-- daemon.rs            # Background service lifecycle (launchd on macOS, systemd on Linux)
-|-- signing.rs           # HMAC-SHA256 verification, replay guard (5min skew, 10k nonce cap)
-|-- metrics.rs           # Local atomic counters (total_requests, success_count, error_count)
-|-- encryption.rs        # AES-256-GCM local encryption, keyfile management (0600 mode)
-|-- keychain.rs          # OS keychain storage backend (macOS/Windows/Linux)
-|-- secret_backend.rs    # Pluggable secret storage trait (file vs keychain)
-|-- error.rs             # Error enum with thiserror
 
 backend/src/
 |-- config.rs            # AppConfig from env vars

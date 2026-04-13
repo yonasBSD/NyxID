@@ -97,12 +97,11 @@ This document describes the system architecture, component design, data flows, a
 
 ### CLI Tools
 
-NyxID ships two CLI binaries, both built from the same Cargo workspace:
+NyxID ships one CLI binary built from the Cargo workspace:
 
 | Crate | Binary | Purpose |
 |-------|--------|---------|
-| `cli` | `nyxid` | User-facing CLI for managing services, API keys, catalog, nodes, approvals, SSH, MCP config, notifications, and more. 24 top-level commands. Reads `$NYXID_ACCESS_TOKEN` for auth. |
-| `node-agent` | `nyxid-node` (deprecated) | On-premise node agent for credential storage and proxy routing. Connects to NyxID via WebSocket. Now available as the `nyxid node` subcommand in the main CLI. |
+| `cli` | `nyxid` | User-facing CLI for managing services, API keys, catalog, nodes, approvals, SSH, MCP config, notifications, and more. Includes the `nyxid node` subcommand for on-premise credential node agent. Reads `$NYXID_ACCESS_TOKEN` for auth. |
 
 The `nyxid` CLI communicates with the backend exclusively via the public REST API (`/api/v1/*`). It stores session tokens in a local file and supports both interactive login and API key authentication.
 

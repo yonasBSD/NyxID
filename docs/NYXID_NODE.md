@@ -1,6 +1,6 @@
 # nyxid node Agent
 
-> **Deprecation notice:** The standalone `nyxid-node` binary is deprecated. The node agent functionality is now available as the `nyxid node` subcommand in the main `nyxid` CLI. All commands documented below should be run as `nyxid node <command>` instead of `nyxid-node <command>`. The `nyxid-node` binary still exists as a thin wrapper that prints a deprecation warning and delegates to `nyxid node`.
+> The node agent is part of the `nyxid` CLI. All commands below use `nyxid node <command>`. The former standalone `nyxid-node` binary has been removed.
 
 The `nyxid node` subcommand is a lightweight credential node agent built into the `nyxid` CLI. It runs on your infrastructure, connects to a NyxID server via WebSocket, receives proxy requests, injects locally stored credentials, and forwards requests to downstream services. Credentials never leave your infrastructure.
 

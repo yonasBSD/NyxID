@@ -16,6 +16,7 @@ export const AUTH_TYPE_LABELS: Readonly<Record<string, string>> = {
   bearer: "Bearer Token",
   bot_bearer: "Bot Token (Discord)",
   body: "JSON Body Injection",
+  path: "Path Prefix",
   oidc: "OIDC / SSO",
   ssh: "SSH Tunnel",
   header: "API Key",

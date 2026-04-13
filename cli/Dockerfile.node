@@ -26,7 +26,6 @@ WORKDIR /build
 # Copy entire workspace (needed for workspace dependency resolution)
 COPY Cargo.toml Cargo.lock ./
 COPY backend/ backend/
-COPY node-agent/ node-agent/
 COPY cli/ cli/
 COPY docs/AI_AGENT_PLAYBOOK.md docs/AI_AGENT_PLAYBOOK.md
 

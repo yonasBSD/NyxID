@@ -178,6 +178,21 @@ pub(crate) fn validate_requested_proxy_path(path: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// When `target.auth_method` is `"path"`, synthesize a `DelegatedCredential`
+/// so `build_forward_path` / `prepare_delegated_request` inject the path
+/// prefix (e.g. `/bot<token>/`).  Appends in-place and returns the
+/// (possibly extended) slice.
+pub fn extend_with_path_credential(delegated: &mut Vec<DelegatedCredential>, target: &ProxyTarget) {
+    if target.auth_method == "path" && !target.credential.is_empty() {
+        delegated.push(DelegatedCredential {
+            provider_slug: String::new(),
+            injection_method: "path".to_string(),
+            injection_key: target.auth_key_name.clone(),
+            credential: target.credential.clone(),
+        });
+    }
+}
+
 pub(crate) fn build_forward_path(
     path: &str,
     delegated_credentials: &[DelegatedCredential],
@@ -1338,7 +1353,9 @@ pub async fn forward_request(
     // Shared generic token exchange cache (used by `token_exchange`).
     token_exchange_cache: &TokenExchangeCache,
 ) -> AppResult<reqwest::Response> {
-    let prepared = prepare_delegated_request(path, query, &delegated_credentials)?;
+    let mut all_delegated = delegated_credentials;
+    extend_with_path_credential(&mut all_delegated, target);
+    let prepared = prepare_delegated_request(path, query, &all_delegated)?;
 
     // TODO(SEC-H1): Re-validate the resolved IP at proxy time to prevent DNS rebinding.
     // Currently base_url is only validated at service creation/update time. An attacker
@@ -1451,6 +1468,10 @@ pub async fn forward_request(
         }
         "body" => {
             // Body injection already happened above; nothing to add to headers.
+        }
+        "path" => {
+            // Path injection already handled above via synthesized
+            // DelegatedCredential + build_forward_path.
         }
         "token_exchange" => {
             // Declarative server-side token exchange. The service's

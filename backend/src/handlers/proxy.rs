@@ -1060,8 +1060,10 @@ async fn execute_proxy_inner(
     // node_route was resolved earlier (before credential check) to allow node-backed
     // users to bypass credential requirements.
     if let Some(node_route) = node_route {
+        let mut node_delegated = delegated.clone();
+        proxy_service::extend_with_path_credential(&mut node_delegated, &target);
         let prepared =
-            proxy_service::prepare_delegated_request(path, query.as_deref(), &delegated)?;
+            proxy_service::prepare_delegated_request(path, query.as_deref(), &node_delegated)?;
         let node_path = if prepared.path.starts_with('/') {
             prepared.path.clone()
         } else {
@@ -1847,7 +1849,9 @@ fn build_downstream_ws_url(
     query: Option<&str>,
     delegated: &[delegation_service::DelegatedCredential],
 ) -> AppResult<String> {
-    let prepared = proxy_service::prepare_delegated_request(path, query, delegated)?;
+    let mut all_delegated = delegated.to_vec();
+    proxy_service::extend_with_path_credential(&mut all_delegated, target);
+    let prepared = proxy_service::prepare_delegated_request(path, query, &all_delegated)?;
 
     let base = target.base_url.trim_end_matches('/');
     let ws_base = if base.starts_with("https://") {
@@ -1934,8 +1938,8 @@ async fn connect_downstream_ws(
             let (_, value) = make_header(b"authorization", &format!("Basic {encoded}"))?;
             headers.insert(reqwest::header::AUTHORIZATION, value);
         }
-        // "query" is already handled in URL construction
-        "query" => {}
+        // "query" and "path" are already handled in URL construction
+        "query" | "path" => {}
         other => {
             return Err(AppError::Internal(format!(
                 "Unsupported auth method for WS passthrough: {other}"
@@ -2313,7 +2317,9 @@ async fn handle_ws_passthrough_via_node(
     use crate::services::node_ws_manager::NodeWsProxyRequest;
 
     // Prepare headers for the node request (same as HTTP node proxy).
-    let prepared = proxy_service::prepare_delegated_request(path, query, delegated)?;
+    let mut node_ws_delegated = delegated.to_vec();
+    proxy_service::extend_with_path_credential(&mut node_ws_delegated, target);
+    let prepared = proxy_service::prepare_delegated_request(path, query, &node_ws_delegated)?;
     let node_path = if prepared.path.starts_with('/') {
         prepared.path.clone()
     } else {
