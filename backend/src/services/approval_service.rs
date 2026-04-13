@@ -561,22 +561,52 @@ pub async fn process_decision(
         }
     };
 
-    // On approval: create a grant ONLY when the request was originally created
-    // in grant mode AND the service is still in grant mode. This prevents:
-    // - Stale grant-mode requests from minting grants after a switch to per_request (#146)
-    // - Per-request requests from being upgraded to grants if the service switches to grant
-    // The current-mode lookup is gated behind `approved` so rejections don't
-    // gain a new failure path.
+    // Guard: reject decisions on grant-mode requests if the service has since
+    // switched to per_request. Normally these requests are cancelled at
+    // mode-switch time (#153), but this catches any that slip through a
+    // TOCTOU race. We roll back the decision so the request stays "pending"
+    // (and will be picked up by the next expiry sweep).
+    if approved && updated.approval_mode == ApprovalMode::Grant {
+        let current_mode = resolve_approval_mode(db, &updated.user_id, &updated.service_id).await?;
+        if current_mode != ApprovalMode::Grant {
+            // Roll back the decision atomically. The filter guards against a
+            // concurrent rollback so we don't clobber a different status.
+            let rollback = db
+                .collection::<ApprovalRequest>(REQUESTS)
+                .update_one(
+                    doc! { "_id": request_id, "status": new_status },
+                    doc! { "$set": {
+                        "status": "expired",
+                        "decided_at": bson::DateTime::from_chrono(now),
+                    }},
+                )
+                .await
+                .map_err(AppError::DatabaseError)?;
+
+            if rollback.matched_count == 0 {
+                // Another process already changed the status (e.g. expiry sweep).
+                // The request is no longer "approved", so the conflict is resolved.
+                tracing::warn!(
+                    request_id,
+                    "Rollback matched no document; concurrent state change"
+                );
+            }
+
+            return Err(AppError::Conflict(
+                "Service approval mode has changed; this request is no longer valid".to_string(),
+            ));
+        }
+    }
+
+    // On approval: create a grant when the request was originally created
+    // in grant mode AND the service is still in grant mode (verified above).
     //
-    // Note: a TOCTOU race exists if a concurrent request switches the service to
-    // per_request between this check and the insert_one below. If that happens,
-    // the grant is inert: the proxy handler skips grants in per_request mode, and
-    // list_grants() filters them out at read time. The grant will expire naturally.
-    if approved
-        && updated.approval_mode == ApprovalMode::Grant
-        && resolve_approval_mode(db, &updated.user_id, &updated.service_id).await?
-            == ApprovalMode::Grant
-    {
+    // Note: a TOCTOU race exists if a concurrent request switches the service
+    // to per_request between the check above and the insert_one below. If
+    // that happens, the grant is inert: the proxy handler skips grants in
+    // per_request mode, and list_grants() filters them out at read time.
+    // The grant will expire naturally.
+    if approved && updated.approval_mode == ApprovalMode::Grant {
         let channel = notification_service::get_or_create_channel(db, &updated.user_id).await?;
         let grant_expiry = resolve_grant_expiry(now, duration_sec, channel.grant_expiry_days);
 
@@ -1069,11 +1099,14 @@ pub async fn set_service_approval_config(
 
         match config {
             Ok(Some(cfg)) => {
-                // Revoke stale grants when the persisted mode is per_request.
-                // Idempotent: re-revoking already-revoked grants is a no-op,
-                // so retries after a partial failure still clean up (see #146).
+                // When the persisted mode is per_request, clean up stale state:
+                // 1. Revoke active grants so they no longer authorize proxy calls (#146)
+                // 2. Cancel pending grant-mode requests so they can't be approved (#153)
+                // Both operations are idempotent, so retries after partial failure
+                // still clean up.
                 if cfg.approval_mode == ApprovalMode::PerRequest {
                     revoke_grants_for_service(db, user_id, service_id).await?;
+                    cancel_pending_grant_requests(db, user_id, service_id).await?;
                 }
                 return Ok(cfg);
             }
@@ -1088,6 +1121,7 @@ pub async fn set_service_approval_config(
                 if let Some(existing) = collection.find_one(filter.clone()).await? {
                     if existing.approval_mode == ApprovalMode::PerRequest {
                         revoke_grants_for_service(db, user_id, service_id).await?;
+                        cancel_pending_grant_requests(db, user_id, service_id).await?;
                     }
                     return Ok(existing);
                 }
@@ -1117,10 +1151,12 @@ pub async fn delete_service_approval_config(
         .delete_one(doc! { "user_id": user_id, "service_id": service_id })
         .await?;
 
-    // Always revoke grants regardless of deleted_count. If a previous attempt
-    // deleted the config but failed on revoke, this retry still cleans up.
-    // The revoke is a no-op when no active grants exist.
+    // Always revoke grants and cancel pending grant-mode requests regardless
+    // of deleted_count. If a previous attempt deleted the config but failed on
+    // cleanup, this retry still cleans up. Both operations are no-ops when
+    // nothing matches.
     revoke_grants_for_service(db, user_id, service_id).await?;
+    cancel_pending_grant_requests(db, user_id, service_id).await?;
 
     if result.deleted_count == 0 {
         return Err(AppError::NotFound(
@@ -1183,6 +1219,33 @@ fn resolve_service_config_update(
         .unwrap_or_default();
 
     Ok((resolved_required, resolved_mode))
+}
+
+/// Cancel all pending grant-mode approval requests for a (user, service) pair.
+/// Called when a service switches to `per_request` mode so stale grant requests
+/// are no longer actionable (see #153).
+///
+/// Uses `$in: ["grant", null]` to also catch legacy requests that pre-date the
+/// `approval_mode` field -- those deserialize as `Grant` via
+/// `legacy_approval_mode_default` but have no stored value in MongoDB.
+async fn cancel_pending_grant_requests(
+    db: &Database,
+    user_id: &str,
+    service_id: &str,
+) -> AppResult<()> {
+    let now = bson::DateTime::from_chrono(Utc::now());
+    db.collection::<ApprovalRequest>(REQUESTS)
+        .update_many(
+            doc! {
+                "user_id": user_id,
+                "service_id": service_id,
+                "status": "pending",
+                "approval_mode": { "$in": ["grant", null] },
+            },
+            doc! { "$set": { "status": "expired", "decided_at": now } },
+        )
+        .await?;
+    Ok(())
 }
 
 /// Revoke all active (non-revoked) grants for a (user, service) pair.
