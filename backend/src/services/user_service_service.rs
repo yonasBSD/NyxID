@@ -26,6 +26,9 @@ use crate::services::{node_service, org_service};
 ///   `TokenExchangeConfig`, caches the result, and injects the token on
 ///   every outbound request (Lark/Feishu tenant tokens, OAuth 2.0
 ///   client_credentials, etc.)
+/// - `path`: inject credential into URL path as a prefix segment
+///   (`/<auth_key_name><credential>/...`), e.g. Telegram Bot API
+///   (`/bot<token>/sendMessage`)
 /// - `none`: no credential injection
 const VALID_AUTH_METHODS: &[&str] = &[
     "bearer",
@@ -35,6 +38,7 @@ const VALID_AUTH_METHODS: &[&str] = &[
     "basic",
     "body",
     "token_exchange",
+    "path",
     "none",
 ];
 
@@ -803,6 +807,7 @@ mod tests {
             "basic",
             "body",
             "token_exchange",
+            "path",
             "none",
         ] {
             validate_auth_method(method)

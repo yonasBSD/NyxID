@@ -656,6 +656,7 @@ pub async fn create_service(
                     "bot_bearer" => "Authorization".to_string(),
                     "basic" => "Authorization".to_string(),
                     "query" => "api_key".to_string(),
+                    "path" => "bot".to_string(),
                     "none" => String::new(),
                     _ => "X-API-Key".to_string(),
                 });
@@ -670,6 +671,7 @@ pub async fn create_service(
             "basic",
             "body",
             "token_exchange",
+            "path",
             "oidc",
             "none",
         ];
