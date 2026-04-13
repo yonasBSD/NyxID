@@ -100,11 +100,18 @@ There are two ways to use NyxID — pick the one that fits your situation:
 |---|---|---|
 | **What it is** | We run NyxID for you in the cloud | You run NyxID on your own machine |
 | **Best for** | Getting started quickly, no setup | Full control, private networks, offline use |
-| **Status** | Closed beta (invitation only) | Open — anyone can run it |
+| **Status** | Early access (invite code below) | Open — anyone can run it |
 
-### Option A: Hosted (closed beta)
+### Option A: Hosted (recommended)
 
-Sign up at the [NyxID console](https://nyx.chrono-ai.fun), then use the `nyxid` CLI — or point your AI agent at it — to connect your services. Currently invitation-only — [join the waitlist](https://nyx.chrono-ai.fun/#waitlist).
+Start using NyxID in under a minute — no Docker, no setup:
+
+1. Go to **[nyx.chrono-ai.fun/register](https://nyx.chrono-ai.fun/register)**
+2. Enter invite code: **`NYX-FGNY85AF`**
+3. Sign in with Google, GitHub, or Apple
+4. Add your first service credential and connect your AI agent
+
+Early access — limited to 20 users.
 
 ### Option B: Self-host
 
