@@ -2,11 +2,14 @@ use mongodb::bson::doc;
 use serde::Serialize;
 use utoipa::ToSchema;
 
+use futures::TryStreamExt;
+
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
+use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::AuthUser;
 
@@ -111,10 +114,63 @@ pub fn service_to_response(s: DownstreamService) -> ServiceResponse {
         examples_url: s.examples_url,
         recommended_skills: s.recommended_skills,
         custom_user_agent: s.custom_user_agent,
+        developer_app_ids: s.developer_app_ids,
         created_by: s.created_by,
         created_at: s.created_at.to_rfc3339(),
         updated_at: s.updated_at.to_rfc3339(),
     }
+}
+
+/// Validate that `developer_app_ids` reference active OAuth clients.
+///
+/// Any mutation of `developer_app_ids` is admin-only because it affects
+/// cross-user auto-provisioning -- both setting and clearing the field.
+/// Each referenced OAuth client must exist and be active; deleted or
+/// unknown IDs are rejected. An empty list is a valid admin-authorized
+/// clear operation.
+pub async fn validate_developer_app_ids(
+    state: &AppState,
+    auth_user: &AuthUser,
+    app_ids: &[String],
+) -> AppResult<()> {
+    // Any mutation (set or clear) requires admin -- clearing also has
+    // cross-user impact (stops auto-provisioning for consented users).
+    require_admin(state, auth_user).await?;
+
+    if app_ids.is_empty() {
+        return Ok(());
+    }
+
+    if app_ids.len() > 50 {
+        return Err(AppError::ValidationError(
+            "developer_app_ids must not exceed 50 entries".to_string(),
+        ));
+    }
+
+    let id_refs: Vec<&str> = app_ids.iter().map(|s| s.as_str()).collect();
+    let active_clients: Vec<OauthClient> = state
+        .db
+        .collection::<OauthClient>(OAUTH_CLIENTS)
+        .find(doc! {
+            "_id": { "$in": &id_refs },
+            "is_active": true,
+        })
+        .await?
+        .try_collect()
+        .await?;
+
+    let found_ids: std::collections::HashSet<&str> =
+        active_clients.iter().map(|c| c.id.as_str()).collect();
+
+    for id in app_ids {
+        if !found_ids.contains(id.as_str()) {
+            return Err(AppError::ValidationError(format!(
+                "developer_app_ids references unknown or inactive OAuth client: {id}"
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 /// Validate that a URL has a valid scheme and hostname.

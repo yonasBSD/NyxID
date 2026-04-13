@@ -239,6 +239,12 @@ pub struct KeyResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_user_agent: Option<String>,
     pub auto_connected: bool,
+    /// Developer app (OAuth client) ID that triggered this auto-provision.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_app_id: Option<String>,
+    /// Human-readable name of the developer app.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_app_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -744,6 +750,8 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
         delegation_token_scope: result.service.delegation_token_scope.clone(),
         custom_user_agent: result.service.custom_user_agent.clone(),
         auto_connected: false,
+        source_app_id: None,
+        source_app_name: None,
         expires_at: result
             .api_key
             .as_ref()
@@ -792,6 +800,8 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         delegation_token_scope: view.delegation_token_scope,
         custom_user_agent: view.custom_user_agent,
         auto_connected: view.auto_connected,
+        source_app_id: view.source_app_id,
+        source_app_name: view.source_app_name,
         expires_at: view.expires_at,
         last_used_at: view.last_used_at,
         error_message: view.error_message,

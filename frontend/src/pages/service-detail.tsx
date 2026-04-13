@@ -18,6 +18,7 @@ import { McpConnectionInfo } from "@/components/dashboard/mcp-connection-info";
 import { SshServiceInstructions } from "@/components/dashboard/ssh-service-instructions";
 import { ServiceRequirementsView } from "@/components/dashboard/service-requirements-editor";
 import { useMyProviderTokens } from "@/hooks/use-providers";
+import { useDeveloperApps } from "@/hooks/use-developer-apps";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
@@ -38,6 +39,7 @@ export function ServiceDetailPage() {
   const { data: service, isLoading, error } = useService(serviceId);
   const deleteMutation = useDeleteService();
   const { data: tokens } = useMyProviderTokens();
+  const { data: appsData } = useDeveloperApps();
 
   async function handleDelete() {
     if (!service) return;
@@ -167,6 +169,28 @@ export function ServiceDetailPage() {
             service.visibility === "private" ? "outline" : "secondary"
           }
         />
+        {service.developer_app_ids &&
+          service.developer_app_ids.length > 0 && (
+            <div className="space-y-1 py-2">
+              <p className="text-sm text-muted-foreground">
+                Developer App Scoping
+              </p>
+              <div className="flex flex-wrap gap-1.5">
+                {service.developer_app_ids.map((appId) => {
+                  const app = appsData?.clients?.find((c) => c.id === appId);
+                  return (
+                    <Badge key={appId} variant="secondary">
+                      {app?.client_name ?? appId}
+                    </Badge>
+                  );
+                })}
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Users who consent to these apps will have this service
+                auto-provisioned.
+              </p>
+            </div>
+          )}
         {!isSshService && (
           <>
             <DetailRow label="Base URL" value={service.base_url} copyable />

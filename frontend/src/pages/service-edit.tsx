@@ -3,6 +3,7 @@ import { useNavigate, useParams } from "@tanstack/react-router";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useService, useUpdateService } from "@/hooks/use-services";
+import { useDeveloperApps } from "@/hooks/use-developer-apps";
 import {
   updateServiceSchema,
   type UpdateServiceFormData,
@@ -40,6 +41,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AlertCircle } from "lucide-react";
 import { toast } from "sonner";
@@ -50,6 +52,8 @@ export function ServiceEditPage() {
   const { data: service, isLoading, error } = useService(serviceId);
   const updateMutation = useUpdateService();
   const user = useAuthStore((s) => s.user);
+  const { data: appsData } = useDeveloperApps();
+  const developerApps = appsData?.clients?.filter((c) => c.is_active) ?? [];
 
   const form = useForm<UpdateServiceFormData>({
     resolver: zodResolver(updateServiceSchema),
@@ -76,6 +80,7 @@ export function ServiceEditPage() {
       required_permissions: "",
       examples_url: "",
       recommended_skills: "",
+      developer_app_ids: [],
       supports_proxy_read: false,
       supports_proxy_write: false,
       supports_proxy_binary_upload: false,
@@ -120,6 +125,7 @@ export function ServiceEditPage() {
         required_permissions: service.required_permissions?.join(", ") ?? "",
         examples_url: service.examples_url ?? "",
         recommended_skills: service.recommended_skills?.join(", ") ?? "",
+        developer_app_ids: [...(service.developer_app_ids ?? [])],
         supports_proxy_read: service.capabilities?.supports_proxy_read ?? false,
         supports_proxy_write: service.capabilities?.supports_proxy_write ?? false,
         supports_proxy_binary_upload: service.capabilities?.supports_proxy_binary_upload ?? false,
@@ -194,6 +200,7 @@ export function ServiceEditPage() {
                   .split(/[,\n]/)
                   .map((s) => s.trim())
                   .filter(Boolean),
+                developer_app_ids: data.developer_app_ids ?? [],
                 capabilities: {
                   supports_proxy_read: data.supports_proxy_read ?? false,
                   supports_proxy_write: data.supports_proxy_write ?? false,
@@ -347,6 +354,56 @@ export function ServiceEditPage() {
                 </FormItem>
               )}
             />
+
+            {form.watch("visibility") === "private" &&
+              user?.is_admin &&
+              developerApps.length > 0 && (
+                <div className="space-y-2">
+                  <p className="text-sm font-medium">Developer App Scoping</p>
+                  <p className="text-xs text-muted-foreground">
+                    Select which developer apps grant access to this service.
+                    Users who log in through a selected app will have this
+                    service auto-provisioned in their AI Services.
+                  </p>
+                  <div className="space-y-2">
+                    {developerApps.map((app) => {
+                      const selected =
+                        form.watch("developer_app_ids") ?? [];
+                      const checked = selected.includes(app.id);
+                      return (
+                        <div
+                          key={app.id}
+                          className="flex items-center gap-2 rounded-[10px] border border-border p-2"
+                        >
+                          <Checkbox
+                            id={`app-${app.id}`}
+                            checked={checked}
+                            onCheckedChange={(v) => {
+                              const current =
+                                form.getValues("developer_app_ids") ?? [];
+                              form.setValue(
+                                "developer_app_ids",
+                                v
+                                  ? [...current, app.id]
+                                  : current.filter((id) => id !== app.id),
+                              );
+                            }}
+                          />
+                          <Label
+                            htmlFor={`app-${app.id}`}
+                            className="text-sm font-normal"
+                          >
+                            {app.client_name}
+                          </Label>
+                          <Badge variant="outline" className="ml-auto text-xs">
+                            {app.client_type}
+                          </Badge>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
 
             {isSshService ? (
               <>

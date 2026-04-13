@@ -1616,6 +1616,7 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
             is_active: true,
             source: Some("migration_provider_token".to_string()),
             source_id: Some(token.id.clone()),
+            source_app_id: None,
             created_at: now,
             updated_at: now,
         };
@@ -1812,6 +1813,7 @@ async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::e
             is_active: true,
             source: Some("migration_connection".to_string()),
             source_id: Some(conn.id.clone()),
+            source_app_id: None,
             created_at: now,
             updated_at: now,
         };
@@ -2043,6 +2045,7 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
             is_active: true,
             source: Some("migration_node_binding".to_string()),
             source_id: Some(binding.id.clone()),
+            source_app_id: None,
             created_at: now,
             updated_at: now,
         };
@@ -2120,6 +2123,7 @@ mod tests {
             examples_url: None,
             recommended_skills: None,
             custom_user_agent: None,
+            developer_app_ids: None,
             token_exchange_config: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),

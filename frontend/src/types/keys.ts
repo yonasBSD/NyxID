@@ -18,6 +18,8 @@ export interface KeyInfo {
   readonly is_active: boolean;
   readonly custom_user_agent?: string | null;
   readonly auto_connected: boolean;
+  readonly source_app_id?: string | null;
+  readonly source_app_name?: string | null;
   readonly expires_at: string | null;
   readonly last_used_at: string | null;
   readonly error_message: string | null;

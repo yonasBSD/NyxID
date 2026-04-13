@@ -23,7 +23,7 @@ use crate::services::{api_docs_service, audit_service, oauth_client_service, ssh
 
 use super::services_helpers::{
     DeleteServiceResponse, fetch_service, require_admin_or_creator, service_to_response,
-    validate_base_url, validate_optional_spec_url,
+    validate_base_url, validate_developer_app_ids, validate_optional_spec_url,
 };
 
 // --- Request / Response types ---
@@ -55,6 +55,10 @@ pub struct CreateServiceRequest {
     pub required_permissions: Option<Vec<String>>,
     pub examples_url: Option<String>,
     pub recommended_skills: Option<Vec<String>>,
+    /// Developer app (OAuth client) IDs that grant access to this service.
+    /// Only relevant for private services -- users who consent to any of these
+    /// apps will have the service auto-provisioned in their AI Services.
+    pub developer_app_ids: Option<Vec<String>>,
     /// Forward the caller's NyxID access token as Authorization: Bearer to downstream
     #[serde(default)]
     pub forward_access_token: bool,
@@ -159,6 +163,8 @@ pub struct ServiceResponse {
     pub recommended_skills: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_user_agent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub developer_app_ids: Option<Vec<String>>,
     pub created_by: String,
     pub created_at: String,
     pub updated_at: String,
@@ -199,6 +205,9 @@ pub struct UpdateServiceRequest {
     pub required_permissions: Option<Vec<String>>,
     pub examples_url: Option<String>,
     pub recommended_skills: Option<Vec<String>>,
+    /// Developer app (OAuth client) IDs that grant access to this service.
+    /// Pass `[]` to clear. Only meaningful for private services.
+    pub developer_app_ids: Option<Vec<String>>,
     /// Custom User-Agent override for this service. Set to "" to clear.
     pub custom_user_agent: Option<String>,
     /// Replace the declarative token exchange config on a `token_exchange`
@@ -402,17 +411,19 @@ fn derive_ssh_service_category(service_category: Option<&str>) -> AppResult<Stri
     }
 }
 
-fn derive_visibility(service_type: &str, explicit: Option<&str>) -> String {
+fn derive_visibility(service_type: &str, explicit: Option<&str>) -> AppResult<String> {
     match explicit {
-        Some("private") => "private".to_string(),
-        Some("public") => "public".to_string(),
-        Some(_) => "public".to_string(),
+        Some("private") => Ok("private".to_string()),
+        Some("public") => Ok("public".to_string()),
+        Some(other) => Err(AppError::ValidationError(format!(
+            "Invalid visibility: {other}. Must be public or private"
+        ))),
         // Default: SSH services are private, HTTP services are public
         None => {
             if service_type == "ssh" {
-                "private".to_string()
+                Ok("private".to_string())
             } else {
-                "public".to_string()
+                Ok("public".to_string())
             }
         }
     }
@@ -858,6 +869,21 @@ pub async fn create_service(
         }
     }
 
+    let visibility = derive_visibility(&service_type, body.visibility.as_deref())?;
+
+    // developer_app_ids causes cross-user auto-provisioning -- admin only,
+    // and each referenced OAuth client must exist and be active.
+    // Only meaningful on private services; on public services the app scoping
+    // would be a no-op since public services auto-provision for everyone.
+    if let Some(ref app_ids) = body.developer_app_ids {
+        if !app_ids.is_empty() && visibility != "private" {
+            return Err(AppError::ValidationError(
+                "developer_app_ids can only be set on private services".to_string(),
+            ));
+        }
+        validate_developer_app_ids(&state, &auth_user, app_ids).await?;
+    }
+
     let new_service = DownstreamService {
         id: id.clone(),
         name: body.name.clone(),
@@ -865,7 +891,7 @@ pub async fn create_service(
         description: body.description.clone(),
         base_url,
         service_type: service_type.clone(),
-        visibility: derive_visibility(&service_type, body.visibility.as_deref()),
+        visibility,
         auth_method: auth_method.clone(),
         auth_type,
         auth_key_name,
@@ -898,6 +924,7 @@ pub async fn create_service(
         examples_url: body.examples_url.clone(),
         recommended_skills: body.recommended_skills.clone(),
         custom_user_agent: None,
+        developer_app_ids: body.developer_app_ids.clone(),
         token_exchange_config,
         created_at: now,
         updated_at: now,
@@ -1114,6 +1141,25 @@ pub async fn update_service(
     if let Some(ref visibility) = body.visibility {
         match visibility.as_str() {
             "public" | "private" => {
+                // Reject changing to public if the service has developer_app_ids
+                // (unless they're being cleared in this same request).
+                if visibility == "public" {
+                    let clearing_app_ids = body
+                        .developer_app_ids
+                        .as_ref()
+                        .is_some_and(|ids| ids.is_empty());
+                    let has_app_ids = service
+                        .developer_app_ids
+                        .as_ref()
+                        .is_some_and(|ids| !ids.is_empty());
+                    if has_app_ids && !clearing_app_ids {
+                        return Err(AppError::ValidationError(
+                            "Cannot change visibility to public while developer_app_ids is set. \
+                             Clear developer_app_ids first."
+                                .to_string(),
+                        ));
+                    }
+                }
                 set_doc.insert("visibility", visibility.as_str());
             }
             other => {
@@ -1444,6 +1490,20 @@ pub async fn update_service(
         let bson_skills = bson::to_bson(skills)
             .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?;
         set_doc.insert("recommended_skills", bson_skills);
+    }
+    if let Some(ref app_ids) = body.developer_app_ids {
+        // Effective visibility: use the value being set in this request,
+        // or fall back to the service's current visibility.
+        let effective_visibility = body.visibility.as_deref().unwrap_or(&service.visibility);
+        if !app_ids.is_empty() && effective_visibility != "private" {
+            return Err(AppError::ValidationError(
+                "developer_app_ids can only be set on private services".to_string(),
+            ));
+        }
+        validate_developer_app_ids(&state, &auth_user, app_ids).await?;
+        let bson_ids = bson::to_bson(app_ids)
+            .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?;
+        set_doc.insert("developer_app_ids", bson_ids);
     }
     if let Some(ref ua) = body.custom_user_agent {
         let trimmed = ua.trim();

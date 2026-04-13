@@ -153,6 +153,7 @@ export interface DownstreamService {
   readonly required_permissions?: readonly string[] | null;
   readonly examples_url?: string | null;
   readonly recommended_skills?: readonly string[] | null;
+  readonly developer_app_ids?: readonly string[] | null;
 }
 
 export interface ServiceCapabilities {
@@ -230,6 +231,7 @@ export type UpdateServicePayload =
       readonly required_permissions?: readonly string[];
       readonly examples_url?: string;
       readonly recommended_skills?: readonly string[];
+      readonly developer_app_ids?: readonly string[];
     }
   | {
       readonly name?: string;

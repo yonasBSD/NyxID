@@ -411,6 +411,7 @@ pub async fn create_user_service(
     service_type: &str,
     source: Option<&str>,
     source_id: Option<&str>,
+    source_app_id: Option<&str>,
     identity: &IdentityConfig,
 ) -> AppResult<UserService> {
     validate_slug(slug)?;
@@ -534,6 +535,7 @@ pub async fn create_user_service(
         is_active: true,
         source: source.map(str::to_string),
         source_id: source_id.map(str::to_string),
+        source_app_id: source_app_id.map(str::to_string),
         created_at: now,
         updated_at: now,
     };

@@ -892,9 +892,107 @@ async fn lookup_user_service(
     }
 }
 
-/// Given a found `UserService`, load its endpoint and credential and build
-/// the resolution result. The `effective_owner_id` is the user_id that owns
-/// the resources -- either the actor (personal path) or the org (org path).
+/// Verify that an auto-provisioned UserService is still eligible.
+///
+/// Called at proxy time for services with `source == "auto_provision"`.
+/// Rechecks the full "truly no-auth" predicate on the catalog entry and,
+/// for private services, verifies the user still has a valid consent for
+/// one of its `developer_app_ids`.
+///
+/// Returns `Ok(())` if the service is still eligible or is not auto-provisioned.
+/// Returns `Err(NotFound)` if the service should no longer be accessible.
+async fn verify_auto_provision_eligibility(
+    db: &mongodb::Database,
+    user_service: &crate::models::user_service::UserService,
+    effective_owner_id: &str,
+) -> AppResult<()> {
+    use crate::models::service_provider_requirement::{
+        COLLECTION_NAME as SERVICE_PROVIDER_REQUIREMENTS, ServiceProviderRequirement,
+    };
+
+    // Only check auto-provisioned services
+    if user_service.source.as_deref() != Some("auto_provision") {
+        return Ok(());
+    }
+
+    let catalog_id = match user_service.catalog_service_id.as_deref() {
+        Some(id) => id,
+        None => {
+            // Auto-provisioned services must always have a catalog link.
+            // A missing one is a data integrity issue -- reject rather than
+            // silently allowing a malformed row through.
+            return Err(AppError::NotFound(
+                "Service is no longer available".to_string(),
+            ));
+        }
+    };
+
+    // Load the catalog entry
+    let ds = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find_one(doc! { "_id": catalog_id })
+        .await?;
+
+    let ds = match ds {
+        Some(ds) => ds,
+        None => {
+            return Err(AppError::NotFound(
+                "Service is no longer available".to_string(),
+            ));
+        }
+    };
+
+    // Re-check the full "truly no-auth" predicate
+    if !ds.is_active
+        || ds.auth_method != "none"
+        || ds.requires_user_credential
+        || (ds.service_category != "connection" && ds.service_category != "internal")
+        || ds.service_type != "http"
+    {
+        return Err(AppError::NotFound(
+            "Service is no longer available".to_string(),
+        ));
+    }
+
+    // Check for SPR (master credential injection makes it not truly no-auth)
+    let spr_count = db
+        .collection::<ServiceProviderRequirement>(SERVICE_PROVIDER_REQUIREMENTS)
+        .count_documents(doc! { "service_id": catalog_id })
+        .await?;
+    if spr_count > 0 {
+        return Err(AppError::NotFound(
+            "Service is no longer available".to_string(),
+        ));
+    }
+
+    // Check visibility/consent rules
+    if ds.visibility == "private" {
+        match ds.developer_app_ids.as_ref() {
+            Some(app_ids) if !app_ids.is_empty() => {
+                let app_id_refs: Vec<&str> = app_ids.iter().map(|s| s.as_str()).collect();
+                let consented = crate::services::unified_key_service::load_valid_app_consents(
+                    db,
+                    effective_owner_id,
+                    &app_id_refs,
+                )
+                .await?;
+                if !app_ids.iter().any(|id| consented.contains(id.as_str())) {
+                    return Err(AppError::NotFound(
+                        "Service is no longer available".to_string(),
+                    ));
+                }
+            }
+            _ => {
+                return Err(AppError::NotFound(
+                    "Service is no longer available".to_string(),
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 async fn finish_resolution(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
@@ -902,6 +1000,10 @@ async fn finish_resolution(
     user_service: crate::models::user_service::UserService,
     org_routing: Option<OrgRouting>,
 ) -> AppResult<UserServiceResolution> {
+    // For auto-provisioned services, verify the catalog entry is still eligible
+    // before allowing the proxy request through.
+    verify_auto_provision_eligibility(db, &user_service, effective_owner_id).await?;
+
     // Load the endpoint
     let endpoint = db
         .collection::<UserEndpoint>(USER_ENDPOINTS)
@@ -1282,6 +1384,7 @@ fn build_minimal_downstream_service(
         examples_url: None,
         recommended_skills: None,
         custom_user_agent: user_service.custom_user_agent.clone(),
+        developer_app_ids: None,
         token_exchange_config,
         created_at: now,
         updated_at: now,
@@ -1727,6 +1830,7 @@ mod tests {
                 examples_url: None,
                 recommended_skills: None,
                 custom_user_agent: None,
+                developer_app_ids: None,
                 token_exchange_config: None,
                 created_at: now,
                 updated_at: now,
@@ -2477,6 +2581,7 @@ mod tests {
                 recommended_skills: None,
                 examples_url: None,
                 custom_user_agent: None,
+                developer_app_ids: None,
                 token_exchange_config: Some(make_lark_token_exchange_config()),
                 created_at: now,
                 updated_at: now,
@@ -2642,6 +2747,7 @@ mod tests {
             is_active: true,
             source: None,
             source_id: None,
+            source_app_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -2759,6 +2865,7 @@ mod tests {
                 recommended_skills: None,
                 examples_url: None,
                 custom_user_agent: None,
+                developer_app_ids: None,
                 token_exchange_config: None,
                 created_at: now,
                 updated_at: now,
