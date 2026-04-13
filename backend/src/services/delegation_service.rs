@@ -12,6 +12,7 @@ use crate::models::service_provider_requirement::{
 use crate::services::user_token_service;
 
 /// A resolved credential ready for injection into a proxied request.
+#[derive(Clone)]
 pub struct DelegatedCredential {
     #[allow(dead_code)]
     pub provider_slug: String,

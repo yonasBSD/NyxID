@@ -178,6 +178,21 @@ pub(crate) fn validate_requested_proxy_path(path: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// When `target.auth_method` is `"path"`, synthesize a `DelegatedCredential`
+/// so `build_forward_path` / `prepare_delegated_request` inject the path
+/// prefix (e.g. `/bot<token>/`).  Appends in-place and returns the
+/// (possibly extended) slice.
+pub fn extend_with_path_credential(delegated: &mut Vec<DelegatedCredential>, target: &ProxyTarget) {
+    if target.auth_method == "path" && !target.credential.is_empty() {
+        delegated.push(DelegatedCredential {
+            provider_slug: String::new(),
+            injection_method: "path".to_string(),
+            injection_key: target.auth_key_name.clone(),
+            credential: target.credential.clone(),
+        });
+    }
+}
+
 pub(crate) fn build_forward_path(
     path: &str,
     delegated_credentials: &[DelegatedCredential],
@@ -1338,19 +1353,8 @@ pub async fn forward_request(
     // Shared generic token exchange cache (used by `token_exchange`).
     token_exchange_cache: &TokenExchangeCache,
 ) -> AppResult<reqwest::Response> {
-    // When auth_method is "path", the credential must be injected as a URL
-    // path prefix (e.g. /bot<token>/sendMessage). Synthesize a
-    // DelegatedCredential so build_forward_path handles the prefix the same
-    // way it does for provider-delegated path credentials.
     let mut all_delegated = delegated_credentials;
-    if target.auth_method == "path" && !target.credential.is_empty() {
-        all_delegated.push(DelegatedCredential {
-            provider_slug: String::new(),
-            injection_method: "path".to_string(),
-            injection_key: target.auth_key_name.clone(),
-            credential: target.credential.clone(),
-        });
-    }
+    extend_with_path_credential(&mut all_delegated, target);
     let prepared = prepare_delegated_request(path, query, &all_delegated)?;
 
     // TODO(SEC-H1): Re-validate the resolved IP at proxy time to prevent DNS rebinding.

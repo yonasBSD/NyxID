@@ -2344,7 +2344,15 @@ async fn handle_ws_proxy_open(
     } else {
         format!("/{path}")
     };
-    let mut url = format!("{ws_base}{normalized_path}");
+
+    // Path-prefix injection: prepend /{prefix}{credential} to the URL path
+    let final_path = if let Some((prefix, credential)) = cred.path_prefix() {
+        format!("/{prefix}{credential}{normalized_path}")
+    } else {
+        normalized_path
+    };
+
+    let mut url = format!("{ws_base}{final_path}");
     if let Some(q) = query
         && !q.is_empty()
     {

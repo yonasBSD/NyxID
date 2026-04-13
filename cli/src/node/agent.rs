@@ -1538,22 +1538,30 @@ async fn cmd_credentials_setup(
             let mut node_config = NodeConfig::load(config_file)?;
             let backend = SecretBackend::from_config(&node_config, config_dir)?;
 
-            // Format credential based on auth method
-            let header_value = if auth_method == "bearer" {
-                format!("Bearer {secret}")
-            } else {
-                secret
-            };
-
-            if auth_method == "query" {
+            // Store credential using the injection method matching the auth method
+            if auth_method == "path" {
+                node_config.add_path_prefix_credential_via(
+                    service,
+                    auth_key_name,
+                    &secret,
+                    target_url.as_deref(),
+                    &backend,
+                )?;
+            } else if auth_method == "query" {
                 node_config.add_query_param_credential_via(
                     service,
                     auth_key_name,
-                    &header_value,
+                    &secret,
                     target_url.as_deref(),
                     &backend,
                 )?;
             } else {
+                // Format credential based on auth method
+                let header_value = if auth_method == "bearer" {
+                    format!("Bearer {secret}")
+                } else {
+                    secret
+                };
                 node_config.add_header_credential_via(
                     service,
                     auth_key_name,

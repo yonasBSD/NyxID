@@ -20,6 +20,12 @@ pub enum CredentialInjection {
         name: String,
         value: Zeroizing<String>,
     },
+    /// Path prefix injection: prepend `/{prefix}{credential}` to the URL path.
+    /// Used by Telegram Bot API (`/bot<token>/sendMessage`).
+    PathPrefix {
+        prefix: String,
+        credential: Zeroizing<String>,
+    },
 }
 
 /// A single service's decrypted credential.
@@ -31,11 +37,12 @@ pub struct ServiceCredential {
 }
 
 impl ServiceCredential {
-    /// The injection method as a string ("header" or "query_param").
+    /// The injection method as a string ("header", "query_param", or "path_prefix").
     pub fn injection_method(&self) -> &str {
         match &self.injection {
             CredentialInjection::Header { .. } => "header",
             CredentialInjection::QueryParam { .. } => "query_param",
+            CredentialInjection::PathPrefix { .. } => "path_prefix",
         }
     }
 
@@ -44,6 +51,7 @@ impl ServiceCredential {
         match &self.injection {
             CredentialInjection::Header { name, .. } => name,
             CredentialInjection::QueryParam { name, .. } => name,
+            CredentialInjection::PathPrefix { prefix, .. } => prefix,
         }
     }
 
@@ -59,6 +67,16 @@ impl ServiceCredential {
     pub fn query_param(&self) -> Option<(&str, &str)> {
         match &self.injection {
             CredentialInjection::QueryParam { name, value } => Some((name, value)),
+            _ => None,
+        }
+    }
+
+    /// For path_prefix injection: returns (prefix, credential).
+    pub fn path_prefix(&self) -> Option<(&str, &str)> {
+        match &self.injection {
+            CredentialInjection::PathPrefix {
+                prefix, credential, ..
+            } => Some((prefix, credential)),
             _ => None,
         }
     }
@@ -131,6 +149,26 @@ impl CredentialStore {
                         },
                     );
                 }
+                "path_prefix" => {
+                    let prefix = cred_config.header_name.as_deref().unwrap_or("bot");
+                    let encrypted = cred_config.header_value_encrypted.as_deref().ok_or_else(|| {
+                        Error::Config(format!(
+                            "Credential '{slug}' has path_prefix injection but no header_value_encrypted"
+                        ))
+                    })?;
+                    let credential = enc.decrypt(encrypted)?;
+
+                    map.insert(
+                        slug.clone(),
+                        ServiceCredential {
+                            injection: CredentialInjection::PathPrefix {
+                                prefix: prefix.to_string(),
+                                credential: Zeroizing::new(credential),
+                            },
+                            target_url: cred_config.target_url.clone(),
+                        },
+                    );
+                }
                 other => {
                     return Err(Error::Config(format!(
                         "Unknown injection method '{other}' for credential '{slug}'"
@@ -186,6 +224,23 @@ impl CredentialStore {
                             injection: CredentialInjection::QueryParam {
                                 name: param_name.to_string(),
                                 value: Zeroizing::new(value),
+                            },
+                            target_url: cred_config.target_url.clone(),
+                        },
+                    );
+                }
+                "path_prefix" => {
+                    let prefix = cred_config.header_name.as_deref().unwrap_or("bot");
+                    let value = backend.load_credential_value(
+                        slug,
+                        cred_config.header_value_encrypted.as_deref(),
+                    )?;
+                    map.insert(
+                        slug.clone(),
+                        ServiceCredential {
+                            injection: CredentialInjection::PathPrefix {
+                                prefix: prefix.to_string(),
+                                credential: Zeroizing::new(value),
                             },
                             target_url: cred_config.target_url.clone(),
                         },
