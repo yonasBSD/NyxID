@@ -271,6 +271,13 @@ pub struct DownstreamService {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_user_agent: Option<String>,
 
+    /// Developer app (OAuth client) IDs that grant access to this service.
+    /// When set on a private service, users who have consented to any of
+    /// these apps will have the service auto-provisioned in their AI Services.
+    /// Ignored for public services (they auto-provision for everyone).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub developer_app_ids: Option<Vec<String>>,
+
     /// Declarative token exchange config. Required when `auth_method` is
     /// `token_exchange`, ignored otherwise. See [`TokenExchangeConfig`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -368,6 +375,7 @@ pub mod test_helpers {
             examples_url: None,
             recommended_skills: None,
             custom_user_agent: None,
+            developer_app_ids: None,
             token_exchange_config: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -464,6 +472,7 @@ mod tests {
             examples_url: Some("https://github.com/example/repo/tree/main/examples".to_string()),
             recommended_skills: Some(vec!["example/skill".to_string()]),
             custom_user_agent: None,
+            developer_app_ids: None,
             token_exchange_config: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -524,6 +533,7 @@ mod tests {
             examples_url: None,
             recommended_skills: None,
             custom_user_agent: None,
+            developer_app_ids: None,
             token_exchange_config: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),

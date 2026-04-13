@@ -177,6 +177,10 @@ pub struct KeyView {
     pub delegation_token_scope: String,
     pub custom_user_agent: Option<String>,
     pub auto_connected: bool,
+    /// Developer app (OAuth client) ID that triggered this auto-provision.
+    pub source_app_id: Option<String>,
+    /// Human-readable name of the developer app (resolved from OauthClient).
+    pub source_app_name: Option<String>,
     pub expires_at: Option<String>,
     pub last_used_at: Option<String>,
     pub error_message: Option<String>,
@@ -535,6 +539,7 @@ pub async fn create_key(
             &svc.service_type,
             None,
             None,
+            None,
             &catalog_identity,
         )
         .await?;
@@ -660,6 +665,7 @@ pub async fn create_key(
             examples_url: None,
             recommended_skills: None,
             custom_user_agent: None,
+            developer_app_ids: None,
             token_exchange_config: None,
             created_at: now,
             updated_at: now,
@@ -707,6 +713,7 @@ pub async fn create_key(
             node_id,
             0,
             "ssh",
+            None,
             None,
             None,
             &user_service_service::IdentityConfig::none(),
@@ -813,6 +820,7 @@ pub async fn create_key(
             "http",
             None,
             None,
+            None,
             &custom_identity,
         )
         .await?;
@@ -857,12 +865,26 @@ async fn cleanup_auto_provision_endpoint(db: &mongodb::Database, user_id: &str, 
 }
 
 /// Auto-provision UserEndpoint + UserService for truly no-auth catalog services.
-/// Called lazily on list_keys. Idempotent: skips services already provisioned
-/// (including deactivated ones, to respect user opt-out).
+/// Called lazily on list_keys. Idempotent: skips services already provisioned.
 ///
 /// "Truly no-auth" means: `auth_method == "none"` on the DownstreamService AND
 /// no `ServiceProviderRequirement` exists (which would indicate master-credential
 /// injection). Internal services with SPRs use master credentials and are NOT no-auth.
+///
+/// Visibility rules:
+/// - Public services: auto-provision for all users.
+/// - Private services with `developer_app_ids`: only auto-provision if the user
+///   has an active consent for at least one of those OAuth clients (developer apps).
+///   The matched app ID is stored as `source_app_id` on the UserService.
+/// - Private services without `developer_app_ids`: never auto-provision.
+///
+/// Reconciliation runs first: any previously auto-provisioned services whose
+/// catalog entry is no longer eligible are deleted (not deactivated). Deletion
+/// allows re-provisioning if the user becomes eligible again later. Users
+/// cannot deactivate auto-connected services themselves (the handler rejects
+/// PUT/DELETE on auto-connected keys), so existing rows for a given
+/// `(user_id, catalog_service_id)` pair are always either active (valid) or
+/// absent (deleted by reconciliation / never created).
 pub async fn auto_provision_no_auth_services(
     db: &mongodb::Database,
     user_id: &str,
@@ -870,6 +892,12 @@ pub async fn auto_provision_no_auth_services(
     use crate::models::service_provider_requirement::{
         COLLECTION_NAME as SERVICE_PROVIDER_REQUIREMENTS, ServiceProviderRequirement,
     };
+
+    // Reconcile first: delete any previously auto-provisioned services whose
+    // catalog entry is no longer eligible (deleted, deactivated, changed auth
+    // method, gained an SPR, went private without consent, etc). This is
+    // fully independent of the provisioning pipeline below.
+    reconcile_stale_auto_provisions(db, user_id).await;
 
     // Find all active services with auth_method "none" and no user credential requirement
     let candidates: Vec<DownstreamService> = db
@@ -910,8 +938,51 @@ pub async fn auto_provision_no_auth_services(
         return Ok(());
     }
 
+    // Collect all developer_app_ids from private services to batch-check consents
+    let all_app_ids: Vec<&str> = no_auth_services
+        .iter()
+        .filter(|s| s.visibility == "private")
+        .filter_map(|s| s.developer_app_ids.as_ref())
+        .flat_map(|ids| ids.iter().map(|id| id.as_str()))
+        .collect();
+
+    // Load user's consents for the referenced developer apps (if any).
+    // Only non-expired consents for active OAuth clients count.
+    let consented_app_ids: std::collections::HashSet<String> = if all_app_ids.is_empty() {
+        std::collections::HashSet::new()
+    } else {
+        load_valid_app_consents(db, user_id, &all_app_ids).await?
+    };
+
+    // Build the eligible list: (service, matched_app_id)
+    // - Public: always eligible, no app context
+    // - Private with developer_app_ids: eligible only if user consented to >= 1 app
+    // - Private without developer_app_ids: never eligible
+    let eligible: Vec<(&DownstreamService, Option<&str>)> = no_auth_services
+        .iter()
+        .filter_map(|svc| {
+            if svc.visibility != "private" {
+                // Public (or legacy without visibility) -- always eligible
+                Some((*svc, None))
+            } else if let Some(ref app_ids) = svc.developer_app_ids {
+                // Private with developer_app_ids -- find first consented app
+                let matched = app_ids
+                    .iter()
+                    .find(|id| consented_app_ids.contains(id.as_str()));
+                matched.map(|app_id| (*svc, Some(app_id.as_str())))
+            } else {
+                // Private without developer_app_ids -- skip
+                None
+            }
+        })
+        .collect();
+
+    if eligible.is_empty() {
+        return Ok(());
+    }
+
     // Find which catalog_service_ids this user already has (active or inactive)
-    let catalog_ids: Vec<&str> = no_auth_services.iter().map(|s| s.id.as_str()).collect();
+    let catalog_ids: Vec<&str> = eligible.iter().map(|(s, _)| s.id.as_str()).collect();
     let existing: Vec<crate::models::user_service::UserService> = db
         .collection::<crate::models::user_service::UserService>(
             crate::models::user_service::COLLECTION_NAME,
@@ -929,7 +1000,7 @@ pub async fn auto_provision_no_auth_services(
         .filter_map(|s| s.catalog_service_id.as_deref())
         .collect();
 
-    for svc in &no_auth_services {
+    for (svc, source_app_id) in &eligible {
         if existing_catalog_ids.contains(svc.id.as_str()) {
             continue;
         }
@@ -985,6 +1056,7 @@ pub async fn auto_provision_no_auth_services(
             "http",
             Some(AUTO_PROVISION_SOURCE),
             Some(&source_id),
+            *source_app_id,
             &catalog_identity,
         )
         .await
@@ -1008,6 +1080,305 @@ pub async fn auto_provision_no_auth_services(
     }
 
     Ok(())
+}
+
+/// Load valid (non-expired, active-client) app consents for a user.
+/// Shared between the provisioning pipeline and reconciliation.
+pub async fn load_valid_app_consents(
+    db: &mongodb::Database,
+    user_id: &str,
+    app_ids: &[&str],
+) -> AppResult<std::collections::HashSet<String>> {
+    use crate::models::consent::{COLLECTION_NAME as CONSENTS, Consent};
+    use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
+
+    if app_ids.is_empty() {
+        return Ok(std::collections::HashSet::new());
+    }
+
+    // Filter to only active OAuth clients
+    let active_clients: Vec<OauthClient> = db
+        .collection::<OauthClient>(OAUTH_CLIENTS)
+        .find(doc! {
+            "_id": { "$in": app_ids },
+            "is_active": true,
+        })
+        .await?
+        .try_collect()
+        .await?;
+    let active_app_ids: Vec<&str> = active_clients.iter().map(|c| c.id.as_str()).collect();
+
+    if active_app_ids.is_empty() {
+        return Ok(std::collections::HashSet::new());
+    }
+
+    // Filter consents: non-expired (null or future) for active apps
+    let now_bson = bson::DateTime::from_chrono(chrono::Utc::now());
+    let consents: Vec<Consent> = db
+        .collection::<Consent>(CONSENTS)
+        .find(doc! {
+            "user_id": user_id,
+            "client_id": { "$in": &active_app_ids },
+            "$or": [
+                { "expires_at": { "$exists": false } },
+                { "expires_at": bson::Bson::Null },
+                { "expires_at": { "$gt": now_bson } },
+            ],
+        })
+        .await?
+        .try_collect()
+        .await?;
+    Ok(consents.into_iter().map(|c| c.client_id).collect())
+}
+
+/// Delete stale auto-provisioned UserServices that the user is no longer
+/// eligible for. Fully self-contained: loads the user's active
+/// auto-provisioned services, their catalog entries, SPRs, and consents,
+/// then applies the complete "truly no-auth" eligibility predicate.
+///
+/// A service is stale if its catalog entry:
+/// - No longer exists or is inactive
+/// - No longer satisfies the "truly no-auth" predicate (auth_method changed,
+///   gained an SPR, changed to SSH, changed category, now requires user
+///   credential, etc.)
+/// - Is now private without `developer_app_ids`
+/// - Is now private with `developer_app_ids` but the user has no valid consent
+async fn reconcile_stale_auto_provisions(db: &mongodb::Database, user_id: &str) {
+    use crate::models::service_provider_requirement::{
+        COLLECTION_NAME as SERVICE_PROVIDER_REQUIREMENTS, ServiceProviderRequirement,
+    };
+
+    // Load all active auto-provisioned services for this user
+    let auto_services: Vec<crate::models::user_service::UserService> = match db
+        .collection::<crate::models::user_service::UserService>(
+            crate::models::user_service::COLLECTION_NAME,
+        )
+        .find(doc! {
+            "user_id": user_id,
+            "source": AUTO_PROVISION_SOURCE,
+            "is_active": true,
+        })
+        .await
+    {
+        Ok(cursor) => match cursor.try_collect().await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "reconcile: failed to load auto-provisioned services");
+                return;
+            }
+        },
+        Err(e) => {
+            tracing::warn!(error = %e, "reconcile: failed to query auto-provisioned services");
+            return;
+        }
+    };
+
+    if auto_services.is_empty() {
+        return;
+    }
+
+    // Batch-load catalog entries
+    let catalog_ids: Vec<&str> = auto_services
+        .iter()
+        .filter_map(|s| s.catalog_service_id.as_deref())
+        .collect();
+    let catalog_map: std::collections::HashMap<String, DownstreamService> =
+        if catalog_ids.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            match db
+                .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .find(doc! { "_id": { "$in": &catalog_ids } })
+                .await
+            {
+                Ok(cursor) => match cursor.try_collect::<Vec<_>>().await {
+                    Ok(svcs) => svcs.into_iter().map(|s| (s.id.clone(), s)).collect(),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "reconcile: failed to load catalog services");
+                        return;
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(error = %e, "reconcile: failed to query catalog services");
+                    return;
+                }
+            }
+        };
+
+    // Load SPRs for the catalog entries to check the "truly no-auth" predicate
+    let spr_set: std::collections::HashSet<String> = if catalog_ids.is_empty() {
+        std::collections::HashSet::new()
+    } else {
+        match db
+            .collection::<ServiceProviderRequirement>(SERVICE_PROVIDER_REQUIREMENTS)
+            .find(doc! { "service_id": { "$in": &catalog_ids } })
+            .await
+        {
+            Ok(cursor) => match cursor
+                .try_collect::<Vec<ServiceProviderRequirement>>()
+                .await
+            {
+                Ok(sprs) => sprs.into_iter().map(|r| r.service_id).collect(),
+                Err(e) => {
+                    tracing::warn!(error = %e, "reconcile: failed to load SPRs");
+                    return;
+                }
+            },
+            Err(e) => {
+                tracing::warn!(error = %e, "reconcile: failed to query SPRs");
+                return;
+            }
+        }
+    };
+
+    // Collect all developer_app_ids from private catalog entries to load consents
+    let all_app_ids: Vec<&str> = catalog_map
+        .values()
+        .filter(|ds| ds.visibility == "private")
+        .filter_map(|ds| ds.developer_app_ids.as_ref())
+        .flat_map(|ids| ids.iter().map(|id| id.as_str()))
+        .collect();
+
+    let consented_app_ids = match load_valid_app_consents(db, user_id, &all_app_ids).await {
+        Ok(set) => set,
+        Err(e) => {
+            tracing::warn!(error = %e, "reconcile: failed to load consents");
+            return;
+        }
+    };
+
+    // Determine which auto-provisioned services are now stale.
+    // A service is valid only if its catalog entry still satisfies the full
+    // "truly no-auth" predicate AND the visibility/consent rules.
+    let stale: Vec<&crate::models::user_service::UserService> = auto_services
+        .iter()
+        .filter(|us| {
+            let catalog = us
+                .catalog_service_id
+                .as_deref()
+                .and_then(|id| catalog_map.get(id));
+
+            match catalog {
+                None => true, // catalog entry deleted
+                Some(ds) => {
+                    // Re-check the full "truly no-auth" predicate
+                    let is_truly_no_auth = ds.is_active
+                        && ds.auth_method == "none"
+                        && !ds.requires_user_credential
+                        && (ds.service_category == "connection"
+                            || ds.service_category == "internal")
+                        && ds.service_type == "http"
+                        && !spr_set.contains(&ds.id);
+
+                    if !is_truly_no_auth {
+                        return true; // catalog changed -- stale
+                    }
+
+                    // Check visibility/consent rules
+                    if ds.visibility == "private" {
+                        match ds.developer_app_ids.as_ref() {
+                            Some(app_ids) if !app_ids.is_empty() => {
+                                // Stale if no consent matches
+                                !app_ids
+                                    .iter()
+                                    .any(|id| consented_app_ids.contains(id.as_str()))
+                            }
+                            _ => true, // private without app_ids -- stale
+                        }
+                    } else {
+                        false // public + truly-no-auth -- still valid
+                    }
+                }
+            }
+        })
+        .collect();
+
+    if stale.is_empty() {
+        return;
+    }
+
+    let stale_service_ids: Vec<&str> = stale.iter().map(|us| us.id.as_str()).collect();
+    let stale_endpoint_ids: Vec<&str> = stale.iter().map(|us| us.endpoint_id.as_str()).collect();
+
+    // Delete stale UserService rows (not deactivate). Deletion lets the
+    // provisioning path re-create the service when the user becomes
+    // eligible again (e.g., re-consents to a developer app). Deactivation
+    // would leave an inactive row that the provisioning path treats as
+    // "already provisioned" and skips.
+    //
+    // Note: users cannot deactivate auto-connected services themselves --
+    // DELETE /keys/:id and PUT /keys/:id both reject auto-connected rows.
+    // So all inactive auto-provisioned rows are from reconciliation, and
+    // deleting here is always correct.
+    match db
+        .collection::<crate::models::user_service::UserService>(
+            crate::models::user_service::COLLECTION_NAME,
+        )
+        .delete_many(doc! { "_id": { "$in": &stale_service_ids } })
+        .await
+    {
+        Ok(result) => {
+            if result.deleted_count > 0 {
+                tracing::info!(
+                    user_id = %user_id,
+                    count = result.deleted_count,
+                    "Deleted stale auto-provisioned services"
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                user_id = %user_id,
+                count = stale_service_ids.len(),
+                error = %e,
+                "Failed to delete stale auto-provisioned services"
+            );
+            return; // don't clean up endpoints if services weren't deleted
+        }
+    }
+
+    // Clean up orphaned auto-provisioned endpoints. Only delete endpoints
+    // that are not referenced by any remaining UserService.
+    if !stale_endpoint_ids.is_empty() {
+        // Find which of these endpoints are still referenced by other services
+        let still_referenced: std::collections::HashSet<String> = match db
+            .collection::<crate::models::user_service::UserService>(
+                crate::models::user_service::COLLECTION_NAME,
+            )
+            .find(doc! {
+                "user_id": user_id,
+                "endpoint_id": { "$in": &stale_endpoint_ids },
+            })
+            .await
+        {
+            Ok(cursor) => match cursor
+                .try_collect::<Vec<crate::models::user_service::UserService>>()
+                .await
+            {
+                Ok(svcs) => svcs.into_iter().map(|s| s.endpoint_id).collect(),
+                Err(_) => return,
+            },
+            Err(_) => return,
+        };
+
+        let orphaned: Vec<&str> = stale_endpoint_ids
+            .iter()
+            .filter(|id| !still_referenced.contains(**id))
+            .copied()
+            .collect();
+
+        if !orphaned.is_empty() {
+            let _ = db
+                .collection::<mongodb::bson::Document>(
+                    crate::models::user_endpoint::COLLECTION_NAME,
+                )
+                .delete_many(doc! {
+                    "_id": { "$in": &orphaned },
+                    "user_id": user_id,
+                })
+                .await;
+        }
+    }
 }
 
 /// GET /api/v1/keys -- list all keys (personal + org-inherited) as combined views.
@@ -1073,6 +1444,24 @@ pub async fn list_keys(db: &mongodb::Database, user_id: &str) -> AppResult<Vec<K
         .map(|s| (s.id.as_str(), s))
         .collect();
 
+    // Batch-load developer app names (for auto-provisioned services from apps).
+    let source_app_ids: Vec<&str> = tagged
+        .iter()
+        .filter_map(|t| t.service.source_app_id.as_deref())
+        .collect();
+    let app_name_map: HashMap<String, String> = if source_app_ids.is_empty() {
+        HashMap::new()
+    } else {
+        use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
+        let apps: Vec<OauthClient> = db
+            .collection::<OauthClient>(OAUTH_CLIENTS)
+            .find(doc! { "_id": { "$in": &source_app_ids } })
+            .await?
+            .try_collect()
+            .await?;
+        apps.into_iter().map(|a| (a.id, a.client_name)).collect()
+    };
+
     let views = tagged
         .into_iter()
         .filter_map(|t| {
@@ -1082,7 +1471,14 @@ pub async fn list_keys(db: &mongodb::Database, user_id: &str) -> AppResult<Vec<K
                 .api_key_id
                 .as_deref()
                 .and_then(|id| ak_map.get(id).copied());
-            Some(build_key_view(&t.service, ep, ak, &cat_map, t.source))
+            Some(build_key_view(
+                &t.service,
+                ep,
+                ak,
+                &cat_map,
+                &app_name_map,
+                t.source,
+            ))
         })
         .collect();
 
@@ -1118,6 +1514,22 @@ pub async fn get_key(
         .into_iter()
         .collect();
 
+    // Load developer app name if this service was app-provisioned
+    let app_name_map: HashMap<String, String> = if let Some(ref app_id) = svc.source_app_id {
+        use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
+        if let Some(app) = db
+            .collection::<OauthClient>(OAUTH_CLIENTS)
+            .find_one(doc! { "_id": app_id })
+            .await?
+        {
+            [(app.id, app.client_name)].into_iter().collect()
+        } else {
+            HashMap::new()
+        }
+    } else {
+        HashMap::new()
+    };
+
     // get_key returns the personal view by default. The handler is responsible
     // for tagging the response with the actual credential_source when the
     // request was authenticated as an org member -- see resolve_key_read_owner
@@ -1127,6 +1539,7 @@ pub async fn get_key(
         &ep,
         ak.as_ref(),
         &cat_map,
+        &app_name_map,
         user_service_service::CredentialSource::Personal,
     ))
 }
@@ -1230,6 +1643,7 @@ fn build_key_view(
     ep: &UserEndpoint,
     ak: Option<&UserApiKey>,
     cat_map: &HashMap<&str, &DownstreamService>,
+    app_name_map: &HashMap<String, String>,
     credential_source: user_service_service::CredentialSource,
 ) -> KeyView {
     let catalog_ds = svc
@@ -1265,6 +1679,10 @@ fn build_key_view(
     };
 
     let auto_connected = svc.source.as_deref() == Some(AUTO_PROVISION_SOURCE);
+    let source_app_name = svc
+        .source_app_id
+        .as_ref()
+        .and_then(|id| app_name_map.get(id).cloned());
 
     KeyView {
         id: svc.id.clone(),
@@ -1298,6 +1716,8 @@ fn build_key_view(
         delegation_token_scope: svc.delegation_token_scope.clone(),
         custom_user_agent: svc.custom_user_agent.clone(),
         auto_connected,
+        source_app_id: svc.source_app_id.clone(),
+        source_app_name,
         expires_at: ak.and_then(|k| k.expires_at.map(|dt| dt.to_rfc3339())),
         last_used_at: ak.and_then(|k| k.last_used_at.map(|dt| dt.to_rfc3339())),
         error_message: ak.and_then(|k| k.error_message.clone()),
@@ -1377,8 +1797,21 @@ mod tests {
             delegation_token_scope: "llm:proxy".to_string(),
             custom_user_agent: None,
             is_active: true,
+            source_app_id: None,
             source: None,
             source_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn sample_endpoint() -> UserEndpoint {
+        UserEndpoint {
+            id: "ep-1".to_string(),
+            user_id: "user-1".to_string(),
+            label: "Test Endpoint".to_string(),
+            url: "https://example.com".to_string(),
+            catalog_service_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -1425,6 +1858,7 @@ mod tests {
             examples_url: None,
             recommended_skills: None,
             custom_user_agent: None,
+            developer_app_ids: None,
             token_exchange_config: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -1482,6 +1916,7 @@ mod tests {
             &service,
             &endpoint,
             None,
+            &HashMap::new(),
             &HashMap::new(),
             crate::services::user_service_service::CredentialSource::Personal,
         );
@@ -1681,5 +2116,165 @@ mod tests {
                 .expect_err("missing config must fail with an Internal error");
         assert!(matches!(err, AppError::Internal(_)));
         assert!(err.to_string().contains("api-lark-bot"));
+    }
+
+    // ─── Developer app auto-provision visibility tests ─────────────────
+
+    #[test]
+    fn build_key_view_sets_source_app_name_from_map() {
+        let mut service = sample_service("none");
+        service.source = Some(AUTO_PROVISION_SOURCE.to_string());
+        service.source_app_id = Some("app-123".to_string());
+        let endpoint = sample_endpoint();
+
+        let app_map: HashMap<String, String> = [("app-123".to_string(), "My Dev App".to_string())]
+            .into_iter()
+            .collect();
+
+        let view = build_key_view(
+            &service,
+            &endpoint,
+            None,
+            &HashMap::new(),
+            &app_map,
+            crate::services::user_service_service::CredentialSource::Personal,
+        );
+
+        assert!(view.auto_connected);
+        assert_eq!(view.source_app_id.as_deref(), Some("app-123"));
+        assert_eq!(view.source_app_name.as_deref(), Some("My Dev App"));
+    }
+
+    #[test]
+    fn build_key_view_no_source_app_for_public_auto_provision() {
+        let mut service = sample_service("none");
+        service.source = Some(AUTO_PROVISION_SOURCE.to_string());
+        // No source_app_id set -- public auto-provision
+        let endpoint = sample_endpoint();
+
+        let view = build_key_view(
+            &service,
+            &endpoint,
+            None,
+            &HashMap::new(),
+            &HashMap::new(),
+            crate::services::user_service_service::CredentialSource::Personal,
+        );
+
+        assert!(view.auto_connected);
+        assert!(view.source_app_id.is_none());
+        assert!(view.source_app_name.is_none());
+    }
+
+    #[test]
+    fn build_key_view_source_app_id_without_matching_name() {
+        // Edge case: source_app_id exists but app was deleted (not in map)
+        let mut service = sample_service("none");
+        service.source = Some(AUTO_PROVISION_SOURCE.to_string());
+        service.source_app_id = Some("deleted-app".to_string());
+        let endpoint = sample_endpoint();
+
+        let view = build_key_view(
+            &service,
+            &endpoint,
+            None,
+            &HashMap::new(),
+            &HashMap::new(), // empty map -- app not found
+            crate::services::user_service_service::CredentialSource::Personal,
+        );
+
+        assert!(view.auto_connected);
+        assert_eq!(view.source_app_id.as_deref(), Some("deleted-app"));
+        assert!(
+            view.source_app_name.is_none(),
+            "deleted app should not resolve a name"
+        );
+    }
+
+    #[test]
+    fn build_key_view_not_auto_connected_without_source() {
+        let service = sample_service("bearer");
+        let endpoint = sample_endpoint();
+
+        let view = build_key_view(
+            &service,
+            &endpoint,
+            None,
+            &HashMap::new(),
+            &HashMap::new(),
+            crate::services::user_service_service::CredentialSource::Personal,
+        );
+
+        assert!(!view.auto_connected);
+        assert!(view.source_app_id.is_none());
+        assert!(view.source_app_name.is_none());
+    }
+
+    /// Visibility eligibility matrix (documents the logic, not an integration test)
+    #[test]
+    fn visibility_eligibility_rules() {
+        use crate::models::downstream_service::test_helpers::dummy_service;
+
+        let consented: std::collections::HashSet<String> =
+            ["app-a".to_string()].into_iter().collect();
+
+        // Public service: always eligible
+        let mut public_svc = dummy_service();
+        public_svc.visibility = "public".to_string();
+        assert_ne!(public_svc.visibility, "private");
+
+        // Private + developer_app_ids with matching consent: eligible
+        let mut private_with_consent = dummy_service();
+        private_with_consent.visibility = "private".to_string();
+        private_with_consent.developer_app_ids = Some(vec!["app-a".to_string()]);
+        let matched = private_with_consent
+            .developer_app_ids
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|id| consented.contains(id.as_str()));
+        assert!(
+            matched.is_some(),
+            "private with matching consent should be eligible"
+        );
+
+        // Private + developer_app_ids without matching consent: ineligible
+        let mut private_no_consent = dummy_service();
+        private_no_consent.visibility = "private".to_string();
+        private_no_consent.developer_app_ids = Some(vec!["app-b".to_string()]);
+        let matched = private_no_consent
+            .developer_app_ids
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|id| consented.contains(id.as_str()));
+        assert!(
+            matched.is_none(),
+            "private without matching consent should be ineligible"
+        );
+
+        // Private without developer_app_ids: ineligible
+        let mut private_no_apps = dummy_service();
+        private_no_apps.visibility = "private".to_string();
+        private_no_apps.developer_app_ids = None;
+        assert!(
+            private_no_apps.developer_app_ids.is_none(),
+            "private without developer_app_ids should never auto-provision"
+        );
+
+        // Private with empty developer_app_ids: ineligible
+        let mut private_empty_apps = dummy_service();
+        private_empty_apps.visibility = "private".to_string();
+        private_empty_apps.developer_app_ids = Some(vec![]);
+        let has_match = private_empty_apps
+            .developer_app_ids
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|id| consented.contains(id.as_str()));
+        assert!(
+            !has_match,
+            "private with empty developer_app_ids should never auto-provision"
+        );
     }
 }

@@ -1188,7 +1188,11 @@ export function KeyDetailPage() {
                   : `/proxy/s/${keyInfo.slug}`}
               </p>
               {keyInfo.auto_connected && (
-                <Badge variant="secondary">Auto-connected</Badge>
+                <Badge variant="secondary">
+                  {keyInfo.source_app_name
+                    ? `Connected via ${keyInfo.source_app_name}`
+                    : "Auto-connected"}
+                </Badge>
               )}
             </div>
           </div>
@@ -1249,9 +1253,9 @@ export function KeyDetailPage() {
           <CardHeader>
             <CardTitle className="text-sm">Service Details</CardTitle>
             <CardDescription>
-              This service requires no authentication and was auto-connected
-              from the catalog. It is managed by the platform and cannot be
-              modified.
+              {keyInfo.source_app_name
+                ? `This service was auto-connected via ${keyInfo.source_app_name}. It is managed by the platform and cannot be modified.`
+                : "This service requires no authentication and was auto-connected from the catalog. It is managed by the platform and cannot be modified."}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">

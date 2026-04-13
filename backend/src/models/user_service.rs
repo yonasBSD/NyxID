@@ -66,6 +66,10 @@ pub struct UserService {
     pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_id: Option<String>,
+    /// Developer app (OAuth client) ID that triggered this auto-provision.
+    /// Set when a private service is auto-provisioned via developer app consent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_app_id: Option<String>,
 
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
@@ -120,6 +124,7 @@ mod tests {
             is_active: true,
             source: None,
             source_id: None,
+            source_app_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -162,6 +167,7 @@ mod tests {
             is_active: true,
             source: None,
             source_id: None,
+            source_app_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -199,6 +205,7 @@ mod tests {
             is_active: true,
             source: None,
             source_id: None,
+            source_app_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -249,6 +256,7 @@ mod tests {
             is_active: true,
             source: None,
             source_id: None,
+            source_app_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

@@ -112,7 +112,11 @@ function KeyCardContent({ keyInfo, source }: KeyCardProps) {
               </Badge>
             )}
             {keyInfo.auto_connected && (
-              <Badge variant="secondary">Auto-connected</Badge>
+              <Badge variant="secondary">
+                {keyInfo.source_app_name
+                  ? `Via ${keyInfo.source_app_name}`
+                  : "Auto-connected"}
+              </Badge>
             )}
             {isSsh && <Badge variant="outline">SSH</Badge>}
             <Badge variant={statusVariant(keyInfo.status)}>
