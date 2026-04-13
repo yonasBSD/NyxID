@@ -11,7 +11,6 @@ use tokio_stream::StreamExt;
 
 use crate::AppState;
 use crate::crypto::jwt;
-use crate::models::mcp_session;
 use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth;
@@ -688,6 +687,7 @@ async fn handle_tools_call(
         &state.http_client,
         &state.db,
         &state.encryption_keys,
+        &state.node_ws_manager,
         user_id,
         service,
         endpoint,
@@ -837,6 +837,7 @@ async fn handle_meta_call_tool(
         &state.http_client,
         &state.db,
         &state.encryption_keys,
+        &state.node_ws_manager,
         user_id,
         service,
         endpoint,
@@ -897,10 +898,10 @@ async fn handle_meta_call_tool(
 async fn handle_meta_search(
     state: &AppState,
     user_id: &str,
-    session_id: &str,
+    _session_id: &str,
     arguments: &serde_json::Value,
     request_id: Option<serde_json::Value>,
-    client_accepts_sse: bool,
+    _client_accepts_sse: bool,
 ) -> Response {
     let query = arguments
         .get("query")
@@ -930,21 +931,10 @@ async fn handle_meta_search(
         }
     };
 
-    // Search across ALL tools
+    // Search across ALL tools (does NOT activate services -- use nyx__call_tool
+    // to invoke discovered tools, which auto-activates on first call)
     let search_result = mcp_service::search_all_tools(&services, query);
 
-    // Activate the services that had matches
-    let changed = state
-        .mcp_sessions
-        .activate_services(session_id, &search_result.matched_service_ids);
-
-    // Send notification via GET SSE channel (fallback for clients that have it)
-    if changed {
-        send_tools_list_changed(state, session_id);
-    }
-
-    // Return search results (include inputSchema so the AI knows what arguments
-    // to pass when calling tools via nyx__call_tool)
     let results: Vec<serde_json::Value> = search_result
         .matches
         .iter()
@@ -957,53 +947,15 @@ async fn handle_meta_search(
         })
         .collect();
 
-    let activated_count = state
-        .mcp_sessions
-        .get_activated_service_ids(session_id)
-        .len();
-
-    let mut response_json = serde_json::json!({
+    let response_json = serde_json::json!({
         "matches": results,
         "count": results.len(),
-        "services_activated": search_result.matched_service_ids.len(),
-        "total_activated_services": activated_count,
         "hint": "Use nyx__call_tool to invoke any of these tools by name. \
             Pass the tool name and arguments as shown in the match results.",
-        "note": if changed {
-            "Matching service tools have been activated. Your tool list has been updated."
-        } else {
-            "Tools were already activated."
-        },
     });
 
-    if activated_count >= mcp_session::MAX_ACTIVATED_SERVICES {
-        response_json.as_object_mut().unwrap().insert(
-            "max_activated_services_warning".to_string(),
-            serde_json::Value::String(
-                "Maximum activated services reached. Some tools may not have been activated."
-                    .to_string(),
-            ),
-        );
-    }
-
     let text = serde_json::to_string_pretty(&response_json).unwrap_or_default();
-
-    // When tools changed and client supports SSE, embed the notification
-    // inline in the POST response so the client picks it up without needing
-    // the separate GET SSE channel.
-    if changed && client_accepts_sse {
-        tool_result_with_notifications(
-            request_id,
-            &text,
-            false,
-            vec![serde_json::json!({
-                "jsonrpc": JSONRPC_VERSION,
-                "method": "notifications/tools/list_changed",
-            })],
-        )
-    } else {
-        tool_result(request_id, &text, false)
-    }
+    tool_result(request_id, &text, false)
 }
 
 async fn handle_meta_discover(
