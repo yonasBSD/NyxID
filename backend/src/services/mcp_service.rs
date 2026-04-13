@@ -96,10 +96,34 @@ pub struct McpToolDefinition {
 ///
 /// Dedup: UserService takes priority over a platform DownstreamService for the
 /// same catalog entry, but only when the UserService is actually executable.
+/// Load all user tools (platform + user-managed).
+///
+/// When `include_non_executable` is true, user services whose credentials are
+/// currently unavailable (node offline, key inactive) are still included so that
+/// search results show them. When false, only callable services are returned.
 pub async fn load_user_tools(
     db: &mongodb::Database,
     node_ws_manager: &NodeWsManager,
     user_id: &str,
+) -> AppResult<Vec<McpToolService>> {
+    load_user_tools_inner(db, node_ws_manager, user_id, false).await
+}
+
+/// Like [`load_user_tools`] but includes non-executable user services for
+/// discovery via `nyx__search_tools`.
+pub async fn load_user_tools_all(
+    db: &mongodb::Database,
+    node_ws_manager: &NodeWsManager,
+    user_id: &str,
+) -> AppResult<Vec<McpToolService>> {
+    load_user_tools_inner(db, node_ws_manager, user_id, true).await
+}
+
+async fn load_user_tools_inner(
+    db: &mongodb::Database,
+    node_ws_manager: &NodeWsManager,
+    user_id: &str,
+    include_non_executable: bool,
 ) -> AppResult<Vec<McpToolService>> {
     // -----------------------------------------------------------------------
     // Phase 1: Load platform (DownstreamService) services
@@ -194,7 +218,8 @@ pub async fn load_user_tools(
     // Phase 2: Load UserService tools (personal + org-shared)
     // -----------------------------------------------------------------------
 
-    let all_user_services = load_callable_user_services(db, node_ws_manager, user_id).await?;
+    let all_user_services =
+        load_callable_user_services(db, node_ws_manager, user_id, include_non_executable).await?;
 
     // Collect catalog IDs and slugs from *executable* user services for dedup
     let executable_catalog_ids: HashSet<&str> = all_user_services
@@ -368,6 +393,7 @@ async fn load_callable_user_services(
     db: &mongodb::Database,
     node_ws_manager: &NodeWsManager,
     user_id: &str,
+    include_non_executable: bool,
 ) -> AppResult<Vec<ResolvedUserService>> {
     use crate::services::org_service;
 
@@ -441,7 +467,7 @@ async fn load_callable_user_services(
     // Personal first (takes priority over org for same slug)
     for us in personal_services {
         let cred_info = classify_credential(&us, &active_key_map, node_ws_manager);
-        if !cred_info.is_executable {
+        if !include_non_executable && !cred_info.is_executable {
             continue;
         }
         seen_slugs.insert(us.slug.clone());
@@ -458,7 +484,7 @@ async fn load_callable_user_services(
             continue;
         }
         let cred_info = classify_credential(&us, &active_key_map, node_ws_manager);
-        if !cred_info.is_executable {
+        if !include_non_executable && !cred_info.is_executable {
             continue;
         }
         seen_slugs.insert(us.slug.clone());
@@ -2090,6 +2116,7 @@ pub async fn discover_services(
     query: Option<&str>,
     category: Option<&str>,
 ) -> AppResult<serde_json::Value> {
+    // Load old-model connections
     let connections: Vec<UserServiceConnection> = db
         .collection::<UserServiceConnection>(CONNECTIONS)
         .find(doc! { "user_id": user_id, "is_active": true })
@@ -2098,6 +2125,21 @@ pub async fn discover_services(
         .await?;
 
     let connected_ids: HashSet<&str> = connections.iter().map(|c| c.service_id.as_str()).collect();
+
+    // Load new-model AI Services -- exclude catalog services already provisioned
+    let user_services: Vec<UserService> = db
+        .collection::<UserService>(USER_SERVICES)
+        .find(doc! { "user_id": user_id, "is_active": true })
+        .await?
+        .try_collect()
+        .await?;
+
+    let user_service_catalog_ids: HashSet<&str> = user_services
+        .iter()
+        .filter_map(|us| us.catalog_service_id.as_deref())
+        .collect();
+    let user_service_slugs: HashSet<&str> =
+        user_services.iter().map(|us| us.slug.as_str()).collect();
 
     let mut filter = doc! {
         "is_active": true,
@@ -2121,7 +2163,15 @@ pub async fn discover_services(
     let results: Vec<serde_json::Value> = all_services
         .iter()
         .filter(|svc| {
+            // Already connected via old model
             if connected_ids.contains(svc.id.as_str()) {
+                return false;
+            }
+            // Already provisioned as a UserService (by catalog ID or slug match)
+            if user_service_catalog_ids.contains(svc.id.as_str()) {
+                return false;
+            }
+            if user_service_slugs.contains(svc.slug.as_str()) {
                 return false;
             }
             match query {
