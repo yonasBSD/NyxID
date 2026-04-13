@@ -735,21 +735,26 @@ Restart Cursor. Authenticate via browser when prompted.
 
 ### Claude Code
 
-Edit `~/.claude/settings.json` or project-level `.claude/settings.json`:
+Run in terminal:
+
+```bash
+claude mcp add --transport http nyxid http://localhost:3001/mcp
+```
+
+Or edit `~/.claude/settings.json` or project-level `.claude/settings.json`:
 
 ```json
 {
   "mcpServers": {
     "nyxid": {
-      "command": "npx",
-      "args": ["-y", "@anthropic-ai/mcp-proxy", "http://localhost:3001/mcp"],
-      "description": "NyxID MCP Proxy"
+      "type": "http",
+      "url": "http://localhost:3001/mcp"
     }
   }
 }
 ```
 
-Restart Claude Code.
+Restart Claude Code. Authenticate via browser when prompted.
 
 ### Codex
 

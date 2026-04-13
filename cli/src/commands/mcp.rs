@@ -21,46 +21,68 @@ pub async fn run(command: McpCommands) -> Result<()> {
                 }
                 OutputFormat::Table => match tool.as_str() {
                     "cursor" => {
+                        println!("Add to .cursor/mcp.json:");
+                        println!();
                         println!("{{");
                         println!("  \"mcpServers\": {{");
                         println!("    \"nyxid\": {{");
-                        println!("      \"url\": \"{mcp_url}\",");
-                        println!(
-                            "      \"headers\": {{ \"Authorization\": \"Bearer ${{NYXID_API_KEY}}\" }}"
-                        );
+                        println!("      \"url\": \"{mcp_url}\"");
                         println!("    }}");
                         println!("  }}");
                         println!("}}");
+                        println!();
+                        println!("Restart Cursor. Authenticate via browser when prompted.");
                     }
                     "claude-code" => {
-                        println!("claude mcp add nyxid --transport streamable-http \\");
-                        println!("  --url \"{mcp_url}\" \\");
-                        println!("  --header \"Authorization: Bearer ${{NYXID_API_KEY}}\"");
-                    }
-                    "vscode" => {
+                        println!("Run in terminal:");
+                        println!();
+                        println!("  claude mcp add --transport http nyxid {mcp_url}");
+                        println!();
+                        println!("Or add to .claude/settings.json:");
+                        println!();
                         println!("{{");
-                        println!("  \"mcp\": {{");
-                        println!("    \"servers\": {{");
-                        println!("      \"nyxid\": {{");
-                        println!("        \"type\": \"http\",");
-                        println!("        \"url\": \"{mcp_url}\",");
-                        println!("        \"headers\": {{");
-                        println!("          \"Authorization\": \"Bearer ${{NYXID_API_KEY}}\"");
-                        println!("        }}");
-                        println!("      }}");
+                        println!("  \"mcpServers\": {{");
+                        println!("    \"nyxid\": {{");
+                        println!("      \"type\": \"http\",");
+                        println!("      \"url\": \"{mcp_url}\"");
                         println!("    }}");
                         println!("  }}");
                         println!("}}");
+                        println!();
+                        println!("Restart Claude Code. Authenticate via browser when prompted.");
+                    }
+                    "vscode" => {
+                        println!("Add to .vscode/mcp.json:");
+                        println!();
+                        println!("{{");
+                        println!("  \"servers\": {{");
+                        println!("    \"nyxid\": {{");
+                        println!("      \"type\": \"http\",");
+                        println!("      \"url\": \"{mcp_url}\"");
+                        println!("    }}");
+                        println!("  }}");
+                        println!("}}");
+                        println!();
+                        println!("Authenticate via browser when prompted.");
+                    }
+                    "codex" => {
+                        println!("Run in terminal:");
+                        println!();
+                        println!("  codex mcp add nyxid --url {mcp_url}");
+                        println!();
+                        println!("Or add to ~/.codex/config.toml:");
+                        println!();
+                        println!("[mcp_servers.nyxid]");
+                        println!("url = \"{mcp_url}\"");
+                        println!();
+                        println!("Then run: codex mcp login nyxid");
                     }
                     _ => {
                         println!("MCP Server URL: {mcp_url}");
-                        println!("Authorization:  Bearer <your-api-key>");
                         println!();
-                        println!("Create an API key:");
-                        println!(
-                            "  nyxid api-key create --name \"MCP Key\" --scopes \"read write proxy\" --base-url {}",
-                            auth.resolved_base_url()?
-                        );
+                        println!("Authentication is handled via OAuth.");
+                        println!("Your MCP client will open a browser window to authenticate");
+                        println!("when it connects for the first time.");
                     }
                 },
             }
