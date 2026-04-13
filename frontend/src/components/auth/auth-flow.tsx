@@ -252,7 +252,7 @@ export function AuthFlow({
         password: data.password,
         invite_code: data.inviteCode,
       });
-      toast.success(result.message || "Account created successfully");
+      toast.info(result.message || "Check your email to complete registration.");
       slideToPanel(0);
     } catch (error) {
       if (error instanceof ApiError) {

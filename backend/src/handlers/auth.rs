@@ -386,9 +386,9 @@ pub async fn register(
     );
 
     let message = if state.config.auto_verify_email {
-        "Registration successful. Email auto-verified (dev mode). You can now sign in.".to_string()
+        "Registration processed. You can now sign in.".to_string()
     } else {
-        "Registration successful. Please verify your email.".to_string()
+        "Check your email for a verification link to complete registration.".to_string()
     };
 
     Ok(Json(RegisterResponse {
