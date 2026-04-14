@@ -255,7 +255,7 @@ export function AuthFlow({
   async function onRegisterSubmit(data: RegisterFormData) {
     try {
       const result = await registerMutation.mutateAsync({
-        name: data.name,
+        display_name: data.name,
         email: data.email,
         password: data.password,
         invite_code: data.inviteCode,
