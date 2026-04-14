@@ -127,13 +127,25 @@ pub struct UpdateApiKeyRequest {
     pub allowed_node_ids: Option<Vec<String>>,
     pub allow_all_services: Option<bool>,
     pub allow_all_nodes: Option<bool>,
-    #[serde(default, deserialize_with = "crate::models::nullable_field::deserialize")]
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
     pub rate_limit_per_second: Option<Option<u32>>,
-    #[serde(default, deserialize_with = "crate::models::nullable_field::deserialize")]
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
     pub rate_limit_burst: Option<Option<u32>>,
-    #[serde(default, deserialize_with = "crate::models::nullable_field::deserialize")]
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
     pub platform: Option<Option<String>>,
-    #[serde(default, deserialize_with = "crate::models::nullable_field::deserialize")]
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
     pub callback_url: Option<Option<String>>,
 }
 
@@ -1207,8 +1219,7 @@ mod tests {
 
     #[test]
     fn platform_null_means_clear() {
-        let req: UpdateApiKeyRequest =
-            serde_json::from_str(r#"{"platform": null}"#).unwrap();
+        let req: UpdateApiKeyRequest = serde_json::from_str(r#"{"platform": null}"#).unwrap();
         assert_eq!(req.platform, Some(None));
     }
 
@@ -1221,8 +1232,7 @@ mod tests {
 
     #[test]
     fn callback_url_null_means_clear() {
-        let req: UpdateApiKeyRequest =
-            serde_json::from_str(r#"{"callback_url": null}"#).unwrap();
+        let req: UpdateApiKeyRequest = serde_json::from_str(r#"{"callback_url": null}"#).unwrap();
         assert_eq!(req.callback_url, Some(None));
     }
 

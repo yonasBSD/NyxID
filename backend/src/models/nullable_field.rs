@@ -36,8 +36,7 @@ mod tests {
 
     #[test]
     fn field_present_is_some_some() {
-        let req: Req =
-            serde_json::from_str(r#"{"platform": "claude-code", "count": 42}"#).unwrap();
+        let req: Req = serde_json::from_str(r#"{"platform": "claude-code", "count": 42}"#).unwrap();
         assert_eq!(req.platform, Some(Some("claude-code".to_string())));
         assert_eq!(req.count, Some(Some(42)));
     }
