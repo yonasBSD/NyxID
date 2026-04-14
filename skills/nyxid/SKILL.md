@@ -432,6 +432,10 @@ Set `NYXID_ACCESS_TOKEN` in your agent's environment to authenticate:
 export NYXID_ACCESS_TOKEN="nyxid_ag_..."
 ```
 
+### Scope requirements for management writes
+
+Agent keys need `write` or `admin` scope to call management endpoints via REST (create/update/delete/rotate API keys, services, endpoints, bindings, etc.). `proxy read` is sufficient for proxy traffic only -- paths under `/proxy`, `/llm`, `/ssh`, `/channel-events`, `/channel-relay`, and `/delegation` do not require write scope. The `nyxid` CLI uses session auth (not API keys) and is unaffected.
+
 ## Organizations (Shared Credentials)
 
 NyxID supports **organizations** for sharing a single set of credentials across multiple users. The classic example is a family Home Assistant or a company OpenAI key: one credential record, many people calling it through their own NyxID accounts. The proxy automatically falls back to org credentials when a personal one is missing for the requested service, with full per-member audit attribution.
