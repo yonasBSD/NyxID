@@ -1237,6 +1237,12 @@ mod tests {
     }
 
     #[test]
+    fn callback_url_empty_string_deserializes_as_present() {
+        let req: UpdateApiKeyRequest = serde_json::from_str(r#"{"callback_url": ""}"#).unwrap();
+        assert_eq!(req.callback_url, Some(Some(String::new())));
+    }
+
+    #[test]
     fn rate_limit_null_means_clear() {
         let req: UpdateApiKeyRequest =
             serde_json::from_str(r#"{"rate_limit_per_second": null}"#).unwrap();

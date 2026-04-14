@@ -439,11 +439,11 @@ pub async fn update_api_key_scope(
     }
     if let Some(url) = callback_url {
         match url {
-            Some(value) => {
+            Some(value) if !value.trim().is_empty() => {
                 crate::handlers::services_helpers::validate_base_url(value)?;
                 update.insert("callback_url", value);
             }
-            None => {
+            _ => {
                 update.insert("callback_url", bson::Bson::Null);
             }
         }
