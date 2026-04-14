@@ -127,6 +127,21 @@ impl AuthUser {
             "Missing required scope for LLM proxy access. Expected one of: {PROXY_SCOPE}, {WIDE_PROXY_SCOPE}, {LLM_PROXY_SCOPE}"
         )))
     }
+
+    pub fn can_write(&self) -> bool {
+        !matches!(self.auth_method, AuthMethod::ApiKey)
+            || self.has_scope(WRITE_SCOPE)
+            || self.has_scope(ADMIN_SCOPE)
+    }
+
+    pub fn ensure_write_scope(&self) -> Result<(), AppError> {
+        if self.can_write() {
+            return Ok(());
+        }
+        Err(AppError::Forbidden(
+            "write or admin scope required for this operation".to_string(),
+        ))
+    }
 }
 
 /// Name of the session cookie.
@@ -134,6 +149,12 @@ pub const SESSION_COOKIE_NAME: &str = "nyx_session";
 
 /// Name of the access token cookie.
 pub const ACCESS_TOKEN_COOKIE_NAME: &str = "nyx_access_token";
+
+/// Scope that grants management write access (create, update, delete, rotate).
+pub const WRITE_SCOPE: &str = "write";
+
+/// Scope that grants full admin access (implies write).
+pub const ADMIN_SCOPE: &str = "admin";
 
 /// Scope that grants standard NyxID proxy access.
 pub const PROXY_SCOPE: &str = "proxy";
@@ -981,5 +1002,61 @@ mod tests {
             .unwrap();
 
         assert!(!is_service_account_request(&request));
+    }
+
+    #[test]
+    fn api_key_read_only_cannot_write() {
+        let user = test_auth_user(AuthMethod::ApiKey, "read");
+        assert!(!user.can_write());
+        assert!(user.ensure_write_scope().is_err());
+    }
+
+    #[test]
+    fn api_key_read_proxy_cannot_write() {
+        let user = test_auth_user(AuthMethod::ApiKey, "read proxy");
+        assert!(!user.can_write());
+        assert!(user.ensure_write_scope().is_err());
+    }
+
+    #[test]
+    fn api_key_write_scope_can_write() {
+        let user = test_auth_user(AuthMethod::ApiKey, "read write");
+        assert!(user.can_write());
+        assert!(user.ensure_write_scope().is_ok());
+    }
+
+    #[test]
+    fn api_key_admin_scope_can_write() {
+        let user = test_auth_user(AuthMethod::ApiKey, "read admin");
+        assert!(user.can_write());
+        assert!(user.ensure_write_scope().is_ok());
+    }
+
+    #[test]
+    fn session_auth_can_write_without_scope() {
+        let user = test_auth_user(AuthMethod::Session, "");
+        assert!(user.can_write());
+        assert!(user.ensure_write_scope().is_ok());
+    }
+
+    #[test]
+    fn access_token_can_write_without_scope() {
+        let user = test_auth_user(AuthMethod::AccessToken, "openid profile");
+        assert!(user.can_write());
+        assert!(user.ensure_write_scope().is_ok());
+    }
+
+    #[test]
+    fn delegated_token_can_write_without_scope() {
+        let user = test_auth_user(AuthMethod::Delegated, "openid");
+        assert!(user.can_write());
+        assert!(user.ensure_write_scope().is_ok());
+    }
+
+    #[test]
+    fn service_account_can_write_without_scope() {
+        let user = test_auth_user(AuthMethod::ServiceAccount, "");
+        assert!(user.can_write());
+        assert!(user.ensure_write_scope().is_ok());
     }
 }
