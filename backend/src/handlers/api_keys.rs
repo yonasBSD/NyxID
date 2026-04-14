@@ -127,9 +127,25 @@ pub struct UpdateApiKeyRequest {
     pub allowed_node_ids: Option<Vec<String>>,
     pub allow_all_services: Option<bool>,
     pub allow_all_nodes: Option<bool>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
     pub rate_limit_per_second: Option<Option<u32>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
     pub rate_limit_burst: Option<Option<u32>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
     pub platform: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
     pub callback_url: Option<Option<String>>,
 }
 
@@ -1189,4 +1205,41 @@ pub async fn rotate_key(
         rate_limit_burst: created.rate_limit_burst,
         platform: created.platform,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::UpdateApiKeyRequest;
+
+    #[test]
+    fn platform_absent_means_no_change() {
+        let req: UpdateApiKeyRequest = serde_json::from_str(r#"{"name": "k"}"#).unwrap();
+        assert!(req.platform.is_none());
+    }
+
+    #[test]
+    fn platform_null_means_clear() {
+        let req: UpdateApiKeyRequest = serde_json::from_str(r#"{"platform": null}"#).unwrap();
+        assert_eq!(req.platform, Some(None));
+    }
+
+    #[test]
+    fn platform_value_means_set() {
+        let req: UpdateApiKeyRequest =
+            serde_json::from_str(r#"{"platform": "claude-code"}"#).unwrap();
+        assert_eq!(req.platform, Some(Some("claude-code".to_string())));
+    }
+
+    #[test]
+    fn callback_url_null_means_clear() {
+        let req: UpdateApiKeyRequest = serde_json::from_str(r#"{"callback_url": null}"#).unwrap();
+        assert_eq!(req.callback_url, Some(None));
+    }
+
+    #[test]
+    fn rate_limit_null_means_clear() {
+        let req: UpdateApiKeyRequest =
+            serde_json::from_str(r#"{"rate_limit_per_second": null}"#).unwrap();
+        assert_eq!(req.rate_limit_per_second, Some(None));
+    }
 }
