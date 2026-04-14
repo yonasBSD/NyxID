@@ -48,6 +48,22 @@ impl McpToolSource {
     }
 }
 
+/// Agent/scope context carried into [`execute_tool`].
+///
+/// Mirrors the agent-isolation fields already honored by the REST proxy
+/// (`execute_proxy_inner`): per-agent credential binding resolution and
+/// node allow-list enforcement. OAuth and session callers pass `api_key_id:
+/// None` and `allow_all_nodes: true`, preserving their existing behavior.
+pub struct McpExecContext<'a> {
+    /// API key ID that is acting on behalf of the user. Enables per-agent
+    /// credential override via [`proxy_service::resolve_agent_credential_override`].
+    pub api_key_id: Option<&'a str>,
+    /// When true, node routing and fallbacks are not filtered.
+    pub allow_all_nodes: bool,
+    /// Permitted node IDs when `allow_all_nodes` is false.
+    pub allowed_node_ids: &'a [String],
+}
+
 /// A downstream service with its active endpoints, ready for MCP tool generation.
 pub struct McpToolService {
     pub service_id: String,
@@ -1665,6 +1681,7 @@ pub async fn execute_tool(
     jwt_keys: &crate::crypto::jwt::JwtKeys,
     config: &crate::config::AppConfig,
     token_exchange_cache: &crate::services::provider_token_exchange_service::TokenExchangeCache,
+    exec_ctx: &McpExecContext<'_>,
 ) -> AppResult<(u16, String)> {
     use crate::models::user::{COLLECTION_NAME as USERS, User};
     use crate::services::node_ws_manager::{NodeProxyRequest, ProxyResponseType};
@@ -1683,7 +1700,7 @@ pub async fn execute_tool(
         McpToolSource::UserManaged {
             user_service_id, ..
         } => {
-            let resolution = proxy_service::resolve_proxy_target_by_user_service_id(
+            let mut resolution = proxy_service::resolve_proxy_target_by_user_service_id(
                 db,
                 encryption_keys,
                 user_id,
@@ -1699,6 +1716,32 @@ pub async fn execute_tool(
                 ))
             })?;
             let has_cred = resolution.has_server_credential;
+
+            // Per-agent credential override: when acting as an API key with
+            // an agent binding, swap in the override credential before execute.
+            // Matches `execute_proxy_inner` in handlers/proxy.rs.
+            if let Some(ak_id) = exec_ctx.api_key_id
+                && let Some(override_cred) = proxy_service::resolve_agent_credential_override(
+                    db,
+                    encryption_keys,
+                    user_id,
+                    ak_id,
+                    user_service_id,
+                )
+                .await?
+            {
+                resolution.target.credential = override_cred;
+            }
+
+            // Enforce node allow-list for scoped API keys on the primary node.
+            if !exec_ctx.allow_all_nodes
+                && let Some(ref nid) = resolution.node_id
+                && !exec_ctx.allowed_node_ids.contains(nid)
+            {
+                return Err(AppError::ApiKeyScopeForbidden(
+                    "API key does not have access to this node".to_string(),
+                ));
+            }
             // Build the full NodeRoute (primary + fallbacks) from the resolution
             let effective_owner = resolution
                 .org_routing
@@ -1706,16 +1749,21 @@ pub async fn execute_tool(
                 .map(|r| r.org_user_id.as_str())
                 .unwrap_or(user_id);
             let nr = if let Some(ref primary_nid) = resolution.node_id {
-                let fallback_ids = node_routing_service::list_viable_binding_node_ids(
-                    db,
-                    effective_owner,
-                    &resolution.target.service.id,
-                    node_ws_manager.as_ref(),
-                )
-                .await?
-                .into_iter()
-                .filter(|nid| nid != primary_nid)
-                .collect();
+                let mut fallback_ids: Vec<String> =
+                    node_routing_service::list_viable_binding_node_ids(
+                        db,
+                        effective_owner,
+                        &resolution.target.service.id,
+                        node_ws_manager.as_ref(),
+                    )
+                    .await?
+                    .into_iter()
+                    .filter(|nid| nid != primary_nid)
+                    .collect();
+                // Trim failover candidates for scoped API keys.
+                if !exec_ctx.allow_all_nodes {
+                    fallback_ids.retain(|nid| exec_ctx.allowed_node_ids.contains(nid));
+                }
                 Some(node_routing_service::NodeRoute {
                     node_id: primary_nid.clone(),
                     fallback_node_ids: fallback_ids,
@@ -1732,13 +1780,31 @@ pub async fn execute_tool(
             // route exists, use the lenient resolver (credential may be
             // absent if the node manages it). Otherwise, use the strict
             // resolver which requires a credential.
-            let nr = node_routing_service::resolve_node_route(
+            let mut nr = node_routing_service::resolve_node_route(
                 db,
                 user_id,
                 downstream_service_id,
                 node_ws_manager.as_ref(),
             )
             .await?;
+
+            // Enforce node allow-list for scoped API keys: reject the primary
+            // node if it is out of scope, and prune out-of-scope failover
+            // candidates. Mirrors the UserManaged branch and the REST proxy
+            // check in `execute_proxy_inner`.
+            if !exec_ctx.allow_all_nodes
+                && let Some(route) = nr.as_mut()
+            {
+                if !exec_ctx.allowed_node_ids.contains(&route.node_id) {
+                    return Err(AppError::ApiKeyScopeForbidden(
+                        "API key does not have access to this node".to_string(),
+                    ));
+                }
+                route
+                    .fallback_node_ids
+                    .retain(|nid| exec_ctx.allowed_node_ids.contains(nid));
+            }
+
             let (t, has_cred) = if nr.is_some() {
                 proxy_service::resolve_proxy_target_lenient(
                     db,
