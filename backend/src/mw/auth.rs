@@ -1,5 +1,8 @@
 use axum::{
-    extract::FromRequestParts, http::request::Parts, middleware::Next, response::IntoResponse,
+    extract::FromRequestParts,
+    http::{Method, request::Parts},
+    middleware::Next,
+    response::IntoResponse,
 };
 use base64::Engine as _;
 use mongodb::bson::doc;
@@ -142,6 +145,19 @@ impl AuthUser {
             "write or admin scope required for this operation".to_string(),
         ))
     }
+
+    pub fn ensure_management_write_scope(
+        &self,
+        method: &Method,
+        path: &str,
+    ) -> Result<(), AppError> {
+        if matches!(self.auth_method, AuthMethod::ApiKey)
+            && api_key_management_write_requires_scope(method, path)
+        {
+            self.ensure_write_scope()?;
+        }
+        Ok(())
+    }
 }
 
 /// Name of the session cookie.
@@ -175,6 +191,34 @@ pub fn scope_allows_rest_proxy(scopes: &str) -> bool {
 
 pub fn scope_allows_llm_proxy(scopes: &str) -> bool {
     scope_allows_rest_proxy(scopes) || scope_contains(scopes, LLM_PROXY_SCOPE)
+}
+
+fn api_key_management_write_requires_scope(method: &Method, path: &str) -> bool {
+    if !matches!(
+        *method,
+        Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    ) || !path_matches_prefix(path, "/api/v1")
+    {
+        return false;
+    }
+
+    ![
+        "/api/v1/channel-events",
+        "/api/v1/channel-relay",
+        "/api/v1/delegation",
+        "/api/v1/llm",
+        "/api/v1/proxy",
+        "/api/v1/ssh",
+    ]
+    .iter()
+    .any(|prefix| path_matches_prefix(path, prefix))
+}
+
+fn path_matches_prefix(path: &str, prefix: &str) -> bool {
+    path == prefix
+        || path
+            .strip_prefix(prefix)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 impl FromRequestParts<AppState> for AuthUser {
@@ -236,7 +280,7 @@ impl FromRequestParts<AppState> for AuthUser {
                                         }
                                     }
 
-                                    return Ok(AuthUser {
+                                    let auth_user = AuthUser {
                                         user_id,
                                         session_id: None,
                                         scope: api_key.scopes.clone(),
@@ -251,7 +295,12 @@ impl FromRequestParts<AppState> for AuthUser {
                                         api_key_name: Some(api_key.name.clone()),
                                         rate_limit_per_second: api_key.rate_limit_per_second,
                                         rate_limit_burst: api_key.rate_limit_burst,
-                                    });
+                                    };
+                                    auth_user.ensure_management_write_scope(
+                                        &parts.method,
+                                        parts.uri.path(),
+                                    )?;
+                                    return Ok(auth_user);
                                 }
                                 Err(_) => return Err(jwt_err),
                             }
@@ -508,7 +557,7 @@ impl FromRequestParts<AppState> for AuthUser {
                     }
                 }
 
-                return Ok(AuthUser {
+                let auth_user = AuthUser {
                     user_id,
                     session_id: None,
                     scope: key.scopes.clone(),
@@ -523,7 +572,9 @@ impl FromRequestParts<AppState> for AuthUser {
                     api_key_name: Some(key.name.clone()),
                     rate_limit_per_second: key.rate_limit_per_second,
                     rate_limit_burst: key.rate_limit_burst,
-                });
+                };
+                auth_user.ensure_management_write_scope(&parts.method, parts.uri.path())?;
+                return Ok(auth_user);
             }
 
             tracing::debug!(
@@ -1002,6 +1053,78 @@ mod tests {
             .unwrap();
 
         assert!(!is_service_account_request(&request));
+    }
+
+    #[test]
+    fn api_key_management_write_routes_require_write_scope() {
+        let user = test_auth_user(AuthMethod::ApiKey, "read proxy");
+        let write_routes = [
+            (Method::POST, "/api/v1/api-keys"),
+            (Method::POST, "/api/v1/api-keys/key-1/rotate"),
+            (Method::POST, "/api/v1/keys"),
+            (Method::PUT, "/api/v1/keys/key-1"),
+            (Method::DELETE, "/api/v1/keys/key-1"),
+            (Method::PUT, "/api/v1/endpoints/endpoint-1"),
+            (Method::DELETE, "/api/v1/endpoints/endpoint-1"),
+            (Method::PUT, "/api/v1/api-keys/external/key-1"),
+            (Method::DELETE, "/api/v1/api-keys/external/key-1"),
+            (Method::PUT, "/api/v1/user-services/service-1"),
+            (Method::DELETE, "/api/v1/user-services/service-1"),
+        ];
+
+        for (method, path) in write_routes {
+            assert!(
+                api_key_management_write_requires_scope(&method, path),
+                "{method:?} {path} should require write scope"
+            );
+            assert!(
+                user.ensure_management_write_scope(&method, path).is_err(),
+                "{method:?} {path} should reject read-only API key auth"
+            );
+        }
+    }
+
+    #[test]
+    fn api_key_write_or_admin_scope_can_use_management_write_routes() {
+        let write_user = test_auth_user(AuthMethod::ApiKey, "read write");
+        let admin_user = test_auth_user(AuthMethod::ApiKey, "read admin");
+
+        for user in [write_user, admin_user] {
+            assert!(
+                user.ensure_management_write_scope(&Method::POST, "/api/v1/keys")
+                    .is_ok()
+            );
+            assert!(
+                user.ensure_management_write_scope(&Method::PUT, "/api/v1/api-keys/external/key-1")
+                    .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn api_key_read_and_operational_routes_do_not_require_management_write_scope() {
+        let user = test_auth_user(AuthMethod::ApiKey, "read proxy");
+        let allowed_routes = [
+            (Method::GET, "/api/v1/keys"),
+            (Method::GET, "/api/v1/api-keys/external"),
+            (Method::POST, "/api/v1/proxy/s/openai/v1/chat/completions"),
+            (Method::POST, "/api/v1/llm/gateway/v1/chat/completions"),
+            (Method::POST, "/api/v1/channel-relay/reply"),
+            (Method::POST, "/api/v1/channel-events/conversation-1"),
+            (Method::POST, "/api/v1/ssh/service-1/exec"),
+            (Method::POST, "/oauth/token"),
+        ];
+
+        for (method, path) in allowed_routes {
+            assert!(
+                !api_key_management_write_requires_scope(&method, path),
+                "{method:?} {path} should not use management write-scope gating"
+            );
+            assert!(
+                user.ensure_management_write_scope(&method, path).is_ok(),
+                "{method:?} {path} should not reject at the management scope layer"
+            );
+        }
     }
 
     #[test]
