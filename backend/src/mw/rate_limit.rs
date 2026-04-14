@@ -191,10 +191,26 @@ pub fn check_agent_rate_limit(
     limiter: &PerAgentRateLimiter,
     auth_user: &crate::mw::auth::AuthUser,
 ) -> Result<(), crate::errors::AppError> {
-    if let (Some(agent_id), Some(rps)) = (&auth_user.api_key_id, auth_user.rate_limit_per_second) {
+    check_agent_rate_limit_raw(
+        limiter,
+        auth_user.api_key_id.as_deref(),
+        auth_user.rate_limit_per_second,
+        auth_user.rate_limit_burst,
+    )
+}
+
+/// Check per-agent rate limit using raw API-key identity and limit fields.
+/// Used by callers that don't hold an `AuthUser` (e.g. the MCP transport).
+pub fn check_agent_rate_limit_raw(
+    limiter: &PerAgentRateLimiter,
+    api_key_id: Option<&str>,
+    rate_limit_per_second: Option<u32>,
+    rate_limit_burst: Option<u32>,
+) -> Result<(), crate::errors::AppError> {
+    if let (Some(agent_id), Some(rps)) = (api_key_id, rate_limit_per_second) {
         // When no explicit burst is set, use the sustained rate as the ceiling.
         // Users who want a higher burst can set rate_limit_burst explicitly.
-        let burst = auth_user.rate_limit_burst.unwrap_or(rps);
+        let burst = rate_limit_burst.unwrap_or(rps);
         if !limiter.check(agent_id, rps, burst) {
             tracing::warn!(
                 agent_id = %agent_id,

@@ -180,11 +180,95 @@ fn mcp_403_insufficient_scope() -> Response {
         .expect("failed to build 403 response")
 }
 
+/// 403 returned when an `x-api-key` lacks the scope required for MCP.
+/// API keys currently only accept `proxy` (see `VALID_API_KEY_SCOPES`),
+/// so the message names just that scope.
+fn mcp_403_api_key_insufficient_scope() -> Response {
+    let body = serde_json::json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "error": {
+            "code": -32003,
+            "message": format!(
+                "API key is missing the required scope for MCP access. Expected: {}",
+                auth::PROXY_SCOPE
+            ),
+        },
+        "id": null,
+    });
+
+    Response::builder()
+        .status(StatusCode::FORBIDDEN)
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(body.to_string()))
+        .expect("failed to build 403 response")
+}
+
+/// JSON-RPC-style forbidden response for scope/binding violations.
+fn rpc_scope_forbidden(id: Option<serde_json::Value>, message: &str) -> Response {
+    axum::Json(JsonRpcResponse {
+        jsonrpc: JSONRPC_VERSION.into(),
+        id,
+        result: None,
+        error: Some(JsonRpcError {
+            code: -32003,
+            message: message.into(),
+            data: None,
+        }),
+    })
+    .into_response()
+}
+
 // ---------------------------------------------------------------------------
 // Auth helper (manual token validation, NOT AuthUser extractor)
 // ---------------------------------------------------------------------------
 
-/// Extract and validate the Bearer token, returning the user_id string.
+/// Result of MCP authentication.
+///
+/// Carries the full API-key identity and scope fields so that MCP requests
+/// honor the same agent-isolation model as the REST proxy path:
+/// service/node allow-lists, per-agent credential bindings, per-agent rate
+/// limits, and audit attribution.
+#[derive(Debug, Clone)]
+struct McpAuthContext {
+    user_id: String,
+    /// True when auth was via `x-api-key`. API-key requests are stateless: each
+    /// request authenticates independently, no MCP session is created or required.
+    is_api_key: bool,
+    api_key_id: Option<String>,
+    api_key_name: Option<String>,
+    /// If false, `allowed_service_ids` constrains which UserServices this request may call.
+    allow_all_services: bool,
+    /// If false, `allowed_node_ids` constrains which nodes this request may route through.
+    allow_all_nodes: bool,
+    allowed_service_ids: Vec<String>,
+    allowed_node_ids: Vec<String>,
+    rate_limit_per_second: Option<u32>,
+    rate_limit_burst: Option<u32>,
+}
+
+impl McpAuthContext {
+    fn user(user_id: String) -> Self {
+        Self {
+            user_id,
+            is_api_key: false,
+            api_key_id: None,
+            api_key_name: None,
+            allow_all_services: true,
+            allow_all_nodes: true,
+            allowed_service_ids: Vec::new(),
+            allowed_node_ids: Vec::new(),
+            rate_limit_per_second: None,
+            rate_limit_burst: None,
+        }
+    }
+}
+
+/// Extract and validate the request credentials, returning the user_id.
+///
+/// Auth precedence:
+/// 1. `x-api-key` header (stateless, for headless integrations like n8n/Make/Zapier)
+/// 2. `Authorization: Bearer <JWT>` (OAuth access token)
+/// 3. `Mcp-Session-Id` header (session fallback; only when `session_fallback` is true)
 ///
 /// When `session_fallback` is true (all methods except `initialize`), an
 /// expired JWT is tolerated as long as a valid MCP session exists.  This
@@ -196,13 +280,42 @@ async fn authenticate_mcp(
     state: &AppState,
     headers: &HeaderMap,
     session_fallback: bool,
-) -> Result<String, Response> {
+) -> Result<McpAuthContext, Response> {
+    // --- Try API key first (stateless auth for headless clients) ---
+    if let Some(api_key_header) = headers.get("x-api-key") {
+        let raw_key = api_key_header
+            .to_str()
+            .map_err(|_| mcp_401(&state.config.base_url))?;
+
+        match crate::services::key_service::validate_api_key(&state.db, raw_key).await {
+            Ok((user_id, api_key)) => {
+                if !auth::scope_allows_rest_proxy(&api_key.scopes) {
+                    return Err(mcp_403_api_key_insufficient_scope());
+                }
+                let user_id = verify_user_active(state, user_id).await?;
+                return Ok(McpAuthContext {
+                    user_id,
+                    is_api_key: true,
+                    api_key_id: Some(api_key.id.clone()),
+                    api_key_name: Some(api_key.name.clone()),
+                    allow_all_services: api_key.allow_all_services,
+                    allow_all_nodes: api_key.allow_all_nodes,
+                    allowed_service_ids: api_key.allowed_service_ids.clone(),
+                    allowed_node_ids: api_key.allowed_node_ids.clone(),
+                    rate_limit_per_second: api_key.rate_limit_per_second,
+                    rate_limit_burst: api_key.rate_limit_burst,
+                });
+            }
+            Err(_) => return Err(mcp_401(&state.config.base_url)),
+        }
+    }
+
     let token = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "));
 
-    // --- Try JWT-based auth first ---
+    // --- Try JWT-based auth ---
     if let Some(token) = token {
         match jwt::verify_token(&state.jwt_keys, &state.config, token) {
             Ok(claims) if claims.token_type == "access" => {
@@ -212,10 +325,12 @@ async fn authenticate_mcp(
 
                 // Service account tokens have sa=true; verify against
                 // the service_accounts collection instead of users.
-                if claims.sa == Some(true) {
-                    return verify_service_account_active(state, claims.sub).await;
-                }
-                return verify_user_active(state, claims.sub).await;
+                let user_id = if claims.sa == Some(true) {
+                    verify_service_account_active(state, claims.sub).await?
+                } else {
+                    verify_user_active(state, claims.sub).await?
+                };
+                return Ok(McpAuthContext::user(user_id));
             }
             Err(_) if session_fallback => {
                 // Any JWT error (expired, invalid issuer, etc.) -- fall through
@@ -239,7 +354,8 @@ async fn authenticate_mcp(
         if !state.mcp_sessions.allows_proxy_access(sid) {
             return Err(mcp_403_insufficient_scope());
         }
-        return verify_user_active(state, user_id).await;
+        let user_id = verify_user_active(state, user_id).await?;
+        return Ok(McpAuthContext::user(user_id));
     }
 
     Err(mcp_401(&state.config.base_url))
@@ -307,6 +423,68 @@ fn validate_session(
 // Notification helper
 // ---------------------------------------------------------------------------
 
+/// True when the caller is an API key with any scope restriction (either a
+/// service or node allow-list). Such callers must not reach SSH meta-tools,
+/// which have no per-service/per-node binding to enforce against.
+fn is_scoped_api_key(auth: &McpAuthContext) -> bool {
+    auth.is_api_key && (!auth.allow_all_services || !auth.allow_all_nodes)
+}
+
+/// Names of tools that SSH-gate on agent scope.
+const SSH_META_TOOL_NAMES: &[&str] = &["nyx__ssh_exec", "nyx__ssh_list_services"];
+
+/// Drop user-managed services the API key is not scoped to, and reject all
+/// platform services (scoped API keys are UserService-only, matching the REST
+/// proxy check in `execute_proxy_inner`). OAuth/session callers keep every
+/// service since `allow_all_services` is `true` in `McpAuthContext::user`.
+fn filter_services_by_scope(
+    services: Vec<mcp_service::McpToolService>,
+    auth: &McpAuthContext,
+) -> Vec<mcp_service::McpToolService> {
+    if auth.allow_all_services {
+        return services;
+    }
+    services
+        .into_iter()
+        .filter(|svc| match &svc.source {
+            mcp_service::McpToolSource::UserManaged { .. } => {
+                auth.allowed_service_ids.contains(&svc.service_id)
+            }
+            mcp_service::McpToolSource::Platform { .. } => false,
+        })
+        .collect()
+}
+
+/// Return an error response when the authenticated API key does not have
+/// access to this service. Mirrors `AppError::ApiKeyScopeForbidden` framing.
+#[allow(clippy::result_large_err)]
+fn ensure_service_in_scope(
+    auth: &McpAuthContext,
+    service: &mcp_service::McpToolService,
+    request_id: Option<serde_json::Value>,
+) -> Result<(), Response> {
+    if auth.allow_all_services {
+        return Ok(());
+    }
+    match &service.source {
+        mcp_service::McpToolSource::UserManaged { .. }
+            if auth.allowed_service_ids.contains(&service.service_id) =>
+        {
+            Ok(())
+        }
+        mcp_service::McpToolSource::UserManaged { .. } => Err(tool_result(
+            request_id,
+            "API key does not have access to this service",
+            true,
+        )),
+        mcp_service::McpToolSource::Platform { .. } => Err(tool_result(
+            request_id,
+            "Scoped API keys cannot call platform services through MCP",
+            true,
+        )),
+    }
+}
+
 /// Send a `notifications/tools/list_changed` JSON-RPC notification
 /// to the session's SSE stream.
 fn send_tools_list_changed(state: &AppState, session_id: &str) {
@@ -337,16 +515,29 @@ pub async fn mcp_post(State(state): State<AppState>, headers: HeaderMap, body: S
         Err(_) => return rpc_error(None, -32700, "Parse error"),
     };
 
-    // `initialize` requires a valid JWT (no session exists yet).
+    // `initialize` requires a valid JWT or API key (no session exists yet).
     // All other methods allow session-based auth fallback.
     let is_initialize = request.method == "initialize";
-    let user_id = match authenticate_mcp(&state, &headers, !is_initialize).await {
-        Ok(uid) => uid,
+    let auth = match authenticate_mcp(&state, &headers, !is_initialize).await {
+        Ok(a) => a,
         Err(resp) => return resp,
     };
 
+    // Per-agent rate limit runs after auth, before any work. For OAuth/session
+    // callers it is a no-op (no api_key_id / rps). This mirrors the REST proxy.
+    if let Err(e) = crate::mw::rate_limit::check_agent_rate_limit_raw(
+        &state.per_agent_limiter,
+        auth.api_key_id.as_deref(),
+        auth.rate_limit_per_second,
+        auth.rate_limit_burst,
+    ) {
+        return app_error_to_rpc(request.id.clone(), &e);
+    }
+
+    let user_id = auth.user_id.clone();
+
     match request.method.as_str() {
-        "initialize" => handle_initialize(&state, &user_id, &request),
+        "initialize" => handle_initialize(&state, &user_id, &request, auth.is_api_key),
 
         "notifications/initialized" => {
             if let Ok(sid) = require_session(&headers) {
@@ -356,26 +547,20 @@ pub async fn mcp_post(State(state): State<AppState>, headers: HeaderMap, body: S
         }
 
         "tools/list" => {
-            let sid = match require_session(&headers) {
+            let sid = match resolve_session(&state, &headers, &user_id, &auth, request.id.clone()) {
                 Ok(s) => s,
                 Err(r) => return r,
             };
-            if let Err(r) = validate_session(&state, &sid, &user_id, request.id.clone()) {
-                return r;
-            }
-            handle_tools_list(&state, &user_id, &sid, &request).await
+            handle_tools_list(&state, &auth, sid.as_deref(), &request).await
         }
 
         "tools/call" => {
-            let sid = match require_session(&headers) {
+            let sid = match resolve_session(&state, &headers, &user_id, &auth, request.id.clone()) {
                 Ok(s) => s,
                 Err(r) => return r,
             };
-            if let Err(r) = validate_session(&state, &sid, &user_id, request.id.clone()) {
-                return r;
-            }
             let sse_capable = accepts_sse(&headers);
-            handle_tools_call(&state, &user_id, &sid, &request, sse_capable).await
+            handle_tools_call(&state, &auth, sid.as_deref(), &request, sse_capable).await
         }
 
         "ping" => rpc_success(request.id, serde_json::json!({})),
@@ -384,16 +569,80 @@ pub async fn mcp_post(State(state): State<AppState>, headers: HeaderMap, body: S
     }
 }
 
+/// Translate an `AppError` into a JSON-RPC response. Used when callers hold the
+/// raw request id and need uniform error framing (e.g. rate-limit rejections).
+fn app_error_to_rpc(id: Option<serde_json::Value>, err: &crate::errors::AppError) -> Response {
+    use crate::errors::AppError;
+    match err {
+        AppError::RateLimited => rpc_error(id, -32005, "Rate limit exceeded"),
+        AppError::ApiKeyScopeForbidden(msg) => rpc_scope_forbidden(id, msg),
+        _ => rpc_error(id, -32603, "Internal error"),
+    }
+}
+
+/// Resolve the MCP session for a request.
+///
+/// For OAuth/JWT/session auth: session is required and validated against user_id.
+/// For API-key auth: session is optional. If the header is present it must be
+/// valid; if absent the request proceeds statelessly (returns `None`).
+#[allow(clippy::result_large_err)]
+fn resolve_session(
+    state: &AppState,
+    headers: &HeaderMap,
+    user_id: &str,
+    auth: &McpAuthContext,
+    request_id: Option<serde_json::Value>,
+) -> Result<Option<String>, Response> {
+    let raw_sid = headers.get("mcp-session-id").and_then(|v| v.to_str().ok());
+
+    match (auth.is_api_key, raw_sid) {
+        (true, None) => Ok(None),
+        (true, Some(sid)) => {
+            let sid = sid.to_string();
+            validate_session(state, &sid, user_id, request_id)?;
+            Ok(Some(sid))
+        }
+        (false, _) => {
+            let sid = require_session(headers)?;
+            validate_session(state, &sid, user_id, request_id)?;
+            Ok(Some(sid))
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // GET /mcp -- SSE notification stream
 // ---------------------------------------------------------------------------
 
 pub async fn mcp_get(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let user_id = match authenticate_mcp(&state, &headers, true).await {
-        Ok(uid) => uid,
+    let auth = match authenticate_mcp(&state, &headers, true).await {
+        Ok(a) => a,
         Err(resp) => return resp,
     };
 
+    if let Err(e) = crate::mw::rate_limit::check_agent_rate_limit_raw(
+        &state.per_agent_limiter,
+        auth.api_key_id.as_deref(),
+        auth.rate_limit_per_second,
+        auth.rate_limit_burst,
+    ) {
+        return app_error_to_rpc(None, &e);
+    }
+
+    // API-key requests without a session have nothing to stream: return empty
+    // keep-alive SSE rather than 400. Real clients use POST /mcp for each call.
+    if auth.is_api_key && headers.get("mcp-session-id").is_none() {
+        let stream = tokio_stream::empty::<Result<Event, Infallible>>();
+        return Sse::new(stream)
+            .keep_alive(
+                KeepAlive::new()
+                    .interval(Duration::from_secs(30))
+                    .text("keepalive"),
+            )
+            .into_response();
+    }
+
+    let user_id = auth.user_id;
     let sid = match require_session(&headers) {
         Ok(s) => s,
         Err(r) => return r,
@@ -438,32 +687,46 @@ pub async fn mcp_get(State(state): State<AppState>, headers: HeaderMap) -> Respo
 // ---------------------------------------------------------------------------
 
 pub async fn mcp_delete(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let user_id = match authenticate_mcp(&state, &headers, true).await {
-        Ok(uid) => uid,
+    let auth = match authenticate_mcp(&state, &headers, true).await {
+        Ok(a) => a,
         Err(resp) => return resp,
     };
+
+    if let Err(e) = crate::mw::rate_limit::check_agent_rate_limit_raw(
+        &state.per_agent_limiter,
+        auth.api_key_id.as_deref(),
+        auth.rate_limit_per_second,
+        auth.rate_limit_burst,
+    ) {
+        return app_error_to_rpc(None, &e);
+    }
+
+    // API-key request without a session: nothing to delete, return 204.
+    if auth.is_api_key && headers.get("mcp-session-id").is_none() {
+        return StatusCode::NO_CONTENT.into_response();
+    }
 
     let sid = match require_session(&headers) {
         Ok(s) => s,
         Err(r) => return r,
     };
 
-    if let Err(r) = validate_session(&state, &sid, &user_id, None) {
+    if let Err(r) = validate_session(&state, &sid, &auth.user_id, None) {
         return r;
     }
 
     state.mcp_sessions.remove(&sid);
 
-    // Audit log for session deletion
+    // Audit log for session deletion -- attribute API key when present.
     audit_service::log_async(
         state.db.clone(),
-        Some(user_id.to_string()),
+        Some(auth.user_id.clone()),
         "mcp_session_deleted".to_string(),
         Some(serde_json::json!({ "session_id": &sid })),
         None,
         None,
-        None,
-        None,
+        auth.api_key_id.clone(),
+        auth.api_key_name.clone(),
     );
 
     StatusCode::NO_CONTENT.into_response()
@@ -473,23 +736,34 @@ pub async fn mcp_delete(State(state): State<AppState>, headers: HeaderMap) -> Re
 // Method handlers
 // ---------------------------------------------------------------------------
 
-fn handle_initialize(state: &AppState, user_id: &str, request: &JsonRpcRequest) -> Response {
-    let session_id = match state.mcp_sessions.create_with_proxy_access(user_id, true) {
-        Some(id) => id,
-        None => return rpc_error(request.id.clone(), -32000, "Too many active MCP sessions"),
+fn handle_initialize(
+    state: &AppState,
+    user_id: &str,
+    request: &JsonRpcRequest,
+    is_api_key: bool,
+) -> Response {
+    // API-key auth is stateless: each request authenticates independently,
+    // so no MCP session is created on initialize.
+    let session_id = if is_api_key {
+        None
+    } else {
+        match state.mcp_sessions.create_with_proxy_access(user_id, true) {
+            Some(id) => {
+                audit_service::log_async(
+                    state.db.clone(),
+                    Some(user_id.to_string()),
+                    "mcp_session_created".to_string(),
+                    Some(serde_json::json!({ "session_id": &id })),
+                    None,
+                    None,
+                    None,
+                    None,
+                );
+                Some(id)
+            }
+            None => return rpc_error(request.id.clone(), -32000, "Too many active MCP sessions"),
+        }
     };
-
-    // Audit log for session creation
-    audit_service::log_async(
-        state.db.clone(),
-        Some(user_id.to_string()),
-        "mcp_session_created".to_string(),
-        Some(serde_json::json!({ "session_id": &session_id })),
-        None,
-        None,
-        None,
-        None,
-    );
 
     let result = serde_json::json!({
         "protocolVersion": MCP_PROTOCOL_VERSION,
@@ -509,35 +783,38 @@ fn handle_initialize(state: &AppState, user_id: &str, request: &JsonRpcRequest) 
         error: None,
     };
 
-    let header_value = match axum::http::HeaderValue::from_str(&session_id) {
-        Ok(v) => v,
-        Err(_) => {
-            return rpc_error(
-                request.id.clone(),
-                -32603,
-                "Failed to create session header",
-            );
-        }
-    };
-
     let mut response = axum::Json(body).into_response();
-    response.headers_mut().insert(
-        axum::http::HeaderName::from_static("mcp-session-id"),
-        header_value,
-    );
+
+    if let Some(sid) = session_id {
+        let header_value = match axum::http::HeaderValue::from_str(&sid) {
+            Ok(v) => v,
+            Err(_) => {
+                return rpc_error(
+                    request.id.clone(),
+                    -32603,
+                    "Failed to create session header",
+                );
+            }
+        };
+        response.headers_mut().insert(
+            axum::http::HeaderName::from_static("mcp-session-id"),
+            header_value,
+        );
+    }
+
     response
 }
 
 async fn handle_tools_list(
     state: &AppState,
-    user_id: &str,
-    session_id: &str,
+    auth: &McpAuthContext,
+    session_id: Option<&str>,
     request: &JsonRpcRequest,
 ) -> Response {
     let services = match mcp_service::load_user_tools(
         &state.db,
         state.node_ws_manager.as_ref(),
-        user_id,
+        &auth.user_id,
     )
     .await
     {
@@ -548,11 +825,25 @@ async fn handle_tools_list(
         }
     };
 
-    // Get activated service IDs for this session
-    let activated = state.mcp_sessions.get_activated_service_ids(session_id);
+    // Enforce API-key service scope: scoped keys only see the UserServices in
+    // their allow-list, mirroring the REST proxy's ApiKeyScopeForbidden check.
+    let services = filter_services_by_scope(services, auth);
 
-    // Generate only meta-tools + activated service tools
-    let tool_defs = mcp_service::generate_tool_definitions(&services, Some(&activated));
+    // Session-backed clients get meta-tools + activated service tools only.
+    // Stateless (API-key) clients with no session get the full tool list up front.
+    let mut tool_defs = match session_id {
+        Some(sid) => {
+            let activated = state.mcp_sessions.get_activated_service_ids(sid);
+            mcp_service::generate_tool_definitions(&services, Some(&activated))
+        }
+        None => mcp_service::generate_tool_definitions(&services, None),
+    };
+
+    // Scoped API keys do not get SSH meta-tools. SSH invocations would
+    // otherwise escape the service/node allow-list entirely.
+    if is_scoped_api_key(auth) {
+        tool_defs.retain(|t| !SSH_META_TOOL_NAMES.contains(&t.name.as_str()));
+    }
 
     let tools_json: Vec<serde_json::Value> = tool_defs
         .iter()
@@ -573,8 +864,8 @@ async fn handle_tools_list(
 
 async fn handle_tools_call(
     state: &AppState,
-    user_id: &str,
-    session_id: &str,
+    auth: &McpAuthContext,
+    session_id: Option<&str>,
     request: &JsonRpcRequest,
     client_accepts_sse: bool,
 ) -> Response {
@@ -598,7 +889,7 @@ async fn handle_tools_call(
         "nyx__search_tools" => {
             return handle_meta_search(
                 state,
-                user_id,
+                auth,
                 session_id,
                 &arguments,
                 request.id.clone(),
@@ -607,12 +898,13 @@ async fn handle_tools_call(
             .await;
         }
         "nyx__discover_services" => {
-            return handle_meta_discover(state, user_id, &arguments, request.id.clone()).await;
+            return handle_meta_discover(state, &auth.user_id, &arguments, request.id.clone())
+                .await;
         }
         "nyx__connect_service" => {
             return handle_meta_connect(
                 state,
-                user_id,
+                auth,
                 session_id,
                 &arguments,
                 request.id.clone(),
@@ -623,7 +915,7 @@ async fn handle_tools_call(
         "nyx__call_tool" => {
             return handle_meta_call_tool(
                 state,
-                user_id,
+                auth,
                 session_id,
                 &arguments,
                 request.id.clone(),
@@ -631,22 +923,30 @@ async fn handle_tools_call(
             )
             .await;
         }
-        "nyx__ssh_exec" => {
-            return handle_mcp_ssh_exec(state, user_id, &arguments, request.id.clone()).await;
-        }
-        "nyx__ssh_list_services" => {
-            return handle_mcp_ssh_list(state, user_id, request.id.clone()).await;
+        "nyx__ssh_exec" | "nyx__ssh_list_services" => {
+            if is_scoped_api_key(auth) {
+                return tool_result(
+                    request.id.clone(),
+                    "SSH meta-tools are not available for scoped API keys. \
+                     Use an unrestricted API key or OAuth.",
+                    true,
+                );
+            }
+            if tool_name == "nyx__ssh_exec" {
+                return handle_mcp_ssh_exec(state, auth, &arguments, request.id.clone()).await;
+            }
+            return handle_mcp_ssh_list(state, auth, request.id.clone()).await;
         }
         _ => {}
     }
 
-    // -- Service tool: verify activation, load, resolve, execute --
-    let activated = state.mcp_sessions.get_activated_service_ids(session_id);
+    // -- Service tool: verify activation (when stateful), load, resolve, execute --
+    let activated = session_id.map(|sid| state.mcp_sessions.get_activated_service_ids(sid));
 
     let services = match mcp_service::load_user_tools(
         &state.db,
         state.node_ws_manager.as_ref(),
-        user_id,
+        &auth.user_id,
     )
     .await
     {
@@ -670,8 +970,17 @@ async fn handle_tools_call(
         }
     };
 
-    // Guard: only allow execution if the service is activated
-    if !activated.contains(&service.service_id) {
+    // Enforce API-key service scope before activation/execute -- scoped keys
+    // must not reach execute_tool for services outside their allow-list.
+    if let Err(resp) = ensure_service_in_scope(auth, service, request.id.clone()) {
+        return resp;
+    }
+
+    // Guard: only allow execution if the service is activated (stateful mode).
+    // Stateless API-key requests bypass the activation gate.
+    if let Some(ref activated_set) = activated
+        && !activated_set.contains(&service.service_id)
+    {
         return tool_result(
             request.id.clone(),
             &format!(
@@ -683,22 +992,27 @@ async fn handle_tools_call(
         );
     }
 
+    let exec_ctx = mcp_exec_context(auth);
     let (status, body) = match mcp_service::execute_tool(
         &state.http_client,
         &state.db,
         &state.encryption_keys,
         &state.node_ws_manager,
-        user_id,
+        &auth.user_id,
         service,
         endpoint,
         &arguments,
         &state.jwt_keys,
         &state.config,
         &state.token_exchange_cache,
+        &exec_ctx,
     )
     .await
     {
         Ok(r) => r,
+        Err(crate::errors::AppError::ApiKeyScopeForbidden(msg)) => {
+            return tool_result(request.id.clone(), &msg, true);
+        }
         Err(e) => {
             tracing::warn!("Tool execution failed for {tool_name}: {e}");
             return tool_result(
@@ -709,10 +1023,10 @@ async fn handle_tools_call(
         }
     };
 
-    // Audit log
+    // Audit log -- attribute the API key when the caller is an agent.
     audit_service::log_async(
         state.db.clone(),
-        Some(user_id.to_string()),
+        Some(auth.user_id.clone()),
         "mcp_tool_call".to_string(),
         Some(serde_json::json!({
             "tool": tool_name,
@@ -721,8 +1035,8 @@ async fn handle_tools_call(
         })),
         None,
         None,
-        None,
-        None,
+        auth.api_key_id.clone(),
+        auth.api_key_name.clone(),
     );
 
     let is_error = !(200..300).contains(&status);
@@ -735,6 +1049,16 @@ async fn handle_tools_call(
     tool_result(request.id.clone(), &content_text, is_error)
 }
 
+/// Build the execution context passed to `mcp_service::execute_tool` from
+/// the authenticated MCP caller -- API key identity + node scope.
+fn mcp_exec_context<'a>(auth: &'a McpAuthContext) -> mcp_service::McpExecContext<'a> {
+    mcp_service::McpExecContext {
+        api_key_id: auth.api_key_id.as_deref(),
+        allow_all_nodes: auth.allow_all_nodes,
+        allowed_node_ids: &auth.allowed_node_ids,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Meta-tool dispatch helpers
 // ---------------------------------------------------------------------------
@@ -745,8 +1069,8 @@ async fn handle_tools_call(
 /// meta-tool, which is always in the static tool list.
 async fn handle_meta_call_tool(
     state: &AppState,
-    user_id: &str,
-    session_id: &str,
+    auth: &McpAuthContext,
+    session_id: Option<&str>,
     arguments: &serde_json::Value,
     request_id: Option<serde_json::Value>,
     client_accepts_sse: bool,
@@ -794,11 +1118,11 @@ async fn handle_meta_call_tool(
             serde_json::Value::Object(flat)
         };
 
-    // Load user tools
+    // Load user tools, then drop anything outside the API key's service scope.
     let services = match mcp_service::load_user_tools(
         &state.db,
         state.node_ws_manager.as_ref(),
-        user_id,
+        &auth.user_id,
     )
     .await
     {
@@ -808,6 +1132,7 @@ async fn handle_meta_call_tool(
             return tool_result(request_id, "Failed to load tools", true);
         }
     };
+    let services = filter_services_by_scope(services, auth);
 
     // Resolve tool (no activation gate -- that's the whole point)
     let (service, endpoint) = match mcp_service::resolve_tool_call(tool_name, &services) {
@@ -823,42 +1148,52 @@ async fn handle_meta_call_tool(
         }
     };
 
-    // Auto-activate so future tools/list responses include this service
-    let changed = state
-        .mcp_sessions
-        .activate_services(session_id, std::slice::from_ref(&service.service_id));
+    // Auto-activate so future tools/list responses include this service.
+    // Stateless (API-key, no session) requests skip activation tracking.
+    let changed = match session_id {
+        Some(sid) => {
+            let changed = state
+                .mcp_sessions
+                .activate_services(sid, std::slice::from_ref(&service.service_id));
+            if changed {
+                send_tools_list_changed(state, sid);
+            }
+            changed
+        }
+        None => false,
+    };
 
-    if changed {
-        send_tools_list_changed(state, session_id);
-    }
-
-    // Execute
+    let exec_ctx = mcp_exec_context(auth);
     let (status, body) = match mcp_service::execute_tool(
         &state.http_client,
         &state.db,
         &state.encryption_keys,
         &state.node_ws_manager,
-        user_id,
+        &auth.user_id,
         service,
         endpoint,
         &inner_args,
         &state.jwt_keys,
         &state.config,
         &state.token_exchange_cache,
+        &exec_ctx,
     )
     .await
     {
         Ok(r) => r,
+        Err(crate::errors::AppError::ApiKeyScopeForbidden(msg)) => {
+            return tool_result(request_id, &msg, true);
+        }
         Err(e) => {
             tracing::warn!("Tool execution failed for {tool_name}: {e}");
             return tool_result(request_id, &format!("Tool execution failed: {e}"), true);
         }
     };
 
-    // Audit log
+    // Audit log -- attribute the API key when the caller is an agent.
     audit_service::log_async(
         state.db.clone(),
-        Some(user_id.to_string()),
+        Some(auth.user_id.clone()),
         "mcp_tool_call".to_string(),
         Some(serde_json::json!({
             "tool": tool_name,
@@ -868,8 +1203,8 @@ async fn handle_meta_call_tool(
         })),
         None,
         None,
-        None,
-        None,
+        auth.api_key_id.clone(),
+        auth.api_key_name.clone(),
     );
 
     let is_error = !(200..300).contains(&status);
@@ -897,8 +1232,8 @@ async fn handle_meta_call_tool(
 
 async fn handle_meta_search(
     state: &AppState,
-    user_id: &str,
-    _session_id: &str,
+    auth: &McpAuthContext,
+    _session_id: Option<&str>,
     arguments: &serde_json::Value,
     request_id: Option<serde_json::Value>,
     _client_accepts_sse: bool,
@@ -917,16 +1252,22 @@ async fn handle_meta_search(
     }
 
     // Load ALL user tools including non-executable (for discovery)
-    let services =
-        match mcp_service::load_user_tools_all(&state.db, state.node_ws_manager.as_ref(), user_id)
-            .await
-        {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!("Failed to load tools for search: {e}");
-                return tool_result(request_id, "Failed to load tools", true);
-            }
-        };
+    let services = match mcp_service::load_user_tools_all(
+        &state.db,
+        state.node_ws_manager.as_ref(),
+        &auth.user_id,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("Failed to load tools for search: {e}");
+            return tool_result(request_id, "Failed to load tools", true);
+        }
+    };
+
+    // Scoped API keys only see services in their allow-list.
+    let services = filter_services_by_scope(services, auth);
 
     // Search across ALL tools (does NOT activate services -- use nyx__call_tool
     // to invoke discovered tools, which auto-activates on first call)
@@ -978,8 +1319,8 @@ async fn handle_meta_discover(
 
 async fn handle_meta_connect(
     state: &AppState,
-    user_id: &str,
-    session_id: &str,
+    auth: &McpAuthContext,
+    session_id: Option<&str>,
     arguments: &serde_json::Value,
     request_id: Option<serde_json::Value>,
     client_accepts_sse: bool,
@@ -989,6 +1330,16 @@ async fn handle_meta_connect(
         Some(_) => return tool_result(request_id, "Invalid service_id format", true),
         None => return tool_result(request_id, "service_id is required", true),
     };
+
+    // Scoped API keys can only connect services already in their allow-list.
+    if !auth.allow_all_services && !auth.allowed_service_ids.contains(&service_id.to_string()) {
+        return tool_result(
+            request_id,
+            "API key does not have access to this service",
+            true,
+        );
+    }
+
     let credential = arguments.get("credential").and_then(|c| c.as_str());
     let credential_label = arguments.get("credential_label").and_then(|l| l.as_str());
 
@@ -996,7 +1347,7 @@ async fn handle_meta_connect(
         &state.db,
         &state.encryption_keys,
         state.node_ws_manager.as_ref(),
-        user_id,
+        &auth.user_id,
         service_id,
         credential,
         credential_label,
@@ -1004,25 +1355,31 @@ async fn handle_meta_connect(
     .await
     {
         Ok(result) => {
-            // Activate the newly connected service
-            let changed = state
-                .mcp_sessions
-                .activate_services(session_id, &[service_id.to_string()]);
-
-            // Send via GET SSE channel (fallback for clients that have it)
-            if changed {
-                send_tools_list_changed(state, session_id);
-            }
+            // Activate the newly connected service. Stateless (API-key,
+            // no session) callers skip activation tracking.
+            let changed = match session_id {
+                Some(sid) => {
+                    let changed = state
+                        .mcp_sessions
+                        .activate_services(sid, &[service_id.to_string()]);
+                    // Send via GET SSE channel (fallback for clients that have it)
+                    if changed {
+                        send_tools_list_changed(state, sid);
+                    }
+                    changed
+                }
+                None => false,
+            };
 
             audit_service::log_async(
                 state.db.clone(),
-                Some(user_id.to_string()),
+                Some(auth.user_id.clone()),
                 "mcp_connect_service".to_string(),
                 Some(serde_json::json!({ "service_id": service_id })),
                 None,
                 None,
-                None,
-                None,
+                auth.api_key_id.clone(),
+                auth.api_key_name.clone(),
             );
 
             // Construct response directly with activation note (no mutation)
@@ -1070,7 +1427,7 @@ async fn handle_meta_connect(
 /// `nyx__ssh_exec` -- execute a command on a remote SSH service.
 async fn handle_mcp_ssh_exec(
     state: &AppState,
-    user_id: &str,
+    auth: &McpAuthContext,
     arguments: &serde_json::Value,
     request_id: Option<serde_json::Value>,
 ) -> Response {
@@ -1155,7 +1512,7 @@ async fn handle_mcp_ssh_exec(
     };
 
     // Reuse the core logic from the ssh_exec module
-    let result = execute_ssh_command_internal(state, user_id, &service_id, &ssh_svc, &body).await;
+    let result = execute_ssh_command_internal(state, auth, &service_id, &ssh_svc, &body).await;
 
     match result {
         Ok(response) => {
@@ -1179,7 +1536,7 @@ async fn handle_mcp_ssh_exec(
 /// `nyx__ssh_list_services` -- list available SSH services.
 async fn handle_mcp_ssh_list(
     state: &AppState,
-    user_id: &str,
+    auth: &McpAuthContext,
     request_id: Option<serde_json::Value>,
 ) -> Response {
     use crate::models::downstream_service::{
@@ -1237,13 +1594,13 @@ async fn handle_mcp_ssh_list(
 
     audit_service::log_async(
         state.db.clone(),
-        Some(user_id.to_string()),
+        Some(auth.user_id.clone()),
         "mcp_ssh_list_services".to_string(),
         Some(serde_json::json!({ "count": count })),
         None,
         None,
-        None,
-        None,
+        auth.api_key_id.clone(),
+        auth.api_key_name.clone(),
     );
 
     tool_result(request_id, &text, false)
@@ -1278,13 +1635,15 @@ async fn resolve_ssh_service_id(
 /// Routes through the node agent for execution.
 async fn execute_ssh_command_internal(
     state: &AppState,
-    user_id: &str,
+    auth: &McpAuthContext,
     service_id: &str,
     ssh_svc: &crate::models::downstream_service::SshServiceConfig,
     body: &super::ssh_exec::SshExecRequest,
 ) -> Result<super::ssh_exec::SshExecResponse, crate::errors::AppError> {
     use crate::errors::AppError;
     use crate::services::{node_routing_service, node_service};
+
+    let user_id = auth.user_id.as_str();
 
     let principal = body.principal.trim();
     let command = body.command.trim();
@@ -1393,10 +1752,10 @@ async fn execute_ssh_command_internal(
                     timed_out: result.timed_out,
                 };
 
-                // Audit log
+                // Audit log -- attribute API key when acting as an agent.
                 audit_service::log_async(
                     state.db.clone(),
-                    Some(user_id.to_string()),
+                    Some(auth.user_id.clone()),
                     "ssh_exec_command".to_string(),
                     Some(serde_json::json!({
                         "service_id": service_id,
@@ -1411,8 +1770,8 @@ async fn execute_ssh_command_internal(
                     })),
                     None,
                     None,
-                    None,
-                    None,
+                    auth.api_key_id.clone(),
+                    auth.api_key_name.clone(),
                 );
 
                 return Ok(response);
@@ -1436,4 +1795,125 @@ async fn execute_ssh_command_internal(
         "SSH exec failed on all nodes: {}",
         last_error.unwrap_or_else(|| "no nodes available".to_string()),
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::mcp_service::{McpToolService, McpToolSource};
+
+    fn api_key_auth(allowed_service_ids: Vec<String>) -> McpAuthContext {
+        McpAuthContext {
+            user_id: "user-1".into(),
+            is_api_key: true,
+            api_key_id: Some("key-1".into()),
+            api_key_name: Some("agent".into()),
+            allow_all_services: false,
+            allow_all_nodes: false,
+            allowed_service_ids,
+            allowed_node_ids: Vec::new(),
+            rate_limit_per_second: None,
+            rate_limit_burst: None,
+        }
+    }
+
+    fn user_managed(id: &str) -> McpToolService {
+        McpToolService {
+            service_id: id.into(),
+            service_name: id.into(),
+            service_slug: id.into(),
+            description: None,
+            service_category: "user_service".into(),
+            endpoints: Vec::new(),
+            source: McpToolSource::UserManaged {
+                user_service_id: id.into(),
+                effective_owner_id: "user-1".into(),
+                node_id: None,
+                has_server_credential: true,
+            },
+            is_generic_proxy: false,
+        }
+    }
+
+    fn platform(id: &str) -> McpToolService {
+        McpToolService {
+            service_id: id.into(),
+            service_name: id.into(),
+            service_slug: id.into(),
+            description: None,
+            service_category: "http".into(),
+            endpoints: Vec::new(),
+            source: McpToolSource::Platform {
+                downstream_service_id: id.into(),
+            },
+            is_generic_proxy: false,
+        }
+    }
+
+    #[test]
+    fn filter_keeps_user_services_in_allow_list() {
+        let auth = api_key_auth(vec!["svc-a".into()]);
+        let services = vec![user_managed("svc-a"), user_managed("svc-b")];
+        let filtered = filter_services_by_scope(services, &auth);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].service_id, "svc-a");
+    }
+
+    #[test]
+    fn filter_drops_platform_services_for_scoped_keys() {
+        let auth = api_key_auth(vec!["svc-a".into()]);
+        let services = vec![user_managed("svc-a"), platform("svc-a")];
+        let filtered = filter_services_by_scope(services, &auth);
+        // The platform-sourced service with the same id is dropped -- scoped
+        // keys cannot call platform services through MCP.
+        assert!(
+            filtered
+                .iter()
+                .all(|s| matches!(s.source, McpToolSource::UserManaged { .. }))
+        );
+    }
+
+    #[test]
+    fn filter_is_noop_for_unrestricted_auth() {
+        let auth = McpAuthContext::user("user-1".into());
+        let services = vec![user_managed("svc-a"), platform("svc-b")];
+        assert_eq!(filter_services_by_scope(services, &auth).len(), 2);
+    }
+
+    #[test]
+    fn ensure_scope_rejects_disallowed_user_service() {
+        let auth = api_key_auth(vec!["svc-a".into()]);
+        let svc = user_managed("svc-b");
+        let res = ensure_service_in_scope(&auth, &svc, None);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn ensure_scope_allows_unrestricted_auth() {
+        let auth = McpAuthContext::user("user-1".into());
+        let svc = platform("svc-x");
+        assert!(ensure_service_in_scope(&auth, &svc, None).is_ok());
+    }
+
+    #[test]
+    fn scoped_api_key_detection() {
+        // No restrictions -> not scoped.
+        let mut auth = api_key_auth(Vec::new());
+        auth.allow_all_services = true;
+        auth.allow_all_nodes = true;
+        assert!(!is_scoped_api_key(&auth));
+
+        // Service allow-list -> scoped.
+        auth.allow_all_services = false;
+        assert!(is_scoped_api_key(&auth));
+
+        // Node allow-list -> scoped.
+        auth.allow_all_services = true;
+        auth.allow_all_nodes = false;
+        assert!(is_scoped_api_key(&auth));
+
+        // OAuth/session auth is never "scoped" in this sense.
+        let oauth = McpAuthContext::user("user-1".into());
+        assert!(!is_scoped_api_key(&oauth));
+    }
 }
