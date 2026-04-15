@@ -692,10 +692,34 @@ async fn execute_proxy_inner(
     request: Request<Body>,
     pre_resolved: Option<PreResolved>,
 ) -> AppResult<Response> {
-    // Per-agent rate limit check (before any work)
-    crate::mw::rate_limit::check_agent_rate_limit(&state.per_agent_limiter, auth_user)?;
-
     let user_id_str = auth_user.user_id.to_string();
+
+    // Per-agent rate limit check (before any work). Emit a
+    // `proxy_request_denied` audit event on 429 so Usage aggregation can
+    // count rate-limited requests in both `request_count` and `error_count`
+    // (see ChronoAIProject/NyxID#341).
+    if let Err(e) =
+        crate::mw::rate_limit::check_agent_rate_limit(&state.per_agent_limiter, auth_user)
+    {
+        audit_service::log_async(
+            state.db.clone(),
+            Some(user_id_str.clone()),
+            "proxy_request_denied".to_string(),
+            Some(serde_json::json!({
+                "service_id": service_id,
+                "path": path,
+                "reason": e.to_string(),
+                "denial_reason": "rate_limited",
+                "response_status": 429,
+            })),
+            None,
+            None,
+            auth_user.api_key_id.clone(),
+            auth_user.api_key_name.clone(),
+        );
+        return Err(e);
+    }
+
     let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
 
     // The user_id that owns the resolved UserService, when known. For
@@ -732,22 +756,61 @@ async fn execute_proxy_inner(
         )
         .await?;
 
-        // API key scope enforcement
+        // API key scope enforcement. Emit a `proxy_request_denied` audit
+        // event on 403 so Usage aggregation can count scope-forbidden
+        // requests in both `request_count` and `error_count`
+        // (see ChronoAIProject/NyxID#341).
         if let Some(ref us_id) = pre.user_service_id
             && !auth_user.allow_all_services
             && !auth_user.allowed_service_ids.contains(us_id)
         {
-            return Err(AppError::ApiKeyScopeForbidden(
+            let err = AppError::ApiKeyScopeForbidden(
                 "API key does not have access to this service".to_string(),
-            ));
+            );
+            audit_service::log_async(
+                state.db.clone(),
+                Some(user_id_str.clone()),
+                "proxy_request_denied".to_string(),
+                Some(serde_json::json!({
+                    "service_id": service_id,
+                    "user_service_id": us_id,
+                    "path": path,
+                    "reason": err.to_string(),
+                    "denial_reason": "api_key_scope_forbidden_service",
+                    "response_status": 403,
+                })),
+                None,
+                None,
+                auth_user.api_key_id.clone(),
+                auth_user.api_key_name.clone(),
+            );
+            return Err(err);
         }
         if let Some(ref nid) = pre.node_id
             && !auth_user.allow_all_nodes
             && !auth_user.allowed_node_ids.contains(nid)
         {
-            return Err(AppError::ApiKeyScopeForbidden(
+            let err = AppError::ApiKeyScopeForbidden(
                 "API key does not have access to this node".to_string(),
-            ));
+            );
+            audit_service::log_async(
+                state.db.clone(),
+                Some(user_id_str.clone()),
+                "proxy_request_denied".to_string(),
+                Some(serde_json::json!({
+                    "service_id": service_id,
+                    "node_id": nid,
+                    "path": path,
+                    "reason": err.to_string(),
+                    "denial_reason": "api_key_scope_forbidden_node",
+                    "response_status": 403,
+                })),
+                None,
+                None,
+                auth_user.api_key_id.clone(),
+                auth_user.api_key_name.clone(),
+            );
+            return Err(err);
         }
         if !auth_user.allow_all_nodes
             && let Some(route) = node_route.as_mut()
@@ -781,11 +844,31 @@ async fn execute_proxy_inner(
             required,
         )
     } else {
-        // Old DownstreamService path -- scoped keys must use configured services
+        // Old DownstreamService path -- scoped keys must use configured
+        // services. Emit a `proxy_request_denied` audit event on 403 so
+        // Usage aggregation counts these failures
+        // (see ChronoAIProject/NyxID#341).
         if !auth_user.allow_all_services {
-            return Err(AppError::ApiKeyScopeForbidden(
+            let err = AppError::ApiKeyScopeForbidden(
                 "Scoped API keys must use configured services".to_string(),
-            ));
+            );
+            audit_service::log_async(
+                state.db.clone(),
+                Some(user_id_str.clone()),
+                "proxy_request_denied".to_string(),
+                Some(serde_json::json!({
+                    "service_id": service_id,
+                    "path": path,
+                    "reason": err.to_string(),
+                    "denial_reason": "api_key_scope_forbidden_legacy",
+                    "response_status": 403,
+                })),
+                None,
+                None,
+                auth_user.api_key_id.clone(),
+                auth_user.api_key_name.clone(),
+            );
+            return Err(err);
         }
 
         resolve_via_downstream_service(state, auth_user, &user_id_str, service_id).await?

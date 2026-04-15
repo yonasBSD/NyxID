@@ -662,6 +662,17 @@ fn extract_response_status(event_data: Option<&serde_json::Value>) -> Option<u16
         .and_then(|status| u16::try_from(status).ok())
 }
 
+/// Classify an audit event as an error for Usage aggregation.
+///
+/// `proxy_request_denied` events are always errors (emitted for pre-proxy
+/// failures like 403 scope-forbidden and 429 rate-limited — see
+/// ChronoAIProject/NyxID#341). For other event types (e.g. `proxy_request`),
+/// we fall back to the downstream response status.
+fn is_error_event(event_type: &str, event_data: Option<&serde_json::Value>) -> bool {
+    matches!(event_type, "proxy_request_denied")
+        || extract_response_status(event_data).is_some_and(|status| status >= 400)
+}
+
 fn extract_service_usage_info(
     event_data: Option<&serde_json::Value>,
     service_info_map: &HashMap<String, (String, String)>,
@@ -777,9 +788,7 @@ async fn build_api_key_usage(
             continue;
         };
 
-        let is_error = matches!(entry.event_type.as_str(), "proxy_request_denied")
-            || extract_response_status(entry.event_data.as_ref())
-                .is_some_and(|status| status >= 400);
+        let is_error = is_error_event(entry.event_type.as_str(), entry.event_data.as_ref());
 
         accumulator.request_count += 1;
         if is_error {
@@ -1247,8 +1256,12 @@ pub async fn rotate_key(
 
 #[cfg(test)]
 mod tests {
-    use super::{UpdateApiKeyRequest, parse_expires_at, usage_date_range};
+    use super::{
+        UpdateApiKeyRequest, extract_response_status, is_error_event, parse_expires_at,
+        usage_date_range,
+    };
     use chrono::{Duration, NaiveDate, Utc};
+    use serde_json::json;
 
     #[test]
     fn parse_expires_at_accepts_future_rfc3339() {
@@ -1351,5 +1364,86 @@ mod tests {
         let req: UpdateApiKeyRequest =
             serde_json::from_str(r#"{"rate_limit_per_second": null}"#).unwrap();
         assert_eq!(req.rate_limit_per_second, Some(None));
+    }
+
+    // Regression tests for ChronoAIProject/NyxID#341: pre-proxy failures
+    // (403 scope-forbidden and 429 rate-limited) emit `proxy_request_denied`
+    // audit events and MUST be counted as errors in Usage aggregation.
+
+    #[test]
+    fn proxy_request_denied_counts_as_error() {
+        assert!(is_error_event("proxy_request_denied", None));
+    }
+
+    #[test]
+    fn rate_limited_denial_counts_as_error() {
+        let data = json!({
+            "service_id": "svc-1",
+            "denial_reason": "rate_limited",
+            "response_status": 429,
+        });
+        assert!(is_error_event("proxy_request_denied", Some(&data)));
+    }
+
+    #[test]
+    fn scope_forbidden_service_denial_counts_as_error() {
+        let data = json!({
+            "service_id": "svc-1",
+            "user_service_id": "us-1",
+            "denial_reason": "api_key_scope_forbidden_service",
+            "response_status": 403,
+        });
+        assert!(is_error_event("proxy_request_denied", Some(&data)));
+    }
+
+    #[test]
+    fn scope_forbidden_node_denial_counts_as_error() {
+        let data = json!({
+            "service_id": "svc-1",
+            "node_id": "node-1",
+            "denial_reason": "api_key_scope_forbidden_node",
+            "response_status": 403,
+        });
+        assert!(is_error_event("proxy_request_denied", Some(&data)));
+    }
+
+    #[test]
+    fn scope_forbidden_legacy_denial_counts_as_error() {
+        let data = json!({
+            "service_id": "svc-1",
+            "denial_reason": "api_key_scope_forbidden_legacy",
+            "response_status": 403,
+        });
+        assert!(is_error_event("proxy_request_denied", Some(&data)));
+    }
+
+    #[test]
+    fn successful_proxy_request_is_not_an_error() {
+        let data = json!({
+            "service_id": "svc-1",
+            "response_status": 200,
+        });
+        assert!(!is_error_event("proxy_request", Some(&data)));
+    }
+
+    #[test]
+    fn downstream_4xx_proxy_request_counts_as_error() {
+        // Sanity check: the existing contract for 400/401/503 still holds.
+        for status in [400u16, 401, 403, 429, 503] {
+            let data = json!({
+                "service_id": "svc-1",
+                "response_status": status,
+            });
+            assert!(
+                is_error_event("proxy_request", Some(&data)),
+                "expected status {status} to count as error"
+            );
+        }
+    }
+
+    #[test]
+    fn extract_response_status_returns_denial_status() {
+        let data = json!({ "response_status": 403 });
+        assert_eq!(extract_response_status(Some(&data)), Some(403));
     }
 }
