@@ -486,6 +486,12 @@ async fn execute_proxy(
 }
 
 /// Resolve proxy target and node routing via the old DownstreamService path.
+///
+/// Returns `(node_route, target, has_server_credential, user_service_id, node_routing_required)`.
+/// `node_routing_required` is `true` when the user's UserService for this
+/// catalog service explicitly pins a node, regardless of whether the node is
+/// currently online. The caller must use this flag to enforce the "Route via
+/// Node" contract (see ChronoAIProject/NyxID#328).
 async fn resolve_via_downstream_service(
     state: &AppState,
     auth_user: &AuthUser,
@@ -496,6 +502,7 @@ async fn resolve_via_downstream_service(
     proxy_service::ProxyTarget,
     bool,
     Option<String>,
+    bool,
 )> {
     let nr = node_routing_service::resolve_node_route(
         &state.db,
@@ -504,6 +511,37 @@ async fn resolve_via_downstream_service(
         &state.node_ws_manager,
     )
     .await?;
+
+    let node_routing_required =
+        node_routing_service::user_service_has_explicit_node(&state.db, user_id_str, service_id)
+            .await?;
+
+    // Hard-fail when the service is explicitly node-routed but no viable
+    // node could be resolved. Falling through to direct routing would
+    // violate the "Route via Node" contract and silently bypass the
+    // intended execution boundary (node isolation, local credentials,
+    // private-network access).
+    if nr.is_none() && node_routing_required {
+        let err = AppError::NodeOffline(
+            "Service is configured to route via a node, but no viable node is available"
+                .to_string(),
+        );
+        audit_service::log_async(
+            state.db.clone(),
+            Some(user_id_str.to_string()),
+            "proxy_request_denied".to_string(),
+            Some(serde_json::json!({
+                "service_id": service_id,
+                "reason": err.to_string(),
+                "node_routing_required": true,
+            })),
+            None,
+            None,
+            auth_user.api_key_id.clone(),
+            auth_user.api_key_name.clone(),
+        );
+        return Err(err);
+    }
 
     let (t, has_cred) = if nr.is_some() {
         match proxy_service::resolve_proxy_target_lenient(
@@ -561,7 +599,7 @@ async fn resolve_via_downstream_service(
         }
     };
 
-    Ok((nr, t, has_cred, None))
+    Ok((nr, t, has_cred, None, node_routing_required))
 }
 
 async fn build_pre_resolved_node_route(
@@ -617,79 +655,91 @@ async fn execute_proxy_inner(
     // block can apply the org-aware cascade.
     let mut effective_owner_for_approval: Option<String> = None;
 
-    // Resolve target and node routing
-    let (node_route, target, has_server_credential, _resolved_user_service_id) =
-        if let Some(mut pre) = pre_resolved {
-            effective_owner_for_approval = Some(pre.effective_owner_id.clone());
-            // New UserService path: target already resolved.
-            // Use the resolved service's effective owner (the org's user_id
-            // for org-routed calls, the actor for personal) when looking up
-            // the node fallback list, so the failover candidates reflect
-            // the org's bindings rather than just the actor's personal ones.
-            let mut node_route = build_pre_resolved_node_route(
-                state,
-                &pre.effective_owner_id,
-                service_id,
-                pre.node_id.as_deref(),
+    // Resolve target and node routing.
+    //
+    // `node_routing_required` is true when the service is explicitly
+    // configured to route through a node (UserService.node_id is set).
+    // When true, the request must NOT silently fall back to direct
+    // routing if all node attempts fail (ChronoAIProject/NyxID#328).
+    let (
+        node_route,
+        target,
+        has_server_credential,
+        _resolved_user_service_id,
+        node_routing_required,
+    ) = if let Some(mut pre) = pre_resolved {
+        effective_owner_for_approval = Some(pre.effective_owner_id.clone());
+        // New UserService path: target already resolved.
+        // Use the resolved service's effective owner (the org's user_id
+        // for org-routed calls, the actor for personal) when looking up
+        // the node fallback list, so the failover candidates reflect
+        // the org's bindings rather than just the actor's personal ones.
+        let mut node_route = build_pre_resolved_node_route(
+            state,
+            &pre.effective_owner_id,
+            service_id,
+            pre.node_id.as_deref(),
+        )
+        .await?;
+
+        // API key scope enforcement
+        if let Some(ref us_id) = pre.user_service_id
+            && !auth_user.allow_all_services
+            && !auth_user.allowed_service_ids.contains(us_id)
+        {
+            return Err(AppError::ApiKeyScopeForbidden(
+                "API key does not have access to this service".to_string(),
+            ));
+        }
+        if let Some(ref nid) = pre.node_id
+            && !auth_user.allow_all_nodes
+            && !auth_user.allowed_node_ids.contains(nid)
+        {
+            return Err(AppError::ApiKeyScopeForbidden(
+                "API key does not have access to this node".to_string(),
+            ));
+        }
+        if !auth_user.allow_all_nodes
+            && let Some(route) = node_route.as_mut()
+        {
+            route
+                .fallback_node_ids
+                .retain(|nid| auth_user.allowed_node_ids.contains(nid));
+        }
+
+        // Per-agent credential override: if this request is via an API key and
+        // the user has bound a different credential for this service, swap it in.
+        if let (Some(ak_id), Some(us_id)) = (&auth_user.api_key_id, &pre.user_service_id)
+            && let Some(override_cred) = proxy_service::resolve_agent_credential_override(
+                &state.db,
+                &state.encryption_keys,
+                &user_id_str,
+                ak_id,
+                us_id,
             )
-            .await?;
+            .await?
+        {
+            pre.target.credential = override_cred;
+        }
 
-            // API key scope enforcement
-            if let Some(ref us_id) = pre.user_service_id
-                && !auth_user.allow_all_services
-                && !auth_user.allowed_service_ids.contains(us_id)
-            {
-                return Err(AppError::ApiKeyScopeForbidden(
-                    "API key does not have access to this service".to_string(),
-                ));
-            }
-            if let Some(ref nid) = pre.node_id
-                && !auth_user.allow_all_nodes
-                && !auth_user.allowed_node_ids.contains(nid)
-            {
-                return Err(AppError::ApiKeyScopeForbidden(
-                    "API key does not have access to this node".to_string(),
-                ));
-            }
-            if !auth_user.allow_all_nodes
-                && let Some(route) = node_route.as_mut()
-            {
-                route
-                    .fallback_node_ids
-                    .retain(|nid| auth_user.allowed_node_ids.contains(nid));
-            }
+        let required = pre.node_id.is_some();
+        (
+            node_route,
+            pre.target,
+            pre.has_server_credential,
+            pre.user_service_id,
+            required,
+        )
+    } else {
+        // Old DownstreamService path -- scoped keys must use configured services
+        if !auth_user.allow_all_services {
+            return Err(AppError::ApiKeyScopeForbidden(
+                "Scoped API keys must use configured services".to_string(),
+            ));
+        }
 
-            // Per-agent credential override: if this request is via an API key and
-            // the user has bound a different credential for this service, swap it in.
-            if let (Some(ak_id), Some(us_id)) = (&auth_user.api_key_id, &pre.user_service_id)
-                && let Some(override_cred) = proxy_service::resolve_agent_credential_override(
-                    &state.db,
-                    &state.encryption_keys,
-                    &user_id_str,
-                    ak_id,
-                    us_id,
-                )
-                .await?
-            {
-                pre.target.credential = override_cred;
-            }
-
-            (
-                node_route,
-                pre.target,
-                pre.has_server_credential,
-                pre.user_service_id,
-            )
-        } else {
-            // Old DownstreamService path -- scoped keys must use configured services
-            if !auth_user.allow_all_services {
-                return Err(AppError::ApiKeyScopeForbidden(
-                    "Scoped API keys must use configured services".to_string(),
-                ));
-            }
-
-            resolve_via_downstream_service(state, auth_user, &user_id_str, service_id).await?
-        };
+        resolve_via_downstream_service(state, auth_user, &user_id_str, service_id).await?
+    };
 
     // === Request Decomposition ===
     // Extract method, query, headers BEFORE body consumption.
@@ -1334,16 +1384,44 @@ async fn execute_proxy_inner(
             }
         }
 
-        // All nodes failed
-        if !has_server_credential {
+        // All nodes failed.
+        //
+        // Hard-fail when:
+        //   * The service is explicitly node-routed (Route via Node) — falling
+        //     back to direct routing would violate the routing contract and
+        //     silently bypass node isolation, local credentials, or
+        //     private-network access. (ChronoAIProject/NyxID#328)
+        //   * No server-side credential is available, so direct routing
+        //     cannot succeed anyway.
+        if node_routing_required || !has_server_credential {
+            audit_service::log_async(
+                state.db.clone(),
+                Some(user_id_str.clone()),
+                "proxy_request_denied".to_string(),
+                Some(serde_json::json!({
+                    "service_id": service_id,
+                    "reason": "all_node_routes_failed",
+                    "node_routing_required": node_routing_required,
+                    "attempted_node_ids": all_node_ids,
+                })),
+                None,
+                None,
+                auth_user.api_key_id.clone(),
+                auth_user.api_key_name.clone(),
+            );
             return Err(last_error.unwrap_or_else(|| {
-                AppError::NodeOffline(
-                    "All node routes failed and no server-side credential is available".to_string(),
-                )
+                AppError::NodeOffline(if node_routing_required {
+                    "Service is configured to route via a node, but all node routes failed"
+                        .to_string()
+                } else {
+                    "All node routes failed and no server-side credential is available".to_string()
+                })
             }));
         }
 
-        // Fall through to standard proxy with server-side credential
+        // Fall through to standard proxy with server-side credential.
+        // Reachable only when the service is NOT explicitly node-routed
+        // (e.g. opportunistic NodeServiceBinding fallback).
         if let Some(err) = last_error {
             tracing::warn!(
                 service_id = %service_id,

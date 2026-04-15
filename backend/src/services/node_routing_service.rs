@@ -211,6 +211,32 @@ pub async fn has_routable_node_bindings(
         .is_some())
 }
 
+/// Check whether the user's `UserService` for this catalog service explicitly
+/// pins routing to a node, regardless of whether that node is currently online.
+///
+/// Used by the proxy to enforce the "Route via Node" contract: when a service
+/// is explicitly bound to a node, requests must not silently fall back to direct
+/// routing if the node is unavailable. See ChronoAIProject/NyxID#328.
+pub async fn user_service_has_explicit_node(
+    db: &mongodb::Database,
+    user_id: &str,
+    service_id: &str,
+) -> AppResult<bool> {
+    let user_service: Option<UserService> = db
+        .collection::<UserService>(USER_SERVICES)
+        .find_one(doc! {
+            "user_id": user_id,
+            "catalog_service_id": service_id,
+            "is_active": true,
+        })
+        .await?;
+
+    Ok(user_service
+        .and_then(|s| s.node_id)
+        .filter(|nid| !nid.is_empty())
+        .is_some())
+}
+
 pub async fn list_viable_binding_node_ids(
     db: &mongodb::Database,
     user_id: &str,
