@@ -1038,6 +1038,14 @@ pub async fn create_key(
         .map(parse_expires_at)
         .transpose()?;
 
+    if let Some(exp) = expires_at
+        && exp <= Utc::now()
+    {
+        return Err(AppError::ValidationError(
+            "expires_at must be in the future".to_string(),
+        ));
+    }
+
     let actor = auth_user.user_id.to_string();
 
     // If `target_org_id` is set, write the key under the org's user_id so
@@ -1217,7 +1225,25 @@ pub async fn rotate_key(
 
 #[cfg(test)]
 mod tests {
-    use super::UpdateApiKeyRequest;
+    use super::{UpdateApiKeyRequest, parse_expires_at};
+    use chrono::{Duration, Utc};
+
+    #[test]
+    fn parse_expires_at_accepts_future_rfc3339() {
+        let future = (Utc::now() + Duration::days(7)).to_rfc3339();
+        assert!(parse_expires_at(&future).is_ok());
+    }
+
+    #[test]
+    fn parse_expires_at_accepts_past_dates_string_validation_is_handler_responsibility() {
+        // parse_expires_at itself only parses; the handler enforces "must be in the future".
+        assert!(parse_expires_at("2020-01-01").is_ok());
+    }
+
+    #[test]
+    fn parse_expires_at_rejects_garbage() {
+        assert!(parse_expires_at("not-a-date").is_err());
+    }
 
     #[test]
     fn platform_absent_means_no_change() {

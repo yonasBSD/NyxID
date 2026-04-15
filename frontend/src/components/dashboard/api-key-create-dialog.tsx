@@ -220,6 +220,7 @@ export function ApiKeyCreateDialog() {
                       <FormControl>
                         <Input
                           type="date"
+                          min={new Date().toISOString().slice(0, 10)}
                           {...field}
                           value={field.value ?? ""}
                           onChange={(e) =>
