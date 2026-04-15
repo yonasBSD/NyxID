@@ -336,10 +336,22 @@ pub async fn resolve_proxy_target(
         ));
     }
 
-    // No-auth services: skip credential handling entirely
+    // No-auth services: skip credential handling entirely.
+    //
+    // Still resolve the gateway URL override so per-user gateway
+    // services (e.g. OpenClaw, where the seed `base_url` is the
+    // `https://openclaw-gateway.invalid` placeholder and the real URL
+    // lives on `UserProviderToken.gateway_url`) get the right
+    // `base_url` on the strict path -- which is what the direct WS
+    // route uses. Errors propagate so a missing gateway URL surfaces
+    // as `Connect your <provider> instance first` instead of building
+    // a request against the placeholder. See ChronoAIProject/NyxID#160.
     if service.auth_method == "none" {
+        let base_url = resolve_gateway_url_override(db, user_id, &service)
+            .await?
+            .unwrap_or_else(|| service.base_url.clone());
         return Ok(ProxyTarget {
-            base_url: service.base_url.clone(),
+            base_url,
             auth_method: service.auth_method.clone(),
             auth_key_name: service.auth_key_name.clone(),
             credential: String::new(),
@@ -417,17 +429,45 @@ pub async fn resolve_proxy_target_lenient(
         ));
     }
 
-    // No-auth services: no credential needed
+    // No-auth services: no credential needed.
+    //
+    // Resolve the gateway URL override so per-user gateway services
+    // (e.g. OpenClaw, where the seed `base_url` is the
+    // `https://openclaw-gateway.invalid` placeholder and the real URL
+    // lives on `UserProviderToken.gateway_url`) get the right
+    // `base_url` -- but tolerate a missing server-side gateway URL.
+    // The lenient path is used for node-routed requests, where the
+    // node agent has the target URL configured locally; treating
+    // "no UserProviderToken" as a hard error here would break
+    // node-managed OpenClaw setups that intentionally keep the URL
+    // off the server. We hand the node an empty `base_url` so its
+    // `proxy_executor` falls back to the credential's `target_url()`.
+    //
+    // The returned `has_server_credential` flag must reflect whether
+    // the SERVER on its own can complete the request without the
+    // node. For the empty-base_url case it cannot: a direct fallback
+    // would call `forward_request` against `""` and surface as an
+    // internal error instead of the intended "node offline" failure.
+    // So we only mark the server target viable when we resolved a
+    // concrete URL (either the user's gateway override or the seed
+    // base_url for non-gateway services).
+    // See ChronoAIProject/NyxID#160.
     if service.auth_method == "none" {
+        let (base_url, has_server_credential) =
+            match resolve_gateway_url_override(db, user_id, &service).await {
+                Ok(Some(url)) => (url, true),
+                Ok(None) => (service.base_url.clone(), true),
+                Err(_) => (String::new(), false),
+            };
         return Ok((
             ProxyTarget {
-                base_url: service.base_url.clone(),
+                base_url,
                 auth_method: service.auth_method.clone(),
                 auth_key_name: service.auth_key_name.clone(),
                 credential: String::new(),
                 service,
             },
-            true,
+            has_server_credential,
         ));
     }
 
