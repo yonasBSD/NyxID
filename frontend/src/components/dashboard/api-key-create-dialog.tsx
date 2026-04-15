@@ -234,6 +234,7 @@ export function ApiKeyCreateDialog() {
                           <div className="relative">
                             <Input
                               type="date"
+                              min={new Date().toISOString().slice(0, 10)}
                               className="cursor-pointer pr-10 [&::-webkit-calendar-picker-indicator]:opacity-0"
                               {...fieldRest}
                               ref={(el) => {
