@@ -2,7 +2,7 @@ use axum::{
     Json,
     extract::{Path, Query, State},
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use futures::TryStreamExt;
 use mongodb::bson::{DateTime as BsonDateTime, doc};
 use serde::{Deserialize, Serialize};
@@ -707,6 +707,19 @@ fn extract_service_usage_info(
     )
 }
 
+/// Build the contiguous UTC date range (oldest first) that the usage chart
+/// should cover. Always returns exactly `days` entries, ending on `today`.
+fn usage_date_range(today: NaiveDate, days: u32) -> Vec<String> {
+    let count = days.max(1);
+    (0..count)
+        .rev()
+        .map(|offset| {
+            let date = today - chrono::Duration::days(i64::from(offset));
+            date.format("%Y-%m-%d").to_string()
+        })
+        .collect()
+}
+
 async fn build_api_key_usage(
     state: &AppState,
     user_id: &str,
@@ -718,7 +731,13 @@ async fn build_api_key_usage(
     }
 
     let clamped_days = days.clamp(1, 30);
-    let since = Utc::now() - chrono::Duration::days(i64::from(clamped_days));
+    let today = Utc::now().date_naive();
+    let bucket_dates = usage_date_range(today, clamped_days);
+    let start_date = today - chrono::Duration::days(i64::from(clamped_days - 1));
+    let since = start_date
+        .and_hms_opt(0, 0, 0)
+        .expect("midnight is always valid")
+        .and_utc();
     let since_bson = BsonDateTime::from_millis(since.timestamp_millis());
     let key_ids: Vec<&str> = keys.iter().map(|key| key.id.as_str()).collect();
 
@@ -820,8 +839,11 @@ async fn build_api_key_usage(
             });
             top_services.truncate(5);
 
-            let daily_buckets = accumulator
-                .daily_buckets
+            let mut bucket_map = accumulator.daily_buckets;
+            for date in &bucket_dates {
+                bucket_map.entry(date.clone()).or_insert((0, 0));
+            }
+            let daily_buckets = bucket_map
                 .into_iter()
                 .map(|(date, (request_count, error_count))| ApiKeyUsageBucket {
                     date,
@@ -1225,8 +1247,8 @@ pub async fn rotate_key(
 
 #[cfg(test)]
 mod tests {
-    use super::{UpdateApiKeyRequest, parse_expires_at};
-    use chrono::{Duration, Utc};
+    use super::{UpdateApiKeyRequest, parse_expires_at, usage_date_range};
+    use chrono::{Duration, NaiveDate, Utc};
 
     #[test]
     fn parse_expires_at_accepts_future_rfc3339() {
@@ -1243,6 +1265,54 @@ mod tests {
     #[test]
     fn parse_expires_at_rejects_garbage() {
         assert!(parse_expires_at("not-a-date").is_err());
+    }
+
+    #[test]
+    fn usage_date_range_returns_seven_contiguous_days() {
+        let today = NaiveDate::from_ymd_opt(2026, 4, 15).unwrap();
+        let dates = usage_date_range(today, 7);
+        assert_eq!(
+            dates,
+            vec![
+                "2026-04-09",
+                "2026-04-10",
+                "2026-04-11",
+                "2026-04-12",
+                "2026-04-13",
+                "2026-04-14",
+                "2026-04-15",
+            ],
+        );
+    }
+
+    #[test]
+    fn usage_date_range_handles_single_day() {
+        let today = NaiveDate::from_ymd_opt(2026, 4, 15).unwrap();
+        assert_eq!(usage_date_range(today, 1), vec!["2026-04-15"]);
+    }
+
+    #[test]
+    fn usage_date_range_clamps_zero_to_today_only() {
+        let today = NaiveDate::from_ymd_opt(2026, 4, 15).unwrap();
+        assert_eq!(usage_date_range(today, 0), vec!["2026-04-15"]);
+    }
+
+    #[test]
+    fn usage_date_range_spans_month_boundary() {
+        let today = NaiveDate::from_ymd_opt(2026, 5, 2).unwrap();
+        let dates = usage_date_range(today, 7);
+        assert_eq!(
+            dates,
+            vec![
+                "2026-04-26",
+                "2026-04-27",
+                "2026-04-28",
+                "2026-04-29",
+                "2026-04-30",
+                "2026-05-01",
+                "2026-05-02",
+            ],
+        );
     }
 
     #[test]
