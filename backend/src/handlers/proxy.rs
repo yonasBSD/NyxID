@@ -574,7 +574,19 @@ async fn build_pre_resolved_node_route(
         return Ok(None);
     };
 
-    let fallback_node_ids = node_routing_service::list_viable_binding_node_ids(
+    // Check if the configured node is actually viable on this instance (DB Online
+    // + WS-connected + healthy). Without this, a request landing on a backend
+    // instance that doesn't hold the WS connection is routed to the node and
+    // surfaces `503 node_offline` to the caller even though `node list` shows
+    // the node online globally. See issue #325.
+    let primary_viable = node_routing_service::is_node_id_viable(
+        &state.db,
+        explicit_node_id,
+        state.node_ws_manager.as_ref(),
+    )
+    .await?;
+
+    let fallback_node_ids: Vec<String> = node_routing_service::list_viable_binding_node_ids(
         &state.db,
         user_id,
         service_id,
@@ -585,10 +597,48 @@ async fn build_pre_resolved_node_route(
     .filter(|node_id| node_id != explicit_node_id)
     .collect();
 
-    Ok(Some(node_routing_service::NodeRoute {
-        node_id: explicit_node_id.to_string(),
-        fallback_node_ids,
-    }))
+    if !primary_viable {
+        if fallback_node_ids.is_empty() {
+            tracing::warn!(
+                configured_node_id = %explicit_node_id,
+                service_id = %service_id,
+                "Configured node is not viable on this instance and no viable fallback bindings; falling through to standard proxy"
+            );
+        } else {
+            tracing::warn!(
+                configured_node_id = %explicit_node_id,
+                promoted_node_id = %fallback_node_ids[0],
+                service_id = %service_id,
+                "Configured node is not viable on this instance; promoting a viable fallback to primary"
+            );
+        }
+    }
+
+    Ok(node_routing_service::build_node_route(
+        compose_pre_resolved_node_ids(explicit_node_id, primary_viable, fallback_node_ids),
+    ))
+}
+
+/// Pure helper: build the ordered node-id list for a pre-resolved route.
+///
+/// - If the configured node is viable, it goes first and viable fallbacks follow.
+/// - If it is not viable, only the viable fallbacks remain; the first one is promoted
+///   to primary by the caller via `build_node_route`.
+/// - If nothing is viable, returns an empty list (caller returns `None` to fall through
+///   to standard proxy).
+fn compose_pre_resolved_node_ids(
+    explicit_node_id: &str,
+    primary_viable: bool,
+    fallback_node_ids: Vec<String>,
+) -> Vec<String> {
+    if primary_viable {
+        let mut ids = Vec::with_capacity(fallback_node_ids.len() + 1);
+        ids.push(explicit_node_id.to_string());
+        ids.extend(fallback_node_ids);
+        ids
+    } else {
+        fallback_node_ids
+    }
 }
 
 /// Inner proxy execution with optional pre-resolved target from UserService path.
@@ -2662,8 +2712,9 @@ async fn bridge_websockets_via_node(
 #[cfg(test)]
 mod tests {
     use super::{
-        WsPassthroughGuard, is_chat_completions_proxy_path, is_codex_transport_path,
-        is_ws_upgrade_request, should_enforce_runtime_approval, validate_range_header,
+        WsPassthroughGuard, compose_pre_resolved_node_ids, is_chat_completions_proxy_path,
+        is_codex_transport_path, is_ws_upgrade_request, should_enforce_runtime_approval,
+        validate_range_header,
     };
     use crate::mw::auth::AuthMethod;
     use crate::services::proxy_service::validate_requested_proxy_path;
@@ -2707,6 +2758,57 @@ mod tests {
         let mut headers = axum::http::HeaderMap::new();
         headers.insert("range", "bytes=0-1,2-3,4-5,6-7,8-9".parse().unwrap());
         assert!(validate_range_header(&headers).is_err());
+    }
+
+    // ---- compose_pre_resolved_node_ids tests (issue #325) ----
+
+    #[test]
+    fn compose_pre_resolved_node_ids_uses_configured_as_primary_when_viable() {
+        let result = compose_pre_resolved_node_ids(
+            "configured",
+            true,
+            vec!["fallback-a".to_string(), "fallback-b".to_string()],
+        );
+
+        assert_eq!(
+            result,
+            vec![
+                "configured".to_string(),
+                "fallback-a".to_string(),
+                "fallback-b".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn compose_pre_resolved_node_ids_drops_configured_when_not_viable() {
+        let result = compose_pre_resolved_node_ids(
+            "configured",
+            false,
+            vec!["fallback-a".to_string(), "fallback-b".to_string()],
+        );
+
+        assert_eq!(
+            result,
+            vec!["fallback-a".to_string(), "fallback-b".to_string()]
+        );
+    }
+
+    #[test]
+    fn compose_pre_resolved_node_ids_returns_empty_when_nothing_viable() {
+        // When the configured node is not viable and no fallback bindings exist,
+        // the list must be empty so `build_node_route` returns None and the caller
+        // falls through to standard proxy instead of surfacing `503 node_offline`.
+        let result = compose_pre_resolved_node_ids("configured", false, vec![]);
+
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn compose_pre_resolved_node_ids_keeps_viable_configured_without_fallbacks() {
+        let result = compose_pre_resolved_node_ids("configured", true, vec![]);
+
+        assert_eq!(result, vec!["configured".to_string()]);
     }
 
     #[test]

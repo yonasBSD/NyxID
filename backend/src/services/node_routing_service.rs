@@ -38,6 +38,31 @@ fn is_node_viable(node: &Node, ws_manager: &NodeWsManager) -> bool {
     true
 }
 
+/// Validate that a specific node_id is viable for proxy routing on this backend instance.
+///
+/// "Viable" means the node is active and marked Online in MongoDB, AND has an active
+/// WebSocket connection on this instance, AND is not unhealthy (error rate check).
+///
+/// This is the single source of truth for "can we actually send a proxy request to
+/// this node right now?" and must stay aligned with the pre-send check in
+/// `NodeWsManager::send_proxy_request`.
+pub async fn is_node_id_viable(
+    db: &mongodb::Database,
+    node_id: &str,
+    ws_manager: &NodeWsManager,
+) -> AppResult<bool> {
+    let node: Option<Node> = db
+        .collection::<Node>(NODES)
+        .find_one(doc! {
+            "_id": node_id,
+            "is_active": true,
+            "status": NodeStatus::Online.as_str(),
+        })
+        .await?;
+
+    Ok(node.as_ref().is_some_and(|n| is_node_viable(n, ws_manager)))
+}
+
 fn collect_ordered_node_ids(
     primary_node_id: Option<String>,
     bindings: Vec<NodeServiceBinding>,
@@ -60,7 +85,7 @@ fn collect_ordered_node_ids(
     node_ids
 }
 
-fn build_node_route(node_ids: Vec<String>) -> Option<NodeRoute> {
+pub fn build_node_route(node_ids: Vec<String>) -> Option<NodeRoute> {
     let mut node_ids = node_ids.into_iter();
     let node_id = node_ids.next()?;
 
@@ -177,25 +202,11 @@ async fn resolve_from_user_service(
         _ => return Ok(None),
     };
 
-    // Validate that the node is online and WebSocket-connected.
-    let node: Option<Node> = db
-        .collection::<Node>(NODES)
-        .find_one(doc! {
-            "_id": &node_id,
-            "is_active": true,
-            "status": NodeStatus::Online.as_str(),
-        })
-        .await?;
-
-    let Some(node) = node else {
-        return Ok(None);
-    };
-
-    if !is_node_viable(&node, ws_manager) {
+    if !is_node_id_viable(db, &node_id, ws_manager).await? {
         return Ok(None);
     }
 
-    Ok(Some(node.id))
+    Ok(Some(node_id))
 }
 
 /// Check if a user has any currently routable node bindings for a specific service.
