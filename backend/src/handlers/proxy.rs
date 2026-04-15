@@ -3489,6 +3489,11 @@ pub struct ProxyServiceItem {
     pub asyncapi_url: Option<String>,
     /// Whether the service advertises streaming support
     pub streaming_supported: bool,
+    /// Whether the service supports WebSocket passthrough via
+    /// `/api/v1/proxy/{service_id}` or `/api/v1/proxy/s/{slug}`.
+    /// Derived from the service's `capabilities.supports_websocket`
+    /// flag. Returns `false` when the capability is not declared.
+    pub websocket_supported: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3617,6 +3622,10 @@ pub async fn list_proxy_services(
                 .as_ref()
                 .map(|_| format!("{base}/api/v1/proxy/services/{}/asyncapi.json", s.id)),
             streaming_supported: s.streaming_supported,
+            websocket_supported: s
+                .capabilities
+                .as_ref()
+                .is_some_and(|c| c.supports_websocket),
         })
         .collect();
 
