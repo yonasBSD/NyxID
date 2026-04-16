@@ -1,4 +1,5 @@
-import { Trash2 } from "lucide-react";
+import { SlidersHorizontal, Trash2 } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -20,6 +21,21 @@ interface MemberRowProps {
   readonly isUpdating: boolean;
   readonly onChangeRole: (memberId: string, nextRole: OrgRole) => void;
   readonly onRevoke: (member: MemberResponse) => void;
+  readonly onEditScope: (member: MemberResponse) => void;
+}
+
+/**
+ * Describe the member's current service scope in a short label. Admins
+ * ignore scope entirely, so that case is short-circuited on the caller
+ * side. `null` means "full access" (no restriction). Anything else is an
+ * explicit allow-list.
+ */
+function scopeSummary(member: MemberResponse): string {
+  if (member.role === "admin") return "All services";
+  const list = member.allowed_service_ids;
+  if (list === null) return "All services";
+  if (list.length === 0) return "No services";
+  return `${String(list.length)} service${list.length === 1 ? "" : "s"}`;
 }
 
 /**
@@ -34,9 +50,16 @@ export function MemberRow({
   isUpdating,
   onChangeRole,
   onRevoke,
+  onEditScope,
 }: MemberRowProps) {
   const displayName =
     member.display_name ?? member.email ?? member.user_id;
+  const scopeLabel = scopeSummary(member);
+  // Admins always have full access and the scope column is purely informational
+  // for them. Members and viewers can be restricted to a subset of services
+  // via `allowed_service_ids`.
+  const isScopeRestricted =
+    member.role !== "admin" && member.allowed_service_ids !== null;
 
   return (
     <TableRow>
@@ -77,22 +100,49 @@ export function MemberRow({
           <RoleBadge role={member.role} />
         )}
       </TableCell>
+      <TableCell>
+        {member.role === "admin" ? (
+          <span className="text-xs text-muted-foreground">All services</span>
+        ) : (
+          <Badge
+            variant={isScopeRestricted ? "info" : "secondary"}
+            className="text-xs"
+          >
+            {scopeLabel}
+          </Badge>
+        )}
+      </TableCell>
       <TableCell className="text-muted-foreground">
         {formatRelativeTime(member.created_at) ?? "—"}
       </TableCell>
       <TableCell>
-        {canManage && (
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-8 w-8 text-muted-foreground hover:text-destructive"
-            onClick={() => onRevoke(member)}
-            disabled={isUpdating}
-            aria-label={`Remove ${displayName}`}
-          >
-            <Trash2 className="h-4 w-4" />
-          </Button>
-        )}
+        <div className="flex items-center justify-end gap-1">
+          {canManage && member.role !== "admin" && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 text-muted-foreground"
+              onClick={() => onEditScope(member)}
+              disabled={isUpdating}
+              aria-label={`Edit service access for ${displayName}`}
+              title="Edit service access"
+            >
+              <SlidersHorizontal className="h-4 w-4" />
+            </Button>
+          )}
+          {canManage && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 text-muted-foreground hover:text-destructive"
+              onClick={() => onRevoke(member)}
+              disabled={isUpdating}
+              aria-label={`Remove ${displayName}`}
+            >
+              <Trash2 className="h-4 w-4" />
+            </Button>
+          )}
+        </div>
       </TableCell>
     </TableRow>
   );

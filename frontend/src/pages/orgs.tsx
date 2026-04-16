@@ -8,6 +8,7 @@ import { PageHeader } from "@/components/shared/page-header";
 import { formatRelativeTime } from "@/lib/utils";
 import { useOrgs } from "@/hooks/use-orgs";
 import { CreateOrgDialog } from "@/components/orgs/create-org-dialog";
+import { OrgAvatar } from "@/components/orgs/org-avatar";
 import { RoleBadge } from "@/components/orgs/role-badge";
 
 function OrgsLoading() {
@@ -82,13 +83,20 @@ export function OrgsPage() {
               <Card className="transition-colors hover:border-primary/30 hover:bg-accent/30">
                 <CardContent className="flex flex-col gap-3 p-5">
                   <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-medium text-foreground">
-                        {org.display_name ?? "Untitled org"}
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        Created {formatRelativeTime(org.created_at) ?? "—"}
-                      </p>
+                    <div className="flex min-w-0 items-center gap-3">
+                      <OrgAvatar
+                        avatarUrl={org.avatar_url}
+                        displayName={org.display_name}
+                        className="h-10 w-10"
+                      />
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-medium text-foreground">
+                          {org.display_name ?? "Untitled org"}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          Created {formatRelativeTime(org.created_at) ?? "—"}
+                        </p>
+                      </div>
                     </div>
                     <RoleBadge role={org.your_role} />
                   </div>

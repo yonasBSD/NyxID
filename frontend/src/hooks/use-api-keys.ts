@@ -1,4 +1,5 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMemo } from "react";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import type {
   ApiKey,
@@ -7,6 +8,7 @@ import type {
   ApiKeyUsageListResponse,
 } from "@/types/api";
 import type { CreateApiKeyFormData } from "@/schemas/api-keys";
+import { useOrgs } from "./use-orgs";
 
 interface UseApiKeysParams {
   /** `null` or omitted lists the caller's personal keys. When set, lists
@@ -14,6 +16,13 @@ interface UseApiKeysParams {
   readonly orgId?: string | null;
 }
 
+/**
+ * List NyxID API keys. Defaults to the caller's personal keys. Pass an
+ * `orgId` to list keys owned by a specific org (caller must be an admin).
+ *
+ * See `useAllAdminedApiKeys` for the aggregated view that the Agent Keys
+ * table uses.
+ */
 export function useApiKeys(params: UseApiKeysParams = {}) {
   const orgId = params.orgId ?? null;
   return useQuery({
@@ -26,6 +35,70 @@ export function useApiKeys(params: UseApiKeysParams = {}) {
       return res.keys;
     },
   });
+}
+
+/**
+ * Aggregate personal + every admined-org API key list into a single array.
+ *
+ * The backend treats `/api-keys` and `/api-keys?org_id=X` as separate scopes
+ * (each requires a different ownership check). The Agent Keys table needs a
+ * single grid that lets org admins manage both kinds in one place, so this
+ * hook fires one request per scope in parallel and flattens the results.
+ *
+ * `isLoading` is true until the first page (personal keys) resolves — at
+ * that point the table can render, and org-scope queries fill in as they
+ * complete. Individual org-scope errors are swallowed (logged) so a single
+ * failed org does not hide the rest of the keys.
+ */
+export function useAllAdminedApiKeys() {
+  const personal = useApiKeys();
+  const { data: orgs } = useOrgs();
+
+  const adminOrgIds = useMemo(
+    () => (orgs ?? []).filter((o) => o.your_role === "admin").map((o) => o.id),
+    [orgs],
+  );
+
+  const orgQueries = useQueries({
+    // Share the cache with direct `useApiKeys({ orgId })` callers (e.g.
+    // channel-bot-detail) by using the same `["api-keys", orgId]` key.
+    queries: adminOrgIds.map((orgId) => ({
+      queryKey: ["api-keys", orgId] as const,
+      queryFn: async (): Promise<readonly ApiKey[]> => {
+        const res = await api.get<{ readonly keys: readonly ApiKey[] }>(
+          `/api-keys?org_id=${encodeURIComponent(orgId)}`,
+        );
+        return res.keys;
+      },
+    })),
+  });
+
+  const orgKeys = useMemo(() => {
+    const out: ApiKey[] = [];
+    for (const q of orgQueries) {
+      if (q.data) out.push(...q.data);
+    }
+    return out;
+  }, [orgQueries]);
+
+  const merged = useMemo(() => {
+    const personalKeys = personal.data ?? [];
+    // Personal first, then org keys in the same admin-org order as useOrgs.
+    const byId = new Map<string, ApiKey>();
+    for (const k of personalKeys) byId.set(k.id, k);
+    for (const k of orgKeys) if (!byId.has(k.id)) byId.set(k.id, k);
+    return Array.from(byId.values());
+  }, [personal.data, orgKeys]);
+
+  const isLoading = personal.isLoading;
+  const isFetching = personal.isFetching || orgQueries.some((q) => q.isFetching);
+
+  return {
+    data: merged,
+    isLoading,
+    isFetching,
+    error: personal.error,
+  } as const;
 }
 
 export function useApiKey(keyId: string) {
@@ -68,6 +141,8 @@ interface CreateApiKeyPayload {
   readonly allow_all_services?: boolean;
   readonly allow_all_nodes?: boolean;
   readonly callback_url?: string;
+  /** Create the key under the given org (caller must be an org admin). */
+  readonly target_org_id?: string;
 }
 
 export function useCreateApiKey() {
@@ -97,12 +172,15 @@ export function useCreateApiKey() {
         allow_all_services: allowAllServices,
         allow_all_nodes: allowAllNodes,
         callback_url: data.callback_url ?? undefined,
+        target_org_id: data.target_org_id ?? undefined,
       };
       return api.post<ApiKeyCreateResponse>("/api-keys", payload);
     },
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["api-keys"] });
-      void queryClient.invalidateQueries({ queryKey: ["api-keys", "usage"] });
+      void queryClient.invalidateQueries({
+        predicate: (q) =>
+          Array.isArray(q.queryKey) && q.queryKey[0] === "api-keys",
+      });
     },
   });
 }
@@ -130,14 +208,10 @@ export function useUpdateApiKey() {
       const { keyId, ...body } = params;
       return api.put<ApiKey>(`/api-keys/${keyId}`, body);
     },
-    onSuccess: (_data, variables) => {
-      void queryClient.invalidateQueries({ queryKey: ["api-keys"] });
-      void queryClient.invalidateQueries({ queryKey: ["api-keys", "usage"] });
+    onSuccess: () => {
       void queryClient.invalidateQueries({
-        queryKey: ["api-keys", variables.keyId],
-      });
-      void queryClient.invalidateQueries({
-        queryKey: ["api-keys", variables.keyId, "usage"],
+        predicate: (q) =>
+          Array.isArray(q.queryKey) && q.queryKey[0] === "api-keys",
       });
     },
   });
@@ -151,8 +225,13 @@ export function useDeleteApiKey() {
       return api.delete<void>(`/api-keys/${id}`);
     },
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["api-keys"] });
-      void queryClient.invalidateQueries({ queryKey: ["api-keys", "usage"] });
+      // Invalidate both the personal scope and every org-scope cache.
+      // `predicate` catches keys like `["api-keys", "org", <orgId>]` that
+      // `useAllAdminedApiKeys` populates lazily.
+      void queryClient.invalidateQueries({
+        predicate: (q) =>
+          Array.isArray(q.queryKey) && q.queryKey[0] === "api-keys",
+      });
     },
   });
 }
@@ -165,8 +244,10 @@ export function useRotateApiKey() {
       return api.post<ApiKeyCreateResponse>(`/api-keys/${id}/rotate`);
     },
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["api-keys"] });
-      void queryClient.invalidateQueries({ queryKey: ["api-keys", "usage"] });
+      void queryClient.invalidateQueries({
+        predicate: (q) =>
+          Array.isArray(q.queryKey) && q.queryKey[0] === "api-keys",
+      });
     },
   });
 }

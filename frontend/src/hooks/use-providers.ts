@@ -94,6 +94,12 @@ export function useInitiateOAuth() {
              * the backend splits on comma/whitespace, validates, and merges.
              */
             readonly additionalScopes?: readonly string[];
+            /**
+             * When set, initiate the OAuth flow on behalf of the given org.
+             * The resulting token is stored under the org's user_id so every
+             * org member can proxy through it. Caller must be an org admin.
+             */
+            readonly targetOrgId?: string;
           },
     ): Promise<OAuthInitiateResponse> => {
       const params =
@@ -104,6 +110,9 @@ export function useInitiateOAuth() {
       }
       if (params.additionalScopes && params.additionalScopes.length > 0) {
         query.set("scope", params.additionalScopes.join(","));
+      }
+      if (params.targetOrgId) {
+        query.set("target_org_id", params.targetOrgId);
       }
       const queryString = query.toString();
       const suffix = queryString ? `?${queryString}` : "";
@@ -122,6 +131,8 @@ export function useInitiateDeviceCode() {
         | {
             readonly providerId: string;
             readonly additionalScopes?: readonly string[];
+            /** Same contract as `useInitiateOAuth`'s `targetOrgId`. */
+            readonly targetOrgId?: string;
           },
     ): Promise<DeviceCodeInitiateResponse> => {
       const params =
@@ -129,6 +140,9 @@ export function useInitiateDeviceCode() {
       const query = new URLSearchParams();
       if (params.additionalScopes && params.additionalScopes.length > 0) {
         query.set("scope", params.additionalScopes.join(","));
+      }
+      if (params.targetOrgId) {
+        query.set("target_org_id", params.targetOrgId);
       }
       const queryString = query.toString();
       const suffix = queryString ? `?${queryString}` : "";

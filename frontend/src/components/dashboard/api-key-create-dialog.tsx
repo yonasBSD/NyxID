@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
@@ -9,6 +9,8 @@ import {
 import { useCreateApiKey } from "@/hooks/use-api-keys";
 import { useKeys } from "@/hooks/use-keys";
 import { useNodes } from "@/hooks/use-nodes";
+import { useOrgs } from "@/hooks/use-orgs";
+import { OrgScopeSelect } from "@/components/shared/org-scope-select";
 import { copyToClipboard } from "@/lib/utils";
 import { ApiError } from "@/lib/api-client";
 import {
@@ -33,7 +35,14 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
-import { Plus, Copy, Check, Calendar, Shield, Server } from "lucide-react";
+import {
+  Plus,
+  Copy,
+  Check,
+  Calendar,
+  Shield,
+  Server,
+} from "lucide-react";
 import { toast } from "sonner";
 
 function toggleInArray(
@@ -54,6 +63,15 @@ export function ApiKeyCreateDialog() {
 
   const { data: services } = useKeys();
   const { data: nodes } = useNodes();
+  const { data: orgs } = useOrgs();
+
+  // Only admin orgs are valid ownership targets -- members/viewers cannot
+  // create org-owned keys. The selector also includes a "Personal" option
+  // that maps to an undefined `target_org_id` (the default).
+  const adminOrgs = useMemo(
+    () => (orgs ?? []).filter((o) => o.your_role === "admin"),
+    [orgs],
+  );
 
   function openDatePicker() {
     const input = expiryInputRef.current;
@@ -77,11 +95,13 @@ export function ApiKeyCreateDialog() {
       allowed_service_ids: [],
       allowed_node_ids: [],
       callback_url: null,
+      target_org_id: undefined,
     },
   });
 
   const watchAllServices = form.watch("allow_all_services") ?? true;
   const watchAllNodes = form.watch("allow_all_nodes") ?? true;
+  const watchTargetOrg = form.watch("target_org_id");
 
   async function onSubmit(data: CreateApiKeyFormData) {
     try {
@@ -184,6 +204,39 @@ export function ApiKeyCreateDialog() {
                     </FormItem>
                   )}
                 />
+
+                {adminOrgs.length > 0 && (
+                  <FormField
+                    control={form.control}
+                    name="target_org_id"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Owner</FormLabel>
+                        <FormControl>
+                          <OrgScopeSelect
+                            value={field.value ?? null}
+                            onChange={(next) => {
+                              field.onChange(next ?? undefined);
+                              // Reset service scope selections when owner
+                              // changes -- the two owners have disjoint
+                              // service lists so a stale selection can't
+                              // round-trip to the backend.
+                              form.setValue("allowed_service_ids", []);
+                              form.setValue("allow_all_services", true);
+                            }}
+                            label="Owner"
+                          />
+                        </FormControl>
+                        <p className="text-xs text-muted-foreground">
+                          Org-owned keys are shared with every admin of that
+                          organization and can only scope to services owned by
+                          the same org.
+                        </p>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                )}
 
                 <FormField
                   control={form.control}
@@ -339,52 +392,72 @@ export function ApiKeyCreateDialog() {
                       <FormField
                         control={form.control}
                         name="allowed_service_ids"
-                        render={({ field }) => (
-                          <FormItem>
-                            <div className="space-y-2 rounded-md border border-border bg-muted/30 p-3">
-                              <p className="text-xs text-muted-foreground">
-                                Select allowed services:
-                              </p>
-                              {services && services.length > 0 ? (
-                                services.map((s) => (
-                                  <div
-                                    key={s.id}
-                                    className="flex items-center gap-2"
-                                  >
-                                    <Checkbox
-                                      id={`create-svc-${s.id}`}
-                                      checked={(
-                                        field.value as readonly string[]
-                                      ).includes(s.id)}
-                                      onCheckedChange={() =>
-                                        field.onChange(
-                                          toggleInArray(
-                                            field.value as readonly string[],
-                                            s.id,
-                                          ),
-                                        )
-                                      }
-                                    />
-                                    <Label
-                                      htmlFor={`create-svc-${s.id}`}
-                                      className="text-xs"
-                                    >
-                                      {s.label}
-                                      <span className="ml-1 text-muted-foreground">
-                                        ({s.slug})
-                                      </span>
-                                    </Label>
-                                  </div>
-                                ))
-                              ) : (
+                        render={({ field }) => {
+                          // Match the selected owner: personal keys can only
+                          // scope to personal services, org keys only to the
+                          // same org's services. Defaults to personal when
+                          // `watchTargetOrg` is undefined.
+                          const visibleServices = (services ?? []).filter(
+                            (s) => {
+                              const source = s.credential_source;
+                              if (watchTargetOrg) {
+                                return (
+                                  source?.type === "org" &&
+                                  source.org_id === watchTargetOrg
+                                );
+                              }
+                              return !source || source.type === "personal";
+                            },
+                          );
+                          return (
+                            <FormItem>
+                              <div className="space-y-2 rounded-md border border-border bg-muted/30 p-3">
                                 <p className="text-xs text-muted-foreground">
-                                  No external services configured yet.
+                                  Select allowed services:
                                 </p>
-                              )}
-                            </div>
-                            <FormMessage />
-                          </FormItem>
-                        )}
+                                {visibleServices.length > 0 ? (
+                                  visibleServices.map((s) => (
+                                    <div
+                                      key={s.id}
+                                      className="flex items-center gap-2"
+                                    >
+                                      <Checkbox
+                                        id={`create-svc-${s.id}`}
+                                        checked={(
+                                          field.value as readonly string[]
+                                        ).includes(s.id)}
+                                        onCheckedChange={() =>
+                                          field.onChange(
+                                            toggleInArray(
+                                              field.value as readonly string[],
+                                              s.id,
+                                            ),
+                                          )
+                                        }
+                                      />
+                                      <Label
+                                        htmlFor={`create-svc-${s.id}`}
+                                        className="text-xs"
+                                      >
+                                        {s.label}
+                                        <span className="ml-1 text-muted-foreground">
+                                          ({s.slug})
+                                        </span>
+                                      </Label>
+                                    </div>
+                                  ))
+                                ) : (
+                                  <p className="text-xs text-muted-foreground">
+                                    {watchTargetOrg
+                                      ? "This org has no services yet."
+                                      : "No personal services configured yet."}
+                                  </p>
+                                )}
+                              </div>
+                              <FormMessage />
+                            </FormItem>
+                          );
+                        }}
                       />
                     )}
                   </div>
