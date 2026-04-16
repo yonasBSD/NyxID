@@ -140,11 +140,20 @@ pub async fn create_invite_code(
 
 /// Atomically reserve one slot on an invite code.
 ///
-/// Returns `Ok(invite_code_id)` on success, or `Err(AppError::BadRequest)` if
-/// the code is unknown, inactive, or exhausted. This only touches `used_count`;
-/// the caller is responsible for recording the usage (via `record_usage`) once
-/// the downstream user creation succeeds, and releasing (via `release_reservation`)
-/// if it fails.
+/// Returns `Ok(invite_code_id)` on success. On failure, returns one of three
+/// distinct errors so the registration UI can show an actionable message:
+///   * `AppError::InviteCodeInvalid` — no code matches (never existed, or typo).
+///   * `AppError::InviteCodeDeactivated` — the admin disabled this code.
+///   * `AppError::InviteCodeExhausted` — the code has reached `max_uses`.
+///
+/// Implementation: the atomic `find_one_and_update` runs first so the happy
+/// path is a single round-trip. Only when the update matched nothing do we
+/// fall back to a `find_one` diagnostic lookup to determine *why* it missed.
+/// This keeps the hot path fast while still giving the user a specific error.
+///
+/// This only touches `used_count`; the caller is responsible for recording
+/// the usage (via `record_usage`) once the downstream user creation succeeds,
+/// and releasing (via `release_reservation`) if it fails.
 pub async fn reserve_invite_code(db: &mongodb::Database, code: &str) -> AppResult<String> {
     let normalized = normalize_code(code);
     let now = bson::DateTime::from_chrono(Utc::now());
@@ -153,8 +162,9 @@ pub async fn reserve_invite_code(db: &mongodb::Database, code: &str) -> AppResul
         .return_document(ReturnDocument::After)
         .build();
 
-    let result = db
-        .collection::<InviteCode>(COLLECTION_NAME)
+    let collection = db.collection::<InviteCode>(COLLECTION_NAME);
+
+    let result = collection
         .find_one_and_update(
             doc! {
                 "code": &normalized,
@@ -169,11 +179,22 @@ pub async fn reserve_invite_code(db: &mongodb::Database, code: &str) -> AppResul
         .with_options(options)
         .await?;
 
-    match result {
-        Some(invite) => Ok(invite.id),
-        None => Err(AppError::BadRequest(
-            "Invalid or exhausted invite code".to_string(),
-        )),
+    if let Some(invite) = result {
+        return Ok(invite.id);
+    }
+
+    // Diagnose why the reservation failed. Order matters: deactivated takes
+    // precedence over exhausted, since an admin may have deactivated a code
+    // that also happens to be full. Both are more informative than "invalid".
+    match collection.find_one(doc! { "code": &normalized }).await? {
+        None => Err(AppError::InviteCodeInvalid),
+        Some(invite) if !invite.is_active => Err(AppError::InviteCodeDeactivated),
+        Some(invite) if invite.used_count >= invite.max_uses => Err(AppError::InviteCodeExhausted),
+        // Race: the code became valid between the update miss and the
+        // diagnostic read (e.g. `release_reservation` landed in between).
+        // Surface as "invalid" rather than silently retrying; the user can
+        // resubmit and succeed on the next attempt.
+        Some(_) => Err(AppError::InviteCodeInvalid),
     }
 }
 
