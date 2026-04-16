@@ -825,16 +825,32 @@ pub async fn guard_slug_against_viewer_orgs(
             continue;
         }
 
-        // Look up UserService on the org user by slug or catalog_service_id
-        // WITHOUT the is_active filter. Inactive rows still count as
-        // "the org has this service" -- a viewer must not slip through
-        // just because an admin soft-disabled the row.
-        let mut us_query = doc! { "user_id": &membership.org_user_id };
-        if let Some(s) = slug {
-            us_query.insert("slug", s);
-        } else if let Some(csid) = catalog_service_id {
-            us_query.insert("catalog_service_id", csid);
+        // Look up UserService on the org user that could route to this
+        // DownstreamService, WITHOUT the is_active filter. An org
+        // UserService counts if:
+        //
+        //   - its `slug` matches the downstream's canonical slug, OR
+        //   - its `slug` matches the route slug the caller used (rare
+        //     but legitimate: org admin picked a custom per-user slug
+        //     that happens to match the downstream's slug), OR
+        //   - its `catalog_service_id` matches the downstream id (the
+        //     new-path link between UserService and DownstreamService).
+        //
+        // Matching any of these means the org has a routable entry for
+        // this service; a viewer must not slip through just because
+        // admins customized the slug or soft-disabled the row.
+        let mut us_or: Vec<mongodb::bson::Document> = Vec::with_capacity(3);
+        us_or.push(doc! { "slug": &downstream.slug });
+        if let Some(route_slug) = slug
+            && route_slug != downstream.slug
+        {
+            us_or.push(doc! { "slug": route_slug });
         }
+        us_or.push(doc! { "catalog_service_id": &downstream.id });
+        let us_query = doc! {
+            "user_id": &membership.org_user_id,
+            "$or": us_or,
+        };
         let us_hit = db
             .collection::<crate::models::user_service::UserService>(
                 crate::models::user_service::COLLECTION_NAME,

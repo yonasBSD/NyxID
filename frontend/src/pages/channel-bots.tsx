@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -210,6 +210,22 @@ function CreateBotDialog({
       target_org_id: defaultOrgId ?? undefined,
     },
   });
+
+  // RHF's `defaultValues` only apply on first mount. The dialog stays
+  // mounted across page-scope changes, so re-seed the form whenever the
+  // page scope changes OR the dialog (re)opens. Otherwise the dialog
+  // would silently submit with the stale first-mount scope -- e.g.
+  // switch page scope to an org, click "Add Bot", and it would create a
+  // personal bot.
+  useEffect(() => {
+    if (!open) return;
+    reset({
+      platform: "telegram",
+      bot_token: "",
+      label: "",
+      target_org_id: defaultOrgId ?? undefined,
+    });
+  }, [open, defaultOrgId, reset]);
 
   const platform = watch("platform");
   const targetOrgId = watch("target_org_id") ?? null;
