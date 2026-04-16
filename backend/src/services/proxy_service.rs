@@ -49,6 +49,14 @@ pub(crate) struct PreparedDelegatedRequest {
 
 /// Headers that are safe to forward to downstream services.
 /// Uses an allowlist approach to prevent leaking sensitive headers.
+///
+/// In addition to the explicit list below, any caller-supplied header whose
+/// lowercased name starts with `x-openclaw-` is forwarded. OpenClaw gateways
+/// require arbitrary namespaced headers (e.g. `x-openclaw-scopes`) to select
+/// operator permissions; listing every one individually caused the bug in
+/// NyxID#161 where `x-openclaw-scopes` was silently stripped. The prefix is
+/// narrow enough to keep sensitive NyxID/infrastructure headers (authorization,
+/// cookie, x-nyxid-*) outside the passthrough.
 const ALLOWED_FORWARD_HEADERS: &[&str] = &[
     "content-type",
     "accept",
@@ -64,12 +72,22 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
     "if-range",
     "if-none-match",
     "if-modified-since",
-    // OpenClaw gateway session and routing headers
-    "x-openclaw-session-key",
-    "x-openclaw-agent-id",
-    "x-openclaw-model",
-    "x-openclaw-message-channel",
 ];
+
+/// Namespaced header prefixes that should be forwarded transparently.
+///
+/// Headers under `x-openclaw-*` are caller-supplied OpenClaw routing / scope
+/// hints; the gateway owns their semantics, so NyxID must not strip them.
+const ALLOWED_FORWARD_HEADER_PREFIXES: &[&str] = &["x-openclaw-"];
+
+/// Returns `true` when the header name is in the allowlist or matches an
+/// allowlisted prefix. Caller must lowercase the name before calling.
+fn is_allowed_forward_header(name_lower: &str) -> bool {
+    ALLOWED_FORWARD_HEADERS.contains(&name_lower)
+        || ALLOWED_FORWARD_HEADER_PREFIXES
+            .iter()
+            .any(|prefix| name_lower.starts_with(prefix))
+}
 
 fn validate_path_injection_prefix(value: &str) -> AppResult<()> {
     if value.trim().is_empty()
@@ -1532,7 +1550,7 @@ pub async fn forward_request(
         if has_custom_ua && name_lower == "user-agent" {
             continue;
         }
-        if ALLOWED_FORWARD_HEADERS.contains(&name_lower.as_str()) {
+        if is_allowed_forward_header(&name_lower) {
             request = request.header(name, value);
         }
     }
@@ -1783,6 +1801,43 @@ mod tests {
     };
     use chrono::Utc;
     use tokio::{net::TcpListener, sync::mpsc};
+
+    // ---- forward header allowlist tests (NyxID#161) ----
+
+    #[test]
+    fn forward_allowlist_accepts_explicit_entries() {
+        assert!(is_allowed_forward_header("content-type"));
+        assert!(is_allowed_forward_header("user-agent"));
+        assert!(is_allowed_forward_header("range"));
+    }
+
+    #[test]
+    fn forward_allowlist_accepts_openclaw_scopes_header() {
+        // NyxID#161: the raw header name was dropped by the proxy because
+        // the allowlist did not include it.
+        assert!(
+            is_allowed_forward_header("x-openclaw-scopes"),
+            "x-openclaw-scopes must pass the direct-proxy allowlist (NyxID#161)",
+        );
+    }
+
+    #[test]
+    fn forward_allowlist_accepts_future_openclaw_prefixed_headers() {
+        assert!(is_allowed_forward_header("x-openclaw-tenant"));
+        assert!(is_allowed_forward_header("x-openclaw-trace-id"));
+        assert!(is_allowed_forward_header("x-openclaw-"));
+    }
+
+    #[test]
+    fn forward_allowlist_rejects_sensitive_and_unrelated_headers() {
+        // Guard: the prefix rule must not broaden leakage of NyxID or
+        // infrastructure headers.
+        assert!(!is_allowed_forward_header("authorization"));
+        assert!(!is_allowed_forward_header("cookie"));
+        assert!(!is_allowed_forward_header("x-nyxid-internal"));
+        assert!(!is_allowed_forward_header("x-forwarded-for"));
+        assert!(!is_allowed_forward_header("host"));
+    }
 
     #[derive(Debug)]
     struct CapturedRequest {
