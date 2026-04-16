@@ -921,6 +921,7 @@ mod tests {
             decision_channel: None,
             decision_idempotency_key: None,
             notify_user_ids: vec![],
+            from_org_policy: false,
             created_at: Utc::now(),
         }
     }

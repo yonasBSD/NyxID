@@ -1089,12 +1089,15 @@ async fn check_llm_approval(
     let has_grant = if approval_resolution.mode
         == crate::models::service_approval_config::ApprovalMode::Grant
     {
+        // Org-policy grants are org-scoped (see ChronoAIProject/NyxID#364) --
+        // pass the flag through so members of the same org reuse the grant.
         approval_service::check_approval(
             &state.db,
             primary_owner,
             service_id,
             requester_type,
             &requester_id,
+            approval_resolution.from_org_policy,
         )
         .await?
     } else {
@@ -1151,6 +1154,7 @@ async fn check_llm_approval(
         approval_resolution.mode.clone(),
         timeout_secs,
         notify_user_ids,
+        approval_resolution.from_org_policy,
     )
     .await?;
 

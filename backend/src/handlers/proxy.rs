@@ -976,12 +976,17 @@ async fn execute_proxy_inner(
         let has_grant = if approval_resolution.mode
             == crate::models::service_approval_config::ApprovalMode::Grant
         {
+            // For org-policy requests the grant is minted as org-scoped and
+            // must be reused across every member of the owning org (see
+            // ChronoAIProject/NyxID#364); pass the resolution flag through so
+            // check_approval widens the lookup to ignore requester identity.
             approval_service::check_approval(
                 &state.db,
                 primary_owner,
                 service_id,
                 requester_type,
                 &requester_id,
+                approval_resolution.from_org_policy,
             )
             .await?
         } else {
@@ -1053,6 +1058,7 @@ async fn execute_proxy_inner(
                 approval_resolution.mode.clone(),
                 timeout_secs,
                 notify_user_ids,
+                approval_resolution.from_org_policy,
             )
             .await?;
 

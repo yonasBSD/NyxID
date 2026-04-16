@@ -119,6 +119,16 @@ pub struct ApprovalRequest {
     #[serde(default)]
     pub notify_user_ids: Vec<String>,
 
+    /// Whether this request was created under an org's per-service approval
+    /// policy (rather than the actor's personal policy). When true, `user_id`
+    /// is the org_id, `notify_user_ids` holds the org's admin list, and any
+    /// resulting grant is reusable by every member of that org (see #364).
+    ///
+    /// Default `false` so legacy rows (created before the org cascade was
+    /// introduced) keep their original per-actor semantics on decision.
+    #[serde(default)]
+    pub from_org_policy: bool,
+
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
 }
@@ -161,6 +171,7 @@ mod tests {
             decision_channel: None,
             decision_idempotency_key: None,
             notify_user_ids: vec![],
+            from_org_policy: false,
             created_at: Utc::now(),
         }
     }
@@ -205,6 +216,30 @@ mod tests {
             restored.action_description.as_deref(),
             Some("POST /v1/chat/completions (model: gpt-4, 3 messages)")
         );
+    }
+
+    #[test]
+    fn missing_from_org_policy_defaults_to_false_for_legacy_rows() {
+        // Legacy approval_requests documents predate from_org_policy (added
+        // as part of the org grant reuse fix for ChronoAIProject/NyxID#364
+        // and ChronoAIProject/NyxID#370). They must still deserialize, and
+        // process_decision must treat them as personal requests so a grant
+        // created from one does not silently become org-reusable.
+        let req = make_approval_request();
+        let mut doc = bson::to_document(&req).expect("serialize");
+        doc.remove("from_org_policy");
+        let restored: ApprovalRequest = bson::from_document(doc).expect("deserialize");
+        assert!(!restored.from_org_policy);
+    }
+
+    #[test]
+    fn from_org_policy_roundtrips() {
+        let mut req = make_approval_request();
+        req.from_org_policy = true;
+        let doc = bson::to_document(&req).expect("serialize");
+        assert!(doc.get_bool("from_org_policy").unwrap());
+        let restored: ApprovalRequest = bson::from_document(doc).expect("deserialize");
+        assert!(restored.from_org_policy);
     }
 
     #[test]
