@@ -7,22 +7,56 @@ import type {
   UpdateChannelConversationRequest,
 } from "@/types/channels";
 
-// -- Queries --
+// ─────────────────────────────────────────────────────────────────────────────
+// Query keys
+// ─────────────────────────────────────────────────────────────────────────────
 
-export function useChannelConversations(botId?: string) {
-  const params = botId ? `?bot_id=${botId}` : "";
+const CHANNEL_CONVERSATIONS_ROOT = ["channel-conversations"] as const;
+
+export const channelConversationsQueryKeys = {
+  all: CHANNEL_CONVERSATIONS_ROOT,
+  list: (orgId: string | null, botId: string | null) =>
+    [
+      ...CHANNEL_CONVERSATIONS_ROOT,
+      "list",
+      orgId ?? "personal",
+      botId ?? "all-bots",
+    ] as const,
+} as const;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Queries
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface UseChannelConversationsParams {
+  readonly botId?: string | null;
+  /** `null` or omitted lists personal conversations. When set, lists
+   *  conversations owned by the given org (admin-only). */
+  readonly orgId?: string | null;
+}
+
+export function useChannelConversations(params: UseChannelConversationsParams = {}) {
+  const orgId = params.orgId ?? null;
+  const botId = params.botId ?? null;
   return useQuery({
-    queryKey: ["channel-conversations", botId ?? "all"],
+    queryKey: channelConversationsQueryKeys.list(orgId, botId),
     queryFn: async (): Promise<readonly ChannelConversationItem[]> => {
-      const res = await api.get<ChannelConversationListResponse>(
-        `/channel-conversations${params}`,
-      );
+      const qs: string[] = [];
+      if (botId) qs.push(`bot_id=${encodeURIComponent(botId)}`);
+      if (orgId) qs.push(`org_id=${encodeURIComponent(orgId)}`);
+      const path =
+        qs.length === 0
+          ? "/channel-conversations"
+          : `/channel-conversations?${qs.join("&")}`;
+      const res = await api.get<ChannelConversationListResponse>(path);
       return res.conversations;
     },
   });
 }
 
-// -- Mutations --
+// ─────────────────────────────────────────────────────────────────────────────
+// Mutations
+// ─────────────────────────────────────────────────────────────────────────────
 
 export function useCreateChannelConversation() {
   const queryClient = useQueryClient();
@@ -38,7 +72,7 @@ export function useCreateChannelConversation() {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({
-        queryKey: ["channel-conversations"],
+        queryKey: CHANNEL_CONVERSATIONS_ROOT,
       });
       void queryClient.invalidateQueries({ queryKey: ["channel-bots"] });
     },
@@ -60,7 +94,7 @@ export function useUpdateChannelConversation() {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({
-        queryKey: ["channel-conversations"],
+        queryKey: CHANNEL_CONVERSATIONS_ROOT,
       });
     },
   });
@@ -75,7 +109,7 @@ export function useDeleteChannelConversation() {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({
-        queryKey: ["channel-conversations"],
+        queryKey: CHANNEL_CONVERSATIONS_ROOT,
       });
       void queryClient.invalidateQueries({ queryKey: ["channel-bots"] });
     },

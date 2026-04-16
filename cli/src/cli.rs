@@ -1752,11 +1752,19 @@ pub enum ChannelBotCommands {
         /// Platform public key (required for some platforms, e.g. Discord)
         #[arg(long)]
         public_key: Option<String>,
+        /// Create this bot under the given org (you must be an admin of
+        /// that org). Omit for a personal bot.
+        #[arg(long, value_name = "ORG_ID")]
+        org: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },
     /// List registered bots
     List {
+        /// List bots owned by the given org (admin-only). Omit for
+        /// personal bots.
+        #[arg(long, value_name = "ORG_ID")]
+        org: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -1813,6 +1821,11 @@ pub enum ChannelRouteCommands {
         /// Mark as the default agent for unmatched conversations
         #[arg(long)]
         default_agent: bool,
+        /// Create this route under the given org (you must be an admin
+        /// of that org). The bot and agent key must also belong to the
+        /// same org. Omit for a personal route.
+        #[arg(long, value_name = "ORG_ID")]
+        org: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -1821,6 +1834,10 @@ pub enum ChannelRouteCommands {
         /// Filter by bot ID
         #[arg(long)]
         bot_id: Option<String>,
+        /// List routes owned by the given org (admin-only). Omit for
+        /// personal routes.
+        #[arg(long, value_name = "ORG_ID")]
+        org: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },

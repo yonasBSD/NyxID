@@ -101,6 +101,17 @@ pub async fn llm_proxy_request(
         {
             Some(resolution) => (resolution.target, true),
             None => {
+                // Before the legacy fallback, block org viewers whose
+                // org has any presence for this slug so they cannot
+                // slip into the LLM gateway approval flow via the
+                // legacy path (see ChronoAIProject/NyxID#375).
+                proxy_service::guard_slug_against_viewer_orgs(
+                    &state.db,
+                    &user_id_str,
+                    Some(&provider_slug),
+                    Some(&service_id),
+                )
+                .await?;
                 let legacy = proxy_service::resolve_proxy_target(
                     &state.db,
                     &state.encryption_keys,

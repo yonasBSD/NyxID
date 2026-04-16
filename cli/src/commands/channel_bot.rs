@@ -18,6 +18,7 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
             app_secret,
             app_secret_env,
             public_key,
+            org,
             auth,
         } => {
             let token = resolve_secret(bot_token.as_deref(), token_env.as_deref(), "bot token")?;
@@ -40,6 +41,9 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
             }
             if let Some(key) = public_key {
                 body["public_key"] = Value::String(key);
+            }
+            if let Some(ref org_id) = org {
+                body["target_org_id"] = Value::String(org_id.clone());
             }
 
             let result: Value = api.post("/channel-bots", &body).await?;
@@ -64,9 +68,13 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
             Ok(())
         }
 
-        ChannelBotCommands::List { auth } => {
+        ChannelBotCommands::List { org, auth } => {
             let mut api = ApiClient::from_auth(&auth)?;
-            let bots: Value = api.get("/channel-bots").await?;
+            let path = match org.as_deref() {
+                Some(id) => format!("/channel-bots?org_id={}", urlencoding::encode(id)),
+                None => "/channel-bots".to_string(),
+            };
+            let bots: Value = api.get(&path).await?;
 
             match auth.output {
                 OutputFormat::Json => {
@@ -218,6 +226,7 @@ async fn run_route(command: ChannelRouteCommands) -> Result<()> {
             conversation_type,
             sender_id,
             default_agent,
+            org,
             auth,
         } => {
             let mut api = ApiClient::from_auth(&auth)?;
@@ -238,6 +247,9 @@ async fn run_route(command: ChannelRouteCommands) -> Result<()> {
             }
             if default_agent {
                 body["default_agent"] = Value::Bool(true);
+            }
+            if let Some(ref org_id) = org {
+                body["target_org_id"] = Value::String(org_id.clone());
             }
 
             let result: Value = api.post("/channel-conversations", &body).await?;
@@ -264,11 +276,19 @@ async fn run_route(command: ChannelRouteCommands) -> Result<()> {
             Ok(())
         }
 
-        ChannelRouteCommands::List { bot_id, auth } => {
+        ChannelRouteCommands::List { bot_id, org, auth } => {
             let mut api = ApiClient::from_auth(&auth)?;
-            let path = match &bot_id {
-                Some(id) => format!("/channel-conversations?bot_id={id}"),
-                None => "/channel-conversations".to_string(),
+            let mut params: Vec<String> = Vec::new();
+            if let Some(id) = &bot_id {
+                params.push(format!("bot_id={}", urlencoding::encode(id)));
+            }
+            if let Some(org_id) = &org {
+                params.push(format!("org_id={}", urlencoding::encode(org_id)));
+            }
+            let path = if params.is_empty() {
+                "/channel-conversations".to_string()
+            } else {
+                format!("/channel-conversations?{}", params.join("&"))
             };
             let routes: Value = api.get(&path).await?;
 

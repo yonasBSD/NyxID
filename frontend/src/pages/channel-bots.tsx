@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -7,6 +7,7 @@ import { createChannelBotSchema, type CreateChannelBotFormData } from "@/schemas
 import { ApiError } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
 import { PageHeader } from "@/components/shared/page-header";
+import { OrgScopeSelect } from "@/components/shared/org-scope-select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -184,9 +185,13 @@ function EmptyState({ onAdd }: { readonly onAdd: () => void }) {
 function CreateBotDialog({
   open,
   onOpenChange,
+  defaultOrgId,
 }: {
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
+  /** Pre-select this org in the scope picker when the page already has one
+   *  active. `null` defaults to personal. */
+  readonly defaultOrgId: string | null;
 }) {
   const createBot = useCreateChannelBot();
   const {
@@ -202,13 +207,39 @@ function CreateBotDialog({
       platform: "telegram",
       bot_token: "",
       label: "",
+      target_org_id: defaultOrgId ?? undefined,
     },
   });
 
+  // RHF's `defaultValues` only apply on first mount. The dialog stays
+  // mounted across page-scope changes, so re-seed the form whenever the
+  // page scope changes OR the dialog (re)opens. Otherwise the dialog
+  // would silently submit with the stale first-mount scope -- e.g.
+  // switch page scope to an org, click "Add Bot", and it would create a
+  // personal bot.
+  useEffect(() => {
+    if (!open) return;
+    reset({
+      platform: "telegram",
+      bot_token: "",
+      label: "",
+      target_org_id: defaultOrgId ?? undefined,
+    });
+  }, [open, defaultOrgId, reset]);
+
   const platform = watch("platform");
+  const targetOrgId = watch("target_org_id") ?? null;
 
   function onSubmit(data: CreateChannelBotFormData) {
-    createBot.mutate(data, {
+    // Empty strings from the form should not be sent as target_org_id.
+    const payload = {
+      ...data,
+      target_org_id:
+        data.target_org_id && data.target_org_id.length > 0
+          ? data.target_org_id
+          : undefined,
+    };
+    createBot.mutate(payload, {
       onSuccess: (result) => {
         toast.success(
           `Bot "${result.platform_bot_username}" created successfully`,
@@ -235,6 +266,23 @@ function CreateBotDialog({
         </DialogHeader>
 
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="scope">Scope</Label>
+            <OrgScopeSelect
+              value={targetOrgId}
+              onChange={(next) =>
+                setValue("target_org_id", next ?? undefined, {
+                  shouldDirty: true,
+                })
+              }
+              label="Scope"
+            />
+            <p className="text-xs text-muted-foreground">
+              Choose where this bot lives. Org bots are visible to every
+              org admin and can be bound to org-owned agent keys.
+            </p>
+          </div>
+
           <div className="space-y-2">
             <Label htmlFor="platform">Platform</Label>
             <Select
@@ -416,7 +464,8 @@ function LoadingSkeleton() {
 }
 
 export function ChannelBotsPage() {
-  const { data: bots, isLoading, error } = useChannelBots();
+  const [scopeOrgId, setScopeOrgId] = useState<string | null>(null);
+  const { data: bots, isLoading, error } = useChannelBots({ orgId: scopeOrgId });
   const [createOpen, setCreateOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
 
@@ -433,6 +482,15 @@ export function ChannelBotsPage() {
         }
       />
 
+      <div className="flex items-center gap-3">
+        <Label htmlFor="bots-scope" className="text-sm font-medium">
+          Scope
+        </Label>
+        <div className="w-60">
+          <OrgScopeSelect value={scopeOrgId} onChange={setScopeOrgId} />
+        </div>
+      </div>
+
       {isLoading ? (
         <LoadingSkeleton />
       ) : error ? (
@@ -447,7 +505,11 @@ export function ChannelBotsPage() {
         <BotsTable bots={bots} onDelete={setDeleteTarget} />
       )}
 
-      <CreateBotDialog open={createOpen} onOpenChange={setCreateOpen} />
+      <CreateBotDialog
+        open={createOpen}
+        onOpenChange={setCreateOpen}
+        defaultOrgId={scopeOrgId}
+      />
       <DeleteBotDialog botId={deleteTarget} onClose={() => setDeleteTarget(null)} />
     </div>
   );
