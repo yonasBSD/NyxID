@@ -68,7 +68,17 @@ pub struct AddMemberRequest {
 pub struct UpdateMemberRequest {
     pub role: Option<OrgRoleWire>,
     /// Pass `null` to clear the scope (full access). Pass an array to restrict.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// The custom deserializer distinguishes an absent field (leave
+    /// existing scope untouched: `None`) from an explicit `null` (clear
+    /// the scope: `Some(None)`). Without it, serde's default
+    /// `Option<Option<T>>` deserialization collapses both cases to outer
+    /// `None`, so `{"allowed_service_ids": null}` is silently ignored
+    /// (issue #363).
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
     pub allowed_service_ids: Option<Option<Vec<String>>>,
 }
 
@@ -225,11 +235,18 @@ fn invite_to_response(invite: OrgInvite) -> InviteResponse {
 }
 
 /// Reject if the actor is not admin of this org.
+///
+/// Verifies the org exists first so a non-existent id returns
+/// `OrgNotFound` (404) rather than masking that as a role/membership
+/// error. Without that check, a caller poking at arbitrary UUIDs gets
+/// `OrgRoleInsufficient` for every id and cannot tell "org does not
+/// exist" from "I'm not an admin of this real org".
 async fn require_org_admin(
     db: &mongodb::Database,
     actor_user_id: &str,
     org_user_id: &str,
 ) -> AppResult<()> {
+    let _ = org_service::get_org_user(db, org_user_id).await?;
     if !org_service::is_admin(db, actor_user_id, org_user_id).await? {
         return Err(AppError::OrgRoleInsufficient(
             "admin role required for this operation".to_string(),
@@ -239,11 +256,17 @@ async fn require_org_admin(
 }
 
 /// Reject if the actor is not any kind of active member of this org.
+///
+/// Verifies the org exists first so a non-existent id returns
+/// `OrgNotFound` (404) instead of `OrgMembershipRequired` (403). This
+/// lets clients distinguish "org does not exist" from "I'm not a
+/// member of this real org" (issue #359).
 async fn require_org_member(
     db: &mongodb::Database,
     actor_user_id: &str,
     org_user_id: &str,
 ) -> AppResult<OrgMembership> {
+    let _ = org_service::get_org_user(db, org_user_id).await?;
     let m = org_service::get_active_membership(db, org_user_id, actor_user_id).await?;
     m.ok_or(AppError::OrgMembershipRequired)
 }
@@ -832,4 +855,49 @@ pub async fn set_primary_org(
     Ok(Json(
         serde_json::json!({ "primary_org_id": body.primary_org_id }),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::UpdateMemberRequest;
+
+    // Regression tests for ChronoAIProject/NyxID#363: `allowed_service_ids:
+    // null` in PATCH /orgs/{id}/members/{id} must clear the scope. With
+    // serde's default `Option<Option<T>>` deserialization, `null` and
+    // "field absent" both collapsed to outer `None`, so the service layer
+    // skipped the update entirely. The nullable_field helper disambiguates.
+
+    #[test]
+    fn allowed_service_ids_absent_leaves_scope_untouched() {
+        let req: UpdateMemberRequest = serde_json::from_str(r#"{"role": "member"}"#).unwrap();
+        assert!(req.allowed_service_ids.is_none());
+    }
+
+    #[test]
+    fn allowed_service_ids_null_clears_scope() {
+        let req: UpdateMemberRequest =
+            serde_json::from_str(r#"{"role": "member", "allowed_service_ids": null}"#).unwrap();
+        assert_eq!(req.allowed_service_ids, Some(None));
+    }
+
+    #[test]
+    fn allowed_service_ids_array_restricts_scope() {
+        let req: UpdateMemberRequest = serde_json::from_str(
+            r#"{"role": "member", "allowed_service_ids": ["svc-a", "svc-b"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            req.allowed_service_ids,
+            Some(Some(vec!["svc-a".to_string(), "svc-b".to_string()]))
+        );
+    }
+
+    #[test]
+    fn allowed_service_ids_empty_array_is_zero_scope() {
+        // Empty array is a legitimate state meaning "locked out of every
+        // service"; distinct from null (clear) and absent (no change).
+        let req: UpdateMemberRequest =
+            serde_json::from_str(r#"{"role": "member", "allowed_service_ids": []}"#).unwrap();
+        assert_eq!(req.allowed_service_ids, Some(Some(vec![])));
+    }
 }
