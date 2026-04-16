@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
 import { Link } from "@tanstack/react-router";
+import { Building2 } from "lucide-react";
 import {
-  useApiKeys,
+  useAllAdminedApiKeys,
   useDeleteApiKey,
   useRotateApiKey,
 } from "@/hooks/use-api-keys";
@@ -53,7 +54,7 @@ function servicesSummary(key: ApiKey): string {
 }
 
 export function ApiKeyTable() {
-  const { data: apiKeys, isLoading } = useApiKeys();
+  const { data: apiKeys, isLoading } = useAllAdminedApiKeys();
   const deleteMutation = useDeleteApiKey();
   const rotateMutation = useRotateApiKey();
   const [deleteTarget, setDeleteTarget] = useState<ApiKey | null>(null);
@@ -123,6 +124,7 @@ export function ApiKeyTable() {
         <TableHeader>
           <TableRow>
             <TableHead>Name</TableHead>
+            <TableHead>Owner</TableHead>
             <TableHead>Key</TableHead>
             <TableHead>Platform</TableHead>
             <TableHead>Scopes</TableHead>
@@ -138,6 +140,9 @@ export function ApiKeyTable() {
         <TableBody>
           {apiKeys.map((key) => {
             const scopesList = parseScopesString(key.scopes);
+            const source = key.credential_source;
+            const isOrg = source?.type === "org";
+            const ownerLabel = isOrg ? source.org_name : "Personal";
             return (
               <TableRow key={key.id}>
                 <TableCell className="font-medium">
@@ -148,6 +153,21 @@ export function ApiKeyTable() {
                   >
                     {key.name}
                   </Link>
+                </TableCell>
+                <TableCell>
+                  {isOrg ? (
+                    <Badge variant="info" className="gap-1 text-xs">
+                      <Building2
+                        className="h-3 w-3"
+                        aria-hidden="true"
+                      />
+                      {ownerLabel}
+                    </Badge>
+                  ) : (
+                    <span className="text-xs text-muted-foreground">
+                      Personal
+                    </span>
+                  )}
                 </TableCell>
                 <TableCell>
                   <code className="rounded bg-muted px-2 py-1 font-mono text-xs">

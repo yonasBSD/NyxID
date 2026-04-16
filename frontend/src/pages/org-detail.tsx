@@ -36,7 +36,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/shared/page-header";
 import { ApiError } from "@/lib/api-client";
-import { formatRelativeTime } from "@/lib/utils";
+import { formatRelativeTime, formatTimeDistance } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth-store";
 import {
   useOrg,
@@ -59,9 +59,11 @@ import {
   type UpdateOrgRequest,
 } from "@/schemas/orgs";
 import { MemberRow } from "@/components/orgs/member-row";
+import { MemberScopeDialog } from "@/components/orgs/member-scope-dialog";
 import { RoleBadge } from "@/components/orgs/role-badge";
 import { InviteDialog } from "@/components/orgs/invite-dialog";
 import { OrgApprovalConfigs } from "@/components/orgs/org-approval-configs";
+import { OrgAvatar } from "@/components/orgs/org-avatar";
 
 type TabValue = "members" | "invites" | "approvals" | "settings";
 
@@ -82,6 +84,7 @@ export function OrgDetailPage() {
   const [tab, setTab] = useState<TabValue>("members");
   const [inviteOpen, setInviteOpen] = useState(false);
   const [revokeTarget, setRevokeTarget] = useState<MemberResponse | null>(null);
+  const [scopeTarget, setScopeTarget] = useState<MemberResponse | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
 
   if (isLoading) {
@@ -176,6 +179,13 @@ export function OrgDetailPage() {
         ]}
         title={org.display_name ?? "Untitled org"}
         description={`${String(org.member_count)} member${org.member_count === 1 ? "" : "s"}`}
+        leading={
+          <OrgAvatar
+            avatarUrl={org.avatar_url}
+            displayName={org.display_name}
+            className="h-14 w-14"
+          />
+        }
         actions={<RoleBadge role={org.your_role} />}
       />
 
@@ -212,8 +222,11 @@ export function OrgDetailPage() {
                   <TableRow>
                     <TableHead>Member</TableHead>
                     <TableHead>Role</TableHead>
+                    <TableHead>Services</TableHead>
                     <TableHead>Joined</TableHead>
-                    <TableHead className="w-[80px]" />
+                    <TableHead className="w-[100px] text-right">
+                      <span className="sr-only">Actions</span>
+                    </TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -229,6 +242,7 @@ export function OrgDetailPage() {
                       }
                       onChangeRole={(id, role) => void handleChangeRole(id, role)}
                       onRevoke={(target) => setRevokeTarget(target)}
+                      onEditScope={(target) => setScopeTarget(target)}
                     />
                   ))}
                 </TableBody>
@@ -301,7 +315,9 @@ export function OrgDetailPage() {
                               )}
                             </TableCell>
                             <TableCell className="text-muted-foreground">
-                              {formatRelativeTime(invite.expires_at) ?? "—"}
+                              {isRedeemed || isExpired
+                                ? formatRelativeTime(invite.expires_at)
+                                : formatTimeDistance(invite.expires_at)}
                             </TableCell>
                             <TableCell>
                               {!isRedeemed && !isExpired && (
@@ -363,6 +379,14 @@ export function OrgDetailPage() {
         orgId={orgId}
         open={inviteOpen}
         onOpenChange={setInviteOpen}
+      />
+
+      <MemberScopeDialog
+        orgId={orgId}
+        member={scopeTarget}
+        onOpenChange={(open) => {
+          if (!open) setScopeTarget(null);
+        }}
       />
 
       <Dialog

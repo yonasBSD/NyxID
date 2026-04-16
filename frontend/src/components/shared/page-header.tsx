@@ -5,6 +5,8 @@ interface PageHeaderProps {
   readonly title: string;
   readonly description?: string;
   readonly actions?: React.ReactNode;
+  /** Optional decoration rendered immediately before the title (e.g. avatar). */
+  readonly leading?: React.ReactNode;
 }
 
 /* ── VoidPortal Page Header ── */
@@ -13,6 +15,7 @@ export function PageHeader({
   title,
   description,
   actions,
+  leading,
 }: PageHeaderProps) {
   return (
     <div className="flex flex-col gap-2">
@@ -20,13 +23,16 @@ export function PageHeader({
         <Breadcrumb items={breadcrumbs} />
       )}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex flex-col gap-2">
-          <h2 className="font-display text-3xl font-normal tracking-tight md:text-5xl">
-            {title}
-          </h2>
-          {description && (
-            <p className="text-sm text-muted-foreground">{description}</p>
-          )}
+        <div className="flex items-center gap-4">
+          {leading && <div className="shrink-0">{leading}</div>}
+          <div className="flex flex-col gap-2">
+            <h2 className="font-display text-3xl font-normal tracking-tight md:text-5xl">
+              {title}
+            </h2>
+            {description && (
+              <p className="text-sm text-muted-foreground">{description}</p>
+            )}
+          </div>
         </div>
         {actions && <div className="flex items-center gap-2">{actions}</div>}
       </div>

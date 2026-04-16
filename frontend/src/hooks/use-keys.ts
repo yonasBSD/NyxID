@@ -69,6 +69,12 @@ interface CreateKeyParams {
   readonly ssh_principals?: string;
   readonly ssh_certificate_ttl_minutes?: number;
   readonly openapi_spec_url?: string;
+  /**
+   * Create the service under the given org so every admin of that org can
+   * manage the resulting UserService / UserEndpoint / UserApiKey rows.
+   * Caller must be an admin of the target org.
+   */
+  readonly target_org_id?: string;
 }
 
 export function useCreateKey() {

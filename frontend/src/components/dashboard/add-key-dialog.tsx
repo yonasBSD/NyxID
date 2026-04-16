@@ -1,7 +1,8 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useMemo, useState, useEffect, useRef, useCallback } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useCatalog, useCreateKey } from "@/hooks/use-keys";
 import { useNodes } from "@/hooks/use-nodes";
+import { useOrgs } from "@/hooks/use-orgs";
 import {
   useInitiateOAuth,
   useInitiateDeviceCode,
@@ -32,6 +33,7 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   ArrowLeft,
+  Building2,
   ExternalLink,
   Globe,
   Search,
@@ -1026,10 +1028,13 @@ function OAuthStep({
   catalogEntry,
   ensureKey,
   onBack,
+  targetOrgId,
 }: {
   readonly catalogEntry: CatalogEntry;
   readonly ensureKey: () => Promise<KeyInfo>;
   readonly onBack: () => void;
+  /** When set, initiate the OAuth flow under this org's scope. */
+  readonly targetOrgId: string | null;
 }) {
   const initiateOAuth = useInitiateOAuth();
   const [error, setError] = useState<string | null>(null);
@@ -1045,6 +1050,7 @@ function OAuthStep({
         providerId: catalogEntry.provider_config_id,
         redirectPath: `/keys/${key.id}`,
         additionalScopes,
+        ...(targetOrgId ? { targetOrgId } : {}),
       });
       hardRedirect(response.authorization_url);
     } catch (err) {
@@ -1136,11 +1142,14 @@ function DeviceCodeStep({
   ensureKey,
   onBack,
   onComplete,
+  targetOrgId,
 }: {
   readonly catalogEntry: CatalogEntry;
   readonly ensureKey: () => Promise<KeyInfo>;
   readonly onBack: () => void;
   readonly onComplete: (keyId: string) => void;
+  /** When set, initiate the device-code flow under this org's scope. */
+  readonly targetOrgId: string | null;
 }) {
   const [flowStep, setFlowStep] = useState<DeviceFlowStep>("configure");
   const [userCode, setUserCode] = useState("");
@@ -1291,6 +1300,7 @@ function DeviceCodeStep({
       const response = await initiateMutation.mutateAsync({
         providerId: catalogEntry.provider_config_id,
         additionalScopes,
+        ...(targetOrgId ? { targetOrgId } : {}),
       });
       if (!isMountedRef.current) return;
 
@@ -1651,6 +1661,61 @@ function OAuthCredentialsStep({
   );
 }
 
+/**
+ * Small owner selector rendered at the top of `AddKeyDialog`. Only surfaces
+ * orgs where the caller is an admin; everything else gets a Personal-only
+ * selector. The selected org id is threaded into the create mutation via
+ * `target_org_id`, which writes the resulting UserService under that org
+ * so every admin of the org can manage it.
+ */
+function OwnerPicker({
+  value,
+  onChange,
+}: {
+  readonly value: string | null;
+  readonly onChange: (orgId: string | null) => void;
+}) {
+  const { data: orgs } = useOrgs();
+  const adminOrgs = useMemo(
+    () => (orgs ?? []).filter((o) => o.your_role === "admin"),
+    [orgs],
+  );
+  if (adminOrgs.length === 0) return null;
+  return (
+    <div className="rounded-lg border border-border bg-muted/30 px-3 py-2">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+          <Building2 className="h-3.5 w-3.5" />
+          Owner
+        </div>
+        <Select
+          value={value ?? "personal"}
+          onValueChange={(next) => onChange(next === "personal" ? null : next)}
+        >
+          <SelectTrigger className="h-8 w-[220px]">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="personal">Personal</SelectItem>
+            {adminOrgs.map((org) => (
+              <SelectItem key={org.id} value={org.id}>
+                <span className="flex items-center gap-2">
+                  <Building2 className="h-3.5 w-3.5" />
+                  {org.display_name ?? "Untitled org"}
+                </span>
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+      <p className="mt-1 text-[11px] text-muted-foreground">
+        Org-owned services are shared with every admin of that organization
+        and can be proxied by its members.
+      </p>
+    </div>
+  );
+}
+
 export function AddKeyDialog({
   open,
   onOpenChange,
@@ -1664,12 +1729,14 @@ export function AddKeyDialog({
   const [selectedEntry, setSelectedEntry] = useState<CatalogEntry | null>(null);
   const [form, setForm] = useState<FormState>(INITIAL_FORM);
   const [authKey, setAuthKey] = useState<KeyInfo | null>(null);
+  const [targetOrgId, setTargetOrgId] = useState<string | null>(null);
 
   function resetWizard() {
     setStep("catalog");
     setSelectedEntry(null);
     setForm(INITIAL_FORM);
     setAuthKey(null);
+    setTargetOrgId(null);
   }
 
   function handleOpenChange(next: boolean) {
@@ -1782,6 +1849,7 @@ export function AddKeyDialog({
       ...(form.openapiSpecUrl.trim()
         ? { openapi_spec_url: form.openapiSpecUrl.trim() }
         : {}),
+      ...(targetOrgId ? { target_org_id: targetOrgId } : {}),
     };
   }
 
@@ -1803,6 +1871,7 @@ export function AddKeyDialog({
 
   function handleFormSubmit() {
     const specUrl = form.openapiSpecUrl.trim();
+    const orgParam = targetOrgId ? { target_org_id: targetOrgId } : {};
     const params = selectedEntry
       ? {
           credential: form.credential,
@@ -1819,6 +1888,7 @@ export function AddKeyDialog({
             ? { auth_key_name: form.authKeyName }
             : {}),
           ...(specUrl ? { openapi_spec_url: specUrl } : {}),
+          ...orgParam,
         }
       : {
           credential: form.credential,
@@ -1827,6 +1897,7 @@ export function AddKeyDialog({
           auth_method: form.authMethod,
           auth_key_name: form.authKeyName,
           ...(specUrl ? { openapi_spec_url: specUrl } : {}),
+          ...orgParam,
         };
 
     createKey.mutate(params, {
@@ -1847,12 +1918,14 @@ export function AddKeyDialog({
     // Node routing: create the service directly. No OAuth/credentials needed --
     // the node agent handles auth locally via `nyxid node credentials setup`.
     const isSshCustom = !selectedEntry && form.serviceType === "ssh";
+    const orgParam = targetOrgId ? { target_org_id: targetOrgId } : {};
     const params = selectedEntry
       ? {
           label: form.label,
           service_slug: selectedEntry.slug,
           node_id: form.nodeId,
           service_type: selectedEntry.service_type,
+          ...orgParam,
         }
       : isSshCustom
         ? {
@@ -1865,6 +1938,7 @@ export function AddKeyDialog({
             ssh_principals: form.sshPrincipals.trim(),
             ssh_certificate_ttl_minutes:
               Number(form.sshCertificateTtlMinutes) || 30,
+            ...orgParam,
           }
         : {
             label: form.label,
@@ -1876,6 +1950,7 @@ export function AddKeyDialog({
             ...(form.openapiSpecUrl.trim()
               ? { openapi_spec_url: form.openapiSpecUrl.trim() }
               : {}),
+            ...orgParam,
           };
 
     createKey.mutate(params, {
@@ -1941,6 +2016,10 @@ export function AddKeyDialog({
         </DialogHeader>
 
         {step === "catalog" && (
+          <OwnerPicker value={targetOrgId} onChange={setTargetOrgId} />
+        )}
+
+        {step === "catalog" && (
           <CatalogGrid
             onSelect={handleSelectCatalog}
             onCustom={handleSelectCustom}
@@ -1997,6 +2076,7 @@ export function AddKeyDialog({
           <OAuthStep
             catalogEntry={selectedEntry}
             ensureKey={ensureAuthKey}
+            targetOrgId={targetOrgId}
             onBack={() =>
               setStep(
                 selectedEntry.credential_mode === "user" ||
@@ -2014,6 +2094,7 @@ export function AddKeyDialog({
           <DeviceCodeStep
             catalogEntry={selectedEntry}
             ensureKey={ensureAuthKey}
+            targetOrgId={targetOrgId}
             onBack={() =>
               setStep(
                 selectedEntry.credential_mode === "user" ||

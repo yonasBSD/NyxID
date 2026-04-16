@@ -53,6 +53,12 @@ export const createApiKeySchema = z.object({
     .url("Must be a valid URL")
     .nullable()
     .optional(),
+  /**
+   * When set, the key is created under the given org and managed by every
+   * admin of that org. Omit for a personal key. The backend enforces that
+   * the caller is an admin of the target org.
+   */
+  target_org_id: z.string().optional(),
 });
 
 export type CreateApiKeyFormData = z.infer<typeof createApiKeySchema>;
