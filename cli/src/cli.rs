@@ -559,6 +559,23 @@ pub enum ServiceCommands {
         /// Set service to inactive
         #[arg(long, conflicts_with = "active")]
         inactive: bool,
+        /// Set or replace a default HTTP header injected on every proxied
+        /// request. Format: `name=value`, optionally suffixed with
+        /// `:overridable` to let a caller-supplied value win. Repeat the
+        /// flag to set multiple headers. Example:
+        ///   --default-header 'x-openclaw-scopes=operator.read,operator.write'
+        ///   --default-header 'x-api-version=v2:overridable'
+        /// When any `--default-header` flag is provided, the full list
+        /// replaces the service's current defaults.
+        #[arg(
+            long = "default-header",
+            value_name = "NAME=VALUE[:overridable]",
+            conflicts_with = "clear_default_headers"
+        )]
+        default_header: Vec<String>,
+        /// Clear all default request headers for this service.
+        #[arg(long)]
+        clear_default_headers: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
