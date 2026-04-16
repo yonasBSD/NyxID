@@ -4,13 +4,15 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
+use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
 use crate::mw::auth::AuthUser;
 use crate::services::{
-    audit_service, channel_bot_service, channel_relay_service, channel_routing_service,
+    audit_service, channel_bot_service, channel_relay_service, channel_routing_service, org_service,
 };
 
 // ---------------------------------------------------------------------------
@@ -29,6 +31,11 @@ pub struct CreateConversationRequest {
     pub platform_sender_id: Option<String>,
     #[serde(default)]
     pub default_agent: Option<bool>,
+    /// When set, create this conversation route under the given org.
+    /// The referenced `channel_bot_id` and `agent_api_key_id` must both
+    /// belong to the same org. Caller must be an admin of the target org.
+    #[serde(default)]
+    pub target_org_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -44,6 +51,10 @@ pub struct UpdateConversationRequest {
 #[derive(Debug, Deserialize)]
 pub struct ListConversationsQuery {
     pub bot_id: Option<String>,
+    /// Scope the list to an org (caller must be admin of the org).
+    /// Omit to list the caller's personal conversations.
+    #[serde(default)]
+    pub org_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -78,6 +89,92 @@ pub struct ConversationListResponse {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Resolve the effective owner id for creating a conversation. When
+/// `target_org_id` is set the caller must be an admin of that org.
+async fn resolve_create_owner(
+    state: &AppState,
+    actor: &str,
+    target_org_id: Option<&str>,
+) -> AppResult<String> {
+    if let Some(org_id) = target_org_id {
+        let access = org_service::resolve_owner_access(&state.db, actor, org_id).await?;
+        if !access.can_write() {
+            return Err(AppError::OrgRoleInsufficient(
+                "you must be an admin of the target org to create a conversation under it"
+                    .to_string(),
+            ));
+        }
+        Ok(org_id.to_string())
+    } else {
+        Ok(actor.to_string())
+    }
+}
+
+/// Resolve the effective owner id for listing conversations. Admin-only
+/// when `org_id` is set.
+async fn resolve_list_owner(
+    state: &AppState,
+    actor: &str,
+    org_id: Option<&str>,
+) -> AppResult<String> {
+    if let Some(org_id) = org_id {
+        let access = org_service::resolve_owner_access(&state.db, actor, org_id).await?;
+        if !access.can_write() {
+            return Err(AppError::OrgRoleInsufficient(
+                "admin access to the target org is required to list its conversations".to_string(),
+            ));
+        }
+        Ok(org_id.to_string())
+    } else {
+        Ok(actor.to_string())
+    }
+}
+
+/// Resolve the owner id for a read/write on an existing conversation.
+/// Returns the conversation's `user_id` on success, gated on the caller's
+/// access level via `OwnerAccess`.
+async fn resolve_conversation_owner(
+    state: &AppState,
+    actor: &str,
+    conversation_id: &str,
+    require_write: bool,
+) -> AppResult<(
+    String,
+    crate::models::channel_conversation::ChannelConversation,
+)> {
+    let conv = state
+        .db
+        .collection::<crate::models::channel_conversation::ChannelConversation>(
+            crate::models::channel_conversation::COLLECTION_NAME,
+        )
+        .find_one(doc! { "_id": conversation_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Conversation not found: {conversation_id}")))?;
+    let access = org_service::resolve_owner_access(&state.db, actor, &conv.user_id).await?;
+    if !access.can_read() {
+        return Err(AppError::NotFound(format!(
+            "Conversation not found: {conversation_id}"
+        )));
+    }
+    if require_write && !access.can_write() {
+        return Err(AppError::OrgRoleInsufficient(
+            "you do not have permission to modify this conversation".to_string(),
+        ));
+    }
+    Ok((conv.user_id.clone(), conv))
+}
+
+/// Load an ApiKey by id without scoping it to a particular user_id.
+/// Used to cross-check ownership during conversation creation.
+async fn load_api_key_any_owner(state: &AppState, key_id: &str) -> AppResult<ApiKey> {
+    state
+        .db
+        .collection::<ApiKey>(API_KEYS)
+        .find_one(doc! { "_id": key_id, "is_active": true })
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("API key not found: {key_id}")))
+}
+
 fn conversation_to_item(
     conv: &crate::models::channel_conversation::ChannelConversation,
 ) -> ConversationItem {
@@ -107,11 +204,35 @@ pub async fn create_conversation(
     auth_user: AuthUser,
     Json(body): Json<CreateConversationRequest>,
 ) -> AppResult<(StatusCode, Json<ConversationItem>)> {
-    let user_id_str = auth_user.user_id.to_string();
+    let actor = auth_user.user_id.to_string();
 
-    // Verify the bot exists and belongs to this user
-    let bot = channel_bot_service::get_bot_for_user(&state.db, &body.channel_bot_id, &user_id_str)
-        .await?;
+    // Resolve the effective owner. Admins of the target org when
+    // target_org_id is set; the actor themselves otherwise.
+    let owner_id = resolve_create_owner(&state, &actor, body.target_org_id.as_deref()).await?;
+
+    // Cross-scope rule: the channel bot and the agent api key must both
+    // belong to the resolved owner. Otherwise a conversation could mix
+    // personal + org resources (or two different orgs), which would
+    // silently cross-authorize downstream services through the api key.
+    let bot = channel_bot_service::get_bot(&state.db, &body.channel_bot_id).await?;
+    if bot.user_id != owner_id {
+        return Err(AppError::ValidationError(
+            "channel_bot and conversation owner must match (personal bot must be bound to a \
+             personal conversation, org bot must be bound to an org conversation under the \
+             same org)"
+                .to_string(),
+        ));
+    }
+
+    let agent_key = load_api_key_any_owner(&state, &body.agent_api_key_id).await?;
+    if agent_key.user_id != owner_id {
+        return Err(AppError::ValidationError(
+            "agent_api_key and conversation owner must match (personal key must be bound to a \
+             personal conversation, org key must be bound to an org conversation under the \
+             same org)"
+                .to_string(),
+        ));
+    }
 
     // When no conversation ID is provided (or empty), treat as a wildcard.
     let has_conversation_id = body
@@ -149,7 +270,7 @@ pub async fn create_conversation(
 
     let conversation = channel_routing_service::create_conversation(
         &state.db,
-        &user_id_str,
+        &owner_id,
         &body.channel_bot_id,
         &bot.platform,
         platform_conversation_id,
@@ -162,12 +283,14 @@ pub async fn create_conversation(
 
     audit_service::log_async(
         state.db.clone(),
-        Some(user_id_str),
+        Some(actor),
         "channel_conversation_created".to_string(),
         Some(serde_json::json!({
             "conversation_id": &conversation.id,
             "channel_bot_id": &body.channel_bot_id,
             "agent_api_key_id": &body.agent_api_key_id,
+            "owner_user_id": &owner_id,
+            "target_org_id": body.target_org_id,
         })),
         None,
         None,
@@ -187,13 +310,11 @@ pub async fn list_conversations(
     auth_user: AuthUser,
     Query(params): Query<ListConversationsQuery>,
 ) -> AppResult<Json<ConversationListResponse>> {
-    let user_id_str = auth_user.user_id.to_string();
-    let conversations = channel_routing_service::list_conversations(
-        &state.db,
-        &user_id_str,
-        params.bot_id.as_deref(),
-    )
-    .await?;
+    let actor = auth_user.user_id.to_string();
+    let owner_id = resolve_list_owner(&state, &actor, params.org_id.as_deref()).await?;
+    let conversations =
+        channel_routing_service::list_conversations(&state.db, &owner_id, params.bot_id.as_deref())
+            .await?;
     let total = conversations.len() as u64;
     let items = conversations.iter().map(conversation_to_item).collect();
     Ok(Json(ConversationListResponse {
@@ -208,21 +329,9 @@ pub async fn get_conversation(
     auth_user: AuthUser,
     Path(conversation_id): Path<String>,
 ) -> AppResult<Json<ConversationItem>> {
-    let user_id_str = auth_user.user_id.to_string();
-
-    // Fetch the conversation directly from MongoDB with ownership check
-    let conversation = state
-        .db
-        .collection::<crate::models::channel_conversation::ChannelConversation>(
-            crate::models::channel_conversation::COLLECTION_NAME,
-        )
-        .find_one(mongodb::bson::doc! {
-            "_id": &conversation_id,
-            "user_id": &user_id_str,
-        })
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("Conversation not found: {conversation_id}")))?;
-
+    let actor = auth_user.user_id.to_string();
+    let (_owner_id, conversation) =
+        resolve_conversation_owner(&state, &actor, &conversation_id, false).await?;
     Ok(Json(conversation_to_item(&conversation)))
 }
 
@@ -233,12 +342,26 @@ pub async fn update_conversation(
     Path(conversation_id): Path<String>,
     Json(body): Json<UpdateConversationRequest>,
 ) -> AppResult<Json<ConversationItem>> {
-    let user_id_str = auth_user.user_id.to_string();
+    let actor = auth_user.user_id.to_string();
+    let (owner_id, _conv) =
+        resolve_conversation_owner(&state, &actor, &conversation_id, true).await?;
+
+    // If the caller is switching the agent_api_key_id, re-enforce the
+    // cross-scope rule: the new key must belong to the same owner as
+    // the conversation.
+    if let Some(new_key_id) = body.agent_api_key_id.as_deref() {
+        let agent_key = load_api_key_any_owner(&state, new_key_id).await?;
+        if agent_key.user_id != owner_id {
+            return Err(AppError::ValidationError(
+                "agent_api_key and conversation owner must match".to_string(),
+            ));
+        }
+    }
 
     let updated = channel_routing_service::update_conversation(
         &state.db,
         &conversation_id,
-        &user_id_str,
+        &owner_id,
         body.agent_api_key_id.as_deref(),
         body.default_agent,
         body.is_active,
@@ -247,10 +370,11 @@ pub async fn update_conversation(
 
     audit_service::log_async(
         state.db.clone(),
-        Some(user_id_str),
+        Some(actor),
         "channel_conversation_updated".to_string(),
         Some(serde_json::json!({
             "conversation_id": &conversation_id,
+            "owner_user_id": &owner_id,
         })),
         None,
         None,
@@ -267,16 +391,19 @@ pub async fn delete_conversation(
     auth_user: AuthUser,
     Path(conversation_id): Path<String>,
 ) -> AppResult<impl IntoResponse> {
-    let user_id_str = auth_user.user_id.to_string();
+    let actor = auth_user.user_id.to_string();
+    let (owner_id, _conv) =
+        resolve_conversation_owner(&state, &actor, &conversation_id, true).await?;
 
-    channel_routing_service::delete_conversation(&state.db, &conversation_id, &user_id_str).await?;
+    channel_routing_service::delete_conversation(&state.db, &conversation_id, &owner_id).await?;
 
     audit_service::log_async(
         state.db.clone(),
-        Some(user_id_str),
+        Some(actor),
         "channel_conversation_deleted".to_string(),
         Some(serde_json::json!({
             "conversation_id": &conversation_id,
+            "owner_user_id": &owner_id,
         })),
         None,
         None,
@@ -343,21 +470,13 @@ pub async fn list_conversation_messages(
     Path(conversation_id): Path<String>,
     Query(params): Query<ConversationMessagesQuery>,
 ) -> AppResult<Json<ConversationMessagesResponse>> {
-    let user_id_str = auth_user.user_id.to_string();
+    let actor = auth_user.user_id.to_string();
 
-    // Verify the conversation belongs to the user via the bot
-    let conversation = state
-        .db
-        .collection::<crate::models::channel_conversation::ChannelConversation>(
-            crate::models::channel_conversation::COLLECTION_NAME,
-        )
-        .find_one(mongodb::bson::doc! { "_id": &conversation_id })
-        .await?
-        .ok_or_else(|| AppError::NotFound("Conversation not found".to_string()))?;
-
-    // Verify ownership through the bot
-    channel_bot_service::get_bot_for_user(&state.db, &conversation.channel_bot_id, &user_id_str)
-        .await?;
+    // Resolve owner access on the conversation itself. Read-level access
+    // (any active member of the owning org) is sufficient to browse
+    // message metadata.
+    let (_owner_id, _conversation) =
+        resolve_conversation_owner(&state, &actor, &conversation_id, false).await?;
 
     let per_page = params.per_page.min(100);
     let (messages, total) =

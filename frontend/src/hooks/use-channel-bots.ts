@@ -8,13 +8,43 @@ import type {
   CreateChannelBotResponse,
 } from "@/types/channels";
 
-// -- Queries --
+// ─────────────────────────────────────────────────────────────────────────────
+// Query keys
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Bots are scoped either to the caller's personal space or to an org. We
+// encode that in the query key so React Query caches personal and per-org
+// results independently; switching the scope selector must not return stale
+// data from the previous scope.
 
-export function useChannelBots() {
+const CHANNEL_BOTS_ROOT = ["channel-bots"] as const;
+
+export const channelBotsQueryKeys = {
+  all: CHANNEL_BOTS_ROOT,
+  list: (orgId: string | null) =>
+    [...CHANNEL_BOTS_ROOT, "list", orgId ?? "personal"] as const,
+  detail: (id: string) => [...CHANNEL_BOTS_ROOT, "detail", id] as const,
+} as const;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Queries
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface UseChannelBotsParams {
+  /** `null` or omitted lists personal bots. When set, lists bots owned by the
+   *  given org (caller must be admin of the org). */
+  readonly orgId?: string | null;
+}
+
+export function useChannelBots(params: UseChannelBotsParams = {}) {
+  const orgId = params.orgId ?? null;
   return useQuery({
-    queryKey: ["channel-bots"],
+    queryKey: channelBotsQueryKeys.list(orgId),
     queryFn: async (): Promise<readonly ChannelBotItem[]> => {
-      const res = await api.get<ChannelBotListResponse>("/channel-bots");
+      const path = orgId
+        ? `/channel-bots?org_id=${encodeURIComponent(orgId)}`
+        : "/channel-bots";
+      const res = await api.get<ChannelBotListResponse>(path);
       return res.bots;
     },
   });
@@ -22,7 +52,7 @@ export function useChannelBots() {
 
 export function useChannelBot(id: string) {
   return useQuery({
-    queryKey: ["channel-bots", id],
+    queryKey: channelBotsQueryKeys.detail(id),
     queryFn: async (): Promise<ChannelBotDetail> => {
       return api.get<ChannelBotDetail>(`/channel-bots/${id}`);
     },
@@ -30,7 +60,9 @@ export function useChannelBot(id: string) {
   });
 }
 
-// -- Mutations --
+// ─────────────────────────────────────────────────────────────────────────────
+// Mutations
+// ─────────────────────────────────────────────────────────────────────────────
 
 export function useCreateChannelBot() {
   const queryClient = useQueryClient();
@@ -42,7 +74,9 @@ export function useCreateChannelBot() {
       return api.post<CreateChannelBotResponse>("/channel-bots", data);
     },
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["channel-bots"] });
+      // Invalidate every list regardless of scope -- the bot could have
+      // landed in any scope the user is viewing.
+      void queryClient.invalidateQueries({ queryKey: CHANNEL_BOTS_ROOT });
     },
   });
 }
@@ -55,7 +89,7 @@ export function useDeleteChannelBot() {
       return api.delete<void>(`/channel-bots/${id}`);
     },
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["channel-bots"] });
+      void queryClient.invalidateQueries({ queryKey: CHANNEL_BOTS_ROOT });
     },
   });
 }
@@ -68,8 +102,10 @@ export function useVerifyChannelBot() {
       return api.post<void>(`/channel-bots/${id}/verify`);
     },
     onSuccess: (_data, id) => {
-      void queryClient.invalidateQueries({ queryKey: ["channel-bots", id] });
-      void queryClient.invalidateQueries({ queryKey: ["channel-bots"] });
+      void queryClient.invalidateQueries({
+        queryKey: channelBotsQueryKeys.detail(id),
+      });
+      void queryClient.invalidateQueries({ queryKey: CHANNEL_BOTS_ROOT });
     },
   });
 }

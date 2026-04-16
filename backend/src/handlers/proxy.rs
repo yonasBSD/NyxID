@@ -331,7 +331,11 @@ pub async fn proxy_request(
         .await;
     }
 
-    // Fall back to old path
+    // Fall back to old path. Before we do, block org viewers whose org
+    // has any presence for this catalog service from slipping into the
+    // legacy approval flow (see ChronoAIProject/NyxID#375).
+    proxy_service::guard_slug_against_viewer_orgs(&state.db, &user_id_str, None, Some(&service_id))
+        .await?;
     execute_proxy(&state, &auth_user, &service_id, &path, request).await
 }
 
@@ -459,7 +463,11 @@ pub async fn proxy_request_by_slug(
         .await;
     }
 
-    // Fall back to old path
+    // Fall back to old path. Before we do, block org viewers whose org
+    // has any presence for this slug from slipping into the legacy
+    // approval flow (see ChronoAIProject/NyxID#375).
+    proxy_service::guard_slug_against_viewer_orgs(&state.db, &user_id_str, Some(&slug), None)
+        .await?;
     let service = proxy_service::resolve_service_by_slug(&state.db, &slug).await?;
     execute_proxy(&state, &auth_user, &service.id, &path, request).await
 }

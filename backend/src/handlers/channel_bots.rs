@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
 };
@@ -14,7 +14,7 @@ use crate::services::channel_adapters::lark::LarkFamilyAdapter;
 use crate::services::channel_adapters::openclaw::OpenClawAdapter;
 use crate::services::channel_adapters::telegram::TelegramAdapter;
 use crate::services::channel_platform::PlatformAdapter;
-use crate::services::{audit_service, channel_bot_service};
+use crate::services::{audit_service, channel_bot_service, org_service};
 
 // ---------------------------------------------------------------------------
 // Request types
@@ -31,6 +31,21 @@ pub struct CreateChannelBotRequest {
     pub app_secret: Option<String>,
     #[serde(default)]
     pub public_key: Option<String>,
+    /// When set, create this channel bot under the given org. The
+    /// resulting `ChannelBot.user_id` is the org's user id, making
+    /// it visible to every org admin and to the org-delete blocker.
+    /// Caller must be an admin of the target org.
+    #[serde(default)]
+    pub target_org_id: Option<String>,
+}
+
+/// Query parameters for `GET /api/v1/channel-bots`. Pass `org_id` to
+/// list bots owned by an org (caller must be admin of the target org);
+/// omit for the caller's personal bots.
+#[derive(Debug, Deserialize, Default)]
+pub struct ChannelBotListQuery {
+    #[serde(default)]
+    pub org_id: Option<String>,
 }
 
 // Redact bot_token in Debug output to prevent credential leakage.
@@ -59,6 +74,10 @@ pub struct ChannelBotItem {
     pub is_active: bool,
     pub created_at: String,
     pub updated_at: String,
+    /// Effective owner user_id. For personal bots this is the caller's
+    /// user id; for org-owned bots this is the org's user id, which also
+    /// doubles as the org id clients use in `target_org_id` / `?org_id=`.
+    pub user_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -80,6 +99,8 @@ pub struct ChannelBotDetailResponse {
     pub conversations_count: u64,
     pub created_at: String,
     pub updated_at: String,
+    /// Effective owner user_id (see `ChannelBotItem::user_id`).
+    pub user_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -100,6 +121,86 @@ pub struct VerifyBotResponse {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Resolve the effective owner id for a WRITE (create, delete, verify)
+/// operation on a bot. For personal bots, returns the caller's id; for
+/// org-owned bots, resolves the caller's access to the org and requires
+/// `can_write()` (admin). Returns the bot's `user_id` on success so the
+/// caller can pass it to the org-agnostic service layer.
+async fn resolve_bot_owner_for_write(
+    state: &AppState,
+    actor: &str,
+    bot_id: &str,
+) -> AppResult<(String, crate::models::channel_bot::ChannelBot)> {
+    let bot = channel_bot_service::get_bot(&state.db, bot_id).await?;
+    let access = org_service::resolve_owner_access(&state.db, actor, &bot.user_id).await?;
+    if !access.can_read() {
+        return Err(AppError::ChannelBotNotFound(bot_id.to_string()));
+    }
+    if !access.can_write() {
+        return Err(AppError::OrgRoleInsufficient(
+            "you do not have permission to modify this channel bot".to_string(),
+        ));
+    }
+    Ok((bot.user_id.clone(), bot))
+}
+
+/// Resolve the effective owner id for a READ operation on a bot.
+/// Allows any active member of the owning org (including viewers).
+async fn resolve_bot_owner_for_read(
+    state: &AppState,
+    actor: &str,
+    bot_id: &str,
+) -> AppResult<(String, crate::models::channel_bot::ChannelBot)> {
+    let bot = channel_bot_service::get_bot(&state.db, bot_id).await?;
+    let access = org_service::resolve_owner_access(&state.db, actor, &bot.user_id).await?;
+    if !access.can_read() {
+        return Err(AppError::ChannelBotNotFound(bot_id.to_string()));
+    }
+    Ok((bot.user_id.clone(), bot))
+}
+
+/// Resolve the owner id for creation. If `target_org_id` is set, the
+/// caller must be an admin of that org; otherwise the owner is the
+/// caller's own id.
+async fn resolve_create_owner(
+    state: &AppState,
+    actor: &str,
+    target_org_id: Option<&str>,
+) -> AppResult<String> {
+    if let Some(org_id) = target_org_id {
+        let access = org_service::resolve_owner_access(&state.db, actor, org_id).await?;
+        if !access.can_write() {
+            return Err(AppError::OrgRoleInsufficient(
+                "you must be an admin of the target org to create a channel bot under it"
+                    .to_string(),
+            ));
+        }
+        Ok(org_id.to_string())
+    } else {
+        Ok(actor.to_string())
+    }
+}
+
+/// Resolve the owner id for a list operation. If `org_id` is set, the
+/// caller must be an admin of that org; otherwise lists personal bots.
+async fn resolve_list_owner(
+    state: &AppState,
+    actor: &str,
+    org_id: Option<&str>,
+) -> AppResult<String> {
+    if let Some(org_id) = org_id {
+        let access = org_service::resolve_owner_access(&state.db, actor, org_id).await?;
+        if !access.can_write() {
+            return Err(AppError::OrgRoleInsufficient(
+                "admin access to the target org is required to list its channel bots".to_string(),
+            ));
+        }
+        Ok(org_id.to_string())
+    } else {
+        Ok(actor.to_string())
+    }
+}
 
 /// Resolve the platform adapter for the given platform identifier.
 ///
@@ -142,6 +243,7 @@ fn bot_to_item(bot: &crate::models::channel_bot::ChannelBot) -> ChannelBotItem {
         is_active: bot.is_active,
         created_at: bot.created_at.to_rfc3339(),
         updated_at: bot.updated_at.to_rfc3339(),
+        user_id: bot.user_id.clone(),
     }
 }
 
@@ -155,7 +257,7 @@ pub async fn create_bot(
     auth_user: AuthUser,
     Json(body): Json<CreateChannelBotRequest>,
 ) -> AppResult<(StatusCode, Json<CreateChannelBotResponse>)> {
-    let user_id_str = auth_user.user_id.to_string();
+    let actor = auth_user.user_id.to_string();
 
     // Only platforms with working webhook routes can be registered as bots.
     // OpenClaw uses a separate integration path (openclaw_channel handler).
@@ -178,6 +280,11 @@ pub async fn create_bot(
         ));
     }
 
+    // Resolve the effective owner. When `target_org_id` is set the bot
+    // is written under the org's user_id so every admin can manage it
+    // and the org-delete blocker treats it as a live org resource.
+    let owner_id = resolve_create_owner(&state, &actor, body.target_org_id.as_deref()).await?;
+
     // Create bot: verify token, encrypt, insert in pending status
     let create_result = channel_bot_service::create_bot(
         &state.db,
@@ -185,7 +292,7 @@ pub async fn create_bot(
         &state.encryption_keys,
         &state.http_client,
         adapter.as_ref(),
-        &user_id_str,
+        &owner_id,
         &body.bot_token,
         &body.label,
         body.app_id.as_deref(),
@@ -225,12 +332,14 @@ pub async fn create_bot(
 
     audit_service::log_async(
         state.db.clone(),
-        Some(user_id_str),
+        Some(actor),
         "channel_bot_created".to_string(),
         Some(serde_json::json!({
             "bot_id": &bot_id,
             "platform": &body.platform,
             "label": &body.label,
+            "owner_user_id": &owner_id,
+            "target_org_id": body.target_org_id,
         })),
         None,
         None,
@@ -253,9 +362,11 @@ pub async fn create_bot(
 pub async fn list_bots(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    Query(query): Query<ChannelBotListQuery>,
 ) -> AppResult<Json<ChannelBotListResponse>> {
-    let user_id_str = auth_user.user_id.to_string();
-    let bots = channel_bot_service::list_bots(&state.db, &user_id_str).await?;
+    let actor = auth_user.user_id.to_string();
+    let owner_id = resolve_list_owner(&state, &actor, query.org_id.as_deref()).await?;
+    let bots = channel_bot_service::list_bots(&state.db, &owner_id).await?;
     let total = bots.len() as u64;
     let items = bots.iter().map(bot_to_item).collect();
     Ok(Json(ChannelBotListResponse { bots: items, total }))
@@ -267,8 +378,8 @@ pub async fn get_bot(
     auth_user: AuthUser,
     Path(bot_id): Path<String>,
 ) -> AppResult<Json<ChannelBotDetailResponse>> {
-    let user_id_str = auth_user.user_id.to_string();
-    let bot = channel_bot_service::get_bot_for_user(&state.db, &bot_id, &user_id_str).await?;
+    let actor = auth_user.user_id.to_string();
+    let (_owner_id, bot) = resolve_bot_owner_for_read(&state, &actor, &bot_id).await?;
 
     // Count active conversations for this bot
     let conversations_count = state
@@ -292,6 +403,7 @@ pub async fn get_bot(
         conversations_count,
         created_at: bot.created_at.to_rfc3339(),
         updated_at: bot.updated_at.to_rfc3339(),
+        user_id: bot.user_id,
     }))
 }
 
@@ -301,10 +413,10 @@ pub async fn delete_bot(
     auth_user: AuthUser,
     Path(bot_id): Path<String>,
 ) -> AppResult<impl IntoResponse> {
-    let user_id_str = auth_user.user_id.to_string();
+    let actor = auth_user.user_id.to_string();
 
-    // Fetch the bot to determine platform for adapter resolution
-    let bot = channel_bot_service::get_bot_for_user(&state.db, &bot_id, &user_id_str).await?;
+    // Resolve the effective owner (personal or org via admin access).
+    let (owner_id, bot) = resolve_bot_owner_for_write(&state, &actor, &bot_id).await?;
     let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
 
     channel_bot_service::delete_bot(
@@ -313,17 +425,18 @@ pub async fn delete_bot(
         &state.encryption_keys,
         adapter.as_ref(),
         &bot_id,
-        &user_id_str,
+        &owner_id,
     )
     .await?;
 
     audit_service::log_async(
         state.db.clone(),
-        Some(user_id_str),
+        Some(actor),
         "channel_bot_deleted".to_string(),
         Some(serde_json::json!({
             "bot_id": &bot_id,
             "platform": &bot.platform,
+            "owner_user_id": &owner_id,
         })),
         None,
         None,
@@ -340,8 +453,8 @@ pub async fn verify_bot(
     auth_user: AuthUser,
     Path(bot_id): Path<String>,
 ) -> AppResult<Json<VerifyBotResponse>> {
-    let user_id_str = auth_user.user_id.to_string();
-    let bot = channel_bot_service::get_bot_for_user(&state.db, &bot_id, &user_id_str).await?;
+    let actor = auth_user.user_id.to_string();
+    let (_owner_id, bot) = resolve_bot_owner_for_write(&state, &actor, &bot_id).await?;
     let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
 
     // Decrypt the token and verify it is still valid with the platform

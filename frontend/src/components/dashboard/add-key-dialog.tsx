@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useCatalog, useCreateKey } from "@/hooks/use-keys";
 import { useNodes } from "@/hooks/use-nodes";
@@ -15,6 +15,7 @@ import { copyToClipboard } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { OrgScopeSelect } from "@/components/shared/org-scope-select";
 import {
   Dialog,
   DialogContent,
@@ -1663,10 +1664,10 @@ function OAuthCredentialsStep({
 
 /**
  * Small owner selector rendered at the top of `AddKeyDialog`. Only surfaces
- * orgs where the caller is an admin; everything else gets a Personal-only
- * selector. The selected org id is threaded into the create mutation via
- * `target_org_id`, which writes the resulting UserService under that org
- * so every admin of the org can manage it.
+ * orgs where the caller is an admin (via `OrgScopeSelect`). The selected
+ * org id is threaded into the create mutation via `target_org_id`, which
+ * writes the resulting UserService under that org so every admin of the
+ * org can manage it.
  */
 function OwnerPicker({
   value,
@@ -1676,11 +1677,10 @@ function OwnerPicker({
   readonly onChange: (orgId: string | null) => void;
 }) {
   const { data: orgs } = useOrgs();
-  const adminOrgs = useMemo(
-    () => (orgs ?? []).filter((o) => o.your_role === "admin"),
-    [orgs],
-  );
-  if (adminOrgs.length === 0) return null;
+  // Hide the picker entirely when the caller has no admin orgs -- a
+  // Personal-only select is noise in that case.
+  const hasAdminOrg = (orgs ?? []).some((o) => o.your_role === "admin");
+  if (!hasAdminOrg) return null;
   return (
     <div className="rounded-lg border border-border bg-muted/30 px-3 py-2">
       <div className="flex items-center justify-between gap-3">
@@ -1688,25 +1688,9 @@ function OwnerPicker({
           <Building2 className="h-3.5 w-3.5" />
           Owner
         </div>
-        <Select
-          value={value ?? "personal"}
-          onValueChange={(next) => onChange(next === "personal" ? null : next)}
-        >
-          <SelectTrigger className="h-8 w-[220px]">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="personal">Personal</SelectItem>
-            {adminOrgs.map((org) => (
-              <SelectItem key={org.id} value={org.id}>
-                <span className="flex items-center gap-2">
-                  <Building2 className="h-3.5 w-3.5" />
-                  {org.display_name ?? "Untitled org"}
-                </span>
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        <div className="w-[220px]">
+          <OrgScopeSelect value={value} onChange={onChange} label="Owner" />
+        </div>
       </div>
       <p className="mt-1 text-[11px] text-muted-foreground">
         Org-owned services are shared with every admin of that organization

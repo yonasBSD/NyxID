@@ -29,6 +29,10 @@ export interface ChannelBotItem {
   readonly is_active: boolean;
   readonly created_at: string;
   readonly updated_at: string;
+  /** Effective owner user_id. For personal bots this equals the caller's
+   *  user id; for org-owned bots it equals the org's user id (which is
+   *  also the value clients pass as `target_org_id`). */
+  readonly user_id: string;
 }
 
 export interface ChannelBotListResponse {
@@ -50,6 +54,8 @@ export interface CreateChannelBotRequest {
   readonly app_secret?: string;
   /** Discord only */
   readonly public_key?: string;
+  /** Create this bot under the given org (caller must be admin). */
+  readonly target_org_id?: string;
 }
 
 export interface CreateChannelBotResponse {
@@ -86,6 +92,8 @@ export interface CreateChannelConversationRequest {
   readonly platform_conversation_type?: ConversationType;
   readonly platform_sender_id?: string;
   readonly default_agent?: boolean;
+  /** Create this conversation under the given org (caller must be admin). */
+  readonly target_org_id?: string;
 }
 
 export interface UpdateChannelConversationRequest {

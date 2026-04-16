@@ -10,9 +10,10 @@ import type {
 import type { CreateApiKeyFormData } from "@/schemas/api-keys";
 import { useOrgs } from "./use-orgs";
 
-interface UseApiKeysOptions {
-  /** When set, lists keys owned by the given org (requires org admin). */
-  readonly orgId?: string;
+interface UseApiKeysParams {
+  /** `null` or omitted lists the caller's personal keys. When set, lists
+   *  keys owned by the given org (admin-only). */
+  readonly orgId?: string | null;
 }
 
 /**
@@ -22,10 +23,10 @@ interface UseApiKeysOptions {
  * See `useAllAdminedApiKeys` for the aggregated view that the Agent Keys
  * table uses.
  */
-export function useApiKeys(options: UseApiKeysOptions = {}) {
-  const { orgId } = options;
+export function useApiKeys(params: UseApiKeysParams = {}) {
+  const orgId = params.orgId ?? null;
   return useQuery({
-    queryKey: orgId ? ["api-keys", "org", orgId] : ["api-keys"],
+    queryKey: ["api-keys", orgId ?? "personal"],
     queryFn: async (): Promise<readonly ApiKey[]> => {
       const path = orgId
         ? `/api-keys?org_id=${encodeURIComponent(orgId)}`
@@ -59,8 +60,10 @@ export function useAllAdminedApiKeys() {
   );
 
   const orgQueries = useQueries({
+    // Share the cache with direct `useApiKeys({ orgId })` callers (e.g.
+    // channel-bot-detail) by using the same `["api-keys", orgId]` key.
     queries: adminOrgIds.map((orgId) => ({
-      queryKey: ["api-keys", "org", orgId] as const,
+      queryKey: ["api-keys", orgId] as const,
       queryFn: async (): Promise<readonly ApiKey[]> => {
         const res = await api.get<{ readonly keys: readonly ApiKey[] }>(
           `/api-keys?org_id=${encodeURIComponent(orgId)}`,

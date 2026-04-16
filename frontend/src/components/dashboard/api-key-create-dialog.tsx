@@ -10,6 +10,7 @@ import { useCreateApiKey } from "@/hooks/use-api-keys";
 import { useKeys } from "@/hooks/use-keys";
 import { useNodes } from "@/hooks/use-nodes";
 import { useOrgs } from "@/hooks/use-orgs";
+import { OrgScopeSelect } from "@/components/shared/org-scope-select";
 import { copyToClipboard } from "@/lib/utils";
 import { ApiError } from "@/lib/api-client";
 import {
@@ -35,20 +36,12 @@ import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
   Plus,
   Copy,
   Check,
   Calendar,
   Shield,
   Server,
-  Building2,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -220,12 +213,10 @@ export function ApiKeyCreateDialog() {
                       <FormItem>
                         <FormLabel>Owner</FormLabel>
                         <FormControl>
-                          <Select
-                            value={field.value ?? "personal"}
-                            onValueChange={(value) => {
-                              const next =
-                                value === "personal" ? undefined : value;
-                              field.onChange(next);
+                          <OrgScopeSelect
+                            value={field.value ?? null}
+                            onChange={(next) => {
+                              field.onChange(next ?? undefined);
                               // Reset service scope selections when owner
                               // changes -- the two owners have disjoint
                               // service lists so a stale selection can't
@@ -233,22 +224,8 @@ export function ApiKeyCreateDialog() {
                               form.setValue("allowed_service_ids", []);
                               form.setValue("allow_all_services", true);
                             }}
-                          >
-                            <SelectTrigger>
-                              <SelectValue />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="personal">Personal</SelectItem>
-                              {adminOrgs.map((org) => (
-                                <SelectItem key={org.id} value={org.id}>
-                                  <span className="flex items-center gap-2">
-                                    <Building2 className="h-3.5 w-3.5" />
-                                    {org.display_name ?? "Untitled org"}
-                                  </span>
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
+                            label="Owner"
+                          />
                         </FormControl>
                         <p className="text-xs text-muted-foreground">
                           Org-owned keys are shared with every admin of that
