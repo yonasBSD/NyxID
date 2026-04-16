@@ -23,6 +23,8 @@ export const createChannelBotSchema = z
     app_id: z.string().max(256).optional(),
     app_secret: z.string().max(512).optional(),
     public_key: z.string().max(256).optional(),
+    /** When set, create this bot under the given org (caller must be admin). */
+    target_org_id: z.string().optional(),
   })
   .superRefine((data, ctx) => {
     if (
@@ -63,6 +65,8 @@ export const createChannelConversationSchema = z.object({
   platform_conversation_type: conversationTypeSchema.optional(),
   platform_sender_id: z.string().max(256).optional(),
   default_agent: z.boolean().optional(),
+  /** When set, create this conversation under the given org (caller must be admin). */
+  target_org_id: z.string().optional(),
 });
 
 export type CreateChannelConversationFormData = z.infer<

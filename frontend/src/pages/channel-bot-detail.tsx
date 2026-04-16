@@ -13,6 +13,8 @@ import {
   useDeleteChannelConversation,
 } from "@/hooks/use-channel-conversations";
 import { useApiKeys } from "@/hooks/use-api-keys";
+import { useOrgs } from "@/hooks/use-orgs";
+import { useAuthStore } from "@/stores/auth-store";
 import {
   createChannelConversationSchema,
   type CreateChannelConversationFormData,
@@ -184,11 +186,19 @@ function ConversationRow({
 function ConversationsSection({
   botId,
   apiKeyNames,
+  ownerOrgId,
 }: {
   readonly botId: string;
   readonly apiKeyNames: ReadonlyMap<string, string>;
+  /** When the parent bot is org-owned, the org id (a user_id). Used to
+   *  scope the conversation list and pre-fill `target_org_id` on create.
+   *  `null` means personal. */
+  readonly ownerOrgId: string | null;
 }) {
-  const { data: conversations, isLoading } = useChannelConversations(botId);
+  const { data: conversations, isLoading } = useChannelConversations({
+    botId,
+    orgId: ownerOrgId,
+  });
   const [addOpen, setAddOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
 
@@ -258,6 +268,7 @@ function ConversationsSection({
         open={addOpen}
         onOpenChange={setAddOpen}
         botId={botId}
+        ownerOrgId={ownerOrgId}
       />
       <DeleteRouteDialog
         routeId={deleteTarget}
@@ -271,12 +282,16 @@ function AddRouteDialog({
   open,
   onOpenChange,
   botId,
+  ownerOrgId,
 }: {
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
   readonly botId: string;
+  /** Bot's owner scope. When non-null, the conversation is created under
+   *  that org and only org-owned agent keys from the same org are shown. */
+  readonly ownerOrgId: string | null;
 }) {
-  const { data: apiKeys } = useApiKeys();
+  const { data: apiKeys } = useApiKeys({ orgId: ownerOrgId });
   const createConversation = useCreateChannelConversation();
   const [defaultAgent, setDefaultAgent] = useState(false);
 
@@ -295,12 +310,20 @@ function AddRouteDialog({
       platform_conversation_type: undefined,
       platform_sender_id: undefined,
       default_agent: false,
+      target_org_id: ownerOrgId ?? undefined,
     },
   });
 
   function onSubmit(data: CreateChannelConversationFormData) {
+    // Backend enforces that channel_bot.user_id, agent_api_key.user_id
+    // and target_org_id all match. The dialog is already scoped to the
+    // bot's owner so just forward the ownerOrgId explicitly.
     createConversation.mutate(
-      { ...data, default_agent: defaultAgent },
+      {
+        ...data,
+        default_agent: defaultAgent,
+        target_org_id: ownerOrgId ?? undefined,
+      },
       {
         onSuccess: () => {
           toast.success("Conversation route added");
@@ -535,9 +558,21 @@ function DeleteBotDialog({
 export function ChannelBotDetailPage() {
   const { botId } = useParams({ strict: false }) as { botId: string };
   const navigate = useNavigate();
+  const currentUserId = useAuthStore((s) => s.user?.id ?? null);
+  const { data: orgs } = useOrgs();
 
   const { data: bot, isLoading, error } = useChannelBot(botId);
-  const { data: apiKeys } = useApiKeys();
+
+  // The bot's owner is an org when `bot.user_id` doesn't match the
+  // current user's id. We pass that org id (a user_id in the backend
+  // schema) down so child components query and create in the right
+  // scope -- the backend enforces `bot.user_id == conversation.user_id
+  // == api_key.user_id` for all three resources.
+  const ownerOrgId = bot && currentUserId && bot.user_id !== currentUserId
+    ? bot.user_id
+    : null;
+
+  const { data: apiKeys } = useApiKeys({ orgId: ownerOrgId });
   const deleteMutation = useDeleteChannelBot();
   const verifyMutation = useVerifyChannelBot();
 
@@ -546,6 +581,13 @@ export function ChannelBotDetailPage() {
   const apiKeyNames: ReadonlyMap<string, string> = new Map(
     (apiKeys ?? []).map((k) => [k.id, k.name]),
   );
+
+  const ownerOrg = ownerOrgId
+    ? (orgs ?? []).find((o) => o.id === ownerOrgId)
+    : undefined;
+  const ownerLabel = ownerOrgId
+    ? `Org: ${ownerOrg?.display_name ?? ownerOrgId}`
+    : "Personal";
 
   async function handleDelete() {
     try {
@@ -656,6 +698,7 @@ export function ChannelBotDetailPage() {
             <span className="text-muted-foreground">Not registered</span>
           )}
         </div>
+        <DetailRow label="Owner" value={ownerLabel} />
         <DetailRow label="Created" value={formatDate(bot.created_at)} />
         <DetailRow label="Updated" value={formatRelativeTime(bot.updated_at)} />
         <DetailRow
@@ -665,7 +708,11 @@ export function ChannelBotDetailPage() {
       </DetailSection>
 
       {/* Conversation Routes */}
-      <ConversationsSection botId={botId} apiKeyNames={apiKeyNames} />
+      <ConversationsSection
+        botId={botId}
+        apiKeyNames={apiKeyNames}
+        ownerOrgId={ownerOrgId}
+      />
 
       {/* Delete Confirmation */}
       <DeleteBotDialog

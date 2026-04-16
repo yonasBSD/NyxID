@@ -8,13 +8,21 @@ import type {
 } from "@/types/api";
 import type { CreateApiKeyFormData } from "@/schemas/api-keys";
 
-export function useApiKeys() {
+interface UseApiKeysParams {
+  /** `null` or omitted lists the caller's personal keys. When set, lists
+   *  keys owned by the given org (admin-only). */
+  readonly orgId?: string | null;
+}
+
+export function useApiKeys(params: UseApiKeysParams = {}) {
+  const orgId = params.orgId ?? null;
   return useQuery({
-    queryKey: ["api-keys"],
+    queryKey: ["api-keys", orgId ?? "personal"],
     queryFn: async (): Promise<readonly ApiKey[]> => {
-      const res = await api.get<{ readonly keys: readonly ApiKey[] }>(
-        "/api-keys",
-      );
+      const path = orgId
+        ? `/api-keys?org_id=${encodeURIComponent(orgId)}`
+        : "/api-keys";
+      const res = await api.get<{ readonly keys: readonly ApiKey[] }>(path);
       return res.keys;
     },
   });
