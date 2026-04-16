@@ -275,6 +275,16 @@ export function AuthHomeScreen({ navigation }: Props) {
       return;
     }
 
+    // Reset the dedup ref so a fresh attempt can re-process a callback URL
+    // that matches a previous attempt's URL. The backend's mobile error
+    // redirect is deterministic (status=error&error=<code>) so two retries
+    // against the same invite-only gate produce identical URLs; without
+    // this reset the second attempt is silently swallowed and the user
+    // sees no error yet no login. The within-attempt race between
+    // WebBrowser.openAuthSessionAsync and Linking's "url" listener is
+    // still deduped because whichever path fires first sets the ref.
+    lastHandledSocialUrlRef.current = null;
+
     if (isMountedRef.current) {
       setLoginError(null);
       setIsSocialAuthPending(true);
