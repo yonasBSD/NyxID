@@ -749,6 +749,139 @@ async fn user_has_legacy_personal_connection(
     Ok(false)
 }
 
+/// Block a viewer from riding the legacy `DownstreamService` fallthrough
+/// path into the approval flow for a service their org shares.
+///
+/// This is called after `resolve_proxy_target_from_user_service` has
+/// returned `Ok(None)` (meaning no personal or active org-owned
+/// `UserService` matched) but BEFORE we fall back to
+/// `resolve_service_by_slug` + `execute_proxy`, which has no org role
+/// check and would otherwise enter the approval flow.
+///
+/// Returns `Err(OrgRoleInsufficient)` when the caller has an active
+/// viewer membership in an org that has any presence for this downstream
+/// service:
+///
+/// - a `UserService` on the org user (regardless of `is_active`) that
+///   matches by slug OR by `catalog_service_id`, OR
+/// - a legacy `UserServiceConnection` on `(org_user_id, downstream_id)`, OR
+/// - a legacy `UserProviderToken` on `(org_user_id, provider_config_id)`
+///   with non-revoked status.
+///
+/// Without this guard, issue #375 lets a viewer trigger approval
+/// requests (and in grant-mode orgs, mint an org-wide grant) simply by
+/// using the bare-slug route instead of `?_nyxid_via=`. See
+/// `proxy_request_by_slug` / `proxy_request` / `llm_proxy_request` for
+/// the call sites.
+///
+/// Safety note: the main resolver returns `Ok(None)` only when the
+/// caller has no personal `UserService`, no legacy personal connection
+/// for the slug, and no usable org-owned `UserService` to route
+/// through. Any org presence we detect here is therefore by
+/// construction a viewer-blocked case, not a legitimate path the
+/// caller could have taken otherwise.
+pub async fn guard_slug_against_viewer_orgs(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    slug: Option<&str>,
+    catalog_service_id: Option<&str>,
+) -> AppResult<()> {
+    // Resolve the DownstreamService so we can check legacy tables by id.
+    // If the slug is unknown the normal fallback will 404 anyway -- we
+    // have nothing to guard against.
+    let downstream: Option<DownstreamService> = if let Some(csid) = catalog_service_id {
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! { "_id": csid })
+            .await?
+    } else if let Some(s) = slug {
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! { "slug": s, "is_active": true })
+            .await?
+    } else {
+        return Ok(());
+    };
+    let Some(downstream) = downstream else {
+        return Ok(());
+    };
+
+    // Memberships. Use the timeout-bounded helper so a degraded Mongo
+    // can't block the proxy path indefinitely -- consistent with the
+    // main resolver. We deliberately swallow `OrgQueryTimeout` here and
+    // return `Ok(())` rather than surfacing the timeout, because the
+    // caller is about to hit `execute_proxy` which will timeout on its
+    // own lookups if Mongo is truly broken. Surfacing here would turn
+    // a transient blip into extra 5xx noise.
+    let memberships =
+        match crate::services::org_service::find_active_memberships_with_timeout(db, actor_user_id)
+            .await
+        {
+            Ok(rows) => rows,
+            Err(crate::errors::AppError::OrgQueryTimeout) => return Ok(()),
+            Err(e) => return Err(e),
+        };
+
+    for membership in &memberships {
+        if membership.role.can_proxy() {
+            continue;
+        }
+
+        // Look up UserService on the org user by slug or catalog_service_id
+        // WITHOUT the is_active filter. Inactive rows still count as
+        // "the org has this service" -- a viewer must not slip through
+        // just because an admin soft-disabled the row.
+        let mut us_query = doc! { "user_id": &membership.org_user_id };
+        if let Some(s) = slug {
+            us_query.insert("slug", s);
+        } else if let Some(csid) = catalog_service_id {
+            us_query.insert("catalog_service_id", csid);
+        }
+        let us_hit = db
+            .collection::<crate::models::user_service::UserService>(
+                crate::models::user_service::COLLECTION_NAME,
+            )
+            .count_documents(us_query)
+            .await?;
+        if us_hit > 0 {
+            return Err(AppError::OrgRoleInsufficient(
+                "your role in the owning org does not permit using this service".to_string(),
+            ));
+        }
+
+        // Legacy UserServiceConnection on the org user.
+        let conn_hit = db
+            .collection::<UserServiceConnection>(USER_SERVICE_CONNECTIONS)
+            .count_documents(doc! {
+                "user_id": &membership.org_user_id,
+                "service_id": &downstream.id,
+            })
+            .await?;
+        if conn_hit > 0 {
+            return Err(AppError::OrgRoleInsufficient(
+                "your role in the owning org does not permit using this service".to_string(),
+            ));
+        }
+
+        // Legacy UserProviderToken on the org user, non-revoked.
+        if let Some(provider_config_id) = &downstream.provider_config_id {
+            let tok_hit = db
+                .collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+                .count_documents(doc! {
+                    "user_id": &membership.org_user_id,
+                    "provider_config_id": provider_config_id,
+                    "status": { "$in": ["active", "expired", "refresh_failed"] },
+                })
+                .await?;
+            if tok_hit > 0 {
+                return Err(AppError::OrgRoleInsufficient(
+                    "your role in the owning org does not permit using this service".to_string(),
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Find the effective owner of a `UserService` that matches the given
 /// slug or catalog service id, scanning the actor's personal scope first
 /// and then any org memberships. Used by callers (e.g. SSH tunnel,
