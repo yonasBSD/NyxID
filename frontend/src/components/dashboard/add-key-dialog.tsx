@@ -240,7 +240,7 @@ function CatalogGrid({
 
   if (isLoading) {
     return (
-      <div className="grid auto-rows-fr grid-cols-2 gap-3 sm:grid-cols-3">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
         {Array.from({ length: 9 }, (_, i) => (
           <Skeleton key={i} className="h-[7.5rem] rounded-lg" />
         ))}
@@ -260,7 +260,7 @@ function CatalogGrid({
         />
       </div>
 
-      <div className="grid max-h-[380px] auto-rows-fr grid-cols-2 gap-3 overflow-y-auto pr-1 sm:grid-cols-3">
+      <div className="grid max-h-[380px] grid-cols-2 gap-3 overflow-y-auto pr-1 sm:grid-cols-3">
         <button
           type="button"
           onClick={onCustom}
