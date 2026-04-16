@@ -1,12 +1,12 @@
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
 };
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
+use utoipa::{IntoParams, ToSchema};
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
@@ -86,21 +86,51 @@ pub struct EndpointListResponse {
     pub endpoints: Vec<EndpointResponse>,
 }
 
+#[derive(Debug, Deserialize, IntoParams)]
+pub struct EndpointListQuery {
+    /// When set, list endpoints owned by the given org instead of the
+    /// caller's personal endpoints. Caller must be an admin of the org
+    /// (admin role required so orphan endpoints blocking org deletion
+    /// can be cleaned up, matching the `?org_id=` contract on other
+    /// org-scoped list endpoints).
+    pub org_id: Option<String>,
+}
+
 #[utoipa::path(
     get,
     path = "/api/v1/endpoints",
+    params(EndpointListQuery),
     responses(
         (status = 200, description = "List of user endpoints", body = EndpointListResponse),
-        (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse)
+        (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse),
+        (status = 403, description = "Not an admin of the target org", body = crate::errors::ErrorResponse),
+        (status = 404, description = "Org not found", body = crate::errors::ErrorResponse)
     ),
     tag = "Endpoints"
 )]
 /// GET /api/v1/endpoints
+///
+/// Defaults to listing the caller's personal endpoints. Pass
+/// `?org_id=<id>` to list endpoints owned by an org (the caller must be
+/// an admin of that org). This is how admins discover orphan endpoints
+/// that block org deletion (issue #365).
 pub async fn list_endpoints(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    Query(query): Query<EndpointListQuery>,
 ) -> AppResult<Json<EndpointListResponse>> {
-    let user_id_str = auth_user.user_id.to_string();
+    let actor = auth_user.user_id.to_string();
+    let user_id_str = if let Some(target_org_id) = query.org_id.as_deref() {
+        let access = org_service::resolve_owner_access(&state.db, &actor, target_org_id).await?;
+        if !access.can_write() {
+            return Err(AppError::OrgRoleInsufficient(
+                "admin access to the target org is required to list its endpoints".to_string(),
+            ));
+        }
+        target_org_id.to_string()
+    } else {
+        actor
+    };
     let endpoints = user_endpoint_service::list_endpoints(&state.db, &user_id_str).await?;
     let items = endpoints.into_iter().map(endpoint_response).collect();
     Ok(Json(EndpointListResponse { endpoints: items }))
