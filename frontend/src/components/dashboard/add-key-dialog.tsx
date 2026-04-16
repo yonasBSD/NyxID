@@ -240,9 +240,9 @@ function CatalogGrid({
 
   if (isLoading) {
     return (
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+      <div className="grid auto-rows-fr grid-cols-2 gap-3 sm:grid-cols-3">
         {Array.from({ length: 9 }, (_, i) => (
-          <Skeleton key={i} className="h-20 rounded-lg" />
+          <Skeleton key={i} className="h-[7.5rem] rounded-lg" />
         ))}
       </div>
     );
@@ -260,11 +260,11 @@ function CatalogGrid({
         />
       </div>
 
-      <div className="grid max-h-[380px] grid-cols-2 gap-3 overflow-y-auto pr-1 sm:grid-cols-3">
+      <div className="grid max-h-[380px] auto-rows-fr grid-cols-2 gap-3 overflow-y-auto pr-1 sm:grid-cols-3">
         <button
           type="button"
           onClick={onCustom}
-          className="flex flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-border p-4 text-center transition-colors hover:border-primary/40 hover:bg-accent/40"
+          className="flex min-h-[7.5rem] flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-border p-4 text-center transition-colors hover:border-primary/40 hover:bg-accent/40"
         >
           <Globe className="h-5 w-5 text-muted-foreground" />
           <span className="text-xs font-medium">Custom Endpoint</span>
@@ -273,7 +273,7 @@ function CatalogGrid({
         <button
           type="button"
           onClick={onCustomSsh}
-          className="flex flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-border p-4 text-center transition-colors hover:border-primary/40 hover:bg-accent/40"
+          className="flex min-h-[7.5rem] flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-border p-4 text-center transition-colors hover:border-primary/40 hover:bg-accent/40"
         >
           <Terminal className="h-5 w-5 text-muted-foreground" />
           <span className="text-xs font-medium">Custom SSH</span>
@@ -284,32 +284,36 @@ function CatalogGrid({
             key={entry.slug}
             type="button"
             onClick={() => onSelect(entry)}
-            className="flex flex-col items-start gap-1.5 rounded-lg border border-border p-4 text-left transition-colors hover:border-primary/40 hover:bg-accent/40"
+            className="flex min-h-[7.5rem] flex-col items-start gap-1.5 rounded-lg border border-border p-4 text-left transition-colors hover:border-primary/40 hover:bg-accent/40"
           >
-            <span className="text-sm font-medium">{entry.name}</span>
-            <span className="line-clamp-2 text-[11px] text-muted-foreground">
+            <span className="line-clamp-1 w-full text-sm font-medium">
+              {entry.name}
+            </span>
+            <span className="line-clamp-2 w-full text-[11px] leading-snug text-muted-foreground">
               {entry.description ?? entry.base_url}
             </span>
-            {entry.service_type === "ssh" && (
-              <Badge variant="secondary" className="text-[10px]">
-                SSH
-              </Badge>
-            )}
-            {entry.requires_gateway_url && (
-              <Badge variant="outline" className="text-[10px]">
-                URL required
-              </Badge>
-            )}
-            {entry.provider_type === "oauth2" && (
-              <Badge variant="secondary" className="text-[10px]">
-                OAuth
-              </Badge>
-            )}
-            {entry.provider_type === "device_code" && (
-              <Badge variant="secondary" className="text-[10px]">
-                Device Code
-              </Badge>
-            )}
+            <div className="mt-auto flex w-full flex-wrap gap-1 pt-1">
+              {entry.service_type === "ssh" && (
+                <Badge variant="secondary" className="text-[10px]">
+                  SSH
+                </Badge>
+              )}
+              {entry.requires_gateway_url && (
+                <Badge variant="outline" className="text-[10px]">
+                  URL required
+                </Badge>
+              )}
+              {entry.provider_type === "oauth2" && (
+                <Badge variant="secondary" className="text-[10px]">
+                  OAuth
+                </Badge>
+              )}
+              {entry.provider_type === "device_code" && (
+                <Badge variant="secondary" className="text-[10px]">
+                  Device Code
+                </Badge>
+              )}
+            </div>
           </button>
         ))}
       </div>
