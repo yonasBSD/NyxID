@@ -256,8 +256,11 @@ async fn update_org(
             "Provide at least one of --display-name or --avatar-url"
         ));
     }
-    let _: Value = api.patch(&format!("/orgs/{id}"), &body).await?;
-    eprintln!("Org updated.");
+    let updated: Value = api.patch(&format!("/orgs/{id}"), &body).await?;
+    match auth.output {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&updated)?),
+        OutputFormat::Table => eprintln!("Org updated."),
+    }
     Ok(())
 }
 
@@ -275,7 +278,13 @@ async fn delete_org(auth: &AuthArgs, id: &str, yes: bool) -> Result<()> {
 
     let mut api = ApiClient::from_auth(auth)?;
     api.delete_empty(&format!("/orgs/{id}")).await?;
-    eprintln!("Org deleted.");
+    match auth.output {
+        OutputFormat::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({ "ok": true }))?
+        ),
+        OutputFormat::Table => eprintln!("Org deleted."),
+    }
     Ok(())
 }
 
@@ -335,11 +344,16 @@ async fn set_primary_org(auth: &AuthArgs, org_id: Option<&str>, clear: bool) -> 
         return Err(anyhow!("Pass --org-id <ID> to set, or --clear to unset"));
     };
 
-    let _: Value = api.patch("/users/me/primary-org", &body).await?;
-    if clear {
-        eprintln!("Primary org cleared.");
-    } else if let Some(id) = org_id {
-        eprintln!("Primary org set to {id}.");
+    let updated: Value = api.patch("/users/me/primary-org", &body).await?;
+    match auth.output {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&updated)?),
+        OutputFormat::Table => {
+            if clear {
+                eprintln!("Primary org cleared.");
+            } else if let Some(id) = org_id {
+                eprintln!("Primary org set to {id}.");
+            }
+        }
     }
     Ok(())
 }
@@ -454,10 +468,13 @@ async fn update_member(
         }
     }
 
-    let _: Value = api
+    let updated: Value = api
         .patch(&format!("/orgs/{org_id}/members/{member_id}"), &body)
         .await?;
-    eprintln!("Member updated.");
+    match auth.output {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&updated)?),
+        OutputFormat::Table => eprintln!("Member updated."),
+    }
     Ok(())
 }
 
@@ -476,7 +493,13 @@ async fn remove_member(auth: &AuthArgs, org_id: &str, member_id: &str, yes: bool
     let mut api = ApiClient::from_auth(auth)?;
     api.delete_empty(&format!("/orgs/{org_id}/members/{member_id}"))
         .await?;
-    eprintln!("Member removed.");
+    match auth.output {
+        OutputFormat::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({ "ok": true }))?
+        ),
+        OutputFormat::Table => eprintln!("Member removed."),
+    }
     Ok(())
 }
 
@@ -603,7 +626,13 @@ async fn cancel_invite(auth: &AuthArgs, org_id: &str, invite_id: &str, yes: bool
     let mut api = ApiClient::from_auth(auth)?;
     api.delete_empty(&format!("/orgs/{org_id}/invites/{invite_id}"))
         .await?;
-    eprintln!("Invite cancelled.");
+    match auth.output {
+        OutputFormat::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({ "ok": true }))?
+        ),
+        OutputFormat::Table => eprintln!("Invite cancelled."),
+    }
     Ok(())
 }
 

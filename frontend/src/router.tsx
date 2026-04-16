@@ -180,6 +180,19 @@ const dashboardLayout = createRoute({
   beforeLoad: () => {
     const { isAuthenticated, isLoading } = useAuthStore.getState();
     if (!isAuthenticated && !isLoading) {
+      // Preserve the deep link (e.g. `/orgs/join/<nonce>`) so sign-in can
+      // resume it. `onLoginSubmit` in auth-flow.tsx and the backend
+      // social-login `return_to` cookie both accept an absolute URL on
+      // this origin. For plain `/dashboard` there's nothing useful to
+      // preserve, so fall through to the bare redirect.
+      const returnPath = `${window.location.pathname}${window.location.search}`;
+      if (returnPath !== "/" && returnPath !== "/dashboard") {
+        const returnTo = `${window.location.origin}${returnPath}`;
+        window.location.assign(
+          `/login?return_to=${encodeURIComponent(returnTo)}`,
+        );
+        return;
+      }
       throw redirect({ to: "/login" });
     }
   },
