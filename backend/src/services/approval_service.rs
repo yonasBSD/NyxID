@@ -154,26 +154,64 @@ fn resolve_approval_requirement(per_service: Option<bool>, global: Option<bool>)
 }
 
 /// Check whether the request has a valid (non-expired, non-revoked) approval grant.
-/// Returns Ok(true) if access is granted, Ok(false) if approval is needed.
+/// Returns `Ok(true)` if access is granted, `Ok(false)` if approval is needed.
+///
+/// When `org_scoped` is `true` the lookup accepts either a new org-scoped
+/// grant (any requester under the owning org, see ChronoAIProject/NyxID#364)
+/// **or** a pre-existing legacy grant that was written under the org
+/// `user_id` for the caller's own `requester_type`/`requester_id` before the
+/// `org_scoped` field was introduced. The legacy branch keeps the original
+/// per-requester semantics so already-approved requesters don't get prompted
+/// again after upgrade; it intentionally does **not** widen those grants to
+/// other members of the org.
+///
+/// When `org_scoped` is `false` the lookup keeps the per-requester behavior
+/// for personal grants and excludes `org_scoped: true` rows so the two
+/// classes stay disjoint.
 pub async fn check_approval(
     db: &Database,
     user_id: &str,
     service_id: &str,
     requester_type: &str,
     requester_id: &str,
+    org_scoped: bool,
 ) -> AppResult<bool> {
     let now = bson::DateTime::from_chrono(Utc::now());
 
-    let grant = db
-        .collection::<ApprovalGrant>(GRANTS)
-        .find_one(doc! {
+    let filter = if org_scoped {
+        // $or: new org-scoped grant OR legacy same-requester grant. A legacy
+        // grant is any row without `org_scoped: true` (i.e. missing the
+        // field, or explicitly false) -- there's no other way to spot rows
+        // written before the field was added. Using `$ne: true` matches both.
+        doc! {
+            "user_id": user_id,
+            "service_id": service_id,
+            "revoked": false,
+            "expires_at": { "$gt": now },
+            "$or": [
+                { "org_scoped": true },
+                {
+                    "org_scoped": { "$ne": true },
+                    "requester_type": requester_type,
+                    "requester_id": requester_id,
+                },
+            ],
+        }
+    } else {
+        doc! {
             "user_id": user_id,
             "service_id": service_id,
             "requester_type": requester_type,
             "requester_id": requester_id,
+            "org_scoped": { "$ne": true },
             "revoked": false,
             "expires_at": { "$gt": now },
-        })
+        }
+    };
+
+    let grant = db
+        .collection::<ApprovalGrant>(GRANTS)
+        .find_one(filter)
         .await?;
 
     Ok(grant.is_some())
@@ -182,7 +220,10 @@ pub async fn check_approval(
 /// Create an approval request.
 ///
 /// Grant mode keeps the legacy dedupe behavior for a pending
-/// `(user, service, requester)` tuple.
+/// `(user, service, requester)` tuple. When `from_org_policy` is true the
+/// pending dedupe key collapses the requester dimension so concurrent calls
+/// from *different org members* against the same org-owned service share a
+/// single pending request (instead of each triggering its own admin prompt).
 /// Per-request mode always creates a distinct pending request so concurrent
 /// calls cannot piggyback on a single approval.
 ///
@@ -197,6 +238,9 @@ pub async fn check_approval(
 /// If `notify_user_ids` is empty the function defaults to `[user_id]` --
 /// preserves the existing single-recipient semantic for callers that
 /// don't yet thread org context through.
+///
+/// `from_org_policy` is persisted on the request so `process_decision` can
+/// mint an org-scoped grant on approval (see ChronoAIProject/NyxID#364).
 #[allow(clippy::too_many_arguments)]
 pub async fn create_approval_request(
     db: &Database,
@@ -216,6 +260,7 @@ pub async fn create_approval_request(
     approval_mode: ApprovalMode,
     timeout_secs: u32,
     notify_user_ids: Vec<String>,
+    from_org_policy: bool,
 ) -> AppResult<ApprovalRequest> {
     let notify_user_ids = if notify_user_ids.is_empty() {
         vec![user_id.to_string()]
@@ -230,6 +275,7 @@ pub async fn create_approval_request(
         service_id,
         requester_type,
         requester_id,
+        from_org_policy,
     );
     let mut inserted_request: Option<ApprovalRequest> = None;
     for _attempt in 0..2 {
@@ -274,6 +320,7 @@ pub async fn create_approval_request(
             decision_channel: None,
             decision_idempotency_key: None,
             notify_user_ids: notify_user_ids.clone(),
+            from_org_policy,
             created_at: now,
         };
 
@@ -447,6 +494,7 @@ pub async fn create_tool_approval_request(
         // `POST /api/v1/approvals/requests` is asking the actor to
         // approve a specific tool invocation. Org cascade does not apply.
         notify_user_ids: vec![user_id.to_string()],
+        from_org_policy: false,
         created_at: now,
     };
 
@@ -606,6 +654,14 @@ pub async fn process_decision(
     // that happens, the grant is inert: the proxy handler skips grants in
     // per_request mode, and list_grants() filters them out at read time.
     // The grant will expire naturally.
+    //
+    // For org-policy requests (`updated.from_org_policy == true`) the grant
+    // is minted as `org_scoped` so it covers every member of the owning org
+    // for its full lifetime (see ChronoAIProject/NyxID#364). Channel defaults
+    // (grant expiry days) fall back to the request owner, which for org-policy
+    // is the org itself (no channel row) -- `get_or_create_channel` creates a
+    // default row whose `grant_expiry_days` is the system default, so the
+    // expiry computation still works.
     if approved && updated.approval_mode == ApprovalMode::Grant {
         let channel = notification_service::get_or_create_channel(db, &updated.user_id).await?;
         let grant_expiry = resolve_grant_expiry(now, duration_sec, channel.grant_expiry_days);
@@ -622,6 +678,7 @@ pub async fn process_decision(
             granted_at: now,
             expires_at: grant_expiry,
             revoked: false,
+            org_scoped: updated.from_org_policy,
         };
 
         db.collection::<ApprovalGrant>(GRANTS)
@@ -781,21 +838,33 @@ pub async fn expire_pending_requests(
         }
     }
 
-    // Send silent push to update mobile app UI for expired requests (best-effort)
+    // Send silent push to update mobile app UI for expired requests
+    // (best-effort). For org-policy requests `user_id` is the org (no
+    // channel); the app clients that need the expiry ping are every admin
+    // that was notified at request creation time. Fall back to
+    // `[req.user_id]` for legacy rows without `notify_user_ids` (see
+    // ChronoAIProject/NyxID#370).
     for req in &actually_expired {
         let mut data = std::collections::HashMap::new();
         data.insert("type".to_string(), "approval_expired".to_string());
         data.insert("request_id".to_string(), req.id.clone());
-        let _ = notification_service::send_silent_push_to_user(
-            db,
-            config,
-            http_client,
-            fcm_auth,
-            apns_auth,
-            &req.user_id,
-            &data,
-        )
-        .await;
+        let recipients: Vec<String> = if req.notify_user_ids.is_empty() {
+            vec![req.user_id.clone()]
+        } else {
+            req.notify_user_ids.clone()
+        };
+        for recipient in recipients {
+            let _ = notification_service::send_silent_push_to_user(
+                db,
+                config,
+                http_client,
+                fcm_auth,
+                apns_auth,
+                &recipient,
+                &data,
+            )
+            .await;
+        }
     }
 
     Ok(count)
@@ -1184,14 +1253,32 @@ fn compute_idempotency_key(
     hex::encode(hasher.finalize())
 }
 
+/// Dedupe key for an org-policy pending request. The key intentionally omits
+/// `requester_type` / `requester_id` so that concurrent calls from different
+/// org members against the same org-owned service collapse into a single
+/// pending request (rather than producing per-member prompts that each have
+/// to be decided separately). A sentinel string keeps the key distinct from
+/// the personal `compute_idempotency_key` output, so a pre-existing personal
+/// pending row on the same `(user, service)` cannot collide with an org row.
+fn compute_org_idempotency_key(user_id: &str, service_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(user_id.as_bytes());
+    hasher.update(b":");
+    hasher.update(service_id.as_bytes());
+    hasher.update(b":org:*");
+    hex::encode(hasher.finalize())
+}
+
 fn compute_pending_request_idempotency_key(
     approval_mode: &ApprovalMode,
     user_id: &str,
     service_id: &str,
     requester_type: &str,
     requester_id: &str,
+    from_org_policy: bool,
 ) -> String {
     match approval_mode {
+        ApprovalMode::Grant if from_org_policy => compute_org_idempotency_key(user_id, service_id),
         ApprovalMode::Grant => {
             compute_idempotency_key(user_id, service_id, requester_type, requester_id)
         }
@@ -1310,6 +1397,7 @@ mod tests {
             is_destructive: None,
             approval_mode: ApprovalMode::PerRequest,
             notify_user_ids: vec![],
+            from_org_policy: false,
             created_at: now,
         }
     }
@@ -1343,6 +1431,7 @@ mod tests {
             "svc1",
             "sa",
             "req1",
+            false,
         );
         let key2 = compute_pending_request_idempotency_key(
             &ApprovalMode::Grant,
@@ -1350,6 +1439,7 @@ mod tests {
             "svc1",
             "sa",
             "req1",
+            false,
         );
         assert_eq!(key1, key2);
     }
@@ -1362,6 +1452,7 @@ mod tests {
             "svc1",
             "sa",
             "req1",
+            false,
         );
         let key2 = compute_pending_request_idempotency_key(
             &ApprovalMode::Grant,
@@ -1369,13 +1460,21 @@ mod tests {
             "svc1",
             "sa",
             "req1",
+            false,
         );
         assert_ne!(key1, key2);
     }
 
     #[test]
     fn grant_mode_idempotency_key_is_hex_sha256() {
-        let key = compute_pending_request_idempotency_key(&ApprovalMode::Grant, "u", "s", "t", "r");
+        let key = compute_pending_request_idempotency_key(
+            &ApprovalMode::Grant,
+            "u",
+            "s",
+            "t",
+            "r",
+            false,
+        );
         assert_eq!(key.len(), 64);
         assert!(key.chars().all(|c| c.is_ascii_hexdigit()));
     }
@@ -1388,6 +1487,7 @@ mod tests {
             "svc1",
             "sa",
             "req1",
+            false,
         );
         let key2 = compute_pending_request_idempotency_key(
             &ApprovalMode::PerRequest,
@@ -1395,11 +1495,70 @@ mod tests {
             "svc1",
             "sa",
             "req1",
+            false,
         );
 
         assert_ne!(key1, key2);
         assert!(uuid::Uuid::parse_str(&key1).is_ok());
         assert!(uuid::Uuid::parse_str(&key2).is_ok());
+    }
+
+    #[test]
+    fn org_policy_grant_mode_idempotency_key_ignores_requester() {
+        // Regression guard for ChronoAIProject/NyxID#364: when an org-policy
+        // grant-mode request is pending, a second call from a different
+        // member of the same org must collapse onto the same idempotency key
+        // so both members wait on a single admin decision instead of each
+        // spawning their own approval prompt.
+        let key_member_a = compute_pending_request_idempotency_key(
+            &ApprovalMode::Grant,
+            "org-1",
+            "svc-1",
+            "api_key",
+            "member-a-key",
+            true,
+        );
+        let key_member_b = compute_pending_request_idempotency_key(
+            &ApprovalMode::Grant,
+            "org-1",
+            "svc-1",
+            "api_key",
+            "member-b-key",
+            true,
+        );
+        assert_eq!(key_member_a, key_member_b);
+    }
+
+    #[test]
+    fn org_policy_grant_mode_idempotency_key_is_hex_sha256() {
+        let key = compute_org_idempotency_key("org-1", "svc-1");
+        assert_eq!(key.len(), 64);
+        assert!(key.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn org_policy_grant_mode_idempotency_key_differs_from_personal() {
+        // A personal pending request (from_org_policy=false) for the same
+        // (user, service, requester) tuple must not collide with the
+        // org-policy wildcard key, so an org request cannot silently inherit
+        // a stale personal pending row.
+        let personal = compute_pending_request_idempotency_key(
+            &ApprovalMode::Grant,
+            "org-1",
+            "svc-1",
+            "api_key",
+            "member-a-key",
+            false,
+        );
+        let org = compute_pending_request_idempotency_key(
+            &ApprovalMode::Grant,
+            "org-1",
+            "svc-1",
+            "api_key",
+            "member-a-key",
+            true,
+        );
+        assert_ne!(personal, org);
     }
 
     #[test]

@@ -817,12 +817,16 @@ pub(crate) async fn authorize_ssh_access(
         let has_grant = if approval_resolution.mode
             == crate::models::service_approval_config::ApprovalMode::Grant
         {
+            // Org-policy grants are org-scoped (see ChronoAIProject/NyxID#364)
+            // -- pass the flag through so a grant minted by one member's call
+            // is reused when any other member of the same org opens a tunnel.
             approval_service::check_approval(
                 &state.db,
                 primary_owner,
                 service_id,
                 requester_type,
                 &auth_user.approval_requester_id(),
+                approval_resolution.from_org_policy,
             )
             .await?
         } else {
@@ -873,6 +877,7 @@ pub(crate) async fn authorize_ssh_access(
                 approval_resolution.mode.clone(),
                 timeout_secs,
                 notify_user_ids,
+                approval_resolution.from_org_policy,
             )
             .await?;
 

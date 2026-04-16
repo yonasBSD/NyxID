@@ -201,16 +201,44 @@ pub async fn notify_decision(
         .await?;
     }
 
-    // 2. Send silent push to update mobile app UI
-    let channel = get_or_create_channel(db, &request.user_id).await?;
-    if channel.push_enabled && !channel.push_devices.is_empty() {
-        let unique_devices = unique_devices_by_token(&channel.push_devices);
-        let decision_str = if approved { "approved" } else { "rejected" };
-        let mut data = HashMap::new();
-        data.insert("type".to_string(), "approval_decision".to_string());
-        data.insert("request_id".to_string(), request.id.clone());
-        data.insert("decision".to_string(), decision_str.to_string());
+    // 2. Send silent push to update mobile app UI.
+    //
+    // For personal requests we push to the request owner. For org-policy
+    // requests the owner is the *org*, which has no notification channel of
+    // its own -- the actual mobile clients waiting on a decision are the
+    // org admins that were recorded on `notify_user_ids` at request time.
+    // Fan out silent push to every recorded admin so every admin app clears
+    // the pending state after one admin decides. Falls back to `[user_id]`
+    // for legacy rows without `notify_user_ids` (see
+    // ChronoAIProject/NyxID#370).
+    let decision_str = if approved { "approved" } else { "rejected" };
+    let mut data = HashMap::new();
+    data.insert("type".to_string(), "approval_decision".to_string());
+    data.insert("request_id".to_string(), request.id.clone());
+    data.insert("decision".to_string(), decision_str.to_string());
 
+    let recipients: Vec<String> = if request.notify_user_ids.is_empty() {
+        vec![request.user_id.clone()]
+    } else {
+        request.notify_user_ids.clone()
+    };
+
+    for recipient in recipients {
+        let channel = match get_or_create_channel(db, &recipient).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    recipient = %recipient,
+                    error = %e,
+                    "Failed to load notification channel for decision silent push"
+                );
+                continue;
+            }
+        };
+        if !channel.push_enabled || channel.push_devices.is_empty() {
+            continue;
+        }
+        let unique_devices = unique_devices_by_token(&channel.push_devices);
         for device in unique_devices {
             let _ = send_silent_push(http_client, fcm_auth, apns_auth, config, device, &data).await;
         }
