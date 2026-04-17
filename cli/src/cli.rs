@@ -130,6 +130,17 @@ pub enum Commands {
         #[command(subcommand)]
         command: AdminCommands,
     },
+    /// Show the NyxID project repository URL
+    Repo(RepoArgs),
+    /// Show CLI version and project links
+    Info,
+}
+
+#[derive(Args)]
+pub struct RepoArgs {
+    /// Open the repository in the default browser
+    #[arg(long)]
+    pub open: bool,
 }
 
 #[derive(Subcommand)]
