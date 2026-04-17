@@ -807,6 +807,12 @@ nyxid approval service-configs --output json           # list per-service approv
 nyxid approval set-config <SERVICE_ID> --require-approval true                    # per-request (default)
 nyxid approval set-config <SERVICE_ID> --require-approval true --approval-mode grant  # grant mode
 
+# `<SERVICE_ID>` is a UserService ID from `nyxid service list --output json`
+# (recommended — works for both catalog-backed and custom user services) or
+# a legacy catalog `DownstreamService.id`. Custom services (added via
+# `nyxid service add --custom`) have no catalog backing, so the UserService
+# ID is the only way to target their per-service policy.
+
 # Org-level per-service approval policies (admin only). When set, the
 # policy is dominant over the member's personal gate: every member of
 # the org must get an admin's approval before the proxy call goes through.

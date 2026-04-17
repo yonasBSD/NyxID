@@ -1613,7 +1613,11 @@ pub enum ApprovalCommands {
     },
     /// Set approval configuration for a service
     SetConfig {
-        /// Service config ID or service ID
+        /// UserService ID (from `nyxid service list`) or catalog
+        /// DownstreamService ID. Use the UserService ID for custom
+        /// services that have no catalog backing — that's the only way
+        /// to target their policy. Catalog-backed user services accept
+        /// either and collapse to the same policy.
         id: String,
         /// Require approval for this service
         #[arg(long)]
