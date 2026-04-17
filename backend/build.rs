@@ -5,6 +5,17 @@ fn main() {
     println!("cargo:rerun-if-changed=.git/refs");
     println!("cargo:rerun-if-env-changed=NYXID_GIT_HASH");
 
+    // If the caller already provided NYXID_GIT_HASH (e.g. Docker build arg in
+    // CI, where .git is not in the build context), honor it verbatim.
+    let full = std::env::var("NYXID_GIT_HASH")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(resolve_from_git);
+
+    println!("cargo:rustc-env=NYXID_GIT_HASH={full}");
+}
+
+fn resolve_from_git() -> String {
     let hash = Command::new("git")
         .args(["rev-parse", "--short=12", "HEAD"])
         .output()
@@ -22,11 +33,9 @@ fn main() {
         .map(|o| !o.stdout.is_empty())
         .unwrap_or(false);
 
-    let full = if dirty && hash != "unknown" {
+    if dirty && hash != "unknown" {
         format!("{hash}-dirty")
     } else {
         hash
-    };
-
-    println!("cargo:rustc-env=NYXID_GIT_HASH={full}");
+    }
 }
