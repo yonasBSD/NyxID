@@ -359,8 +359,13 @@ nyxid service show <id>                                        # show service de
 nyxid service update <id> --label "My Custom Name"             # rename service
 nyxid service update <id> --openapi-spec-url https://api.example.com/openapi.json  # attach an OpenAPI spec
 nyxid service update <id> --openapi-spec-url ""                # clear the OpenAPI spec URL
+nyxid service update <id> --default-header 'x-openclaw-scopes=operator.read,operator.write'
+nyxid service update <id> --default-header 'x-api-version=v2:overridable'
+nyxid service update <id> --clear-default-headers
 nyxid service delete <id> --yes                                # remove service (no prompt)
 ```
+
+> Default request header precedence is `catalog defaults -> UserService defaults -> caller`. The default is non-overridable unless `:overridable` is set on the value.
 
 > Node commands accept names (e.g., `--via-node test-server`) in addition to UUIDs.
 
@@ -1096,6 +1101,12 @@ Without this, restarting the gateway (`openclaw gateway restart`) will shut it d
 
 **Transport selection.** `llm-openclaw` supports both HTTP proxy (`POST /v1/chat/completions`, etc.) and WebSocket passthrough (the OpenClaw CLI's native `connect` + `chat.send` flow). Check `nyxid proxy discover --output json` — the entry exposes `"streaming_supported": true` and `"websocket_supported": true`. Use `wss://<nyxid-host>/api/v1/proxy/s/llm-openclaw` with a `Bearer` token for the WebSocket path. If it's node-routed and the WS upgrade times out, update the node agent and restart its daemon (older agents pre-date WS proxy support).
 
+**Scope and routing headers.** The service-level default-header flag closes the workflow described in NyxID#161 -- agents no longer need to remember `x-openclaw-scopes` per call. Set it once on the UserService and every call carries it automatically:
+
+```bash
+nyxid service update <user-service-id> --default-header 'x-openclaw-scopes=operator.read,operator.write'
+```
+
 ## Account Management
 
 ```bash
@@ -1150,6 +1161,7 @@ nyxid mcp config --tool vscode                         # generate MCP config for
 - `1002 forbidden` -- missing scope or service not configured
 - `8003 node_proxy_error` -- node agent proxy failed (check `nyxid node list`)
 - **403 from downstream with no NyxID error code** -- the downstream service itself rejected the request. A common cause is WAF rules blocking your User-Agent header (e.g. `OpenAI/Python 2.30.0`). The user can set a per-service custom User-Agent override via the frontend (key detail page > Service > User-Agent) or via API: `PATCH /api/v1/user-services/{id}` with `{"custom_user_agent": "MyApp/1.0"}`. Set to `""` to clear and revert to passthrough.
+- **Any other static header a downstream requires on every call** (scope hint, API version, routing key) should be configured once as a service default via `nyxid service update <id> --default-header 'name=value'` rather than sent from every caller.
 
 ## Working Rules
 
@@ -1161,6 +1173,7 @@ nyxid mcp config --tool vscode                         # generate MCP config for
 - Never try to extract or display the user's stored provider credentials.
 - If multiple AI agents share a machine, each should have its own `NYXID_ACCESS_TOKEN`. Never share a single API key across multiple agents -- it defeats audit isolation and makes revocation impossible without disrupting all agents.
 - Your User-Agent header is forwarded to downstream services by default (passthrough). Some downstreams block SDK-specific User-Agent strings -- see the 403 troubleshooting note in "Approval and Errors" above.
+- If a downstream requires a static header on every call (scope hint, API version, routing key), configure it once as a service default via `nyxid service update ... --default-header 'name=value'` rather than sending it from every caller.
 
 ## External Endpoints
 
