@@ -5,6 +5,7 @@ const channelPlatformSchema = z.enum([
   "discord",
   "lark",
   "feishu",
+  "slack",
 ]);
 
 const conversationTypeSchema = z.enum(["private", "group", "channel"]);
@@ -52,6 +53,13 @@ export const createChannelBotSchema = z
         code: z.ZodIssueCode.custom,
         message: "Public Key is required for Discord",
         path: ["public_key"],
+      });
+    }
+    if (data.platform === "slack" && !data.app_secret) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Signing Secret is required for Slack",
+        path: ["app_secret"],
       });
     }
   });

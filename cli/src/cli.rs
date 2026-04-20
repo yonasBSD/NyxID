@@ -1760,10 +1760,11 @@ pub enum AiSetupCommands {
 pub enum ChannelBotCommands {
     /// Register a new messaging platform bot
     Register {
-        /// Platform: telegram, discord, lark, feishu, openclaw
+        /// Platform: telegram, discord, lark, feishu, slack
         #[arg(long)]
         platform: String,
-        /// Bot token (hidden from help -- use --token-env instead)
+        /// Bot token (hidden from help -- use --token-env instead).
+        /// Slack: pass the `xoxb-` bot user OAuth token.
         #[arg(long, hide = true)]
         bot_token: Option<String>,
         /// Read bot token from this environment variable
@@ -1772,16 +1773,17 @@ pub enum ChannelBotCommands {
         /// Label for this bot
         #[arg(long)]
         label: String,
-        /// Platform app ID (required for some platforms, e.g. Discord, Lark)
+        /// Platform app ID (required for Lark/Feishu)
         #[arg(long)]
         app_id: Option<String>,
-        /// Platform app secret (hidden from help -- use --app-secret-env instead)
+        /// App secret (hidden from help -- use --app-secret-env instead).
+        /// Lark/Feishu: app secret. Slack: app signing secret.
         #[arg(long, hide = true)]
         app_secret: Option<String>,
         /// Read app secret from this environment variable
         #[arg(long)]
         app_secret_env: Option<String>,
-        /// Platform public key (required for some platforms, e.g. Discord)
+        /// Platform public key (required for Discord)
         #[arg(long)]
         public_key: Option<String>,
         /// Create this bot under the given org (you must be an admin of

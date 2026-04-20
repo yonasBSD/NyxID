@@ -1,4 +1,9 @@
-export type ChannelPlatform = "telegram" | "discord" | "lark" | "feishu";
+export type ChannelPlatform =
+  | "telegram"
+  | "discord"
+  | "lark"
+  | "feishu"
+  | "slack";
 
 export type ChannelBotStatus = "pending" | "active" | "failed" | "invalid";
 
@@ -50,7 +55,7 @@ export interface CreateChannelBotRequest {
   readonly label: string;
   /** Lark/Feishu only */
   readonly app_id?: string;
-  /** Lark/Feishu only */
+  /** Lark/Feishu: app secret. Slack: app signing secret. */
   readonly app_secret?: string;
   /** Discord only */
   readonly public_key?: string;

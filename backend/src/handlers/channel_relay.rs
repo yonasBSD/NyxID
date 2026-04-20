@@ -306,6 +306,17 @@ pub async fn async_reply(
                 obj.entry("message_thread_id")
                     .or_insert_with(|| serde_json::json!(tid));
             }
+        } else if conversation.platform == "slack" {
+            // Slack threading uses the ROOT message's `ts` as `thread_ts`.
+            // The inbound `thread_id` already holds the root (`thread_ts`
+            // from the original event), while `reply_to_platform_message_id`
+            // can be a child reply's `ts`. Surface the root explicitly so
+            // the adapter doesn't anchor replies on the wrong message.
+            let md = metadata.get_or_insert_with(|| serde_json::json!({}));
+            if let Some(obj) = md.as_object_mut() {
+                obj.entry("thread_ts")
+                    .or_insert_with(|| serde_json::json!(tid));
+            }
         }
     }
 
