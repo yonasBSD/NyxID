@@ -658,7 +658,7 @@ async fn build_pre_resolved_node_route(
             tracing::warn!(
                 configured_node_id = %explicit_node_id,
                 service_id = %service_id,
-                "Configured node is not viable on this instance and no viable fallback bindings; falling through to standard proxy"
+                "Configured node is not viable on this instance and no viable fallback bindings; caller will hard-fail the node-pinned request"
             );
         } else {
             tracing::warn!(
@@ -680,8 +680,10 @@ async fn build_pre_resolved_node_route(
 /// - If the configured node is viable, it goes first and viable fallbacks follow.
 /// - If it is not viable, only the viable fallbacks remain; the first one is promoted
 ///   to primary by the caller via `build_node_route`.
-/// - If nothing is viable, returns an empty list (caller returns `None` to fall through
-///   to standard proxy).
+/// - If nothing is viable, returns an empty list. `build_node_route` then yields
+///   `None`, and `execute_proxy_inner`'s pre_resolved arm hard-fails with
+///   `NodeOffline` to honor the "Route via Node" contract
+///   (see ChronoAIProject/NyxID#328).
 fn compose_pre_resolved_node_ids(
     explicit_node_id: &str,
     primary_viable: bool,
@@ -773,6 +775,40 @@ async fn execute_proxy_inner(
             pre.node_id.as_deref(),
         )
         .await?;
+
+        // Hard-fail when the UserService pins a node (Route via Node) but
+        // `build_pre_resolved_node_route` could not resolve a viable node
+        // and no fallback binding exists. Falling through to direct routing
+        // would silently bypass node isolation, local credentials, and
+        // private-network access -- the exact contract "Route via Node"
+        // promises. The legacy DownstreamService path enforces the same
+        // invariant in `resolve_via_downstream_service`; this mirror keeps
+        // the UserService path honest. See ChronoAIProject/NyxID#328.
+        if node_route.is_none() && pre.node_id.as_deref().is_some_and(|nid| !nid.is_empty()) {
+            let err = AppError::NodeOffline(
+                "Service is configured to route via a node, but no viable node is available"
+                    .to_string(),
+            );
+            audit_service::log_async(
+                state.db.clone(),
+                Some(user_id_str.clone()),
+                "proxy_request_denied".to_string(),
+                Some(serde_json::json!({
+                    "service_id": service_id,
+                    "user_service_id": pre.user_service_id,
+                    "configured_node_id": pre.node_id,
+                    "path": path,
+                    "reason": err.to_string(),
+                    "denial_reason": "node_routing_required_no_viable_node",
+                    "node_routing_required": true,
+                })),
+                None,
+                None,
+                auth_user.api_key_id.clone(),
+                auth_user.api_key_name.clone(),
+            );
+            return Err(err);
+        }
 
         // API key scope enforcement. Emit a `proxy_request_denied` audit
         // event on 403 so Usage aggregation can count scope-forbidden
@@ -3100,8 +3136,10 @@ mod tests {
     #[test]
     fn compose_pre_resolved_node_ids_returns_empty_when_nothing_viable() {
         // When the configured node is not viable and no fallback bindings exist,
-        // the list must be empty so `build_node_route` returns None and the caller
-        // falls through to standard proxy instead of surfacing `503 node_offline`.
+        // the list must be empty so `build_node_route` returns None. The caller
+        // (execute_proxy_inner pre_resolved arm) then hard-fails with
+        // `NodeOffline` to honor the "Route via Node" contract rather than
+        // silently dropping to direct routing. See ChronoAIProject/NyxID#328.
         let result = compose_pre_resolved_node_ids("configured", false, vec![]);
 
         assert!(result.is_empty());
