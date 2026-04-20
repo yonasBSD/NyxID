@@ -701,6 +701,11 @@ pub enum ApiKeyCommands {
     /// Rotate a key
     Rotate {
         id: String,
+        /// Skip the browser wizard and print the new key to the terminal.
+        /// The new key is shown ONCE — copy it before scrolling away.
+        /// Equivalent to setting `NYXID_NO_WIZARD=1` for a single invocation.
+        #[arg(long, alias = "no-wizard")]
+        terminal: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -962,6 +967,12 @@ pub enum NodeCommands {
     RotateToken {
         /// Node ID
         id: String,
+        /// Skip the browser wizard and print the new auth token + signing
+        /// secret to the terminal. The new values are shown ONCE — copy
+        /// them before scrolling away. Equivalent to setting
+        /// `NYXID_NO_WIZARD=1` for a single invocation.
+        #[arg(long, alias = "no-wizard")]
+        terminal: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
