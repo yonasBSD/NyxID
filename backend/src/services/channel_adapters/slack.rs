@@ -149,6 +149,31 @@ fn extract_attachments(event: &serde_json::Value) -> Vec<InboundAttachment> {
         .collect()
 }
 
+/// Parse Slack's `Retry-After` response header. Slack always sends this as
+/// whole seconds (never an HTTP-date), but we defensively bound the result
+/// to a sensible range to avoid surprising downstream consumers.
+fn parse_retry_after(header: Option<&axum::http::HeaderValue>) -> Option<u64> {
+    header
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        // Cap at 1 hour — anything larger is almost certainly misconfigured.
+        .map(|s| s.min(3600))
+}
+
+/// Build a rate-limit error for `chat.postMessage`. Kept as a helper so both
+/// the HTTP-429 path and the `ok:false` JSON path produce consistent messages
+/// and so the shape is easy to update later if we add a structured variant.
+fn slack_rate_limited(source: &str, retry_after_secs: Option<u64>) -> AppError {
+    match retry_after_secs {
+        Some(secs) => AppError::ChannelPlatformError(format!(
+            "Slack chat.postMessage rate limited ({source}); retry after {secs}s"
+        )),
+        None => AppError::ChannelPlatformError(format!(
+            "Slack chat.postMessage rate limited ({source}); retry later"
+        )),
+    }
+}
+
 /// True if this `message`/`app_mention` event was produced by a bot, in which
 /// case we must skip it to avoid reply loops. Slack flags bot-authored
 /// messages with `bot_id` and/or `subtype: "bot_message"`.
@@ -371,7 +396,7 @@ impl PlatformAdapter for SlackAdapter {
         }
 
         let url = format!("{SLACK_API_BASE}/chat.postMessage");
-        let resp: serde_json::Value = http
+        let response = http
             .post(&url)
             .header("Authorization", format!("Bearer {bot_token}"))
             .json(&body)
@@ -381,20 +406,34 @@ impl PlatformAdapter for SlackAdapter {
                 AppError::ChannelPlatformError(format!(
                     "Slack chat.postMessage request failed: {e}"
                 ))
-            })?
-            .json()
-            .await
-            .map_err(|e| {
-                AppError::ChannelPlatformError(format!(
-                    "Slack chat.postMessage response parse failed: {e}"
-                ))
             })?;
+
+        // Rate-limit signal #1: HTTP 429 with a Retry-After header.
+        // https://api.slack.com/docs/rate-limits
+        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let retry_after = parse_retry_after(response.headers().get("retry-after"));
+            return Err(slack_rate_limited("HTTP 429", retry_after));
+        }
+
+        let resp: serde_json::Value = response.json().await.map_err(|e| {
+            AppError::ChannelPlatformError(format!(
+                "Slack chat.postMessage response parse failed: {e}"
+            ))
+        })?;
 
         if resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
             let error = resp
                 .get("error")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown error");
+
+            // Rate-limit signal #2: Slack can also return `{"ok":false,
+            // "error":"ratelimited"}` with HTTP 200 on some endpoints.
+            // `response_metadata.messages` may carry a human-readable hint.
+            if error == "ratelimited" || error == "rate_limited" {
+                return Err(slack_rate_limited(error, None));
+            }
+
             return Err(AppError::ChannelPlatformError(format!(
                 "Slack chat.postMessage failed: {error}"
             )));
@@ -1063,5 +1102,64 @@ mod tests {
         };
         let body = build_post_message_body(&reply, "C1");
         assert_eq!(body["blocks"], blocks);
+    }
+
+    // -- rate limit handling -------------------------------------------------
+    //
+    // Slack signals backpressure two different ways on chat.postMessage:
+    //   1. HTTP 429 with a `Retry-After: <seconds>` header.
+    //   2. HTTP 200 with `{"ok": false, "error": "ratelimited"}`.
+    // Both must surface as a clearly-labeled error so the relay / agent can
+    // reason about retry timing. The adapter does NOT auto-retry — that's an
+    // agent-level decision since Slack replies are time-sensitive.
+
+    #[test]
+    fn parse_retry_after_reads_seconds() {
+        let hv = axum::http::HeaderValue::from_static("7");
+        assert_eq!(parse_retry_after(Some(&hv)), Some(7));
+    }
+
+    #[test]
+    fn parse_retry_after_handles_missing_header() {
+        assert_eq!(parse_retry_after(None), None);
+    }
+
+    #[test]
+    fn parse_retry_after_rejects_non_numeric() {
+        // Slack docs specify integer seconds; HTTP-date form isn't used.
+        let hv = axum::http::HeaderValue::from_static("Tue, 15 Nov 1994 08:12:31 GMT");
+        assert_eq!(parse_retry_after(Some(&hv)), None);
+    }
+
+    #[test]
+    fn parse_retry_after_caps_absurd_values() {
+        let hv = axum::http::HeaderValue::from_static("99999");
+        assert_eq!(parse_retry_after(Some(&hv)), Some(3600));
+    }
+
+    #[test]
+    fn slack_rate_limited_includes_retry_window() {
+        let err = slack_rate_limited("HTTP 429", Some(30));
+        match err {
+            AppError::ChannelPlatformError(msg) => {
+                assert!(msg.contains("rate limited"), "msg was: {msg}");
+                assert!(msg.contains("30s"), "msg was: {msg}");
+                assert!(msg.contains("HTTP 429"), "msg was: {msg}");
+            }
+            other => panic!("expected ChannelPlatformError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slack_rate_limited_without_retry_window() {
+        let err = slack_rate_limited("ratelimited", None);
+        match err {
+            AppError::ChannelPlatformError(msg) => {
+                assert!(msg.contains("rate limited"));
+                assert!(msg.contains("retry later"));
+                assert!(msg.contains("ratelimited"));
+            }
+            other => panic!("expected ChannelPlatformError, got {other:?}"),
+        }
     }
 }
