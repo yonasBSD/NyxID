@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="wizard-csrf" content="{{CSRF_TOKEN}}">
+<meta name="wizard-flow" content="{{FLOW}}">
+<meta name="wizard-base-url" content="{{BASE_URL}}">
+<title>NyxID Wizard</title>
+<link rel="stylesheet" href="/assets/wizard.css">
+</head>
+<body>
+<div class="wizard-shell">
+  <header class="wizard-header">
+    <div class="wizard-brand">
+      <img class="wizard-brand-mark" src="/assets/nyxid-logo.svg" alt="" width="36" height="36" aria-hidden="true">
+      <span class="wizard-brand-wordmark">NyxID</span>
+    </div>
+    <div class="wizard-step" id="wizard-step-label">Step 1 of 3 · pick a service</div>
+  </header>
+
+  <main class="wizard-main">
+    <!-- Step 1 — catalog -->
+    <section class="wizard-step-panel" id="step-catalog" data-step="1">
+      <h1 class="wizard-title">Add an AI service</h1>
+      <p class="wizard-body wizard-muted">
+        Pick a service to connect. Simple-bearer APIs (OpenAI, Anthropic,
+        Gemini) land in the guided form. Anything else — self-hosted,
+        OAuth, device code, custom endpoint — goes to the power-user form.
+      </p>
+
+      <div class="wizard-search">
+        <input type="search" id="catalog-search" placeholder="search services…"
+               autocomplete="off" autocapitalize="off" spellcheck="false">
+      </div>
+
+      <div class="wizard-section-label">Simple setup</div>
+      <div class="wizard-catalog-grid" id="catalog-simple" role="list"></div>
+      <div class="wizard-catalog-empty" id="catalog-simple-empty" role="status" hidden>
+        No services match your search.
+      </div>
+
+      <div class="wizard-section-label">Advanced</div>
+      <div class="wizard-catalog-grid" id="catalog-advanced" role="list">
+        <button type="button" class="wizard-card wizard-card-custom"
+                data-slug="__custom__" role="listitem">
+          <div class="wizard-card-title">Custom / self-hosted…</div>
+          <div class="wizard-card-sub">
+            For anything that isn't in the catalog above — paste your own
+            endpoint URL + credential.
+          </div>
+        </button>
+      </div>
+
+      <div class="wizard-status" id="catalog-status" aria-live="polite">
+        Loading catalog…
+      </div>
+
+      <div class="wizard-actions">
+        <button type="button" id="wizard-cancel" class="wizard-btn wizard-btn-ghost">Cancel</button>
+        <button type="button" id="wizard-next" class="wizard-btn wizard-btn-primary" disabled>Next</button>
+      </div>
+    </section>
+
+    <!-- Step 2 — credential form (fields rendered dynamically from the
+         catalog entry's flow shape: paste-key / gateway-url /
+         token-exchange / no-auth / [unsupported-fallback]) -->
+    <section class="wizard-step-panel" id="step-credential" data-step="2" hidden>
+      <h1 class="wizard-title" id="credential-title">Connect service</h1>
+      <p class="wizard-body wizard-muted" id="credential-subtitle"></p>
+
+      <div class="wizard-error-banner" id="credential-error" role="alert" hidden></div>
+      <form id="credential-form" autocomplete="off">
+        <div id="credential-fields"></div>
+
+        <div class="wizard-info-panel">
+          This will create:
+          <ul>
+            <li>an endpoint — where NyxID sends requests</li>
+            <li>a stored key — encrypted at rest</li>
+            <li>a routing rule — reachable at <code>/proxy/s/&lt;slug&gt;/…</code></li>
+          </ul>
+        </div>
+      </form>
+
+      <div class="wizard-status" id="credential-status" aria-live="polite"></div>
+
+      <div class="wizard-actions">
+        <button type="button" id="credential-back" class="wizard-btn wizard-btn-ghost">← Back</button>
+        <span id="credential-submit-wrap">
+          <button type="button" id="credential-submit" class="wizard-btn wizard-btn-primary">Connect</button>
+        </span>
+      </div>
+    </section>
+
+    <!-- Step 3 — confirmation -->
+    <section class="wizard-step-panel" id="step-confirm" data-step="3" hidden>
+      <h1 class="wizard-title"><span aria-hidden="true">✓</span> Service created</h1>
+
+      <dl class="wizard-detail-list">
+        <dt>Slug</dt><dd id="confirm-slug">—</dd>
+        <dt>Label</dt><dd id="confirm-label">—</dd>
+        <dt>Proxy URL</dt>
+        <dd>
+          <code id="confirm-proxy-url">—</code>
+          <button type="button" class="wizard-btn-tiny" id="copy-proxy-url">Copy</button>
+        </dd>
+      </dl>
+
+      <p class="wizard-body wizard-muted">Try it:</p>
+      <pre class="wizard-code" id="confirm-curl">curl …</pre>
+      <div class="wizard-actions wizard-actions-left">
+        <button type="button" class="wizard-btn-tiny" id="copy-curl">Copy curl</button>
+      </div>
+
+      <div class="wizard-status" id="confirm-status" aria-live="polite"></div>
+
+      <div class="wizard-actions">
+        <button type="button" id="wizard-done" class="wizard-btn wizard-btn-primary">Done — return to terminal</button>
+      </div>
+    </section>
+  </main>
+
+  <footer class="wizard-footer">
+    <span>Served locally from <code id="wizard-origin"></code></span>
+    <span>· Nothing leaves your machine</span>
+  </footer>
+</div>
+
+<div class="wizard-overlay" id="wizard-overlay" hidden aria-hidden="true">
+  <div class="wizard-overlay-card" role="alertdialog" aria-labelledby="overlay-title">
+    <div class="wizard-overlay-icon" id="overlay-icon">✓</div>
+    <h2 class="wizard-overlay-title" id="overlay-title">Done</h2>
+    <p class="wizard-overlay-body" id="overlay-body">
+      You can close this tab and return to your terminal.
+    </p>
+    <p class="wizard-overlay-sub" id="overlay-sub"></p>
+  </div>
+</div>
+<script src="/assets/wizard.js"></script>
+</body>
+</html>
