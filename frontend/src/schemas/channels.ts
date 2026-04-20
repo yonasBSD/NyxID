@@ -7,7 +7,27 @@ const channelPlatformSchema = z.enum([
   "feishu",
 ]);
 
-const conversationTypeSchema = z.enum(["private", "group", "channel"]);
+/**
+ * Platform values accepted when reading a conversation back from the API.
+ * Device conversations (HTTP Event Gateway, NyxID#221) use `"device"` and
+ * have no backing `channel_bot_id`.
+ */
+export const conversationPlatformSchema = z.enum([
+  "telegram",
+  "discord",
+  "lark",
+  "feishu",
+  "device",
+]);
+
+export type ConversationPlatform = z.infer<typeof conversationPlatformSchema>;
+
+const conversationTypeSchema = z.enum([
+  "private",
+  "group",
+  "channel",
+  "device",
+]);
 
 export const createChannelBotSchema = z
   .object({
@@ -71,6 +91,25 @@ export const createChannelConversationSchema = z.object({
 
 export type CreateChannelConversationFormData = z.infer<
   typeof createChannelConversationSchema
+>;
+
+/**
+ * Device conversations (HTTP Event Gateway, NyxID#221) are not backed by a
+ * bot. They require an explicit `platform_conversation_id` (the logical
+ * device channel name, e.g. `household-camera`) and an agent API key.
+ */
+export const createDeviceConversationSchema = z.object({
+  platform_conversation_id: z
+    .string()
+    .min(1, "Device channel ID is required")
+    .max(256, "Device channel ID must be at most 256 characters"),
+  agent_api_key_id: z.string().uuid("Invalid API key ID"),
+  platform_conversation_type: z.string().max(64).optional(),
+  target_org_id: z.string().optional(),
+});
+
+export type CreateDeviceConversationFormData = z.infer<
+  typeof createDeviceConversationSchema
 >;
 
 export const updateChannelConversationSchema = z.object({

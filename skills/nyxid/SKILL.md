@@ -1086,14 +1086,56 @@ GET /api/v1/channel-relay/resolve-sender?platform=telegram&platform_id=12345
 
 ## HTTP Event Gateway — device/analyzer events
 
-NyxID also accepts push-mode events from external devices and analyzers on the same channel infrastructure. The envelope is converted to a `CallbackPayload` with `platform = "device"` and forwarded through the agent's `callback_url` just like a chat message.
+NyxID accepts push-mode events from external devices and analyzers on the same channel relay infrastructure. The envelope is converted to a `CallbackPayload` with `platform = "device"` and forwarded through the agent's `callback_url` just like a chat message.
+
+Device channels are **first-class** and **not backed by a bot** — no Telegram/Discord/Lark/Feishu registration is required. A device channel is a `ChannelConversation` row with `platform = "device"` and `channel_bot_id = null`.
 
 **Endpoint:** `POST /api/v1/channel-events/{conversation_id}`
 **Auth:** Bearer API key (`nyxid_ag_...`) bound to the target conversation
 **Storage:** Metadata only. Event payloads are never persisted (ADR-013).
 **Retry:** None. NyxID is a pure passthrough — the client decides what to do on failure.
-**Rate limit:** 100 events/second per conversation (default, configurable).
+**Rate limit:** 100 events/second per conversation (default, configurable via `CHANNEL_EVENT_RATE_LIMIT_PER_SECOND`).
 **Idempotency:** Best-effort — same `event_id` within 5 minutes is deduplicated.
+**One-way:** Device conversations do not support agent replies. `POST /channel-relay/reply` returns `400 device_channel_reply_not_allowed` against a device channel.
+
+### Create a device channel
+
+Before pushing events, create a device channel (once) and bind it to an agent API key with a `callback_url`:
+
+```bash
+# Create the agent key first if you don't have one
+nyxid api-key create --name "household-agent" --platform custom \
+  --callback-url "https://my-agent.example.com/webhook"
+
+# Create the device channel
+nyxid channel-event channel create \
+  --conversation-id household-camera \
+  --agent-key-id <API_KEY_ID> \
+  --conversation-type camera     # optional; defaults to "device"
+
+# List device channels
+nyxid channel-event channel list
+
+# Delete a device channel (takes the NyxID-assigned _id, not the logical name)
+nyxid channel-event channel delete <CONVERSATION_ROW_ID> --yes
+```
+
+You can also create the channel through `POST /api/v1/channel-conversations` directly:
+
+```json
+{
+  "platform": "device",
+  "platform_conversation_id": "household-camera",
+  "agent_api_key_id": "<api-key-uuid>"
+}
+```
+
+Validation rules for device channels:
+
+- `channel_bot_id` MUST be omitted or null.
+- `platform_conversation_id` is **required** and must be non-empty and not `"*"` (no catch-all routes).
+- `platform_sender_id` and `default_agent: true` are rejected — devices have no group/sender or fan-out concept.
+- Uniqueness is per `(user_id, platform_conversation_id)` — each owner gets one active device channel per logical name.
 
 ### Envelope
 
@@ -1108,21 +1150,22 @@ NyxID also accepts push-mode events from external devices and analyzers on the s
 }
 ```
 
-### CLI
+### Push events
+
+The `conversation_id` in the path is the NyxID-assigned `_id` returned by `channel create` (not the logical `platform_conversation_id`).
 
 ```bash
-# Push a device event from a shell script
+# Push from the CLI
 nyxid channel-event push \
-  --conversation-id <CONVERSATION_ID> \
+  --conversation-id <CONVERSATION_ROW_ID> \
   --source camera-analyzer \
   --type person_detected \
   --payload-json '{"room":"living_room","confidence":0.95}'
 ```
 
-### curl
-
 ```bash
-curl -X POST https://<your-nyxid>/api/v1/channel-events/<CONVERSATION_ID> \
+# Push via curl
+curl -X POST https://<your-nyxid>/api/v1/channel-events/<CONVERSATION_ROW_ID> \
   -H "Authorization: Bearer nyxid_ag_..." \
   -H "Content-Type: application/json" \
   -d '{
@@ -1140,8 +1183,7 @@ curl -X POST https://<your-nyxid>/api/v1/channel-events/<CONVERSATION_ID> \
 |---|---|
 | 200 | Accepted (delivered) or deduplicated |
 | 400 | Invalid envelope shape |
-| 401 | Missing/invalid bearer, or API key is not bound to the conversation |
-| 404 | Conversation not found |
+| 401 | Missing/invalid bearer, **or** conversation not found, **or** API key is not bound to the conversation (collapsed into one opaque error to prevent existence-probing) |
 | 429 | Per-channel rate limit exceeded |
 | 502 | Downstream agent unreachable or returned non-2xx |
 

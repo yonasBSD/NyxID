@@ -1976,4 +1976,53 @@ pub enum ChannelEventCommands {
         #[arg(long, default_value = "table")]
         output: OutputFormat,
     },
+    /// Manage device channels (HTTP Event Gateway conversations, NyxID#221).
+    ///
+    /// Device channels are NOT backed by a bot — they exist purely as
+    /// conversation rows on the channel relay pipeline so the gateway has
+    /// somewhere to address events to.
+    Channel {
+        #[command(subcommand)]
+        command: ChannelEventChannelCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ChannelEventChannelCommands {
+    /// Create a device channel (platform = "device").
+    Create {
+        /// Logical device channel ID (the name devices POST to).
+        #[arg(long)]
+        conversation_id: String,
+        /// Agent API key ID that handles events for this channel.
+        #[arg(long)]
+        agent_key_id: String,
+        /// Conversation type label surfaced to the agent. Defaults to "device".
+        #[arg(long)]
+        conversation_type: Option<String>,
+        /// Create under the given org (caller must be an admin of that org).
+        #[arg(long, value_name = "ORG_ID")]
+        org: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// List device channels (platform = "device").
+    List {
+        /// List channels owned by the given org (admin-only).
+        #[arg(long, value_name = "ORG_ID")]
+        org: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Delete a device channel by conversation ID.
+    Delete {
+        /// Conversation ID (the `_id` returned by `create`, not the logical
+        /// channel name).
+        id: String,
+        /// Skip confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
 }
