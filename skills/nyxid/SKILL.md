@@ -876,6 +876,18 @@ nyxid service add api-discord-bot
 nyxid proxy request api-discord-bot /channels/{channel_id}/messages \
   -m POST -d '{"content":"hello"}'
 # NyxID adds `Authorization: Bot <your_token>` automatically.
+
+# Slack bot (persistent xoxb- token, standard Bearer auth)
+nyxid service add api-slack-bot
+# CLI prompts for the Bot User OAuth Token (xoxb-...) from your Slack app's
+# OAuth & Permissions page. NyxID injects `Authorization: Bearer xoxb-...`
+# on every outbound call.
+nyxid proxy request api-slack-bot /chat.postMessage \
+  -m POST \
+  -H "Content-Type: application/json; charset=utf-8" \
+  -d '{"channel":"C1234567890","text":"hello"}'
+
+nyxid proxy request api-slack-bot /conversations.list -m GET
 ```
 
 ### If Lark/Feishu bot calls fail, recreate the binding
@@ -938,6 +950,8 @@ steps apply to `api-feishu-bot`.
 | `api-telegram-bot` | Telegram Bot API |
 | `api-discord` | Discord API as a logged-in user (OAuth) |
 | `api-discord-bot` | Discord API as a bot (persistent bot token) |
+| `api-slack` | Slack Web API as a logged-in user (OAuth) |
+| `api-slack-bot` | Slack Web API as a bot (persistent `xoxb-` token) |
 
 ## Channel Bot Relay
 
