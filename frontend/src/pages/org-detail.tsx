@@ -36,7 +36,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/shared/page-header";
 import { ApiError } from "@/lib/api-client";
-import { formatRelativeTime, formatTimeDistance } from "@/lib/utils";
+import { formatDate, formatRelativeTime, formatTimeDistance } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth-store";
 import {
   useOrg,
@@ -285,7 +285,8 @@ export function OrgDetailPage() {
                         <TableHead>Nonce</TableHead>
                         <TableHead>Role</TableHead>
                         <TableHead>Status</TableHead>
-                        <TableHead>Expires</TableHead>
+                        <TableHead>Used by</TableHead>
+                        <TableHead>Timeline</TableHead>
                         <TableHead className="w-[80px]" />
                       </TableRow>
                     </TableHeader>
@@ -295,6 +296,30 @@ export function OrgDetailPage() {
                         const isExpired =
                           !isRedeemed &&
                           new Date(invite.expires_at).getTime() < Date.now();
+                        // For redeemed rows, show the user that consumed the
+                        // invite (issue #409). Prefer email because that's
+                        // the primary auth identifier; fall back to display
+                        // name, then raw user id, then a dash.
+                        const usedBy = isRedeemed
+                          ? (invite.redeemed_by_email ??
+                            invite.redeemed_by_display_name ??
+                            invite.redeemed_by ??
+                            "-")
+                          : "-";
+                        // Status-aware timeline text (issue #408): pending
+                        // rows count down to expiry, expired/redeemed rows
+                        // count up from the lifecycle event that actually
+                        // ended the invite's usefulness.
+                        let timeline: string;
+                        let timelineTooltip: string | undefined;
+                        if (isRedeemed && invite.redeemed_at) {
+                          timeline = `Redeemed ${formatRelativeTime(invite.redeemed_at)}`;
+                          timelineTooltip = `Original expiry ${formatDate(invite.expires_at)}`;
+                        } else if (isExpired) {
+                          timeline = `Expired ${formatRelativeTime(invite.expires_at)}`;
+                        } else {
+                          timeline = `Expires ${formatTimeDistance(invite.expires_at)}`;
+                        }
                         return (
                           <TableRow key={invite.id}>
                             <TableCell>
@@ -314,10 +339,14 @@ export function OrgDetailPage() {
                                 <Badge variant="info">Pending</Badge>
                               )}
                             </TableCell>
-                            <TableCell className="text-muted-foreground">
-                              {isRedeemed || isExpired
-                                ? formatRelativeTime(invite.expires_at)
-                                : formatTimeDistance(invite.expires_at)}
+                            <TableCell className="break-all text-xs text-muted-foreground">
+                              {usedBy}
+                            </TableCell>
+                            <TableCell
+                              className="text-muted-foreground"
+                              title={timelineTooltip}
+                            >
+                              {timeline}
                             </TableCell>
                             <TableCell>
                               {!isRedeemed && !isExpired && (

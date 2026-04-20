@@ -149,6 +149,12 @@ pub struct InviteResponse {
     pub created_by: String,
     pub expires_at: String,
     pub redeemed_by: Option<String>,
+    /// Email of the user who redeemed the invite. Populated when
+    /// `redeemed_by` is set. Lets the admin UI show "Used by foo@bar"
+    /// without a per-row user lookup (issue #409).
+    pub redeemed_by_email: Option<String>,
+    /// Display name of the redeeming user, if set.
+    pub redeemed_by_display_name: Option<String>,
     pub redeemed_at: Option<String>,
     pub created_at: String,
 }
@@ -220,7 +226,7 @@ fn membership_to_response(m: OrgMembership, member: Option<&User>) -> MemberResp
     }
 }
 
-fn invite_to_response(invite: OrgInvite) -> InviteResponse {
+fn invite_to_response(invite: OrgInvite, redeemer: Option<&User>) -> InviteResponse {
     InviteResponse {
         id: invite.id,
         nonce: invite.nonce,
@@ -229,9 +235,40 @@ fn invite_to_response(invite: OrgInvite) -> InviteResponse {
         created_by: invite.created_by,
         expires_at: invite.expires_at.to_rfc3339(),
         redeemed_by: invite.redeemed_by,
+        redeemed_by_email: redeemer.map(|u| u.email.clone()),
+        redeemed_by_display_name: redeemer.and_then(|u| u.display_name.clone()),
         redeemed_at: invite.redeemed_at.map(|d| d.to_rfc3339()),
         created_at: invite.created_at.to_rfc3339(),
     }
+}
+
+/// Batch-fetch the users referenced by `redeemed_by` across a list of
+/// invites. Uses a single `$in` query so rendering the invites tab stays
+/// O(1) round-trip regardless of list size (issue #409).
+async fn fetch_invite_redeemers(
+    db: &mongodb::Database,
+    invites: &[OrgInvite],
+) -> AppResult<std::collections::HashMap<String, User>> {
+    use crate::models::user::COLLECTION_NAME as USERS;
+    use futures::TryStreamExt;
+    use mongodb::bson::doc;
+    use std::collections::HashMap;
+
+    let ids: Vec<&str> = invites
+        .iter()
+        .filter_map(|i| i.redeemed_by.as_deref())
+        .collect();
+
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let cursor = db
+        .collection::<User>(USERS)
+        .find(doc! { "_id": { "$in": &ids } })
+        .await?;
+    let users: Vec<User> = cursor.try_collect().await?;
+    Ok(users.into_iter().map(|u| (u.id.clone(), u)).collect())
 }
 
 /// Reject if the actor is not admin of this org.
@@ -733,7 +770,8 @@ pub async fn create_invite(
         auth_user.api_key_name.clone(),
     );
 
-    Ok((StatusCode::CREATED, Json(invite_to_response(invite))))
+    // A freshly created invite has no redeemer yet, so pass `None`.
+    Ok((StatusCode::CREATED, Json(invite_to_response(invite, None))))
 }
 
 /// GET /api/v1/orgs/{org_id}/invites
@@ -746,10 +784,17 @@ pub async fn list_invites(
     require_org_admin(&state.db, &actor, &org_id).await?;
 
     let invites = org_invite_service::list_invites_for_org(&state.db, &org_id).await?;
+    let redeemers = fetch_invite_redeemers(&state.db, &invites).await?;
 
-    Ok(Json(InviteListResponse {
-        invites: invites.into_iter().map(invite_to_response).collect(),
-    }))
+    let out = invites
+        .into_iter()
+        .map(|i| {
+            let redeemer = i.redeemed_by.as_deref().and_then(|id| redeemers.get(id));
+            invite_to_response(i, redeemer)
+        })
+        .collect();
+
+    Ok(Json(InviteListResponse { invites: out }))
 }
 
 /// DELETE /api/v1/orgs/{org_id}/invites/{invite_id}
