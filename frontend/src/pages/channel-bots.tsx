@@ -68,6 +68,8 @@ function platformLabel(platform: ChannelPlatform): string {
       return "Lark";
     case "feishu":
       return "Feishu";
+    case "slack":
+      return "Slack";
     default:
       return platform;
   }
@@ -299,6 +301,7 @@ function CreateBotDialog({
                 <SelectItem value="discord">Discord</SelectItem>
                 <SelectItem value="lark">Lark</SelectItem>
                 <SelectItem value="feishu">Feishu</SelectItem>
+                <SelectItem value="slack">Slack</SelectItem>
               </SelectContent>
             </Select>
             {errors.platform && (
@@ -380,6 +383,28 @@ function CreateBotDialog({
               {errors.public_key && (
                 <p className="text-xs text-destructive">
                   {errors.public_key.message}
+                </p>
+              )}
+            </div>
+          )}
+
+          {platform === "slack" && (
+            <div className="space-y-2">
+              <Label htmlFor="app_secret">Signing Secret</Label>
+              <Input
+                id="app_secret"
+                type="password"
+                placeholder="Slack app signing secret"
+                {...register("app_secret")}
+              />
+              <p className="text-xs text-muted-foreground">
+                Found under Basic Information → App Credentials in your
+                Slack app settings. Used to verify Events API request
+                signatures.
+              </p>
+              {errors.app_secret && (
+                <p className="text-xs text-destructive">
+                  {errors.app_secret.message}
                 </p>
               )}
             </div>
