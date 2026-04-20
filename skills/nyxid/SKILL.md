@@ -941,7 +941,7 @@ steps apply to `api-feishu-bot`.
 
 ## Channel Bot Relay
 
-NyxID can bridge messaging platforms (Telegram, Discord, Lark, Feishu) to AI agent callback URLs. Users register their own bots, configure conversation-to-agent routing, and NyxID handles webhook reception, message normalization, and delivery to the agent.
+NyxID can bridge messaging platforms (Telegram, Discord, Lark, Feishu, Slack) to AI agent callback URLs. Users register their own bots, configure conversation-to-agent routing, and NyxID handles webhook reception, message normalization, and delivery to the agent.
 
 NyxID is a **pure passthrough gateway** (ADR-013): it never stores message bodies or attachments. Only routing metadata lives in NyxID; the full conversation history belongs to the downstream agent.
 
@@ -956,9 +956,12 @@ nyxid channel-bot register --platform discord --label "My Discord Bot" --token-e
 
 # Lark / Feishu (requires app credentials)
 nyxid channel-bot register --platform lark --label "My Lark Bot" --token-env LARK_BOT_TOKEN --app-id "cli_xxx" --app-secret-env LARK_APP_SECRET
+
+# Slack (pass the xoxb- bot user token and the app's signing secret)
+nyxid channel-bot register --platform slack --label "My Slack Bot" --token-env SLACK_BOT_TOKEN --app-secret-env SLACK_SIGNING_SECRET
 ```
 
-For Telegram, NyxID auto-registers the webhook. For Discord/Lark/Feishu, configure the webhook URL in the platform's developer console: `https://<your-nyxid>/api/v1/webhooks/channel/<platform>/<bot-id>`. The bot auto-activates on first successful webhook delivery.
+For Telegram, NyxID auto-registers the webhook. For Discord/Lark/Feishu/Slack, configure the webhook URL in the platform's developer console: `https://<your-nyxid>/api/v1/webhooks/channel/<platform>/<bot-id>`. The bot auto-activates on first successful webhook delivery. For Slack, paste the URL into the app's **Event Subscriptions** page — Slack's `url_verification` handshake is answered automatically.
 
 ### Manage bots
 
@@ -998,11 +1001,11 @@ nyxid channel-bot route delete <ROUTE_ID> --yes
 
 Routing priority: sender-specific match > exact conversation match > default catch-all.
 
-For Telegram, `conversation_id` is the `chat.id` (a number like `-1001234567890` for groups). For Discord, it's the `channel_id`. The bot must be added to the group/channel on the platform side.
+For Telegram, `conversation_id` is the `chat.id` (a number like `-1001234567890` for groups). For Discord, it's the `channel_id`. For Slack, it's the channel id (`C...` public channel, `G...` private group / mpim, `D...` direct message). The bot must be added to the group/channel on the platform side.
 
 ### How it works
 
-1. User sends message on Telegram/Discord/Lark/Feishu
+1. User sends message on Telegram/Discord/Lark/Feishu/Slack
 2. Platform webhook delivers to NyxID
 3. NyxID verifies signature, resolves route, writes a metadata-only record (per ADR-013, no text or attachments are persisted)
 4. NyxID POSTs the normalized payload to the agent's `callback_url` with an HMAC signature
@@ -1010,7 +1013,9 @@ For Telegram, `conversation_id` is the `chat.id` (a number like `-1001234567890`
 6. Agent processes asynchronously, then POSTs the reply to `/channel-relay/reply`
 7. NyxID delivers the reply to the platform chat
 
-The callback payload includes normalized fields (`content.text`, `sender`, etc.) and the full `raw_platform_data` (original Telegram/Discord/Lark JSON). The callback is the **only** place the message body exists inside NyxID — it's built in-memory from the live webhook parse and once the callback returns, NyxID retains nothing but metadata.
+Slack specifics: inbound events land on `/api/v1/webhooks/channel/slack/{bot_id}` and are HMAC-verified against the app's signing secret (`v0:{ts}:{body}` with a 5-minute replay window). NyxID ACKs with HTTP 200 inside Slack's 3-second window and processes in a background task. Outbound replies go through `chat.postMessage`; threaded replies anchor on the thread root via `metadata.thread_ts`. Rate-limit signals (HTTP 429 with `Retry-After`, or `{"ok":false,"error":"ratelimited"}`) surface as a clearly-labeled error so the agent can decide when to retry.
+
+The callback payload includes normalized fields (`content.text`, `sender`, etc.) and the full `raw_platform_data` (original Telegram/Discord/Lark/Slack JSON). The callback is the **only** place the message body exists inside NyxID — it's built in-memory from the live webhook parse and once the callback returns, NyxID retains nothing but metadata.
 
 ### Agent-facing endpoints (API-key authenticated)
 
