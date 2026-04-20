@@ -594,17 +594,30 @@ async fn list_invites(auth: &AuthArgs, org_id: &str) -> Result<()> {
 
             let mut table = Table::new();
             table.load_preset(UTF8_FULL_CONDENSED);
-            table.set_header(["Invite ID", "Role", "Expires", "Status"]);
+            table.set_header(["Invite ID", "Role", "Status", "Used by", "Expires"]);
+            let now = chrono::Utc::now();
             for inv in items {
                 let id = inv["id"].as_str().unwrap_or("-");
                 let role = inv["role"].as_str().unwrap_or("-");
                 let expires = inv["expires_at"].as_str().unwrap_or("-");
-                let status = if inv["redeemed_at"].is_null() {
-                    "pending"
-                } else {
+                let status = if !inv["redeemed_at"].is_null() {
                     "redeemed"
+                } else {
+                    // Post-#407 the TTL index is gone, so expired rows
+                    // stay visible. Surface them as a distinct status so
+                    // admins can see them in the table instead of having
+                    // to eyeball expires_at.
+                    let expired = chrono::DateTime::parse_from_rfc3339(expires)
+                        .map(|t| t.with_timezone(&chrono::Utc) <= now)
+                        .unwrap_or(false);
+                    if expired { "expired" } else { "pending" }
                 };
-                table.add_row([id, role, expires, status]);
+                let used_by = inv["redeemed_by_email"]
+                    .as_str()
+                    .or_else(|| inv["redeemed_by_display_name"].as_str())
+                    .or_else(|| inv["redeemed_by"].as_str())
+                    .unwrap_or("-");
+                table.add_row([id, role, status, used_by, expires]);
             }
             eprintln!("{table}");
         }

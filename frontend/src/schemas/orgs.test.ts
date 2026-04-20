@@ -113,6 +113,23 @@ describe("inviteResponseSchema", () => {
     });
     expect(result.success).toBe(true);
   });
+
+  it("accepts a redeemed invite with redeemer identity fields", () => {
+    const result = inviteResponseSchema.safeParse({
+      id: "inv-2",
+      nonce: "redeemed1234",
+      role: "viewer",
+      allowed_service_ids: null,
+      created_by: "u-1",
+      expires_at: "2026-02-02T00:00:00Z",
+      redeemed_by: "u-2",
+      redeemed_by_email: "alice@example.com",
+      redeemed_by_display_name: "Alice",
+      redeemed_at: "2026-01-15T00:00:00Z",
+      created_at: "2026-01-01T00:00:00Z",
+    });
+    expect(result.success).toBe(true);
+  });
 });
 
 describe("createOrgRequestSchema", () => {

@@ -1048,18 +1048,15 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
-    // TTL: invites are removed automatically after expiry
+    // Migration: drop the legacy TTL index on `expires_at` if it still
+    // exists, then recreate a plain index. Invites are now retained as
+    // long-term admin history (issue #407) -- expired and redeemed rows
+    // must remain visible in the admin UI and must be distinguishable
+    // from unknown nonces at redeem time. The plain index still
+    // accelerates the range query in `redeem_invite` and admin filters.
+    let _ = org_invites.drop_index("expires_at_1").await;
     org_invites
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "expires_at": 1 })
-                .options(
-                    IndexOptions::builder()
-                        .expire_after(Duration::from_secs(0))
-                        .build(),
-                )
-                .build(),
-        )
+        .create_index(IndexModel::builder().keys(doc! { "expires_at": 1 }).build())
         .await?;
     org_invites
         .create_index(

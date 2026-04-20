@@ -72,6 +72,10 @@ export type MemberListResponse = z.infer<typeof memberListResponseSchema>;
 
 /**
  * A pending or redeemed org invite.
+ *
+ * `redeemed_by_email` and `redeemed_by_display_name` are populated by the
+ * backend for redeemed invites so the admin UI can show who used each
+ * invite without an N+1 user lookup (issue #409).
  */
 export const inviteResponseSchema = z.object({
   id: z.string(),
@@ -81,6 +85,8 @@ export const inviteResponseSchema = z.object({
   created_by: z.string(),
   expires_at: z.string(),
   redeemed_by: z.string().nullable(),
+  redeemed_by_email: z.string().nullable().optional(),
+  redeemed_by_display_name: z.string().nullable().optional(),
   redeemed_at: z.string().nullable(),
   created_at: z.string(),
 });

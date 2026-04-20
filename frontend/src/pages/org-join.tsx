@@ -34,10 +34,19 @@ export function OrgJoinPage() {
         setState({ status: "success", orgId: result.org_id });
         void navigate({ to: "/orgs/$orgId", params: { orgId: result.org_id } });
       } catch (err) {
-        const message =
-          err instanceof ApiError
-            ? err.message
-            : "Failed to redeem invite. The link may be invalid or expired.";
+        // Distinguish the dedicated `org_invite_expired` (410 / error_code
+        // 8105) case from a generic invalid invite so the UI can point the
+        // user at a concrete next step (issue #407). Pre-#407 this was
+        // masked because the TTL index hard-deleted the row; the redeem
+        // path then fell back to `org_invite_invalid`.
+        let message =
+          "Failed to redeem invite. The link may be invalid or expired.";
+        if (err instanceof ApiError) {
+          message =
+            err.errorResponse.error === "org_invite_expired"
+              ? "This invite has expired. Ask an admin to send a new invite."
+              : err.message;
+        }
         setState({ status: "error", message });
       }
     })();
