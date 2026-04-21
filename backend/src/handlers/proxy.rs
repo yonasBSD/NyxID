@@ -133,6 +133,39 @@ fn audit_org_routing(
     );
 }
 
+/// Emit a single audit entry recording that this proxy call was routed via
+/// the actor's own personal credential (no org inheritance). Mirrors
+/// `audit_org_routing` so audit consumers can distinguish personal vs org
+/// routing attribution without inferring it from the absence of org fields
+/// (see docs/ORG_MODEL.md "Audit Trail").
+///
+/// `user_service_id` is `None` for the legacy DownstreamService / provider-
+/// token path, which resolves directly from the catalog service + the
+/// caller's stored provider credentials without a `UserService` record.
+/// Even there the event must still fire so the audit trail is complete for
+/// unmigrated users during the migration window.
+fn audit_personal_routing(
+    state: &AppState,
+    auth_user: &AuthUser,
+    user_service_id: Option<&str>,
+    service_id: &str,
+) {
+    audit_service::log_async(
+        state.db.clone(),
+        Some(auth_user.user_id.to_string()),
+        "proxy_routed_via_personal".to_string(),
+        Some(serde_json::json!({
+            "routed_via": "personal",
+            "service_id": service_id,
+            "user_service_id": user_service_id,
+        })),
+        None,
+        None,
+        auth_user.api_key_id.clone(),
+        auth_user.api_key_name.clone(),
+    );
+}
+
 struct DownstreamWsConnection {
     stream: tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -263,6 +296,13 @@ pub async fn proxy_request(
                     &resolved.user_service_id,
                     &effective_service_id,
                 );
+            } else {
+                audit_personal_routing(
+                    &state,
+                    &auth_user,
+                    Some(&resolved.user_service_id),
+                    &effective_service_id,
+                );
             }
             return execute_proxy_inner(
                 &state,
@@ -307,6 +347,13 @@ pub async fn proxy_request(
                 &auth_user,
                 routing,
                 &resolved.user_service_id,
+                &effective_service_id,
+            );
+        } else {
+            audit_personal_routing(
+                &state,
+                &auth_user,
+                Some(&resolved.user_service_id),
                 &effective_service_id,
             );
         }
@@ -395,6 +442,13 @@ pub async fn proxy_request_by_slug(
                     &resolved.user_service_id,
                     &effective_service_id,
                 );
+            } else {
+                audit_personal_routing(
+                    &state,
+                    &auth_user,
+                    Some(&resolved.user_service_id),
+                    &effective_service_id,
+                );
             }
             return execute_proxy_inner(
                 &state,
@@ -439,6 +493,13 @@ pub async fn proxy_request_by_slug(
                 &auth_user,
                 routing,
                 &resolved.user_service_id,
+                &effective_service_id,
+            );
+        } else {
+            audit_personal_routing(
+                &state,
+                &auth_user,
+                Some(&resolved.user_service_id),
                 &effective_service_id,
             );
         }
@@ -493,6 +554,14 @@ pub async fn proxy_request_by_slug_root(
 }
 
 /// Core proxy execution logic shared by UUID and slug handlers (old path).
+///
+/// Reached only when no `UserService` match was found for the caller, so the
+/// request resolves against the legacy `DownstreamService` + provider-token
+/// path. The `proxy_routed_via_personal` audit event is emitted inside
+/// `execute_proxy_inner` once legacy resolution actually succeeds — emitting
+/// it here would record a "routed via personal" attribution even for
+/// requests that never resolved a target (e.g. disconnected service,
+/// missing credential). See ChronoAIProject/NyxID#423.
 async fn execute_proxy(
     state: &AppState,
     auth_user: &AuthUser,
@@ -925,7 +994,18 @@ async fn execute_proxy_inner(
             return Err(err);
         }
 
-        resolve_via_downstream_service(state, auth_user, &user_id_str, service_id).await?
+        let resolved =
+            resolve_via_downstream_service(state, auth_user, &user_id_str, service_id).await?;
+        // Legacy path resolution succeeded — this is still personal
+        // routing (caller's own DownstreamService + provider token), so
+        // attribute it the same way the UserService path is attributed.
+        // `user_service_id` is `None` because the legacy path doesn't own
+        // one. Emitted AFTER `resolve_via_downstream_service` returns Ok
+        // so we never record a "routed via personal" entry for a request
+        // that failed before a target was resolved (disconnected service,
+        // missing credential, etc.). See ChronoAIProject/NyxID#423.
+        audit_personal_routing(state, auth_user, None, service_id);
+        resolved
     };
 
     // === Request Decomposition ===
