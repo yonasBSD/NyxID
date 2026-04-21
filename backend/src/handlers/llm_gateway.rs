@@ -421,6 +421,21 @@ pub async fn gateway_request(
                         auth_user.api_key_id.clone(),
                         auth_user.api_key_name.clone(),
                     );
+                } else {
+                    audit_service::log_async(
+                        state.db.clone(),
+                        Some(auth_user.user_id.to_string()),
+                        "llm_gateway_routed_via_personal".to_string(),
+                        Some(serde_json::json!({
+                            "routed_via": "personal",
+                            "service_id": service_id,
+                            "user_service_id": resolution.user_service_id,
+                        })),
+                        None,
+                        None,
+                        auth_user.api_key_id.clone(),
+                        auth_user.api_key_name.clone(),
+                    );
                 }
                 (resolution.target, true)
             }
@@ -432,6 +447,25 @@ pub async fn gateway_request(
                     &service_id,
                 )
                 .await?;
+                // Still personal routing — attribute it so unmigrated users
+                // are present in the audit trail just like migrated ones.
+                // `user_service_id` is null because the legacy path resolves
+                // straight from the catalog + provider-token store, with no
+                // `UserService` record to point at. See NyxID#423.
+                audit_service::log_async(
+                    state.db.clone(),
+                    Some(auth_user.user_id.to_string()),
+                    "llm_gateway_routed_via_personal".to_string(),
+                    Some(serde_json::json!({
+                        "routed_via": "personal",
+                        "service_id": service_id,
+                        "user_service_id": serde_json::Value::Null,
+                    })),
+                    None,
+                    None,
+                    auth_user.api_key_id.clone(),
+                    auth_user.api_key_name.clone(),
+                );
                 (legacy, false)
             }
         };

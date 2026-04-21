@@ -32,17 +32,19 @@ describe("orgListItemSchema", () => {
       id: "org-1",
       display_name: "Chrono AI",
       avatar_url: null,
+      contact_email: "contact@chrono.ai",
       your_role: "admin",
       created_at: "2026-01-01T00:00:00Z",
     });
     expect(result.success).toBe(true);
   });
 
-  it("allows null display_name and avatar_url", () => {
+  it("allows null display_name, avatar_url, and contact_email", () => {
     const result = orgListItemSchema.safeParse({
       id: "org-1",
       display_name: null,
       avatar_url: null,
+      contact_email: null,
       your_role: "viewer",
       created_at: "2026-01-01T00:00:00Z",
     });
@@ -56,6 +58,7 @@ describe("orgResponseSchema", () => {
       id: "org-1",
       display_name: "Acme",
       avatar_url: null,
+      contact_email: null,
       created_at: "2026-01-01T00:00:00Z",
       your_role: "member" as const,
     };
@@ -65,6 +68,19 @@ describe("orgResponseSchema", () => {
     expect(
       orgResponseSchema.safeParse({ ...base, member_count: -1 }).success,
     ).toBe(false);
+  });
+
+  it("accepts a contact_email string", () => {
+    const result = orgResponseSchema.safeParse({
+      id: "org-1",
+      display_name: "Acme",
+      avatar_url: null,
+      contact_email: "contact@acme.test",
+      created_at: "2026-01-01T00:00:00Z",
+      your_role: "admin",
+      member_count: 1,
+    });
+    expect(result.success).toBe(true);
   });
 });
 
@@ -172,6 +188,28 @@ describe("createOrgRequestSchema", () => {
 describe("updateOrgRequestSchema", () => {
   it("accepts an empty object (no changes)", () => {
     expect(updateOrgRequestSchema.safeParse({}).success).toBe(true);
+  });
+
+  it("accepts a valid contact_email", () => {
+    expect(
+      updateOrgRequestSchema.safeParse({
+        contact_email: "contact@example.com",
+      }).success,
+    ).toBe(true);
+  });
+
+  it("treats an empty contact_email as a sentinel for clear", () => {
+    expect(
+      updateOrgRequestSchema.safeParse({ contact_email: "" }).success,
+    ).toBe(true);
+  });
+
+  it("rejects an invalid contact_email", () => {
+    expect(
+      updateOrgRequestSchema.safeParse({
+        contact_email: "not-an-email",
+      }).success,
+    ).toBe(false);
   });
 });
 

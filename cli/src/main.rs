@@ -76,6 +76,12 @@ async fn run() -> Result<()> {
         // I25-I26: External keys
         Commands::ExternalKey { command } => commands::external_key::run(command).await,
 
+        // SUP-030: Service accounts (admin + org-admin)
+        Commands::ServiceAccount { command } => commands::service_account::run(command).await,
+
+        // SUP-030: Developer OAuth apps (personal + org-admin)
+        Commands::DeveloperApp { command } => commands::developer_app::run(command).await,
+
         // AI skill setup
         Commands::AiSetup { command } => commands::ai_setup::run(command).await,
 

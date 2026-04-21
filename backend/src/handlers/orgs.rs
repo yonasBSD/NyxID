@@ -54,6 +54,11 @@ pub struct UpdateOrgRequest {
     #[validate(length(min = 1, max = 128, message = "display_name must be 1-128 characters"))]
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
+    /// Update the org's contact email. Pass an empty string to clear back to
+    /// the synthetic placeholder used when no contact email was provided at
+    /// creation time. Accepts any RFC-compliant email otherwise.
+    #[serde(default)]
+    pub contact_email: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -103,6 +108,11 @@ pub struct OrgResponse {
     pub id: String,
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
+    /// User-visible contact email. `None` when the org was created without an
+    /// explicit contact email (the backend stores a synthetic
+    /// `org-<uuid>@nyxid.local` placeholder, which is intentionally hidden
+    /// from user-facing surfaces).
+    pub contact_email: Option<String>,
     pub created_at: String,
     /// Caller's role in this org. Always present in single-org responses.
     pub your_role: OrgRoleWire,
@@ -119,6 +129,8 @@ pub struct OrgListItem {
     pub id: String,
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
+    /// See [`OrgResponse::contact_email`].
+    pub contact_email: Option<String>,
     pub your_role: OrgRoleWire,
     pub created_at: String,
 }
@@ -424,12 +436,14 @@ pub async fn create_org(
         auth_user.api_key_name.clone(),
     );
 
+    let contact_email = org_service::contact_email_for_display(&org);
     Ok((
         StatusCode::CREATED,
         Json(OrgResponse {
             id: org.id,
             display_name: org.display_name,
             avatar_url: org.avatar_url,
+            contact_email,
             created_at: org.created_at.to_rfc3339(),
             your_role: membership.role.into(),
             member_count: 1,
@@ -450,10 +464,12 @@ pub async fn list_orgs(
     let mut items = Vec::with_capacity(memberships.len());
     for m in memberships {
         if let Ok(org) = org_service::get_org_user(&state.db, &m.org_user_id).await {
+            let contact_email = org_service::contact_email_for_display(&org);
             items.push(OrgListItem {
                 id: org.id,
                 display_name: org.display_name,
                 avatar_url: org.avatar_url,
+                contact_email,
                 your_role: m.role.into(),
                 created_at: org.created_at.to_rfc3339(),
             });
@@ -474,11 +490,13 @@ pub async fn get_org(
     let org = org_service::get_org_user(&state.db, &org_id).await?;
 
     let members = org_service::list_members_for_org(&state.db, &org_id, false).await?;
+    let contact_email = org_service::contact_email_for_display(&org);
 
     Ok(Json(OrgResponse {
         id: org.id,
         display_name: org.display_name,
         avatar_url: org.avatar_url,
+        contact_email,
         created_at: org.created_at.to_rfc3339(),
         your_role: membership.role.into(),
         member_count: members.len() as u64,
@@ -498,22 +516,41 @@ pub async fn update_org(
     let actor = auth_user.user_id.to_string();
     require_org_admin(&state.db, &actor, &org_id).await?;
 
+    // Validate contact_email when non-empty; empty string clears back to the
+    // synthetic placeholder (see `org_service::update_org_user`). Uses the
+    // same `validator::ValidateEmail` path as `CreateOrgRequest` so the
+    // accept/reject surface matches the create flow.
+    if let Some(ref email) = body.contact_email {
+        let trimmed = email.trim();
+        if !trimmed.is_empty() && !validator::ValidateEmail::validate_email(&trimmed) {
+            return Err(AppError::ValidationError(
+                "contact_email must be a valid email".to_string(),
+            ));
+        }
+    }
+
     let org = org_service::update_org_user(
         &state.db,
         &org_id,
         body.display_name.as_deref(),
         body.avatar_url.as_deref(),
+        body.contact_email.as_deref(),
     )
     .await?;
 
     let membership = require_org_member(&state.db, &actor, &org_id).await?;
     let members = org_service::list_members_for_org(&state.db, &org_id, false).await?;
+    let contact_email = org_service::contact_email_for_display(&org);
 
+    let contact_email_changed = body.contact_email.is_some();
     audit_service::log_async(
         state.db.clone(),
         Some(actor),
         "org_updated".to_string(),
-        Some(serde_json::json!({ "org_user_id": org_id })),
+        Some(serde_json::json!({
+            "org_user_id": org_id,
+            "contact_email_changed": contact_email_changed,
+        })),
         None,
         None,
         auth_user.api_key_id.clone(),
@@ -524,6 +561,7 @@ pub async fn update_org(
         id: org.id,
         display_name: org.display_name,
         avatar_url: org.avatar_url,
+        contact_email,
         created_at: org.created_at.to_rfc3339(),
         your_role: membership.role.into(),
         member_count: members.len() as u64,

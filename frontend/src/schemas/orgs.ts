@@ -27,6 +27,12 @@ export const orgListItemSchema = z.object({
   id: z.string(),
   display_name: z.string().nullable(),
   avatar_url: z.string().nullable(),
+  /**
+   * User-visible contact email. `null` when the backend stores the synthetic
+   * `org-<uuid>@nyxid.local` placeholder (i.e. the admin did not set one at
+   * creation time).
+   */
+  contact_email: z.string().nullable(),
   your_role: orgRoleSchema,
   created_at: z.string(),
 });
@@ -44,6 +50,10 @@ export const orgResponseSchema = z.object({
   id: z.string(),
   display_name: z.string().nullable(),
   avatar_url: z.string().nullable(),
+  /**
+   * See `orgListItemSchema.contact_email`.
+   */
+  contact_email: z.string().nullable(),
   created_at: z.string(),
   your_role: orgRoleSchema,
   member_count: z.number().int().nonnegative(),
@@ -138,6 +148,16 @@ export const updateOrgRequestSchema = z.object({
   avatar_url: z.string().trim().url("Avatar URL must be valid").optional().or(
     z.literal(""),
   ),
+  /**
+   * Pass an empty string to clear the contact email back to the synthetic
+   * placeholder on the backend. Omit to leave unchanged.
+   */
+  contact_email: z
+    .string()
+    .trim()
+    .email("Contact email must be a valid email")
+    .optional()
+    .or(z.literal("")),
 });
 export type UpdateOrgRequest = z.infer<typeof updateOrgRequestSchema>;
 
