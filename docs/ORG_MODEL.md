@@ -211,21 +211,32 @@ flowchart TD
     B -->|POST /auth/reset-password| G[auth_service::reset_password]
     B -->|POST /mfa/*| H[mfa_service::*]
 
-    C --> X{user_type == Org?}
+    C --> PUB{Public path?}
+    F --> PUB
     D --> X
     E --> X
-    F --> X
     G --> X
     H --> X
 
+    PUB -->|Yes, no session| GE[Generic failure<br/>authentication_failed / generic 200]
+    PUB -->|Authenticated context| X
+    X{user_type == Org?}
     X -->|Yes| R[AppError::OrgCannotAuthenticate<br/>HTTP 403, code 1403]
     X -->|No| OK[Continue existing flow]
 
     style X fill:#f96,stroke:#333
     style R fill:#faa,stroke:#333
+    style GE fill:#ddd,stroke:#333
 ```
 
-`auth_service::ensure_person_user(&user)` is called immediately after every `find_one_by_email` / `find_one_by_id` in the auth paths above. Person-login email lookups also include an explicit `user_type: "person"` filter as belt-and-suspenders even though the partial unique index already guarantees uniqueness for that subset.
+`auth_service::ensure_person_user(&user)` is called immediately after every `find_one_by_email` / `find_one_by_id` in the auth paths above. Person-login email lookups also include an explicit `user_type: "person"` filter so org-owner emails are treated exactly like unknown emails on public anti-enumeration paths; the belt-and-suspenders `ensure_person_user` call still runs on every authenticated path where the user record is already loaded (verify-email, reset-password with a valid token, refresh, social exchange, MFA) and fails with `OrgCannotAuthenticate` there.
+
+### Public vs authenticated surfaces
+
+- **Public, unauthenticated (login, forgot-password, register):** intentionally return the generic `authentication_failed` / anti-enumeration success response for org-owner emails. `OrgCannotAuthenticate` is **not** surfaced here so an unauthenticated caller cannot distinguish "org account" from "unknown email" — the same reason we do not surface "wrong password vs unknown email".
+- **Authenticated or token-bound (verify-email, reset-password, refresh, social exchange, MFA, admin promote):** the caller already proved possession of a token, cookie, or social identity, so leaking the org-vs-person distinction back to that specific caller is acceptable. These paths **do** surface `OrgCannotAuthenticate` (HTTP 403, code 1403) per the error table below.
+
+Callers who need to confirm whether an email belongs to an org must do so through an authenticated admin path (`/admin/users`), not through public auth endpoints.
 
 ---
 
@@ -377,8 +388,10 @@ All routes are under `/api/v1`. Org-aware mutation handlers gate on the new `org
 | `POST` | `/orgs` | session | Create an org (caller becomes the first Admin) |
 | `GET` | `/orgs` | session | List orgs the caller belongs to |
 | `GET` | `/orgs/{id}` | org member | Org detail |
-| `PATCH` | `/orgs/{id}` | org admin | Update display name / avatar |
+| `PATCH` | `/orgs/{id}` | org admin | Update display name, avatar, or contact email |
 | `DELETE` | `/orgs/{id}` | org admin | Delete org (see [Org Deletion](#org-deletion)) |
+
+`GET /orgs` and `GET /orgs/{id}` return a `contact_email` field alongside `display_name` and `avatar_url`. The backend stores this on the underlying org `User.email`; when the admin did not set one at creation time the DB keeps a synthetic `org-<uuid>@nyxid.local` placeholder so the user row stays legible in admin tooling, but the API filters that sentinel out and returns `null` so user-facing surfaces do not leak it. `PATCH /orgs/{id}` accepts `contact_email`: a non-empty string updates the value (same RFC validation as `POST /orgs`), and an empty string resets back to the synthetic placeholder.
 
 ### Members
 
@@ -733,7 +746,7 @@ Org-related errors live in the 8100–8199 range (8000–8099 is reserved for no
 
 | Code | Variant | HTTP | Meaning |
 |---|---|---|---|
-| `1403` | `OrgCannotAuthenticate` | 403 | Tried to log in as an org user via password / refresh / social / forgot-password / MFA |
+| `1403` | `OrgCannotAuthenticate` | 403 | Org-user auth attempt from an **authenticated / token-bound** path (verify-email, reset-password, refresh, social exchange, MFA, admin promote). **Not** returned from public `/auth/login` or `/auth/forgot-password` — those surface the generic `authentication_failed` / anti-enumeration response so callers cannot distinguish org accounts from unknown emails. |
 | `8100` | `OrgQueryTimeout` | 503 | Org-fallback membership query exceeded its 500 ms wall-clock budget; usually means MongoDB is degraded |
 | `8101` | `OrgNotFound` | 404 | Target org id does not exist |
 | `8102` | `OrgMembershipRequired` | 403 | You tried to access an org you do not belong to |
