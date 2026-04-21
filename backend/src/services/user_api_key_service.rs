@@ -228,11 +228,21 @@ pub async fn sync_provider_token_to_api_keys(
     user_id: &str,
     provider_config_id: &str,
 ) -> AppResult<()> {
+    // Exclude `revoked` keys from provider-token sync. Without
+    // this filter, a placeholder that was revoked via the
+    // `only_if_pending` cleanup path (e.g. the cli-pair flow's
+    // unload/cancel race against the OAuth callback) would be
+    // resurrected as the callback's `sync_provider_token_to_api_keys`
+    // blindly rewrites every key for the provider back to the
+    // token's status. `revoked` is terminal by design — once the
+    // user's explicit cleanup took effect, a late-arriving
+    // provider callback must not flip it back to `active`.
     let keys: Vec<UserApiKey> = db
         .collection::<UserApiKey>(COLLECTION_NAME)
         .find(doc! {
             "user_id": user_id,
             "provider_config_id": provider_config_id,
+            "status": { "$ne": "revoked" },
         })
         .await?
         .try_collect()
@@ -496,6 +506,65 @@ pub async fn revoke_api_key(db: &mongodb::Database, user_id: &str, key_id: &str)
     }
 
     Ok(())
+}
+
+/// Atomic conditional revoke used by the `only_if_pending=true`
+/// cleanup path. Flips status `pending_auth -> revoked` in a
+/// single MongoDB update with the status in the filter, so the
+/// provider OAuth/device-code callback cannot slip a
+/// `pending_auth -> active` write in between our status read and
+/// the destructive update. Returns `Ok(true)` when the revoke
+/// happened, `Ok(false)` when the status had already changed
+/// (callback won the race — leave the newly-authorized credential
+/// alone). Returns `NotFound` if the record does not exist at all.
+pub async fn revoke_api_key_if_pending(
+    db: &mongodb::Database,
+    user_id: &str,
+    key_id: &str,
+) -> AppResult<bool> {
+    // Verify the key exists and belongs to this user before the
+    // conditional update, so `matched_count == 0` on the main
+    // update can be unambiguously interpreted as "status already
+    // changed" (not "key doesn't exist").
+    let existing = db
+        .collection::<UserApiKey>(COLLECTION_NAME)
+        .find_one(doc! { "_id": key_id, "user_id": user_id })
+        .await?;
+    if existing.is_none() {
+        return Err(AppError::NotFound("API key not found".to_string()));
+    }
+
+    let result = db
+        .collection::<UserApiKey>(COLLECTION_NAME)
+        .update_one(
+            doc! {
+                "_id": key_id,
+                "user_id": user_id,
+                "status": { "$in": ["pending_auth", "pending-auth"] },
+            },
+            doc! {
+                "$set": {
+                    "status": "revoked",
+                    "credential_encrypted": bson::Bson::Null,
+                    "access_token_encrypted": bson::Bson::Null,
+                    "refresh_token_encrypted": bson::Bson::Null,
+                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                    // Defense-in-depth against a late OAuth /
+                    // device-code callback racing this revoke.
+                    // `sync_provider_token_to_api_keys` already
+                    // filters out `status: "revoked"`, but
+                    // clearing the provider link here means the
+                    // callback's find() can't locate this row
+                    // at all — so even if the status filter
+                    // were ever removed by mistake, the
+                    // revoked key stays revoked.
+                    "provider_config_id": bson::Bson::Null,
+                }
+            },
+        )
+        .await?;
+
+    Ok(result.matched_count > 0)
 }
 
 /// Delete an API key. Fails if any active UserService references it.

@@ -56,6 +56,7 @@ import {
   AdminAuditLogPage,
   AdminInviteCodesPage,
   CliAuthPage,
+  CliPairPage,
   SshTerminalPage,
   KeysPage,
   KeyDetailPage,
@@ -160,6 +161,12 @@ const cliAuthRoute = createRoute({
   path: "/cli-auth",
   getParentRoute: () => rootRoute,
   component: CliAuthPage,
+});
+
+const cliPairRoute = createRoute({
+  path: "/cli/pair",
+  getParentRoute: () => rootRoute,
+  component: CliPairPage,
 });
 
 const sshTerminalRoute = createRoute({
@@ -388,8 +395,19 @@ const nodeDetailRoute = createRoute({
 const keysRoute = createRoute({
   path: "/keys",
   getParentRoute: () => dashboardLayout,
-  validateSearch: (search: Record<string, unknown>): { tab?: string } => ({
+  // Whitelist the known search params. TanStack Router strips any
+  // field this validator doesn't emit, so the cli-pair handoff
+  // `/keys?tab=services&slug=<catalog-slug>` needs `slug` here
+  // or `useSearch()` inside `KeysPage` will never observe it and
+  // the auto-open-AddKeyDialog flow silently degrades to the
+  // generic catalog grid.
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { tab?: string; slug?: string } => ({
     ...(typeof search.tab === "string" ? { tab: search.tab } : {}),
+    ...(typeof search.slug === "string" && search.slug.length > 0
+      ? { slug: search.slug }
+      : {}),
   }),
   component: KeysPage,
 });
@@ -530,6 +548,7 @@ const routeTree = rootRoute.addChildren([
   oauthErrorRoute,
   privacyRoute,
   cliAuthRoute,
+  cliPairRoute,
   sshTerminalRoute,
   dashboardLayout.addChildren([
     dashboardIndexRoute,

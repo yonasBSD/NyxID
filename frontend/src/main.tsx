@@ -10,6 +10,27 @@ import "./app.css";
 // This ensures future deploys can auto-reload again.
 sessionStorage.removeItem("nyxid_chunk_reload");
 
+// Paths that should render without first resolving the auth
+// session. Includes the landing/login/register pages users may
+// hit before authenticating, and `/cli/pair`: that route is the
+// remote-pairing target and must render for unauthenticated
+// visitors so `CliPairPage` can redirect to `/login` with a
+// `return_to` carrying `?code=...` intact. Routing to bare
+// `/login` from here would drop the query string and strand the
+// pairing.
+function isPublicPath(path: string): boolean {
+  return (
+    path === "/" ||
+    path === "/login" ||
+    path === "/register" ||
+    path === "/privacy" ||
+    path.startsWith("/error") ||
+    path.startsWith("/oauth-consent") ||
+    path === "/cli-auth" ||
+    path === "/cli/pair"
+  );
+}
+
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
@@ -49,15 +70,7 @@ function Root() {
     if (isAuthenticated && path === "/") {
       router.navigate({ to: "/dashboard" });
     } else if (!isAuthenticated) {
-      const isPublicRoute =
-        path === "/" ||
-        path === "/login" ||
-        path === "/register" ||
-        path === "/privacy" ||
-        path.startsWith("/error") ||
-        path.startsWith("/oauth-consent") ||
-        path === "/cli-auth";
-      if (!isPublicRoute) {
+      if (!isPublicPath(path)) {
         router.navigate({ to: "/login" });
       }
     }
@@ -66,16 +79,7 @@ function Root() {
   // Only block rendering on auth for protected routes.
   // Public routes (landing, login, register, etc.) render immediately.
   if (!ready) {
-    const path = window.location.pathname;
-    const isPublicRoute =
-      path === "/" ||
-      path === "/login" ||
-      path === "/register" ||
-      path === "/privacy" ||
-      path.startsWith("/error") ||
-      path.startsWith("/oauth-consent") ||
-      path === "/cli-auth";
-    if (!isPublicRoute) return null;
+    if (!isPublicPath(window.location.pathname)) return null;
   }
 
   return (

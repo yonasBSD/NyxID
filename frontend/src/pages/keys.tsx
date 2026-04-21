@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearch, useNavigate } from "@tanstack/react-router";
 import { useKeys } from "@/hooks/use-keys";
 import { useUserServices } from "@/hooks/use-user-services";
@@ -455,13 +455,54 @@ function AutoConnectedToggle({
 }
 
 export function KeysPage() {
-  const search: { tab?: string } = useSearch({ strict: false });
+  const search: { tab?: string; slug?: string } = useSearch({ strict: false });
   const navigate = useNavigate();
   const rawTab = search.tab ?? "services";
   const tab: TabValue = rawTab === "nyxid" ? "nyxid" : "services";
 
   const [addServiceOpen, setAddServiceOpen] = useState(false);
   const [showAutoConnected, setShowAutoConnected] = useState(false);
+  // Consume `?slug=X` once on mount and hold it in component state
+  // so it survives the URL replace below. If we derived
+  // `prefillSlug` from `search.slug` directly, the `navigate(...,
+  // replace)` call would wipe it from the URL before `AddKeyDialog`
+  // mounts and reads the prop, so the dialog's auto-select effect
+  // would never see the slug and the user would land on the generic
+  // catalog picker. Keeping it in state decouples "UI intent" from
+  // "current URL" — the URL gets cleaned up immediately so a
+  // refresh doesn't re-open the dialog, but the slug stays
+  // addressable until the dialog closes and we reset it.
+  const [pendingPrefillSlug, setPendingPrefillSlug] = useState<string | null>(null);
+  const appliedSlugRef = useRef<string | null>(null);
+  useEffect(() => {
+    const slug = search.slug ?? null;
+    if (!slug) return;
+    if (appliedSlugRef.current === slug) return;
+    appliedSlugRef.current = slug;
+    setPendingPrefillSlug(slug);
+    setAddServiceOpen(true);
+    void navigate({
+      to: "/keys",
+      search: { tab: "services" },
+      replace: true,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search.slug]);
+
+  // Clear the stashed slug AND reset the once-per-slug guard when
+  // the dialog closes. Resetting `appliedSlugRef` lets a subsequent
+  // `/keys?slug=<same-provider>` handoff auto-open the dialog again
+  // — for example, two consecutive cli-pair retries for the same
+  // catalog entry. Without the reset the second handoff's effect
+  // short-circuits and the user lands on the keys list with no
+  // dialog.
+  function handleAddServiceOpenChange(next: boolean) {
+    setAddServiceOpen(next);
+    if (!next) {
+      setPendingPrefillSlug(null);
+      appliedSlugRef.current = null;
+    }
+  }
 
   const { data: keys } = useKeys();
   const autoCount = (keys ?? []).filter((k) => k.auto_connected).length;
@@ -510,7 +551,11 @@ export function KeysPage() {
         </TabsContent>
       </Tabs>
 
-      <AddKeyDialog open={addServiceOpen} onOpenChange={setAddServiceOpen} />
+      <AddKeyDialog
+        open={addServiceOpen}
+        onOpenChange={handleAddServiceOpenChange}
+        prefillSlug={pendingPrefillSlug ?? undefined}
+      />
     </div>
   );
 }

@@ -15,6 +15,9 @@ export const RegisterPage = lazy(() =>
 export const CliAuthPage = lazy(() =>
   import("@/pages/cli-auth").then((m) => ({ default: m.CliAuthPage })),
 );
+export const CliPairPage = lazy(() =>
+  import("@/pages/cli-pair").then((m) => ({ default: m.CliPairPage })),
+);
 export const DashboardPage = lazy(() =>
   import("@/pages/dashboard").then((m) => ({ default: m.DashboardPage })),
 );

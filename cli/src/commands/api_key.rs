@@ -21,18 +21,23 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
             callback_url,
             org,
             terminal,
+            no_wait,
             auth,
         } => {
-            use std::io::IsTerminal;
-            // Wizard gate — mirrors Rotate. Any of --terminal,
-            // --output json, piped stdout, SSH, or NYXID_NO_WIZARD
-            // falls through to the scripted path below with
-            // byte-identical behavior to pre-wizard.
+            // Browser-flow gate — opens the local wizard when a
+            // browser is available, or the remote pairing transport
+            // (code + URL) otherwise. `--terminal` and
+            // `NYXID_NO_WIZARD=1` fall through to the scripted path
+            // below with byte-identical behavior to pre-wizard.
+            //
+            // `--no-wait` is specifically designed for agent
+            // wrappers that want a resumable pairing id — and those
+            // callers almost always request `--output json`. So
+            // `--no-wait` wins over the `--output json → scripted`
+            // gate; only `--terminal` overrides it.
             let interactive_output = matches!(auth.output, OutputFormat::Table);
             let wizard_eligible = !terminal
-                && interactive_output
-                && std::io::stdout().is_terminal()
-                && crate::wizard::is_wizard_eligible();
+                && (no_wait || (interactive_output && crate::wizard::is_browser_flow_eligible()));
 
             if wizard_eligible {
                 let prefill = crate::wizard::ApiKeyCreatePrefill {
@@ -47,7 +52,7 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
                     callback_url: callback_url.clone(),
                     org_id: org.clone(),
                 };
-                return crate::wizard::run_api_key_create_wizard(&auth, prefill).await;
+                return crate::wizard::run_api_key_create_wizard(&auth, prefill, no_wait).await;
             }
 
             let mut api = ApiClient::from_auth(&auth)?;
@@ -254,19 +259,21 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
             Ok(())
         }
 
-        ApiKeyCommands::Rotate { id, terminal, auth } => {
-            use std::io::IsTerminal;
-            // Wizard mode (v3 DisplayOnce) when output is interactive,
-            // stdout is a TTY, and the environment can open a local
-            // browser. Mirrors the v2 `service add` gate. Anything else
-            // (--terminal, --output json, piped, SSH, NYXID_NO_WIZARD)
-            // falls through to the scripted path BELOW, byte-identical
-            // to pre-wizard behavior.
+        ApiKeyCommands::Rotate {
+            id,
+            terminal,
+            no_wait,
+            auth,
+        } => {
+            // Browser-flow gate — local wizard or remote pairing.
+            // `--terminal` and `NYXID_NO_WIZARD=1` fall through to
+            // the scripted path BELOW. `--no-wait` forces the
+            // pairing variant and wins over both `--output json`
+            // and local-browser preference — agent wrappers
+            // specifically opt into the resumable pairing handoff.
             let interactive_output = matches!(auth.output, OutputFormat::Table);
             let wizard_eligible = !terminal
-                && interactive_output
-                && std::io::stdout().is_terminal()
-                && crate::wizard::is_wizard_eligible();
+                && (no_wait || (interactive_output && crate::wizard::is_browser_flow_eligible()));
 
             if wizard_eligible {
                 let mut api = ApiClient::from_auth(&auth)?;
@@ -287,7 +294,7 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
                     resource_id: key_id,
                     display_name,
                 };
-                return crate::wizard::run_api_key_rotate_wizard(&auth, prefill).await;
+                return crate::wizard::run_api_key_rotate_wizard(&auth, prefill, no_wait).await;
             }
 
             // Scripted / headless path — UNCHANGED from pre-wizard

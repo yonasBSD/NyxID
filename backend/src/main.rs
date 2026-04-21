@@ -61,6 +61,21 @@ pub struct AppState {
     pub ssh_session_manager: Arc<SshSessionManager>,
     /// Per-agent rate limiter keyed by API key ID
     pub per_agent_limiter: mw::rate_limit::SharedPerAgentRateLimiter,
+    /// Per-IP rate limiter for `POST /cli-pairings/claim`. Tighter than
+    /// the global rate limiter (5 attempts per 60s per IP) so brute
+    /// forcing the 8-char pairing code is infeasible even from a
+    /// compromised session. Keyed by remote IP — an attacker behind a
+    /// single NAT still gets rate-limited; mobile users who are behind
+    /// CGNAT may collide, but the floor is generous enough (1/12s avg)
+    /// that legitimate retypes aren't blocked.
+    pub cli_pairing_claim_limiter: mw::rate_limit::SharedPerIpRateLimiter,
+    /// Server-side HMAC key used to derive `CliPairing.code_hash`.
+    /// Lives in process memory only (never persisted), so a MongoDB
+    /// snapshot alone doesn't let an attacker brute-force the 32^8
+    /// code space offline. Derived at startup from `ENCRYPTION_KEY`
+    /// (or `CLI_PAIRING_HMAC_KEY` when set); see
+    /// `derive_cli_pairing_hmac_key` in `main.rs`.
+    pub cli_pairing_hmac_key: std::sync::Arc<zeroize::Zeroizing<[u8; 32]>>,
     /// Per-channel rate limiter keyed by conversation_id, for the HTTP Event
     /// Gateway (NyxID#221). Distinct from `per_agent_limiter`.
     pub per_channel_event_limiter: mw::rate_limit::SharedPerChannelEventLimiter,
@@ -329,6 +344,22 @@ async fn main() {
         std::time::Duration::from_secs(config.channel_event_dedup_ttl_secs),
     ));
 
+    // Derive the CLI-pairing HMAC key. Kept in process memory
+    // only; see `derive_cli_pairing_hmac_key` for the key source.
+    // The JWT private key file contents are the universal
+    // fallback so KMS deployments without `ENCRYPTION_KEY` still
+    // start — see the function's doc for the full priority chain.
+    let jwt_private_key_pem = std::fs::read(&config.jwt_private_key_path)
+        .expect("Failed to read JWT private key for CLI-pairing HMAC seed");
+    let cli_pairing_hmac_key = Arc::new(derive_cli_pairing_hmac_key(
+        std::env::var("CLI_PAIRING_HMAC_KEY").ok().as_deref(),
+        config.encryption_key.as_deref(),
+        Some(&jwt_private_key_pem),
+    ));
+    // JWT private key bytes carry no secret beyond what's
+    // already in JwtKeys; drop them immediately after derivation.
+    drop(jwt_private_key_pem);
+
     // Create shared state
     let state = AppState {
         db,
@@ -344,6 +375,10 @@ async fn main() {
         node_ws_manager,
         ssh_session_manager,
         per_agent_limiter: Arc::new(mw::rate_limit::PerAgentRateLimiter::new()),
+        // 5 claim attempts per 60 seconds per IP; window-based, not token
+        // bucket, because we want a hard cap on guesses per unit time.
+        cli_pairing_claim_limiter: mw::rate_limit::create_per_ip_rate_limiter(5, 60),
+        cli_pairing_hmac_key,
         per_channel_event_limiter,
         event_dedup_cache,
         ws_passthrough_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -365,6 +400,17 @@ async fn main() {
         loop {
             interval.tick().await;
             cleanup_limiter.cleanup();
+        }
+    });
+
+    // Spawn background cleanup task for the CLI-pairing claim limiter.
+    // Same cadence as the global per-IP limiter.
+    let cleanup_pairing_claim_limiter = state.cli_pairing_claim_limiter.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            cleanup_pairing_claim_limiter.cleanup();
         }
     });
 
@@ -597,6 +643,125 @@ async fn main() {
     .expect("Server error");
 }
 
+/// Derive the HMAC key used to key `CliPairing.code_hash`.
+///
+/// Priority:
+///   1. `env_override` (sourced from `CLI_PAIRING_HMAC_KEY` in
+///      production). 64 hex chars = 32 bytes. Use this in multi-
+///      instance deployments so all workers agree on the HMAC
+///      output for the same code.
+///   2. Derived from `encryption_key` (`ENCRYPTION_KEY`) via
+///      HMAC-SHA256 with a domain-separated label. Stable across
+///      restarts and instances that share `ENCRYPTION_KEY`. This
+///      is the expected production path for the local key provider.
+///   3. Derived from `jwt_private_key_pem` via HMAC-SHA256 with a
+///      distinct domain-separated label. The JWT signing key is
+///      always loaded at startup (the service won't come up
+///      without it) and is by deployment practice shared across
+///      workers. This branch is what keeps `KEY_PROVIDER=aws-kms`
+///      or `gcp-kms` deployments (which may omit `ENCRYPTION_KEY`)
+///      booting without operators having to configure an extra
+///      env var up front — and it still yields the same HMAC on
+///      every worker, so CLI remote pairing keeps working without
+///      sticky sessions.
+///   4. Panic. Should be unreachable in practice because the JWT
+///      private key is required; the branch exists purely as a
+///      defensive stop against a future refactor silently
+///      dropping the JWT fallback.
+///
+/// The key never touches MongoDB; an attacker with DB-only access
+/// cannot derive it and therefore cannot brute-force the ~2^40
+/// code space offline.
+///
+/// All inputs are passed in (rather than read via `std::env::var`,
+/// through `&AppConfig`, or from disk here) so unit tests can pin
+/// precedence without racing on process-wide environment state.
+fn derive_cli_pairing_hmac_key(
+    env_override: Option<&str>,
+    encryption_key: Option<&str>,
+    jwt_private_key_pem: Option<&[u8]>,
+) -> zeroize::Zeroizing<[u8; 32]> {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    type HmacSha256 = Hmac<Sha256>;
+
+    // 1. Explicit env override takes precedence. A set-but-empty
+    //    value is treated as unset (dotenv / docker-compose often
+    //    emit empty strings for unused vars).
+    if let Some(raw) = env_override {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            match hex::decode(trimmed) {
+                Ok(bytes) if bytes.len() == 32 => {
+                    let mut out = [0u8; 32];
+                    out.copy_from_slice(&bytes);
+                    tracing::info!("cli-pairing HMAC key loaded from CLI_PAIRING_HMAC_KEY");
+                    return zeroize::Zeroizing::new(out);
+                }
+                _ => {
+                    panic!("CLI_PAIRING_HMAC_KEY must be 64 hex characters (32 bytes)");
+                }
+            }
+        }
+    }
+
+    // 2. Derive from ENCRYPTION_KEY if configured. ENCRYPTION_KEY
+    //    is 32 bytes of random material for the local AES provider
+    //    and is the natural shared-secret in single-region
+    //    deployments. Domain-separate the output so we can't
+    //    accidentally collide with any future HMAC use.
+    if let Some(hex_key) = encryption_key
+        && let Ok(master) = hex::decode(hex_key.trim())
+        && master.len() == 32
+    {
+        let mut mac =
+            HmacSha256::new_from_slice(&master).expect("HMAC-SHA256 accepts any key length");
+        mac.update(b"nyxid:cli-pairing-code-hmac-v1");
+        let digest = mac.finalize().into_bytes();
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&digest);
+        tracing::info!("cli-pairing HMAC key derived from ENCRYPTION_KEY");
+        return zeroize::Zeroizing::new(out);
+    }
+
+    // 3. Universal JWT-private-key fallback. Lets KMS
+    //    deployments (which may legitimately omit
+    //    `ENCRYPTION_KEY`) boot without requiring ops to set
+    //    `CLI_PAIRING_HMAC_KEY` up front — and still gives every
+    //    worker the same HMAC because the JWT private key is the
+    //    same PEM file on every instance. Domain-separated with
+    //    a distinct label so the derivation can't collide with
+    //    any other HMAC use of the JWT key.
+    if let Some(pem) = jwt_private_key_pem
+        && !pem.is_empty()
+    {
+        let mut mac = HmacSha256::new_from_slice(pem).expect("HMAC-SHA256 accepts any key length");
+        mac.update(b"nyxid:cli-pairing-code-hmac-v1:jwt");
+        let digest = mac.finalize().into_bytes();
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&digest);
+        tracing::info!(
+            "cli-pairing HMAC key derived from JWT private key \
+             (neither CLI_PAIRING_HMAC_KEY nor ENCRYPTION_KEY is \
+             set). Set CLI_PAIRING_HMAC_KEY explicitly if you need \
+             to rotate it independently of the JWT signing key."
+        );
+        return zeroize::Zeroizing::new(out);
+    }
+
+    // 4. Defensive stop. Unreachable in practice because the JWT
+    //    private key is loaded before this function is called —
+    //    the service would have panicked earlier. Keep the
+    //    message actionable in case a future refactor severs the
+    //    JWT input.
+    panic!(
+        "cli-pairing HMAC key has no source: CLI_PAIRING_HMAC_KEY, \
+         ENCRYPTION_KEY, and the JWT private key are all missing. \
+         Set CLI_PAIRING_HMAC_KEY to a 64-hex-char value \
+         (`openssl rand -hex 32`) — see docs/ENV.md."
+    );
+}
+
 /// Run the --promote-admin CLI command, then return.
 async fn run_promote_admin(db: &mongodb::Database, email: &str) {
     use services::{audit_service, auth_service};
@@ -628,5 +793,175 @@ async fn run_promote_admin(db: &mongodb::Database, email: &str) {
             eprintln!("Failed to promote admin: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Tests for startup-time helpers that sit in `main.rs`.
+    //!
+    //! Keeping derivation-ordering invariants pinned here because a
+    //! silent precedence flip (e.g. a refactor that read
+    //! `config.encryption_key` before the env override) would be a
+    //! security regression: the explicit override is the escape
+    //! hatch ops use when policy says "do not reuse encryption-key
+    //! material for other HMAC purposes," and it must win every
+    //! time.
+
+    use super::*;
+
+    fn enc_hex(byte: u8) -> String {
+        hex::encode([byte; 32])
+    }
+
+    fn jwt_bytes(byte: u8) -> Vec<u8> {
+        // Stand-in for a PEM file's bytes; the derivation reads
+        // raw bytes and doesn't care about PEM structure.
+        vec![byte; 1_024]
+    }
+
+    #[test]
+    fn cli_pairing_key_prefers_env_override_over_encryption_key() {
+        // Both set. The explicit env override must win — ops use
+        // this to decouple the pairing HMAC key from ENCRYPTION_KEY
+        // (for independent rotation, or for policies that forbid
+        // reusing key material across purposes).
+        let env_override_hex = hex::encode([0xAAu8; 32]);
+        let enc = enc_hex(0x55);
+        let jwt = jwt_bytes(0x33);
+
+        let key_with_override =
+            derive_cli_pairing_hmac_key(Some(&env_override_hex), Some(&enc), Some(&jwt));
+        let key_from_enc_only = derive_cli_pairing_hmac_key(None, Some(&enc), Some(&jwt));
+
+        assert_eq!(
+            key_with_override.as_slice(),
+            &[0xAAu8; 32],
+            "env override must be used verbatim, not derived"
+        );
+        assert_ne!(
+            key_with_override.as_slice(),
+            key_from_enc_only.as_slice(),
+            "env override must NOT match the ENCRYPTION_KEY-derived key"
+        );
+    }
+
+    #[test]
+    fn cli_pairing_key_prefers_encryption_key_over_jwt_fallback() {
+        // With ENCRYPTION_KEY set we prefer that derivation over
+        // the JWT fallback, so operators migrating from local to
+        // KMS don't get a silent HMAC-key change.
+        let enc = enc_hex(0x55);
+        let jwt = jwt_bytes(0x33);
+        let with_enc = derive_cli_pairing_hmac_key(None, Some(&enc), Some(&jwt));
+        let jwt_only = derive_cli_pairing_hmac_key(None, None, Some(&jwt));
+        assert_ne!(
+            with_enc.as_slice(),
+            jwt_only.as_slice(),
+            "ENCRYPTION_KEY derivation must differ from JWT fallback"
+        );
+    }
+
+    #[test]
+    fn cli_pairing_key_falls_back_to_encryption_key_when_env_absent() {
+        // Unset and empty-string overrides both fall through to
+        // the ENCRYPTION_KEY derivation — dotenv often emits empty
+        // strings for unused vars.
+        let enc = enc_hex(0x55);
+        let jwt = jwt_bytes(0x33);
+        let unset = derive_cli_pairing_hmac_key(None, Some(&enc), Some(&jwt));
+        let empty = derive_cli_pairing_hmac_key(Some(""), Some(&enc), Some(&jwt));
+        let whitespace_only = derive_cli_pairing_hmac_key(Some("   "), Some(&enc), Some(&jwt));
+
+        assert_eq!(unset.as_slice(), empty.as_slice());
+        assert_eq!(unset.as_slice(), whitespace_only.as_slice());
+    }
+
+    #[test]
+    fn cli_pairing_key_falls_back_to_jwt_when_encryption_key_absent() {
+        // KMS deployments without ENCRYPTION_KEY must still boot.
+        // The JWT private key is always loaded at startup so
+        // deriving the pairing HMAC from its PEM bytes is the
+        // zero-configuration path for those deployments. The
+        // derivation must still be deterministic so all workers
+        // agree on the HMAC output.
+        let jwt = jwt_bytes(0x33);
+        let a = derive_cli_pairing_hmac_key(None, None, Some(&jwt));
+        let b = derive_cli_pairing_hmac_key(None, None, Some(&jwt));
+        assert_eq!(
+            a.as_slice(),
+            b.as_slice(),
+            "JWT fallback must be deterministic across calls"
+        );
+    }
+
+    #[test]
+    fn cli_pairing_key_jwt_fallback_is_keyed_by_jwt_contents() {
+        // Different JWT PEM → different derived HMAC, so rotating
+        // the JWT signing key rotates the pairing HMAC in lockstep.
+        let a = derive_cli_pairing_hmac_key(None, None, Some(&jwt_bytes(0x11)));
+        let b = derive_cli_pairing_hmac_key(None, None, Some(&jwt_bytes(0x22)));
+        assert_ne!(a.as_slice(), b.as_slice());
+    }
+
+    #[test]
+    fn cli_pairing_key_derivation_is_deterministic_across_calls() {
+        // Two calls with the same inputs must produce the same
+        // derived key — otherwise multi-instance deployments
+        // sharing ENCRYPTION_KEY would disagree on HMACs.
+        let enc = enc_hex(0x77);
+        let jwt = jwt_bytes(0x33);
+        let a = derive_cli_pairing_hmac_key(None, Some(&enc), Some(&jwt));
+        let b = derive_cli_pairing_hmac_key(None, Some(&enc), Some(&jwt));
+        assert_eq!(a.as_slice(), b.as_slice());
+    }
+
+    #[test]
+    fn cli_pairing_key_differs_per_encryption_key() {
+        // Different ENCRYPTION_KEY → different derived HMAC key,
+        // so the domain-separated derivation actually does depend
+        // on the master.
+        let jwt = jwt_bytes(0x33);
+        let a = derive_cli_pairing_hmac_key(None, Some(&enc_hex(0x11)), Some(&jwt));
+        let b = derive_cli_pairing_hmac_key(None, Some(&enc_hex(0x22)), Some(&jwt));
+        assert_ne!(a.as_slice(), b.as_slice());
+    }
+
+    #[test]
+    #[should_panic(expected = "CLI_PAIRING_HMAC_KEY must be 64 hex characters")]
+    fn cli_pairing_key_panics_on_malformed_env_override() {
+        // A typo must fail loudly at startup — silently falling
+        // through to derivation would hide operator intent
+        // ("use THIS key, not one derived from ENCRYPTION_KEY").
+        let _ = derive_cli_pairing_hmac_key(
+            Some("not-valid-hex"),
+            Some(&enc_hex(0x55)),
+            Some(&jwt_bytes(0x33)),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "CLI_PAIRING_HMAC_KEY must be 64 hex characters")]
+    fn cli_pairing_key_panics_on_wrong_length_env_override() {
+        // Hex parses fine but the byte count is wrong — same
+        // failure mode, still loud.
+        let short = hex::encode([0xCCu8; 16]);
+        let _ =
+            derive_cli_pairing_hmac_key(Some(&short), Some(&enc_hex(0x55)), Some(&jwt_bytes(0x33)));
+    }
+
+    #[test]
+    #[should_panic(expected = "cli-pairing HMAC key has no source")]
+    fn cli_pairing_key_panics_when_no_source_at_all() {
+        // JWT input is required in production; if none of the
+        // three sources resolve, refuse to start.
+        let _ = derive_cli_pairing_hmac_key(None, None, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "cli-pairing HMAC key has no source")]
+    fn cli_pairing_key_panics_on_all_empty_inputs() {
+        // Empty strings / empty slice are treated like unset.
+        let _ = derive_cli_pairing_hmac_key(Some(""), Some(""), Some(&[]));
     }
 }

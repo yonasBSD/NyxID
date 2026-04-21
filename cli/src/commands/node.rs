@@ -116,22 +116,23 @@ pub async fn run(command: NodeCommands) -> Result<()> {
         NodeCommands::RegisterToken {
             name,
             terminal,
+            no_wait,
             auth,
         } => {
-            use std::io::IsTerminal;
-            // Wizard gate — mirrors RotateToken / api-key Rotate. Any of
-            // --terminal, --output json, piped stdout, SSH, or
-            // NYXID_NO_WIZARD falls through to the scripted path below
-            // with byte-identical behavior to pre-wizard.
+            // Browser-flow gate — local wizard or remote pairing.
+            // `--terminal` and `NYXID_NO_WIZARD=1` fall through to
+            // the scripted path below. `--no-wait` forces the
+            // pairing variant and wins over both `--output json`
+            // and local-browser preference (only `--terminal`
+            // overrides it).
             let interactive_output = matches!(auth.output, OutputFormat::Table);
             let wizard_eligible = !terminal
-                && interactive_output
-                && std::io::stdout().is_terminal()
-                && crate::wizard::is_wizard_eligible();
+                && (no_wait || (interactive_output && crate::wizard::is_browser_flow_eligible()));
 
             if wizard_eligible {
                 let prefill = crate::wizard::NodeRegisterPrefill { name: name.clone() };
-                return crate::wizard::run_node_register_token_wizard(&auth, prefill).await;
+                return crate::wizard::run_node_register_token_wizard(&auth, prefill, no_wait)
+                    .await;
             }
 
             // Scripted / headless path — UNCHANGED from pre-wizard
@@ -205,19 +206,21 @@ pub async fn run(command: NodeCommands) -> Result<()> {
             Ok(())
         }
 
-        NodeCommands::RotateToken { id, terminal, auth } => {
-            use std::io::IsTerminal;
-            // Wizard mode (v3 DisplayOnce) when output is interactive,
-            // stdout is a TTY, and the environment can open a local
-            // browser. Mirrors the v2 `service add` gate. Anything else
-            // (--terminal, --output json, piped, SSH, NYXID_NO_WIZARD)
-            // falls through to the scripted path BELOW, byte-identical
-            // to pre-wizard behavior.
+        NodeCommands::RotateToken {
+            id,
+            terminal,
+            no_wait,
+            auth,
+        } => {
+            // Browser-flow gate — local wizard or remote pairing.
+            // `--terminal` and `NYXID_NO_WIZARD=1` fall through to
+            // the scripted path BELOW. `--no-wait` forces the
+            // pairing variant and wins over both `--output json`
+            // and local-browser preference (only `--terminal`
+            // overrides it).
             let interactive_output = matches!(auth.output, OutputFormat::Table);
             let wizard_eligible = !terminal
-                && interactive_output
-                && std::io::stdout().is_terminal()
-                && crate::wizard::is_wizard_eligible();
+                && (no_wait || (interactive_output && crate::wizard::is_browser_flow_eligible()));
 
             if wizard_eligible {
                 let mut api = ApiClient::from_auth(&auth)?;
@@ -235,7 +238,7 @@ pub async fn run(command: NodeCommands) -> Result<()> {
                     resource_id: resolved_id,
                     display_name,
                 };
-                return crate::wizard::run_node_rotate_token_wizard(&auth, prefill).await;
+                return crate::wizard::run_node_rotate_token_wizard(&auth, prefill, no_wait).await;
             }
 
             // Scripted / headless path — UNCHANGED from pre-wizard behavior.

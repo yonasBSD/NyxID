@@ -15,6 +15,7 @@ pub mod node;
 pub mod notification;
 pub mod openclaw;
 pub mod org;
+pub mod pairing;
 pub mod profile;
 pub mod proxy;
 pub mod repo;

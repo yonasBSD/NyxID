@@ -13,6 +13,7 @@ pub mod channel_platform;
 pub mod channel_relay_service;
 pub mod channel_routing_service;
 pub mod chatgpt_translator;
+pub mod cli_pairing_service;
 pub mod connection_service;
 pub mod consent_service;
 pub mod content_type;

@@ -307,6 +307,18 @@ ENVIRONMENT=development
 RATE_LIMIT_PER_SECOND=10
 RATE_LIMIT_BURST=30
 
+# CLI remote pairing (optional)
+CLI_PAIRING_HMAC_KEY=                   # 64 hex chars; keys `CliPairing.code_hash`
+                                        # so a DB snapshot cannot brute-force the
+                                        # ~2^40 pairing-code space. Leave unset
+                                        # unless you need to rotate it independently
+                                        # of ENCRYPTION_KEY / the JWT signing key:
+                                        # the backend derives from ENCRYPTION_KEY
+                                        # when set, otherwise from the JWT private
+                                        # key PEM. Both are stable per-worker so
+                                        # multi-instance deployments stay in sync
+                                        # without extra config. See docs/ENV.md.
+
 # Telegram / Approval System (optional)
 TELEGRAM_BOT_TOKEN=                     # From @BotFather
 TELEGRAM_WEBHOOK_SECRET=                # Random string for webhook verification

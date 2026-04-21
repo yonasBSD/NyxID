@@ -99,6 +99,7 @@ async fn run() -> Result<()> {
 
         // Project links
         Commands::Repo(args) => commands::repo::run_repo(args).await,
+        Commands::Pairing { command } => commands::pairing::run(command).await,
         Commands::Info => commands::repo::run_info().await,
     }
 }

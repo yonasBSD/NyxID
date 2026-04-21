@@ -85,6 +85,31 @@ chmod 600 keys/private.pem
 | `RATE_LIMIT_PER_SECOND` | `10` | Global rate limit (requests/second) |
 | `RATE_LIMIT_BURST` | `30` | Burst capacity and per-IP limit |
 
+## CLI Remote Pairing (Optional)
+
+The `nyxid` CLI's wizard-style commands (e.g. `nyxid service add`, `nyxid api-key create`, `nyxid node register-token`) can hand off to a browser on another device via a short pairing code. Codes are 8 Crockford characters (~2^40 space) and live for 15 minutes; the backend keys the stored hash with an HMAC so a MongoDB snapshot alone cannot brute-force them offline.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CLI_PAIRING_HMAC_KEY` | *(derived from `ENCRYPTION_KEY`)* | Explicit 32-byte HMAC key (64 hex chars) for `CliPairing.code_hash`. Generate with `openssl rand -hex 32`. Set this in multi-instance deployments where `ENCRYPTION_KEY` is not configured (for example `KEY_PROVIDER=aws-kms` or `gcp-kms`) so every backend worker produces the same HMAC output for a given code. |
+
+### Key selection rules
+
+The backend picks the key at startup using the first match:
+
+1. `CLI_PAIRING_HMAC_KEY` if set (must be 64 hex chars).
+2. Derived from `ENCRYPTION_KEY` via HMAC-SHA256 with domain-separated label `nyxid:cli-pairing-code-hmac-v1`. Stable across restarts and workers that share `ENCRYPTION_KEY`. This is the expected path for the local AES provider.
+3. Derived from the **JWT private key** file contents via HMAC-SHA256 with a distinct domain-separated label (`...-hmac-v1:jwt`). Lets `KEY_PROVIDER=aws-kms` or `gcp-kms` deployments boot without requiring operators to configure `CLI_PAIRING_HMAC_KEY` up front — and because the same JWT PEM is deployed to every worker, this derivation is stable across a cluster (no sticky-session footgun).
+
+If all three sources are missing, the backend refuses to start with a clear error message pointing at this section. In practice that branch is unreachable because the JWT private key is already required at startup.
+
+### When you must set it explicitly
+
+- You want to rotate the pairing-code HMAC independently of both `ENCRYPTION_KEY` and the JWT signing key (e.g. to rotate it without rotating JWTs).
+- Any deployment policy that forbids reusing key material across purposes.
+
+Otherwise the automatic derivation chain is safe: local deployments derive from `ENCRYPTION_KEY`, KMS deployments derive from the JWT signing key.
+
 ## Social Login (Optional)
 
 | Variable | Description |
