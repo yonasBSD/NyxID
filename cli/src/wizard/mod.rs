@@ -708,41 +708,52 @@ pub fn is_wizard_eligible() -> bool {
 
 /// Returns true when the caller should route through the unified
 /// wizard-or-pairing path instead of falling through to the scripted
-/// stdin prompts.
+/// stdin prompts. The wizard helper itself picks the local-browser
+/// flavor when `is_wizard_eligible` says a browser can launch, and
+/// the remote-pairing fallback otherwise (agent bash tool, SSH
+/// session, Docker container, etc.).
 ///
-/// The rule is conservative on purpose: the wizard only fires
-/// **implicitly** when BOTH stdin and stdout are TTYs — i.e. the
-/// user is genuinely sitting at an interactive terminal. Any
-/// non-interactive shape (CI pipelines, subprocess wrappers,
-/// redirected/piped stdout, or missing stdin) falls through to
-/// the scripted path so existing automation like
-/// `nyxid api-key rotate <id>` inside a CI job keeps executing
-/// the API call immediately, exactly as it did pre-wizard.
+/// The predicate distinguishes three environments:
 ///
-/// Agents / AI-tool wrappers that want the remote-pairing
-/// transport must opt in explicitly with `--no-wait`, which the
-/// per-command call site short-circuits AROUND this predicate. We
-/// documented this as the agent-invocation contract because
-/// implicit "non-TTY → pairing" routing ends up stealing every
-/// CI rotate / register-token call into the pairing flow even
-/// when the scripted path has everything it needs.
+/// 1. **Fully headless** (agent bash tools, subprocess wrappers,
+///    SSH without display, CI containers) — stdin is NOT a TTY.
+///    The scripted fallback would hang on the first missing-arg
+///    prompt, so route through the browser / remote-pairing path
+///    unconditionally. This is the main agent-use-case: the agent
+///    relays the printed URL + code to the user, the user completes
+///    the wizard on a phone or desktop, and the CLI polls for the
+///    ack. Users who are scripted but DO have all args can opt out
+///    of the pairing detour with `NYXID_NO_WIZARD=1` or `--terminal`.
 ///
-/// `NYXID_NO_WIZARD=1` is an explicit opt-out that forces the
-/// scripted path even in a fully-interactive shell — useful for
-/// users who prefer the stdin prompts for muscle-memory reasons.
+/// 2. **Interactive stdin + piped stdout**
+///    (`nyxid api-key create > key.txt`, `| jq ...`) — the user is
+///    clearly scripting output but can still answer prompts.
+///    Fall through to the stdin-prompt path so redirection keeps
+///    working without the user learning any flags.
+///
+/// 3. **Interactive stdin + interactive stdout** — normal
+///    foreground use; route to the wizard.
+///
+/// `NYXID_NO_WIZARD=1` forces the scripted path regardless of TTY
+/// state, and `--no-wait` at the call site always chooses remote
+/// pairing for agents that want a resumable handoff.
 pub fn is_browser_flow_eligible() -> bool {
     // Explicit opt-out — same env var as the local-wizard predicate.
     if std::env::var_os("NYXID_NO_WIZARD").is_some() {
         return false;
     }
-    // Implicit wizard requires a fully-interactive terminal. Any
-    // non-TTY on either side means the caller is almost certainly
-    // scripting, and the scripted path is what existing automation
-    // has relied on for rotate / register-token / create flows with
-    // all args supplied via flags. Agents that want pairing without
-    // a TTY must pass `--no-wait`.
-    std::io::IsTerminal::is_terminal(&std::io::stdin())
-        && std::io::IsTerminal::is_terminal(&std::io::stdout())
+    // Fully headless (no stdin TTY): scripted path can't prompt,
+    // so the wizard/remote-pairing path is the only way the
+    // command can complete without the caller re-running with
+    // every flag supplied manually.
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        return true;
+    }
+    // Interactive stdin — scripted path works. Route to wizard
+    // only when stdout is ALSO a TTY; a piped/redirected stdout
+    // means the user is scripting output and expects the
+    // stdin-prompt path (existing `> key.txt` / `| jq` patterns).
+    std::io::IsTerminal::is_terminal(&std::io::stdout())
 }
 
 /// Ring a terminal bell + emit the OSC-9 notification sequence so the

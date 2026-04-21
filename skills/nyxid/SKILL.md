@@ -186,16 +186,54 @@ Running `nyxid service add <slug>` with no scripted flags on an interactive TTY 
 **Prefill flags** (safe to combine with the wizard -- they just seed the form):
 `--slug`, `--label`, `--via-node`, `--endpoint-url`.
 
+### When no local browser is available: remote pairing (wizard v4)
+
+Introduced in PR #438 / wizard v4. When the CLI can't launch a local browser (agent bash tool, SSH without X11, Docker container, no `DISPLAY`) — i.e. `is_wizard_eligible()` returns `false` — the wizard is NOT disabled. It transparently switches to a **remote pairing transport**: the CLI prints a short pairing code + a URL on `FRONTEND_URL/cli/pair`, the user opens that URL on any device with a browser (phone, laptop, desktop), logs in, enters the code, and completes the exact same wizard there. The CLI polls and picks up the typed ack. Secrets NEVER transit the CLI — only non-secret identifiers (`service_id`, `slug`, `label`).
+
+End-to-end for an agent:
+
+```bash
+# The agent runs the wizard-capable command inside its bash tool. No
+# TTY, no local browser — the CLI detects this and prints:
+$ nyxid service add llm-openai
+  Pair with NyxID to finish:
+    1. Open:   https://auth.nyxid.dev/cli/pair?code=ABCD-1234
+    2. Enter:  ABCD-1234
+  Waiting for browser ... (Ctrl-C to cancel)
+```
+
+The agent relays the URL to the user; the user completes the wizard on their own device; the CLI exits with the usual summary. Same works for `api-key create`/`rotate`, `node register-token`/`rotate-token`.
+
+**For agents that can't block on stdout** (streaming tool frameworks), pass `--no-wait` to get a resumable handoff instead:
+
+```bash
+# One-shot: print machine-readable pairing info and exit.
+nyxid api-key create --name coding-agent --platform claude-code \
+  --no-wait --output json
+# → { "pairing_id": "pair_…", "code": "ABCD-1234",
+#     "pair_url": "https://auth.nyxid.dev/cli/pair?code=ABCD-1234",
+#     "resume_cmd": "nyxid pairing resume pair_…",
+#     "requires_access_token_on_resume": false,
+#     "expires_at": "…" }
+
+# Later, after the user has completed the pair page:
+nyxid pairing resume pair_…
+```
+
+`--no-wait` also works for agents that DO have a TTY but want an explicit "hand-off and return" semantic.
+
+**Safety posture for remote pairing:** codes are 8 Crockford chars (32^8 ≈ 2^40) stored only as HMAC-SHA256 with a server-side key that never touches MongoDB, user-bound at create time (user A's code cannot be claimed as user B), per-IP rate-limited to 5 claim attempts per 60s on real TCP peer, and expire after 15 min. The backend validates the ack references an actual active UserService before transitioning the pairing to `Completed`, so a malicious / buggy browser page cannot trick the CLI into thinking a placeholder is a connected service.
+
 ### When the CLI falls back to terminal (rpassword) mode
 
-Terminal mode is selected when **any** of the following is true:
+Terminal (scripted stdin-prompt) mode is selected when **any** of the following is true:
 
 - `--terminal` (alias `--no-wizard`) is passed on the command line -- **per-invocation override**, useful for a one-off scripted call on a GUI machine.
-- `NYXID_NO_WIZARD=1` is set in the environment -- **sticky** across all invocations. Right choice for CI runners, Dockerfiles, and systemd units where you never want a browser to launch.
-- A **scripted flag** is present (tells the CLI the caller already decided the flow): `--oauth`, `--device-code`, `--credential-env`, `--credential`, `--custom`, `--auth-method`, `--auth-key-name`, `--scope`, `--org`, `--openapi-spec-url`, or `--output json`.
-- Running over **SSH** (`SSH_CONNECTION` or `SSH_TTY` is set) -- the browser would open on the wrong machine.
-- Running on **Linux without a display** (both `DISPLAY` and `WAYLAND_DISPLAY` unset).
-- **stdout is not a TTY** (piped to another command, redirected to a file).
+- `NYXID_NO_WIZARD=1` is set in the environment -- **sticky** across all invocations. Right choice for CI runners, Dockerfiles, and systemd units that want the pre-wizard behavior.
+- A **scripted flag** is present (tells the CLI the caller already decided the flow): `--oauth`, `--device-code`, `--credential-env`, `--credential`, `--custom`, `--auth-method`, `--auth-key-name`, `--scope`, `--org`, `--openapi-spec-url`, or `--output json` (unless combined with `--no-wait`, which always uses remote pairing).
+- stdin is a TTY **and** stdout is piped / redirected -- the user is clearly scripting output (`nyxid api-key create > key.txt`, `| jq`), so the CLI respects that and uses the stdin-prompt path.
+
+Note: fully-headless environments (agents, SSH without display, CI containers) NO LONGER fall through to stdin-prompt mode. They route through remote pairing instead, because the scripted path would otherwise hang on the first missing-arg prompt. Set `NYXID_NO_WIZARD=1` to opt out if a caller genuinely wants the stdin-prompt behavior on a headless box (rare — usually means all args are supplied via flags).
 
 Examples:
 
@@ -208,9 +246,12 @@ NYXID_NO_WIZARD=1 nyxid service add llm-openai
 
 # Scripted flow (auto-falls-through, no flag needed)
 nyxid service add llm-openai --credential-env OPENAI_KEY --output json
+
+# Agent: get a pairing URL + resume command for the user
+nyxid service add llm-openai --no-wait --output json
 ```
 
-**Guidance for AI agents using this skill:** always pass scripted flags (`--oauth`, `--credential-env`, `--output json`, etc.). Those automatically bypass the wizard, so an agent never accidentally tries to open a browser on a headless box. Use `--terminal` only when you need to explicitly force the rpassword prompt in an interactive session where none of the other triggers apply.
+**Guidance for AI agents using this skill:** prefer scripted flags (`--credential-env`, `--output json`) when the agent already has the credential in hand — this stays fully non-interactive and never touches a browser. When the agent doesn't have the credential (e.g. the user needs to log into an OAuth provider), pass `--no-wait --output json` to print a machine-readable pairing URL the agent can surface to the user, then `nyxid pairing resume <id>` once the user confirms they've completed the browser flow. Agents should NOT rely on `--terminal` without supplying all required args — the scripted path will hang on the first stdin prompt.
 
 
 ### Step 1: Check the catalog
@@ -500,9 +541,9 @@ export NYXID_ACCESS_TOKEN="nyxid_ag_..."
 
 Agent keys need `write` or `admin` scope to call management endpoints via REST (create/update/delete/rotate API keys, services, endpoints, bindings, etc.). `proxy read` is sufficient for proxy traffic only -- paths under `/proxy`, `/llm`, `/ssh`, `/channel-events`, `/channel-relay`, and `/delegation` do not require write scope. The `nyxid` CLI uses session auth (not API keys) and is unaffected.
 
-### Browser wizard for one-time secrets (v2 + v3.0 + v3.1)
+### Browser wizard for one-time secrets (v2 + v3.0 + v3.1 + v4)
 
-Five commands now open a local browser-based wizard for interactive use, so the secret (either collected from the user or minted by the backend) lands in the user's browser tab instead of the terminal / agent context:
+Five commands now open a browser-based wizard for interactive use, so the secret (either collected from the user or minted by the backend) lands in the user's browser tab instead of the terminal / agent context:
 
 | Command                           | Version | Wizard role                                                                                            |
 |-----------------------------------|:-------:|--------------------------------------------------------------------------------------------------------|
@@ -512,20 +553,32 @@ Five commands now open a local browser-based wizard for interactive use, so the 
 | `nyxid node register-token`       |   v3.1  | DisplayOnce: backend mints a new `nyx_nreg_…` for bootstrapping a fresh node.                          |
 | `nyxid api-key create`            |   v3.1  | Scope picker (name + owner + platform + scopes + expiry + service/node multi-select + rate limits) → DisplayOnce on the new `nyxid_ag_…`. |
 
-The CLI prints `→ Opening http://127.0.0.1:…/wizard …` and a no-secret success line on exit. Full spec: [`docs/CLI_WIZARD_V2.md`](../../docs/CLI_WIZARD_V2.md) (v2) + [`docs/CLI_WIZARD_V3.md`](../../docs/CLI_WIZARD_V3.md) (v3 / v3.1).
+All five commands automatically pick between two transports depending on environment, added in v4 (PR #438):
 
-**Visual consistency.** Every wizard command — v2 and v3 and v3.1 alike — shares the same shell: same brand lockup (NyxID wordmark in DM Serif Display) in the header, same "Served locally from <origin> · Nothing leaves your machine" footer, same ✓/✗/⚠ overlay system, same purple accent (`#8b5cf6` / `#7c3aed`), same button and field styling. v3.1 adds only the scope-picker's internal widgets (multi-select rows, radio groups, numeric inputs); the frame around them is unchanged from v2. A user who ran `nyxid api-key rotate` on v3.0 sees the identical chrome when running `nyxid api-key create` on v3.1.
+- **Local** (Mode A, v2/v3 original): when a local browser is available, the CLI boots an axum server on `127.0.0.1:<random-port>`, opens the wizard SPA there, and the browser talks back through a narrow allowlist of proxied endpoints. Access tokens never hit the browser; 10-second heartbeat cancels on tab-close. CLI prints `→ Opening http://127.0.0.1:…/wizard …`.
 
-For scripted / agent use, the wizard is **bypassed automatically** when ANY of these is true:
+- **Remote pairing** (Mode B, v4 new): when no local browser is available — agent bash tool, SSH without display, Docker container, no `DISPLAY` — the CLI creates a short-lived server-side pairing record and prints a pair URL + 8-char Crockford code. The user opens the URL on ANY device with a browser (phone, desktop), logs in, enters the code, and completes the same wizard there. The CLI polls for the typed ack. Same visual experience, same DisplayOnce affordances; the only difference is the page is hosted on `FRONTEND_URL/cli/pair` instead of `127.0.0.1`.
 
-- `--terminal` (alias `--no-wizard`) is passed -- per-invocation override, available on all five wizard commands
-- `--output json` is passed (output is machine-readable)
-- stdout is not a TTY (piped, captured, redirected)
-- `NYXID_NO_WIZARD=1` is set in the environment
-- `SSH_CONNECTION` or `SSH_TTY` is set (SSH session, no local browser)
-- on Linux: both `DISPLAY` and `WAYLAND_DISPLAY` are unset
+Full specs: [`docs/CLI_WIZARD_V2.md`](../../docs/CLI_WIZARD_V2.md) (v2) + [`docs/CLI_WIZARD_V3.md`](../../docs/CLI_WIZARD_V3.md) (v3 / v3.1). v4's pairing transport lives under `/cli-pairings/*` backend endpoints and `/cli/pair` on the frontend.
 
-In any of these cases, the commands print the raw secret to stdout exactly as before (legacy shape, byte-identical). Agents calling these commands programmatically should always use `--output json` to be explicit and to make the response machine-parseable.
+**Visual consistency.** Both transports share the same shell: same brand lockup (NyxID wordmark in DM Serif Display), same ✓/✗/⚠ overlay system, same purple accent (`#8b5cf6` / `#7c3aed`), same button and field styling. The local path's footer says "Served locally from 127.0.0.1 · Nothing leaves your machine"; the remote path omits that footer because the page is served from the NyxID frontend origin — but secrets still never leave the browser (the CLI receives only non-secret identifiers via the pairing ack).
+
+**Agent handoff with `--no-wait`.** For agents that can't block on the pairing URL streaming out of stdout, every wizard-capable command accepts `--no-wait`: the CLI creates the pairing, prints a JSON payload on stdout with `{pairing_id, code, pair_url, resume_cmd, requires_access_token_on_resume, expires_at}`, and exits 0 immediately. The agent relays `pair_url` to the user and later runs the printed `resume_cmd` (or `nyxid pairing resume <pairing_id>`) to pick up the result. `--no-wait` works regardless of TTY state.
+
+For scripted / agent use, the wizard is **bypassed** (falls through to the pre-wizard stdin / rpassword path) when ANY of these is true:
+
+- `--terminal` (alias `--no-wizard`) is passed — per-invocation override, available on all five wizard commands.
+- `NYXID_NO_WIZARD=1` is set in the environment.
+- `--output json` is passed AND `--no-wait` is NOT — agents that want machine-readable output stay scripted, unless they explicitly opt into the pairing transport via `--no-wait`.
+- stdin is a TTY AND stdout is piped / redirected — the user is scripting output but has an interactive shell for prompts.
+
+Note: having no TTY at all (agent subprocess, SSH without X11, CI container) does NOT bypass — the command routes through remote pairing instead, since a scripted stdin prompt would just hang. Set `NYXID_NO_WIZARD=1` explicitly if a caller wants the scripted path on a headless box.
+
+When the wizard is bypassed the commands print the raw secret to stdout in the same shape as the pre-wizard CLI. Agents calling these commands programmatically have three clean options:
+
+- `--output json --credential-env VAR` or other scripted flags → fully non-interactive, no browser or pairing involved.
+- `--no-wait --output json` → machine-readable pairing URL + resume command; agent relays the URL to the user.
+- `--terminal` with all args supplied → pre-wizard scripted prompts skipped because every prompt has a flag value.
 
 Behavior change to be aware of: `nyxid api-key rotate <name>` now **refuses ambiguous names** — if multiple keys share the same name, the command exits with `Name 'X' matches N keys. Pass the ID instead.` Previously it silently rotated the first match (which could rotate the wrong key). Always prefer ID over name for scripted rotation.
 
