@@ -69,7 +69,7 @@ pub async fn create_org_user(
     let email = contact_email
         .map(|e| e.trim().to_lowercase())
         .filter(|e| !e.is_empty())
-        .unwrap_or_else(|| format!("org-{}@nyxid.local", &id));
+        .unwrap_or_else(|| synthetic_org_email(&id));
 
     let org = User {
         id: id.clone(),
@@ -115,15 +115,49 @@ pub async fn get_org_user(db: &mongodb::Database, org_user_id: &str) -> AppResul
     Ok(user)
 }
 
-/// Update org metadata. Only `display_name` and `avatar_url` are mutable.
+/// Suffix used for the synthetic placeholder email generated when an org is
+/// created without an explicit contact email. Kept as a const so UI/API
+/// normalizers can hide it behind a single check.
+pub const ORG_PLACEHOLDER_EMAIL_SUFFIX: &str = "@nyxid.local";
+
+/// Build the exact synthetic placeholder email for an org with the given
+/// id. The only value `create_org_user` ever generates is
+/// `org-<id>@nyxid.local`, so normalizers compare against this exact string
+/// rather than a `starts_with("org-") && ends_with("@nyxid.local")` pattern
+/// — the loose check incorrectly hides legitimate user-supplied addresses
+/// like `org-support@nyxid.local`.
+fn synthetic_org_email(org_user_id: &str) -> String {
+    format!("org-{}{}", org_user_id, ORG_PLACEHOLDER_EMAIL_SUFFIX)
+}
+
+/// Return the org's user-visible contact email, or `None` when the stored
+/// email is the synthetic `org-<id>@nyxid.local` placeholder for *this*
+/// org. Any other address — including a real `org-support@nyxid.local`
+/// the admin explicitly set — is returned verbatim.
+pub fn contact_email_for_display(user: &User) -> Option<String> {
+    let email = user.email.trim();
+    if email.is_empty() {
+        return None;
+    }
+    if email.eq_ignore_ascii_case(&synthetic_org_email(&user.id)) {
+        return None;
+    }
+    Some(email.to_string())
+}
+
+/// Update org metadata. Supports `display_name`, `avatar_url`, and
+/// `contact_email`. Pass `Some(value)` to set/clear each field; `None` leaves
+/// the field untouched. For `contact_email`, an empty string clears back to
+/// the synthetic placeholder so audit/admin surfaces stay legible.
 pub async fn update_org_user(
     db: &mongodb::Database,
     org_user_id: &str,
     display_name: Option<&str>,
     avatar_url: Option<&str>,
+    contact_email: Option<&str>,
 ) -> AppResult<User> {
     // Verify it's an org first.
-    let _ = get_org_user(db, org_user_id).await?;
+    let existing = get_org_user(db, org_user_id).await?;
 
     let mut update = doc! {};
     if let Some(name) = display_name {
@@ -141,6 +175,23 @@ pub async fn update_org_user(
             update.insert("avatar_url", bson::Bson::Null);
         } else {
             update.insert("avatar_url", trimmed);
+        }
+    }
+    if let Some(email) = contact_email {
+        let trimmed = email.trim();
+        if trimmed.is_empty() {
+            // Restore the synthetic placeholder so admin/audit surfaces
+            // still show a stable, unique-looking identifier.
+            update.insert("email", synthetic_org_email(&existing.id));
+        } else {
+            // Defensive validation — handler-level validator already runs,
+            // but this keeps the service safe for direct callers.
+            if !trimmed.contains('@') {
+                return Err(AppError::ValidationError(
+                    "contact_email must be a valid email".to_string(),
+                ));
+            }
+            update.insert("email", trimmed.to_lowercase());
         }
     }
     update.insert("updated_at", bson::DateTime::from_chrono(Utc::now()));
@@ -1277,5 +1328,95 @@ mod tests {
             allowed_service_ids: Some(vec![]),
         };
         assert!(!member.allows_resource("svc-1"));
+    }
+
+    fn make_org_user(email: &str) -> User {
+        use chrono::Utc;
+        let now = Utc::now();
+        User {
+            id: "11111111-2222-3333-4444-555555555555".to_string(),
+            email: email.to_string(),
+            password_hash: None,
+            display_name: Some("Test Org".to_string()),
+            avatar_url: None,
+            email_verified: false,
+            email_verification_token: None,
+            password_reset_token: None,
+            password_reset_expires_at: None,
+            is_active: true,
+            is_admin: false,
+            role_ids: vec![],
+            group_ids: vec![],
+            invite_code_id: None,
+            mfa_enabled: false,
+            social_provider: None,
+            social_provider_id: None,
+            user_type: UserType::Org,
+            primary_org_id: None,
+            created_at: now,
+            updated_at: now,
+            last_login_at: None,
+        }
+    }
+
+    #[test]
+    fn contact_email_for_display_hides_placeholder() {
+        let user = make_org_user(&format!(
+            "org-11111111-2222-3333-4444-555555555555{}",
+            ORG_PLACEHOLDER_EMAIL_SUFFIX
+        ));
+        assert_eq!(contact_email_for_display(&user), None);
+    }
+
+    #[test]
+    fn contact_email_for_display_returns_real_email() {
+        let user = make_org_user("contact@acme.test");
+        assert_eq!(
+            contact_email_for_display(&user),
+            Some("contact@acme.test".to_string())
+        );
+    }
+
+    #[test]
+    fn contact_email_for_display_empty_is_none() {
+        let user = make_org_user("");
+        assert_eq!(contact_email_for_display(&user), None);
+    }
+
+    #[test]
+    fn contact_email_for_display_passes_through_other_nyxid_local_emails() {
+        // Only the exact `org-<this_org_id>@nyxid.local` form is treated
+        // as the placeholder. A real user who happens to use
+        // `foo@nyxid.local` is still surfaced.
+        let user = make_org_user("foo@nyxid.local");
+        assert_eq!(
+            contact_email_for_display(&user),
+            Some("foo@nyxid.local".to_string())
+        );
+    }
+
+    #[test]
+    fn contact_email_for_display_surfaces_org_prefixed_real_emails() {
+        // Regression: the old check hid every `org-*@nyxid.local` address,
+        // including admin-configured ones like `org-support@nyxid.local`.
+        // It must now only hide the synthetic id-based placeholder.
+        let user = make_org_user("org-support@nyxid.local");
+        assert_eq!(
+            contact_email_for_display(&user),
+            Some("org-support@nyxid.local".to_string())
+        );
+    }
+
+    #[test]
+    fn contact_email_for_display_hides_placeholder_case_insensitive() {
+        // MongoDB should never store mixed case here (the service
+        // lowercases user-supplied emails and generates the placeholder
+        // lowercase), but guard against data that came in via a different
+        // path.
+        let user = make_org_user(&format!(
+            "ORG-11111111-2222-3333-4444-555555555555{}",
+            ORG_PLACEHOLDER_EMAIL_SUFFIX
+        ));
+        assert_eq!(contact_email_for_display(&user), None);
     }
 }

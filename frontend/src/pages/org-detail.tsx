@@ -178,7 +178,11 @@ export function OrgDetailPage() {
           { label: org.display_name ?? "Untitled org" },
         ]}
         title={org.display_name ?? "Untitled org"}
-        description={`${String(org.member_count)} member${org.member_count === 1 ? "" : "s"}`}
+        description={
+          org.contact_email
+            ? `${org.contact_email} · ${String(org.member_count)} member${org.member_count === 1 ? "" : "s"}`
+            : `${String(org.member_count)} member${org.member_count === 1 ? "" : "s"}`
+        }
         leading={
           <OrgAvatar
             avatarUrl={org.avatar_url}
@@ -392,6 +396,7 @@ export function OrgDetailPage() {
               orgId={orgId}
               initialDisplayName={org.display_name ?? ""}
               initialAvatarUrl={org.avatar_url ?? ""}
+              initialContactEmail={org.contact_email ?? ""}
               onDelete={() => setDeleteOpen(true)}
             />
           ) : (
@@ -490,6 +495,7 @@ interface SettingsPanelProps {
   readonly orgId: string;
   readonly initialDisplayName: string;
   readonly initialAvatarUrl: string;
+  readonly initialContactEmail: string;
   readonly onDelete: () => void;
 }
 
@@ -497,6 +503,7 @@ function SettingsPanel({
   orgId,
   initialDisplayName,
   initialAvatarUrl,
+  initialContactEmail,
   onDelete,
 }: SettingsPanelProps) {
   const updateMutation = useUpdateOrg();
@@ -506,12 +513,20 @@ function SettingsPanel({
     defaultValues: {
       display_name: initialDisplayName,
       avatar_url: initialAvatarUrl,
+      contact_email: initialContactEmail,
     },
   });
 
   async function onSubmit(data: UpdateOrgRequest) {
+    // Only send contact_email when the user actually changed it. This avoids
+    // clobbering the backend-side placeholder with an empty string on
+    // every Save click, and keeps audit entries accurate.
+    const body: UpdateOrgRequest = { ...data };
+    if ((body.contact_email ?? "") === initialContactEmail) {
+      delete body.contact_email;
+    }
     try {
-      await updateMutation.mutateAsync({ orgId, body: data });
+      await updateMutation.mutateAsync({ orgId, body });
       toast.success("Organization updated");
     } catch (err) {
       if (err instanceof ApiError) {
@@ -554,6 +569,28 @@ function SettingsPanel({
                     <FormControl>
                       <Input placeholder="https://..." {...field} />
                     </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+
+              <FormField
+                control={form.control}
+                name="contact_email"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Contact email</FormLabel>
+                    <FormControl>
+                      <Input
+                        type="email"
+                        placeholder="you@example.com"
+                        {...field}
+                      />
+                    </FormControl>
+                    <p className="text-xs text-muted-foreground">
+                      Shown in admin surfaces and used as the org user's
+                      identity. Leave blank to clear.
+                    </p>
                     <FormMessage />
                   </FormItem>
                 )}
