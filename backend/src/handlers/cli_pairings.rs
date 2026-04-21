@@ -149,18 +149,49 @@ pub async fn claim_pairing(
     headers: HeaderMap,
     Json(req): Json<ClaimPairingRequest>,
 ) -> AppResult<Json<ClaimPairingResponse>> {
-    // Rate-limit KEY uses the TCP peer address, NOT the
-    // `X-Forwarded-For` / `X-Real-IP` result from `extract_ip`. Those
-    // headers are client-spoofable on direct-exposure deployments
-    // (and on proxies that blindly forward client-supplied values);
-    // rotating them would let an attacker bypass the 5/60s throttle
-    // entirely. Since this limiter is the only brute-force control
-    // for the 8-char pairing code, we must key on the real peer.
-    // Behind a trusted reverse proxy this degrades to a per-proxy
-    // throttle — a known tradeoff we accept until a trusted-proxy
-    // allowlist exists.
-    if !state.cli_pairing_claim_limiter.check(peer.ip()) {
+    // Rate-limit KEY: prefer `X-Forwarded-For` / `X-Real-IP` only
+    // when the TCP peer appears in `config.trusted_proxy_ips`,
+    // otherwise fall back to the peer address. This closes two
+    // otherwise-exclusive failure modes:
+    //
+    //   - Direct-exposure (no proxy allowlist configured): headers
+    //     are spoofable, so keying on them would let an attacker
+    //     rotate `X-Forwarded-For` and bypass the 5/60s throttle
+    //     that is the primary guard for the 8-char pairing code.
+    //     The peer IP is the only trustworthy key here.
+    //   - Proxy deployments (nginx / ALB / etc.): the peer IP is
+    //     always the proxy, so a per-peer bucket collapses into a
+    //     site-wide 5/60s bucket and legitimate users collide. The
+    //     operator opts in to per-real-client keying by listing
+    //     proxy IPs in `TRUSTED_PROXY_IPS`; headers from other
+    //     peers are still ignored, so the spoofing hole stays
+    //     closed.
+    //
+    // Failure modes left over:
+    //   - A misconfigured reverse proxy that passes client-supplied
+    //     `X-Forwarded-For` through unchanged will now honor the
+    //     spoofed header. Operators are explicitly responsible for
+    //     configuring the proxy to overwrite forwarded headers
+    //     (see docs/ENV.md) when listing it in `TRUSTED_PROXY_IPS`.
+    //   - A request with no peer info (unreachable in normal axum
+    //     wiring, but possible in tests) falls through to the
+    //     rate-limiter's `None` path below — we refuse the request
+    //     rather than allow it to skip throttling.
+    let client_ip = crate::mw::rate_limit::resolve_client_ip_for_rate_limit(
+        &headers,
+        Some(peer),
+        &state.config.trusted_proxy_ips,
+    );
+    let Some(client_ip) = client_ip else {
         tracing::warn!(
+            user_id = %user.user_id,
+            "cli_pairings/claim: could not resolve client IP for rate limit; refusing"
+        );
+        return Err(AppError::RateLimited);
+    };
+    if !state.cli_pairing_claim_limiter.check(client_ip) {
+        tracing::warn!(
+            client_ip = %client_ip,
             peer_ip = %peer.ip(),
             user_id = %user.user_id,
             "cli_pairings/claim rate-limited"

@@ -346,18 +346,67 @@ fn format_resume_command(auth: &crate::cli::AuthArgs, pairing_id: &str) -> Strin
     parts.join(" ")
 }
 
-/// Conservative POSIX shell quoting: wrap in single quotes unless
-/// the value is empty or contains a single-quote (in which case we
-/// fall back to escaping the inner quotes). Values we care about
-/// here — profile names and HTTPS URLs — are already well-formed,
-/// so the quoting is almost always cosmetic.
+/// Cross-shell argument formatter for the printed `resume_cmd`.
+///
+/// The resume hint is copy-pasted into whatever shell the user happens
+/// to run (POSIX sh/bash/zsh on macOS/Linux, `cmd.exe` / PowerShell on
+/// Windows). Single-quote wrapping — the POSIX idiom — is NOT portable:
+/// `cmd.exe` passes single quotes through literally, so a value like
+/// `'staging'` becomes the literal string `'staging'` (including the
+/// quotes) and the profile lookup goes looking for `'staging'` instead
+/// of `staging`.
+///
+/// In practice the values that flow through here are constrained:
+/// profile names (validated elsewhere as alphanumeric + `-_`), HTTPS
+/// URLs (no shell metacharacters in normal use), and env-var names
+/// (alphanumeric + `_`). The overwhelmingly common path is "no
+/// quoting needed": we return the value unchanged whenever it lies
+/// in a conservative safe set that both POSIX shells and `cmd.exe`
+/// treat as a single literal argv token. For anything outside that
+/// set we wrap in double quotes (the common subset between POSIX
+/// and cmd.exe grouping) with a minimal escape for `"` and `\` —
+/// good enough for the rare weirder URL without introducing shell-
+/// specific quirks. Values that contain characters neither shell
+/// can grouping-quote safely (unescaped newlines, raw control
+/// chars, `$`-interpolation under POSIX, `%` under cmd.exe) fall
+/// through as an unquoted best-effort; the copy-paste path is a
+/// hint, not a contract, and operators are expected to use sane
+/// profile/URL values.
 fn shell_quote(value: &str) -> String {
-    if !value.contains('\'') {
-        return format!("'{value}'");
+    // Intersection of "safe unquoted" for POSIX sh and cmd.exe:
+    //   POSIX sh safe: [A-Za-z0-9_./:@%+=-]
+    //   cmd.exe safe:  no spaces or any of & | < > ( ) ^ " ; , = ! %
+    // The `=` and `%` characters are legal in POSIX but special in
+    // cmd.exe (argv split / variable expansion), so we drop them.
+    // The `,` and `;` characters are legal in both as part of a
+    // single argv token, but cmd.exe treats them as delimiters in
+    // some contexts — safest to require quoting.
+    fn is_cross_shell_safe(ch: char) -> bool {
+        ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':' | '@' | '+')
     }
-    // Replace `'` with `'\''` and wrap in quotes.
-    let escaped = value.replace('\'', "'\\''");
-    format!("'{escaped}'")
+
+    if !value.is_empty() && value.chars().all(is_cross_shell_safe) {
+        return value.to_string();
+    }
+
+    // Fallback: double-quote and escape `\` and `"`. This is the
+    // common shape both POSIX sh and cmd.exe accept as a single
+    // grouped argument. Values with `$` (POSIX interpolation) or `%`
+    // (cmd.exe variable expansion) will still transform, but the
+    // hint has always been best-effort and those characters don't
+    // appear in our realistic input set (URL schemes, profile
+    // names, env var names).
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// `nyxid pairing resume <id>`: poll an existing pairing record and
@@ -809,19 +858,29 @@ mod tests {
     }
 
     #[test]
-    fn shell_quote_single_quotes_simple_values() {
-        assert_eq!(shell_quote("staging"), "'staging'");
+    fn shell_quote_leaves_safe_values_bare() {
+        // Safe values must emit unchanged so the hint works in both
+        // POSIX sh/bash and Windows cmd.exe — cmd.exe passes single
+        // quotes through literally, so `'staging'` would be treated
+        // as the literal value `'staging'`, not `staging`.
+        assert_eq!(shell_quote("staging"), "staging");
+        assert_eq!(shell_quote("NYXID_ACCESS_TOKEN"), "NYXID_ACCESS_TOKEN");
         assert_eq!(
             shell_quote("https://auth.nyxid.dev"),
-            "'https://auth.nyxid.dev'"
+            "https://auth.nyxid.dev"
         );
     }
 
     #[test]
-    fn shell_quote_escapes_embedded_single_quote() {
-        // POSIX idiom: close the quote, emit an escaped quote,
-        // reopen. Round-trips through sh/bash safely.
-        assert_eq!(shell_quote("weird'name"), "'weird'\\''name'");
+    fn shell_quote_wraps_unsafe_values_in_double_quotes() {
+        // Double-quote is the grouping quote both POSIX sh and
+        // cmd.exe understand. Single-quote wrapping would fail on
+        // cmd.exe; double-quote works cross-shell for tokens
+        // without `$` / `%`.
+        assert_eq!(shell_quote("weird name"), "\"weird name\"");
+        assert_eq!(shell_quote("a&b"), "\"a&b\"");
+        assert_eq!(shell_quote("a\"b"), "\"a\\\"b\"");
+        assert_eq!(shell_quote("a\\b"), "\"a\\\\b\"");
     }
 
     fn make_auth(
@@ -868,10 +927,13 @@ mod tests {
             "NYXID_ACCESS_TOKEN",
             crate::cli::OutputFormat::Table,
         );
+        // No quoting on values made of safe chars — see `shell_quote`
+        // for the cross-shell rationale (single-quotes would break
+        // Windows cmd.exe, which treats them as literal).
         assert_eq!(
             format_resume_command(&auth, "pair_abc"),
-            "nyxid pairing resume pair_abc --profile 'staging' \
-             --base-url 'https://auth.staging.nyxid.dev'"
+            "nyxid pairing resume pair_abc --profile staging \
+             --base-url https://auth.staging.nyxid.dev"
         );
     }
 
@@ -901,7 +963,7 @@ mod tests {
         );
         assert_eq!(
             format_resume_command(&auth, "pair_env"),
-            "nyxid pairing resume pair_env --access-token-env 'AGENT_BOT_TOKEN'"
+            "nyxid pairing resume pair_env --access-token-env AGENT_BOT_TOKEN"
         );
     }
 

@@ -64,10 +64,12 @@ pub struct AppState {
     /// Per-IP rate limiter for `POST /cli-pairings/claim`. Tighter than
     /// the global rate limiter (5 attempts per 60s per IP) so brute
     /// forcing the 8-char pairing code is infeasible even from a
-    /// compromised session. Keyed by remote IP — an attacker behind a
-    /// single NAT still gets rate-limited; mobile users who are behind
-    /// CGNAT may collide, but the floor is generous enough (1/12s avg)
-    /// that legitimate retypes aren't blocked.
+    /// compromised session. The key is the TCP peer IP by default;
+    /// deployments that configure `TRUSTED_PROXY_IPS` get per-real-
+    /// client keying by reading the forwarded headers from the listed
+    /// proxies. Mobile users behind CGNAT may collide, but the floor
+    /// is generous enough (1/12s avg) that legitimate retypes aren't
+    /// blocked.
     pub cli_pairing_claim_limiter: mw::rate_limit::SharedPerIpRateLimiter,
     /// Server-side HMAC key used to derive `CliPairing.code_hash`.
     /// Lives in process memory only (never persisted), so a MongoDB

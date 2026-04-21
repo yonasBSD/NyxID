@@ -306,6 +306,18 @@ SA_TOKEN_TTL_SECS=3600              # 1 hour (service account tokens)
 ENVIRONMENT=development
 RATE_LIMIT_PER_SECOND=10
 RATE_LIMIT_BURST=30
+TRUSTED_PROXY_IPS=                     # Comma-separated list of reverse-proxy IPs
+                                        # whose `X-Forwarded-For` / `X-Real-IP` may
+                                        # be trusted for per-IP rate-limit keying
+                                        # (CLI-pairing claim: 5/60s). Empty default
+                                        # means "trust only the TCP peer" — safe for
+                                        # direct-exposure deployments. Behind nginx /
+                                        # ALB / Fly.io, set this to the proxy IPs so
+                                        # each user gets their own bucket instead of
+                                        # colliding on a single proxy-wide bucket.
+                                        # ONLY list proxies you've configured to
+                                        # overwrite client-supplied forwarded
+                                        # headers. See docs/ENV.md.
 
 # CLI remote pairing (optional)
 CLI_PAIRING_HMAC_KEY=                   # 64 hex chars; keys `CliPairing.code_hash`
