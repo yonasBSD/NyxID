@@ -186,9 +186,49 @@ Running `nyxid service add <slug>` with no scripted flags on an interactive TTY 
 **Prefill flags** (safe to combine with the wizard -- they just seed the form):
 `--slug`, `--label`, `--via-node`, `--endpoint-url`.
 
+### Wizard transport selection: two predicates, two transports
+
+Before diving into the remote-pairing path below, it's worth making the layering explicit because the skill section above collapses two separate decisions. The wizard code (see `cli/src/wizard/mod.rs`) makes them as follows:
+
+1. **`is_browser_flow_eligible()`** — *"should we use the wizard path at all, vs. the scripted stdin-prompt path?"* Returns `true` when stdin is NOT a TTY (headless), or when both stdin and stdout are TTYs (interactive). Returns `false` only for `TTY stdin + piped stdout` (classic "user scripting output") and for `NYXID_NO_WIZARD=1`.
+
+2. **`is_wizard_eligible()`** — *"inside the wizard path, can we launch a browser on THIS machine?"* Returns `false` on SSH sessions (`SSH_CONNECTION` / `SSH_TTY` set), on Linux without `DISPLAY`/`WAYLAND_DISPLAY`, and with `NYXID_NO_WIZARD=1`.
+
+Inside each wizard runner the two predicates stack as:
+
+```rust
+if is_wizard_eligible() {
+    // Mode A: launch local axum wizard, `open::that(url)` the browser
+} else {
+    // Mode B: remote pairing — print code + pair URL, poll for ack
+}
+```
+
+`open::that()` is the standard Rust wrapper for `open` (macOS), `xdg-open` (Linux), and `start` (Windows) — the same mechanism Lark CLI uses. It means a non-TTY caller that still has a local GUI (macOS agent subprocess, GNOME terminal tab, Windows shell) lands on the **local wizard**, not remote pairing. Remote pairing is reserved for the cases where no local browser can open at all.
+
+Concrete examples of how the layering resolves:
+
+| Environment                                                        | `is_browser_flow_eligible` | `is_wizard_eligible` | Transport                              |
+|--------------------------------------------------------------------|:--------------------------:|:--------------------:|----------------------------------------|
+| macOS agent subprocess (no TTY)                                     | true                       | true                 | **Local wizard** via `open` (macOS)    |
+| Linux GUI agent subprocess with `DISPLAY`                           | true                       | true                 | **Local wizard** via `xdg-open`        |
+| Windows subprocess, no TTY                                          | true                       | true                 | **Local wizard** via `start`           |
+| SSH session (no X forwarding)                                       | true                       | false (SSH_CONNECTION) | **Remote pairing** (code + URL)       |
+| Linux CI container / Docker, no `DISPLAY`                           | true                       | false                | **Remote pairing**                     |
+| Interactive TTY on any OS                                           | true                       | true                 | **Local wizard**                       |
+| Interactive TTY with piped/redirected stdout (`> file`)            | false                      | —                    | Scripted stdin prompts                 |
+| `NYXID_NO_WIZARD=1`                                                 | false                      | —                    | Scripted stdin prompts                 |
+
+Guidance for integrators:
+
+- **Users on a GUI machine** (laptop, desktop) always get the local wizard, whether they invoked the CLI from an interactive terminal or from a launcher / IDE that captured stdio.
+- **Agents on the user's local machine** (Claude Code / Zed / Codex bash tools, VS Code terminal in an editor window) also get the local wizard — `open`/`xdg-open` opens the user's default browser.
+- **Truly remote or headless environments** (SSH from a phone, CI runners, Dockerfile builds, cloud sandboxes) get remote pairing so the user can complete the flow on a separate device.
+- To force a specific transport, set `NYXID_NO_WIZARD=1` for the scripted path, or pass `--no-wait` to always use remote pairing.
+
 ### When no local browser is available: remote pairing (wizard v4)
 
-Introduced in PR #438 / wizard v4. When the CLI can't launch a local browser (agent bash tool, SSH without X11, Docker container, no `DISPLAY`) — i.e. `is_wizard_eligible()` returns `false` — the wizard is NOT disabled. It transparently switches to a **remote pairing transport**: the CLI prints a short pairing code + a URL on `FRONTEND_URL/cli/pair`, the user opens that URL on any device with a browser (phone, laptop, desktop), logs in, enters the code, and completes the exact same wizard there. The CLI polls and picks up the typed ack. Secrets NEVER transit the CLI — only non-secret identifiers (`service_id`, `slug`, `label`).
+Introduced in PR #438 / wizard v4. When the CLI can't launch a local browser (SSH without X11, Docker container, no `DISPLAY` on Linux) — i.e. `is_wizard_eligible()` returns `false` — the wizard is NOT disabled. It transparently switches to a **remote pairing transport**: the CLI prints a short pairing code + a URL on `FRONTEND_URL/cli/pair`, the user opens that URL on any device with a browser (phone, laptop, desktop), logs in, enters the code, and completes the exact same wizard there. The CLI polls and picks up the typed ack. Secrets NEVER transit the CLI — only non-secret identifiers (`service_id`, `slug`, `label`).
 
 End-to-end for an agent:
 
@@ -555,9 +595,11 @@ Five commands now open a browser-based wizard for interactive use, so the secret
 
 All five commands automatically pick between two transports depending on environment, added in v4 (PR #438):
 
-- **Local** (Mode A, v2/v3 original): when a local browser is available, the CLI boots an axum server on `127.0.0.1:<random-port>`, opens the wizard SPA there, and the browser talks back through a narrow allowlist of proxied endpoints. Access tokens never hit the browser; 10-second heartbeat cancels on tab-close. CLI prints `→ Opening http://127.0.0.1:…/wizard …`.
+- **Mode A — Local wizard** (v2/v3 original): picked when `is_wizard_eligible()` returns `true`, i.e. the CLI can launch a local browser via `open::that()` (macOS `open`, Linux `xdg-open`, Windows `start`). The CLI boots an axum server on `127.0.0.1:<random-port>`, opens the wizard SPA there, and the browser talks back through a narrow allowlist of proxied endpoints. Access tokens never hit the browser; 10-second heartbeat cancels on tab-close. CLI prints `→ Opening http://127.0.0.1:…/wizard …`. This is the path taken **on any machine with a desktop environment**, including non-TTY agent subprocesses on macOS / Windows / Linux-with-DISPLAY — the subprocess not having a TTY doesn't prevent `open` / `xdg-open` / `start` from reaching the user's default browser.
 
-- **Remote pairing** (Mode B, v4 new): when no local browser is available — agent bash tool, SSH without display, Docker container, no `DISPLAY` — the CLI creates a short-lived server-side pairing record and prints a pair URL + 8-char Crockford code. The user opens the URL on ANY device with a browser (phone, desktop), logs in, enters the code, and completes the same wizard there. The CLI polls for the typed ack. Same visual experience, same DisplayOnce affordances; the only difference is the page is hosted on `FRONTEND_URL/cli/pair` instead of `127.0.0.1`.
+- **Mode B — Remote pairing** (v4 new): picked when `is_wizard_eligible()` returns `false`, which only happens on SSH sessions (`SSH_CONNECTION` / `SSH_TTY` set), Linux boxes without `DISPLAY`/`WAYLAND_DISPLAY` (CI runners, headless containers), or when `NYXID_NO_WIZARD=1` is set. The CLI creates a short-lived server-side pairing record and prints a pair URL + 8-char Crockford code on `FRONTEND_URL/cli/pair`. The user opens the URL on ANY device with a browser (phone, desktop), logs in, enters the code, and completes the same wizard there. The CLI polls for the typed ack. Same visual experience, same DisplayOnce affordances.
+
+The selection is automatic — callers don't need to pick. The only caller-facing knob is `--no-wait`, which forces Mode B regardless of `is_wizard_eligible()` because it's designed for agent wrappers that want a resumable handoff instead of blocking on a live wizard.
 
 Full specs: [`docs/CLI_WIZARD_V2.md`](../../docs/CLI_WIZARD_V2.md) (v2) + [`docs/CLI_WIZARD_V3.md`](../../docs/CLI_WIZARD_V3.md) (v3 / v3.1). v4's pairing transport lives under `/cli-pairings/*` backend endpoints and `/cli/pair` on the frontend.
 
