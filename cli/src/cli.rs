@@ -108,6 +108,18 @@ pub enum Commands {
         #[command(subcommand)]
         command: ExternalKeyCommands,
     },
+    /// Manage service accounts (machine-to-machine OAuth2 client-credentials identities)
+    #[command(name = "service-account")]
+    ServiceAccount {
+        #[command(subcommand)]
+        command: ServiceAccountCommands,
+    },
+    /// Manage developer OAuth applications (OIDC clients for downstream apps)
+    #[command(name = "developer-app")]
+    DeveloperApp {
+        #[command(subcommand)]
+        command: DeveloperAppCommands,
+    },
     /// Set up persistent AI skills for coding assistants
     AiSetup {
         #[command(subcommand)]
@@ -1752,6 +1764,184 @@ pub enum ExternalKeyCommands {
         /// Skip confirmation
         #[arg(long)]
         yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+// ---- Service Account (SUP-030) ----
+
+#[derive(Subcommand)]
+pub enum ServiceAccountCommands {
+    /// Create a service account (machine identity for `grant_type=client_credentials`)
+    Create {
+        /// Human-readable name for this service account
+        #[arg(long)]
+        name: String,
+        /// Space-separated OAuth scopes the SA may request (e.g. "openid profile")
+        #[arg(long)]
+        scopes: String,
+        /// Optional description
+        #[arg(long)]
+        description: Option<String>,
+        /// Override the default rate limit (tokens per second). Admin-only.
+        #[arg(long)]
+        rate_limit_override: Option<u64>,
+        /// Comma-separated role IDs to assign to this SA
+        #[arg(long)]
+        role_ids: Option<String>,
+        /// Create under the given org (you must be an admin of that org).
+        /// Omit to create a global SA (requires global admin).
+        #[arg(long, value_name = "ORG_ID")]
+        org: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// List service accounts
+    List {
+        /// Scope the listing to a single org (requires admin of that org).
+        /// Omit to list the global set (requires global admin).
+        #[arg(long, value_name = "ORG_ID")]
+        org: Option<String>,
+        /// Optional search filter (matches name / client_id)
+        #[arg(long)]
+        search: Option<String>,
+        /// Page number (1-based)
+        #[arg(long, default_value_t = 1)]
+        page: u64,
+        /// Results per page (max 100)
+        #[arg(long, default_value_t = 50)]
+        per_page: u64,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Show service account details
+    Show {
+        /// Service account ID
+        id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Update service account metadata
+    Update {
+        /// Service account ID
+        id: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long)]
+        scopes: Option<String>,
+        /// Comma-separated role IDs
+        #[arg(long)]
+        role_ids: Option<String>,
+        /// Enable (`true`) or disable (`false`) the service account
+        #[arg(long)]
+        is_active: Option<bool>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Delete a service account (soft-delete + token revocation)
+    Delete {
+        /// Service account ID
+        id: String,
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Rotate the service account's client secret (revokes existing tokens)
+    RotateSecret {
+        /// Service account ID
+        id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Revoke all active tokens for a service account
+    RevokeTokens {
+        /// Service account ID
+        id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+// ---- Developer App (SUP-030) ----
+
+#[derive(Subcommand)]
+pub enum DeveloperAppCommands {
+    /// Create a developer OAuth client (OIDC app for downstream integrations)
+    Create {
+        /// Display name for the OAuth client
+        #[arg(long)]
+        name: String,
+        /// Redirect URI. Repeat `--redirect-uri` to register multiple.
+        #[arg(long = "redirect-uri", value_name = "URI")]
+        redirect_uris: Vec<String>,
+        /// Client type: `public` or `confidential` (default: `public`)
+        #[arg(long)]
+        client_type: Option<String>,
+        /// Space-separated OIDC scopes this client may request
+        /// (e.g. "openid profile email")
+        #[arg(long)]
+        allowed_scopes: Option<String>,
+        /// Space-separated delegation scopes (empty string disables token exchange)
+        #[arg(long)]
+        delegation_scopes: Option<String>,
+        /// Create under the given org (you must be an admin of that org).
+        /// Omit to create a personal developer app.
+        #[arg(long, value_name = "ORG_ID")]
+        org: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// List developer OAuth clients
+    List {
+        /// Scope the listing to a single org (requires admin of that org).
+        /// Omit to list the caller's personal developer apps.
+        #[arg(long, value_name = "ORG_ID")]
+        org: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Show developer OAuth client details
+    Show {
+        /// OAuth client ID
+        id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Update developer OAuth client metadata
+    Update {
+        /// OAuth client ID
+        id: String,
+        #[arg(long)]
+        name: Option<String>,
+        /// Redirect URI. Repeat `--redirect-uri` to replace with multiple URIs.
+        #[arg(long = "redirect-uri", value_name = "URI")]
+        redirect_uris: Vec<String>,
+        /// Space-separated OIDC scopes. Empty string canonicalizes to "openid".
+        #[arg(long)]
+        allowed_scopes: Option<String>,
+        /// Space-separated delegation scopes (empty string disables token exchange)
+        #[arg(long)]
+        delegation_scopes: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Delete a developer OAuth client (soft-delete)
+    Delete {
+        /// OAuth client ID
+        id: String,
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Rotate a confidential client's secret
+    RotateSecret {
+        /// OAuth client ID
+        id: String,
         #[command(flatten)]
         auth: AuthArgs,
     },
