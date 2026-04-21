@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use base64::Engine;
 use dashmap::DashMap;
@@ -207,6 +207,44 @@ struct NodeConnection {
     ssh_exec_requests: Arc<DashMap<String, PendingSshExec>>,
     /// Pending and active WS proxy sessions keyed by session_id
     ws_proxies: Arc<DashMap<String, PendingWsProxy>>,
+    /// Pending `credential_update` / `credential_remove` acks keyed by
+    /// the `request_id` the backend assigned when the frame was sent.
+    /// Resolved by `handlers/node_ws::CredentialUpdateAck` when the
+    /// node echoes the `request_id` back. Enables strict delivery
+    /// semantics: callers that want to gate a DB commit on node-side
+    /// persistence await the oneshot with a timeout.
+    credential_acks: Arc<DashMap<String, oneshot::Sender<CredentialAckOutcome>>>,
+    /// Per-connection capability flags advertised by the node in its
+    /// `status_update` message. Strict ack-wait on credential pushes
+    /// only runs when the node has advertised
+    /// `credential_ack_correlation`; older agents that don't know
+    /// about the `request_id` echo fall back to fire-and-forget
+    /// delivery (twenty-seventh-round Codex P2). Arc so shallow
+    /// clones share writes after the deep auth handshake.
+    capabilities: Arc<std::sync::Mutex<NodeCapabilitiesFlags>>,
+    /// Set to `true` once the node has sent its first `status_update`
+    /// after the WS handshake — whether or not the frame carried a
+    /// `capabilities` field. Callers that need to know "has the
+    /// capability negotiation finished?" (e.g. strict credential
+    /// push) wait on this instead of checking the flag state
+    /// directly, avoiding a race where `PUT /keys` lands after auth
+    /// but before the first `status_update` arrives and wrongly
+    /// treats an upgraded agent as legacy
+    /// (twenty-ninth-round Codex P2).
+    capabilities_resolved: Arc<AtomicBool>,
+    /// Broadcasts capability resolution to anyone awaiting it. Paired
+    /// with `capabilities_resolved` so late waiters see the flag
+    /// immediately without having to block. Arc + `notify_waiters`
+    /// wakes every waiter on state transition.
+    capability_notify: Arc<tokio::sync::Notify>,
+}
+
+/// Negotiated capability flags. Default is "legacy agent": every
+/// feature disabled, preserving pre-migration behavior for nodes that
+/// haven't been upgraded yet.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NodeCapabilitiesFlags {
+    pub credential_ack_correlation: bool,
 }
 
 /// In-memory WebSocket connection manager for credential nodes.
@@ -546,11 +584,17 @@ pub struct WsWebTerminalClosedMsg {
     pub error: Option<String>,
 }
 
-/// JSON message for pushing a credential update to a node.
+/// JSON message for pushing a credential update to a node. Includes an
+/// optional `request_id` used by callers that want to await a node-
+/// side `credential_update_ack` before treating the push as confirmed
+/// (see `send_credential_update_and_wait`). Older node agents ignore
+/// the field; newer ones echo it back in the ack.
 #[derive(Debug, Serialize)]
 struct WsCredentialUpdate {
     #[serde(rename = "type")]
     msg_type: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_id: Option<String>,
     service_slug: String,
     injection_method: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -563,6 +607,46 @@ struct WsCredentialUpdate {
     param_value: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     target_url: Option<String>,
+}
+
+/// JSON message instructing a node to drop its local credential for a
+/// given service slug. Sent when a `UserService` is reassigned from one
+/// node to another so the prior node stops holding the secret. Includes
+/// an optional `request_id` for ack-wait correlation.
+#[derive(Debug, Serialize)]
+struct WsCredentialRemove {
+    #[serde(rename = "type")]
+    msg_type: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_id: Option<String>,
+    service_slug: String,
+}
+
+/// Outcome of a `credential_update` / `credential_remove` ack from a
+/// node agent. `Ok` means the node persisted the change; `Err` carries
+/// the node's error message.
+#[derive(Debug, Clone)]
+pub enum CredentialAckOutcome {
+    Ok,
+    Err(String),
+}
+
+/// Capability flags advertised by a node agent in its `status_update`
+/// message. The backend uses these to decide whether to enable
+/// features that require node-side cooperation (e.g., `request_id`
+/// echo on credential acks). Old agents omit the `capabilities` field
+/// entirely; deserialisation sees `None`, so every flag defaults to
+/// `false` and the backend falls back to legacy behavior (twenty-
+/// seventh-round Codex P2).
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct NodeCapabilitiesMsg {
+    /// Node echoes the `request_id` from a `credential_update` /
+    /// `credential_remove` frame back in the resulting
+    /// `credential_update_ack`. Required for strict ack-wait on the
+    /// `PUT /keys` push path; when absent, the backend falls back to
+    /// fire-and-forget delivery.
+    #[serde(default)]
+    pub credential_ack_correlation: bool,
 }
 
 /// Parameters for pushing a credential update to a node.
@@ -759,6 +843,10 @@ impl NodeWsManager {
                 web_terminals,
                 ssh_exec_requests,
                 ws_proxies,
+                credential_acks: Arc::new(DashMap::new()),
+                capabilities: Arc::new(std::sync::Mutex::new(NodeCapabilitiesFlags::default())),
+                capabilities_resolved: Arc::new(AtomicBool::new(false)),
+                capability_notify: Arc::new(tokio::sync::Notify::new()),
             },
         );
 
@@ -774,6 +862,14 @@ impl NodeWsManager {
             conn.web_terminals.clear();
             conn.ssh_exec_requests.clear();
             conn.ws_proxies.clear();
+            // Drop pending credential-ack waiters so any in-flight
+            // `send_credential_update_and_wait` / `_remove_and_wait`
+            // fails immediately with RecvError (→ our NodeOffline
+            // branch) instead of blocking for the full 10-second
+            // timeout (twenty-sixth-round Codex P3). Clearing the map
+            // drops the `oneshot::Sender`s, which closes the
+            // receivers.
+            conn.credential_acks.clear();
         }
     }
 
@@ -787,6 +883,7 @@ impl NodeWsManager {
             conn.web_terminals.clear();
             conn.ssh_exec_requests.clear();
             conn.ws_proxies.clear();
+            conn.credential_acks.clear();
             let close_msg = NodeOutboundMessage::Close {
                 code,
                 reason: reason.to_string(),
@@ -1099,6 +1196,7 @@ impl NodeWsManager {
 
         let msg = WsCredentialUpdate {
             msg_type: "credential_update",
+            request_id: None,
             service_slug: params.service_slug.clone(),
             injection_method: params.injection_method.clone(),
             header_name: params.header_name.clone(),
@@ -1125,6 +1223,280 @@ impl NodeWsManager {
         );
 
         Ok(())
+    }
+
+    /// Send a `credential_remove` frame to the node so it drops any
+    /// locally-stored credential + target_url for the given service
+    /// slug. Used when a `UserService`'s `node_id` changes so the prior
+    /// node stops holding the secret.
+    pub fn send_credential_remove(&self, node_id: &str, service_slug: &str) -> AppResult<()> {
+        let conn = self
+            .connections
+            .get(node_id)
+            .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
+
+        let msg = WsCredentialRemove {
+            msg_type: "credential_remove",
+            request_id: None,
+            service_slug: service_slug.to_string(),
+        };
+        let json = serde_json::to_string(&msg).map_err(|e| {
+            AppError::Internal(format!("Failed to serialize credential_remove: {e}"))
+        })?;
+
+        conn.tx
+            .try_send(NodeOutboundMessage::Text(json))
+            .map_err(|_| {
+                AppError::NodeOffline(format!("Node {node_id} connection closed or buffer full"))
+            })?;
+
+        tracing::info!(
+            node_id = %node_id,
+            service_slug = %service_slug,
+            "Sent credential_remove to node"
+        );
+
+        Ok(())
+    }
+
+    /// Strict-wait variant of `send_credential_update`: generates a
+    /// `request_id`, registers a pending oneshot waiter, sends the
+    /// frame, then awaits the node's `credential_update_ack` with a
+    /// timeout. Returns `Ok(())` only when the node acknowledged a
+    /// successful apply. Timeout or negative ack returns an error so
+    /// the caller can abort the surrounding transaction. Callers that
+    /// don't need strict semantics keep using `send_credential_update`.
+    pub async fn send_credential_update_and_wait(
+        &self,
+        node_id: &str,
+        params: &CredentialUpdateParams,
+        timeout: std::time::Duration,
+    ) -> AppResult<()> {
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let (tx_ack, rx_ack) = oneshot::channel::<CredentialAckOutcome>();
+        let conn = self
+            .connections
+            .get(node_id)
+            .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
+        conn.credential_acks.insert(request_id.clone(), tx_ack);
+
+        let msg = WsCredentialUpdate {
+            msg_type: "credential_update",
+            request_id: Some(request_id.clone()),
+            service_slug: params.service_slug.clone(),
+            injection_method: params.injection_method.clone(),
+            header_name: params.header_name.clone(),
+            header_value: params.header_value.clone(),
+            param_name: params.param_name.clone(),
+            param_value: params.param_value.clone(),
+            target_url: params.target_url.clone(),
+        };
+        let json = serde_json::to_string(&msg).map_err(|e| {
+            conn.credential_acks.remove(&request_id);
+            AppError::Internal(format!("Failed to serialize credential_update: {e}"))
+        })?;
+        if conn.tx.try_send(NodeOutboundMessage::Text(json)).is_err() {
+            conn.credential_acks.remove(&request_id);
+            return Err(AppError::NodeOffline(format!(
+                "Node {node_id} connection closed or buffer full"
+            )));
+        }
+        let acks_ref = conn.credential_acks.clone();
+        drop(conn); // release DashMap ref before awaiting
+
+        match tokio::time::timeout(timeout, rx_ack).await {
+            Ok(Ok(CredentialAckOutcome::Ok)) => Ok(()),
+            Ok(Ok(CredentialAckOutcome::Err(msg))) => {
+                // A negative ack means the node's keyring / local
+                // config write failed — the request body was already
+                // validated, so surfacing this as 400 would mislead
+                // callers into treating it as a client-side error
+                // and could stop automation from retrying. Map to
+                // `NodeOffline` so it lands in the node-failure class
+                // (5xx-shaped) alongside disconnect / timeout
+                // outcomes (thirty-first-round Codex P2).
+                Err(AppError::NodeOffline(format!(
+                    "Node rejected credential update: {msg}"
+                )))
+            }
+            Ok(Err(_)) => {
+                acks_ref.remove(&request_id);
+                Err(AppError::NodeOffline(format!(
+                    "Node {node_id} dropped before acknowledging credential update"
+                )))
+            }
+            Err(_) => {
+                acks_ref.remove(&request_id);
+                // Timeout with no matching ack. Return an error so the
+                // caller (the `PUT /keys` handler) aborts before
+                // committing routing/auth mutations. This is the
+                // correct safety property: without a confirmed apply,
+                // committing the DB side leaves server and node out of
+                // sync (twenty-fifth-round Codex P1 walks back the
+                // earlier best-effort fallback). CLIs that predate the
+                // `request_id` echo need to be upgraded in lockstep —
+                // users who hit the timeout see a clear error instead
+                // of a silent broken service.
+                Err(AppError::NodeOffline(format!(
+                    "Timed out waiting for credential_update_ack from node {node_id}"
+                )))
+            }
+        }
+    }
+
+    /// Strict-wait variant of `send_credential_remove`. Same semantics
+    /// as `send_credential_update_and_wait`: returns `Ok(())` only after
+    /// the node's `credential_update_ack` echoes back with status=ok.
+    pub async fn send_credential_remove_and_wait(
+        &self,
+        node_id: &str,
+        service_slug: &str,
+        timeout: std::time::Duration,
+    ) -> AppResult<()> {
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let (tx_ack, rx_ack) = oneshot::channel::<CredentialAckOutcome>();
+        let conn = self
+            .connections
+            .get(node_id)
+            .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
+        conn.credential_acks.insert(request_id.clone(), tx_ack);
+
+        let msg = WsCredentialRemove {
+            msg_type: "credential_remove",
+            request_id: Some(request_id.clone()),
+            service_slug: service_slug.to_string(),
+        };
+        let json = serde_json::to_string(&msg).map_err(|e| {
+            conn.credential_acks.remove(&request_id);
+            AppError::Internal(format!("Failed to serialize credential_remove: {e}"))
+        })?;
+        if conn.tx.try_send(NodeOutboundMessage::Text(json)).is_err() {
+            conn.credential_acks.remove(&request_id);
+            return Err(AppError::NodeOffline(format!(
+                "Node {node_id} connection closed or buffer full"
+            )));
+        }
+        let acks_ref = conn.credential_acks.clone();
+        drop(conn);
+
+        match tokio::time::timeout(timeout, rx_ack).await {
+            Ok(Ok(CredentialAckOutcome::Ok)) => Ok(()),
+            Ok(Ok(CredentialAckOutcome::Err(msg))) => Err(AppError::NodeOffline(format!(
+                "Node rejected credential remove: {msg}"
+            ))),
+            Ok(Err(_)) => {
+                acks_ref.remove(&request_id);
+                Err(AppError::NodeOffline(format!(
+                    "Node {node_id} dropped before acknowledging credential remove"
+                )))
+            }
+            Err(_) => {
+                acks_ref.remove(&request_id);
+                // Timeout with no matching ack. Return an error so the
+                // caller (the `PUT /keys` handler) aborts before
+                // committing routing/auth mutations. This is the
+                // correct safety property: without a confirmed apply,
+                // committing the DB side leaves server and node out of
+                // sync (twenty-fifth-round Codex P1 walks back the
+                // earlier best-effort fallback). CLIs that predate the
+                // `request_id` echo need to be upgraded in lockstep —
+                // users who hit the timeout see a clear error instead
+                // of a silent broken service.
+                Err(AppError::NodeOffline(format!(
+                    "Timed out waiting for credential_update_ack from node {node_id}"
+                )))
+            }
+        }
+    }
+
+    /// Record the capabilities advertised by a node in its
+    /// `status_update` message. Called by the WS reader task on each
+    /// status_update; stays a no-op for nodes that omit the field
+    /// (old agents → `None`).
+    pub fn record_capabilities(&self, node_id: &str, caps: &NodeCapabilitiesMsg) {
+        if let Some(conn) = self.connections.get(node_id)
+            && let Ok(mut flags) = conn.capabilities.lock()
+        {
+            flags.credential_ack_correlation = caps.credential_ack_correlation;
+        }
+    }
+
+    /// Mark that the node has sent *some* `status_update` — with or
+    /// without a `capabilities` field — so strict-push waiters know the
+    /// capability state for this connection is now final. Also wakes
+    /// any futures blocked on `await_capability_resolution`. Called by
+    /// the WS reader task on every `status_update`, so legacy agents
+    /// that ship a status_update without capabilities still release
+    /// waiters and fall through to the fire-and-forget branch
+    /// immediately (twenty-ninth-round Codex P2).
+    pub fn mark_status_update_received(&self, node_id: &str) {
+        if let Some(conn) = self.connections.get(node_id) {
+            let was_unresolved = !conn.capabilities_resolved.swap(true, Ordering::AcqRel);
+            if was_unresolved {
+                conn.capability_notify.notify_waiters();
+            }
+        }
+    }
+
+    /// Await the first `status_update` for this connection, up to
+    /// `timeout`. Returns immediately if capabilities have already
+    /// been resolved (including negative — old agent advertised no
+    /// capabilities) or if the node is not connected. Used by
+    /// `push_credential_to_node_strict` to avoid the reconnect race
+    /// where a `PUT /keys` lands in the short window after auth but
+    /// before the node's first `status_update`, which would otherwise
+    /// wrongly downgrade an upgraded agent to fire-and-forget
+    /// delivery (twenty-ninth-round Codex P2).
+    pub async fn await_capability_resolution(&self, node_id: &str, timeout: std::time::Duration) {
+        let (resolved, notify) = {
+            let Some(conn) = self.connections.get(node_id) else {
+                return;
+            };
+            (
+                conn.capabilities_resolved.clone(),
+                conn.capability_notify.clone(),
+            )
+        };
+        if resolved.load(Ordering::Acquire) {
+            return;
+        }
+        let notified = notify.notified();
+        if resolved.load(Ordering::Acquire) {
+            return;
+        }
+        let _ = tokio::time::timeout(timeout, notified).await;
+    }
+
+    /// Whether the connected node has advertised support for
+    /// `request_id`-correlated `credential_update_ack` messages. Used
+    /// by the strict-push caller to decide whether to await an ack or
+    /// fall back to fire-and-forget.
+    pub fn supports_credential_ack_correlation(&self, node_id: &str) -> bool {
+        self.connections
+            .get(node_id)
+            .and_then(|conn| {
+                conn.capabilities
+                    .lock()
+                    .ok()
+                    .map(|f| f.credential_ack_correlation)
+            })
+            .unwrap_or(false)
+    }
+
+    /// Deliver a node's `credential_update_ack` to the pending waiter.
+    /// Called by the WS reader task when a `credential_update_ack`
+    /// arrives with a recognized `request_id`.
+    pub fn deliver_credential_ack(
+        &self,
+        node_id: &str,
+        request_id: &str,
+        outcome: CredentialAckOutcome,
+    ) {
+        if let Some(conn) = self.connections.get(node_id)
+            && let Some((_, sender)) = conn.credential_acks.remove(request_id)
+        {
+            let _ = sender.send(outcome);
+        }
     }
 
     /// Get the IDs of all currently connected nodes.
