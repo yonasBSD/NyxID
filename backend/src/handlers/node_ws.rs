@@ -161,6 +161,7 @@ fn handle_proxy_response_chunk(
             "invalid_base64_payload",
             502,
             false,
+            None,
         );
     }
 }
@@ -496,6 +497,7 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
                         "invalid_base64_payload",
                         502,
                         false,
+                        None,
                     );
                     continue;
                 };
@@ -528,6 +530,7 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
                     &err.error,
                     status,
                     err.retryable,
+                    err.reason.as_deref(),
                 );
             }
             NodeMessage::ProxyResponseStart(start) => {

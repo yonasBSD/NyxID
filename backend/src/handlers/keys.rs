@@ -1016,6 +1016,58 @@ pub async fn update_key(
         .await?;
     }
 
+    // Same-node downgrade to `auth_method: "none"` is pushed BEFORE
+    // any endpoint/service mutations so the PUT stays atomic: if the
+    // node rejects the no-auth placeholder (offline, ack timeout,
+    // legacy agent without `credential_ack_correlation`), we abort
+    // with no partial commit and the old secret keeps working until
+    // the user retries — instead of the previous best-effort ordering
+    // where a failed push left the DB saying "none" while the node
+    // kept injecting the old bearer token (PR #437 review).
+    //
+    // `effective_endpoint_url_for_push` is the same body-preferred
+    // value used by the strict credential push above: it reads
+    // `body.endpoint_url` first and only falls back to
+    // `view.endpoint_url` when the caller didn't touch it, fixing the
+    // stale-URL bug where a combined `{auth_method: "none",
+    // endpoint_url: "<new>"}` used to push the old view URL (PR #437
+    // review).
+    let auth_downgraded_to_none =
+        body.auth_method.as_deref() == Some("none") && view.auth_method != "none";
+    let stays_on_same_node = {
+        let new_effective = match body.node_id.as_deref() {
+            Some("") => None,
+            Some(n) => Some(n),
+            None => view.node_id.as_deref().filter(|n| !n.is_empty()),
+        };
+        let old_effective = view.node_id.as_deref().filter(|n| !n.is_empty());
+        old_effective.is_some() && old_effective == new_effective
+    };
+    if auth_downgraded_to_none
+        && stays_on_same_node
+        && let Some(current_nid) = view.node_id.as_deref().filter(|n| !n.is_empty())
+    {
+        // Mirror the strict credential push's target-URL semantics
+        // exactly:
+        //   * `Some("new-url")` from body → Some("new-url")
+        //   * `Some("")`       from body → Some("")  (explicit clear)
+        //   * body omitted, view has URL → Some(view.url) (reassert)
+        //   * body omitted, view empty   → None (preserve node's local
+        //     config, since same-node)
+        // Previously this only read `view.endpoint_url`, so a combined
+        // `{auth_method: "none", endpoint_url: "<new>"}` pushed the
+        // stale URL and left the node disagreeing with the DB — the
+        // stale-URL bug flagged in the PR #437 review.
+        let target_url_for_no_auth = effective_endpoint_url_for_push.as_deref();
+        credential_push_service::push_no_auth_to_node_strict(
+            &state.node_ws_manager,
+            current_nid,
+            view.slug.as_str(),
+            target_url_for_no_auth,
+        )
+        .await?;
+    }
+
     // Deferred label write. See the matching note at the top of the
     // handler: committing the label up front would break the atomic
     // semantics we now guarantee for node-routed credential updates —
@@ -1267,51 +1319,12 @@ pub async fn update_key(
         }
     }
 
-    // When the service stays on the same node but `auth_method` is
-    // downgraded to `"none"`, the node still has the credential in
-    // its local `CredentialStore` from the prior state and will keep
-    // injecting it on every proxy call — even though the server now
-    // says the service is no-auth. `should_push` already skips the
-    // push for `auth_method == "none"`, which is correct for *sending*
-    // fresh secrets but leaves stale ones behind.
-    //
-    // Push a no-auth placeholder to the node: it drops the stored
-    // secret but keeps the slug entry + `target_url` so
-    // `proxy_executor` can still resolve the downstream. A raw
-    // `credential_remove` would make the executor 502 with
-    // "No credentials configured" on the next call
-    // (thirty-third-round Codex P1). Legacy agents without no-auth
-    // support get a warning log with the manual cleanup hint.
-    // Best-effort: the DB mutation has already committed, so we
-    // don't fail the PUT here.
-    let auth_downgraded_to_none =
-        body.auth_method.as_deref() == Some("none") && view.auth_method != "none";
-    let stays_on_same_node = {
-        let new_effective = match body.node_id.as_deref() {
-            Some("") => None,
-            Some(n) => Some(n),
-            None => view.node_id.as_deref().filter(|n| !n.is_empty()),
-        };
-        let old_effective = view.node_id.as_deref().filter(|n| !n.is_empty());
-        old_effective.is_some() && old_effective == new_effective
-    };
-    if auth_downgraded_to_none
-        && stays_on_same_node
-        && let Some(current_nid) = view.node_id.as_deref().filter(|n| !n.is_empty())
-    {
-        let target_url_for_no_auth = if view.endpoint_url.is_empty() {
-            None
-        } else {
-            Some(view.endpoint_url.as_str())
-        };
-        credential_push_service::push_no_auth_to_node(
-            &state.node_ws_manager,
-            current_nid,
-            view.slug.as_str(),
-            target_url_for_no_auth,
-        )
-        .await;
-    }
+    // The same-node `auth_method: "none"` downgrade used to push a
+    // no-auth placeholder here, post-commit and best-effort. That
+    // block has moved up to run BEFORE any DB mutations (next to
+    // `push_credential_to_node_strict`) so a failed node push leaves
+    // the service untouched and the PUT is retry-idempotent (see
+    // comment at the strict push site for the full rationale).
 
     // Return refreshed view
     let updated = unified_key_service::get_key(&state.db, &user_id_str, &key_id).await?;

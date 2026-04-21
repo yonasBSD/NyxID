@@ -85,7 +85,16 @@ pub enum WebTerminalChunk {
 
 pub(crate) enum NodeProxyOutcome {
     Response(ProxyResponseType),
-    RetryableFailure(String),
+    RetryableFailure {
+        message: String,
+        /// Machine-readable classifier echoed from the node's
+        /// `proxy_error.reason` field. Lets the backend distinguish
+        /// "node is up but can't complete the request" (e.g.
+        /// `credential_missing`) from "node is genuinely offline".
+        /// `None` means the node didn't advertise a reason (older
+        /// agents) or the failure originated on the backend.
+        reason: Option<String>,
+    },
 }
 
 /// A pending proxy request that may receive a single response or a stream.
@@ -458,6 +467,11 @@ pub struct WsProxyErrorMsg {
     pub status: Option<u16>,
     #[serde(default)]
     pub retryable: bool,
+    /// Optional machine-readable classifier (e.g. `"credential_missing"`).
+    /// Older node agents omit this field; the backend falls back to
+    /// the generic `NodeOffline` path in that case.
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// JSON proxy_response_start from node (streaming).
@@ -658,6 +672,23 @@ pub struct CredentialUpdateParams {
     pub param_name: Option<String>,
     pub param_value: Option<String>,
     pub target_url: Option<String>,
+}
+
+/// Map a retryable proxy failure from a node into the appropriate
+/// [`AppError`] variant. A `reason` of `"credential_missing"` means the
+/// node itself is reachable and functioning, but doesn't have a local
+/// credential for the requested slug — a misconfiguration on the node,
+/// not a transient outage. Surfacing that as `NodeCredentialMissing`
+/// (HTTP 502 / code 8004) lets clients tell it apart from
+/// `NodeOffline` (HTTP 503 / code 8001), which is what issue #418 asks
+/// for. Every other reason (or `None` from older agents) still lands
+/// in the generic `NodeOffline` bucket so fallback/retry behavior is
+/// unchanged.
+pub(crate) fn map_retryable_node_failure(message: String, reason: Option<&str>) -> AppError {
+    match reason {
+        Some("credential_missing") => AppError::NodeCredentialMissing(message),
+        _ => AppError::NodeOffline(message),
+    }
 }
 
 /// Compute HMAC-SHA256 signature for a proxy request.
@@ -1008,8 +1039,8 @@ impl NodeWsManager {
         let timeout = std::time::Duration::from_secs(self.proxy_timeout_secs);
         match tokio::time::timeout(timeout, resp_rx).await {
             Ok(Ok(NodeProxyOutcome::Response(response))) => Ok(response),
-            Ok(Ok(NodeProxyOutcome::RetryableFailure(message))) => {
-                Err(AppError::NodeOffline(message))
+            Ok(Ok(NodeProxyOutcome::RetryableFailure { message, reason })) => {
+                Err(map_retryable_node_failure(message, reason.as_deref()))
             }
             Ok(Err(_)) => Err(AppError::NodeOffline(format!(
                 "Node {node_id} disconnected during request"
@@ -1551,6 +1582,12 @@ impl NodeWsManager {
     }
 
     /// Deliver a proxy error from a node. Called by the WS reader task.
+    ///
+    /// `reason` carries the optional machine-readable classifier from
+    /// the node's `proxy_error.reason` field (e.g. `credential_missing`).
+    /// It's propagated through [`NodeProxyOutcome::RetryableFailure`] so
+    /// callers can distinguish specific failure classes from the generic
+    /// "node offline" bucket.
     pub fn deliver_proxy_error(
         &self,
         node_id: &str,
@@ -1558,6 +1595,7 @@ impl NodeWsManager {
         error: &str,
         status: u16,
         retryable: bool,
+        reason: Option<&str>,
     ) {
         if let Some(conn) = self.connections.get(node_id)
             && let Some((_, pending)) = conn.pending.remove(request_id)
@@ -1565,7 +1603,10 @@ impl NodeWsManager {
             match pending {
                 PendingRequest::Awaiting(sender) => {
                     let outcome = if retryable {
-                        NodeProxyOutcome::RetryableFailure(error.to_string())
+                        NodeProxyOutcome::RetryableFailure {
+                            message: error.to_string(),
+                            reason: reason.map(str::to_string),
+                        }
                     } else {
                         NodeProxyOutcome::Response(ProxyResponseType::Complete(NodeProxyResponse {
                             request_id: request_id.to_string(),
@@ -2750,7 +2791,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retryable_proxy_error_is_returned_as_node_offline() {
+    async fn retryable_proxy_error_without_reason_is_returned_as_node_offline() {
         let mgr = Arc::new(NodeWsManager::new(30, 100));
         let (tx, mut rx) = mpsc::channel(256);
         mgr.register_connection("node-1", tx);
@@ -2766,9 +2807,10 @@ mod tests {
             mgr_clone.deliver_proxy_error(
                 "node-1",
                 request_id,
-                "No credentials configured for service 'demo'",
+                "Transient downstream failure",
                 502,
                 true,
+                None,
             );
         });
 
@@ -2797,6 +2839,61 @@ mod tests {
         assert!(matches!(
             err,
             AppError::NodeOffline(message)
+                if message.contains("Transient downstream failure")
+        ));
+
+        responder.await.expect("responder task");
+    }
+
+    #[tokio::test]
+    async fn retryable_proxy_error_with_credential_missing_reason_maps_to_credential_missing() {
+        let mgr = Arc::new(NodeWsManager::new(30, 100));
+        let (tx, mut rx) = mpsc::channel(256);
+        mgr.register_connection("node-1", tx);
+
+        let mgr_clone = mgr.clone();
+        let responder = tokio::spawn(async move {
+            let Some(NodeOutboundMessage::Text(msg)) = rx.recv().await else {
+                panic!("expected outbound proxy request");
+            };
+            let parsed: Value = serde_json::from_str(&msg).expect("valid json");
+            let request_id = parsed["request_id"].as_str().expect("request id");
+
+            mgr_clone.deliver_proxy_error(
+                "node-1",
+                request_id,
+                "No credentials configured for service 'demo'",
+                502,
+                true,
+                Some("credential_missing"),
+            );
+        });
+
+        let err = match mgr
+            .send_proxy_request(
+                "node-1",
+                NodeProxyRequest {
+                    request_id: "req-cred-missing".to_string(),
+                    service_id: "svc-1".to_string(),
+                    service_slug: "demo".to_string(),
+                    base_url: "https://api.example.com".to_string(),
+                    method: "GET".to_string(),
+                    path: "/models".to_string(),
+                    query: None,
+                    headers: vec![],
+                    body: None,
+                },
+                None,
+            )
+            .await
+        {
+            Ok(_) => panic!("credential_missing proxy error should surface as credential missing"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(
+            err,
+            AppError::NodeCredentialMissing(message)
                 if message.contains("No credentials configured for service 'demo'")
         ));
 

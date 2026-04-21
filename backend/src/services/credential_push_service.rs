@@ -404,20 +404,28 @@ pub async fn push_credential_to_node_strict(
     Ok(())
 }
 
-/// Push a `"no-auth"` placeholder to the node: preserves (or sets) the
-/// slug's `target_url` but drops any stored secret, leaving
-/// `proxy_executor` able to resolve the downstream without the "No
-/// credentials configured" 502 that a raw `credential_remove` produces.
-/// Used when `PUT /keys` downgrades `auth_method` to `"none"` on a
-/// same-node routed service (thirty-third-round Codex P1). Best-effort
-/// delivery: logs failures instead of aborting, since the DB
-/// mutation has already committed by the time this is called.
-pub async fn push_no_auth_to_node(
+/// Strict variant of `push_no_auth_to_node`: returns an error if the
+/// node rejects the placeholder or never acknowledges it. Used by
+/// `PUT /keys` to keep the `auth_method: "none"` downgrade atomic —
+/// the caller runs this BEFORE any `UserService` / `UserEndpoint`
+/// mutations land so a failed push leaves server state untouched and
+/// the client can retry (fixes the non-atomic gap flagged in the
+/// PR #437 review).
+///
+/// Legacy agents that don't advertise `credential_ack_correlation`
+/// can't participate in the ack protocol and also don't understand the
+/// `injection_method: "none"` placeholder. Rather than silently
+/// accept the downgrade and leave the old secret live on the node,
+/// this function refuses the downgrade with `NodeCredentialMissing`
+/// so the caller surfaces a clear, actionable error. Operators who
+/// really need the downgrade can upgrade the agent or manually run
+/// `nyxid node credentials remove` first.
+pub async fn push_no_auth_to_node_strict(
     node_ws_manager: &Arc<NodeWsManager>,
     node_id: &str,
     service_slug: &str,
     target_url: Option<&str>,
-) {
+) -> AppResult<()> {
     let params = CredentialUpdateParams {
         service_slug: service_slug.to_string(),
         injection_method: "none".to_string(),
@@ -428,32 +436,45 @@ pub async fn push_no_auth_to_node(
         target_url: target_url.map(str::to_string),
     };
 
+    // Short-circuit on a disconnected node so the caller sees a
+    // retryable `NodeOffline` (503 / 8001) instead of the
+    // "legacy agent" `BadRequest` below —
+    // `supports_credential_ack_correlation` returns `false` in both
+    // cases, so without this guard an offline node was being told to
+    // "upgrade the agent" even though retrying when it reconnects is
+    // the right move.
+    if !node_ws_manager.is_connected(node_id) {
+        return Err(AppError::NodeOffline(format!(
+            "Node {node_id} is not connected; cannot downgrade service '{service_slug}' to no-auth \
+             without first clearing the credential on the node."
+        )));
+    }
+
     node_ws_manager
         .await_capability_resolution(node_id, std::time::Duration::from_millis(500))
         .await;
 
+    // Re-check connection after the capability wait: the node may
+    // have dropped while we awaited. Same reasoning as above —
+    // surface `NodeOffline` for a retryable outage, not the
+    // legacy-agent `BadRequest`.
+    if !node_ws_manager.is_connected(node_id) {
+        return Err(AppError::NodeOffline(format!(
+            "Node {node_id} disconnected before no-auth placeholder could be pushed"
+        )));
+    }
+
     if node_ws_manager.supports_credential_ack_correlation(node_id) {
-        if let Err(e) = node_ws_manager
+        node_ws_manager
             .send_credential_update_and_wait(node_id, &params, std::time::Duration::from_secs(10))
             .await
-        {
-            tracing::warn!(
-                node_id = %node_id,
-                service_slug = %service_slug,
-                error = %e,
-                "no-auth placeholder push did not ack cleanly — node may keep injecting the old secret. Run `nyxid node credentials remove` on the node to clean up"
-            );
-        }
     } else {
-        // Legacy agent: no ack correlation and no no-auth handling
-        // either. Best we can do is log an operator hint; the old
-        // secret remains in the local config until manually removed.
-        tracing::warn!(
-            node_id = %node_id,
-            service_slug = %service_slug,
-            "auth_method downgraded to none but the node is a legacy agent without no-auth placeholder support — it will keep injecting the old secret. Run `nyxid node credentials remove {}` on that node to clean up, then upgrade the node agent",
-            service_slug
-        );
+        Err(AppError::BadRequest(format!(
+            "Cannot downgrade service '{service_slug}' to no-auth: node '{node_id}' is a legacy \
+             agent without credential_ack_correlation support and would keep injecting the old \
+             secret. Upgrade the node agent or run `nyxid node credentials remove {service_slug}` \
+             on that node first."
+        )))
     }
 }
 
@@ -622,4 +643,121 @@ async fn decrypt_api_key_credential(
     };
 
     String::from_utf8(decrypted_bytes).ok()
+}
+
+#[cfg(test)]
+mod no_auth_strict_push_tests {
+    use super::*;
+    use crate::services::node_ws_manager::{
+        CredentialAckOutcome, NodeCapabilitiesMsg, NodeOutboundMessage,
+    };
+    use serde_json::Value;
+    use tokio::sync::mpsc;
+
+    /// Simulate a connected node that has advertised
+    /// `credential_ack_correlation` (the modern agent) and acks any
+    /// `credential_update` with Ok. Returns both the manager (wrapped
+    /// in Arc for the caller) and the rx half so tests can inspect the
+    /// frame that was sent.
+    fn spawn_modern_agent() -> (
+        Arc<NodeWsManager>,
+        mpsc::Receiver<NodeOutboundMessage>,
+        &'static str,
+    ) {
+        let mgr = Arc::new(NodeWsManager::new(30, 100));
+        let (tx, rx) = mpsc::channel(256);
+        mgr.register_connection("node-1", tx);
+        mgr.record_capabilities(
+            "node-1",
+            &NodeCapabilitiesMsg {
+                credential_ack_correlation: true,
+            },
+        );
+        mgr.mark_status_update_received("node-1");
+        (mgr, rx, "node-1")
+    }
+
+    #[tokio::test]
+    async fn strict_no_auth_push_sends_none_injection_and_awaits_ack() {
+        let (mgr, mut rx, node_id) = spawn_modern_agent();
+
+        let mgr_for_responder = mgr.clone();
+        let ack_task = tokio::spawn(async move {
+            let Some(NodeOutboundMessage::Text(msg)) = rx.recv().await else {
+                panic!("expected credential_update frame");
+            };
+            let parsed: Value = serde_json::from_str(&msg).expect("valid json");
+            assert_eq!(parsed["type"], "credential_update");
+            assert_eq!(parsed["service_slug"], "demo");
+            assert_eq!(parsed["injection_method"], "none");
+            assert_eq!(parsed["target_url"], "https://new.example.com");
+            // header/param fields MUST be absent so a legacy path
+            // that mishandles them never sees a stale secret.
+            assert!(parsed.get("header_name").is_none());
+            assert!(parsed.get("header_value").is_none());
+            assert!(parsed.get("param_name").is_none());
+            assert!(parsed.get("param_value").is_none());
+
+            let request_id = parsed["request_id"].as_str().expect("request id echoed");
+            mgr_for_responder.deliver_credential_ack(node_id, request_id, CredentialAckOutcome::Ok);
+            msg
+        });
+
+        let result =
+            push_no_auth_to_node_strict(&mgr, node_id, "demo", Some("https://new.example.com"))
+                .await;
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        ack_task.await.expect("responder panicked");
+    }
+
+    #[tokio::test]
+    async fn strict_no_auth_push_rejects_legacy_agent_with_actionable_error() {
+        // Connected but no capabilities recorded → legacy agent.
+        let mgr = Arc::new(NodeWsManager::new(30, 100));
+        let (tx, _rx) = mpsc::channel(256);
+        mgr.register_connection("legacy-node", tx);
+        mgr.mark_status_update_received("legacy-node");
+
+        let err =
+            push_no_auth_to_node_strict(&mgr, "legacy-node", "demo", Some("https://example.com"))
+                .await
+                .expect_err("legacy agent should reject no-auth downgrade");
+
+        // We specifically surface BadRequest (not NodeOffline) so the
+        // user sees a clear, actionable error instead of "transient".
+        let AppError::BadRequest(msg) = err else {
+            panic!("expected BadRequest, got {err:?}");
+        };
+        assert!(
+            msg.contains("legacy agent"),
+            "error must flag legacy-agent root cause: {msg}"
+        );
+        assert!(
+            msg.contains("credentials remove"),
+            "error must tell the user how to recover: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn strict_no_auth_push_disconnected_node_surfaces_as_node_offline() {
+        // A disconnected node must NOT be confused with a legacy
+        // agent: the user should be told the node is offline (a
+        // retryable, transient condition) rather than being nudged to
+        // upgrade or manually remove credentials. Both conditions
+        // cause `supports_credential_ack_correlation` to return
+        // false, so the helper has to check connection state
+        // explicitly — this test locks that in.
+        let mgr = Arc::new(NodeWsManager::new(30, 100));
+        let err = push_no_auth_to_node_strict(&mgr, "missing-node", "demo", None)
+            .await
+            .expect_err("disconnected node must fail the strict downgrade");
+
+        let AppError::NodeOffline(msg) = err else {
+            panic!("expected NodeOffline for disconnected node, got {err:?}");
+        };
+        assert!(
+            msg.contains("missing-node"),
+            "error should name the offline node: {msg}"
+        );
+    }
 }
