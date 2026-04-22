@@ -581,9 +581,14 @@ async fn build_verify_secrets(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use axum::{Router, body::Bytes, http::StatusCode, routing::post};
     use chrono::Utc;
     use mongodb::bson::doc;
+    use tokio::sync::{Mutex, oneshot};
+    use tokio::time::{Duration, timeout};
 
     fn test_config(
         database_url: String,
@@ -716,6 +721,45 @@ mod tests {
         .unwrap()
     }
 
+    async fn spawn_mock_callback_server() -> (
+        String,
+        Arc<Mutex<Vec<serde_json::Value>>>,
+        oneshot::Sender<()>,
+    ) {
+        let received_requests = Arc::new(Mutex::new(Vec::new()));
+        let route_requests = received_requests.clone();
+        let app = Router::new().route(
+            "/callback",
+            post(move |body: Bytes| {
+                let route_requests = route_requests.clone();
+                async move {
+                    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    route_requests.lock().await.push(parsed);
+                    StatusCode::ACCEPTED
+                }
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+
+        (
+            format!("http://{address}/callback"),
+            received_requests,
+            shutdown_tx,
+        )
+    }
+
     #[tokio::test]
     async fn valid_lark_event_promotes_pending_webhook_bot_and_stores_message() {
         let Some(db) = connect_test_database().await else {
@@ -735,6 +779,7 @@ mod tests {
         let bot_id = uuid::Uuid::new_v4().to_string();
         let api_key_id = uuid::Uuid::new_v4().to_string();
         let conversation_id = uuid::Uuid::new_v4().to_string();
+        let (callback_url, received_requests, shutdown_tx) = spawn_mock_callback_server().await;
 
         let verification_token_encrypted = encryption_keys.encrypt(b"verify_token").await.unwrap();
 
@@ -778,7 +823,7 @@ mod tests {
             rate_limit_per_second: None,
             rate_limit_burst: None,
             platform: Some("codex".to_string()),
-            callback_url: Some("http://127.0.0.1:9/callback".to_string()),
+            callback_url: Some(callback_url),
         };
 
         let conversation = crate::models::channel_conversation::ChannelConversation {
@@ -862,6 +907,21 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(stored_count, 1);
+
+        let delivered = timeout(Duration::from_secs(2), async {
+            loop {
+                let snapshot = received_requests.lock().await.clone();
+                if !snapshot.is_empty() {
+                    return snapshot;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("agent callback should be delivered");
+        assert_eq!(delivered.len(), 1);
+
+        let _ = shutdown_tx.send(());
 
         db.drop().await.unwrap();
     }
