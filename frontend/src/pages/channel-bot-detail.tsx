@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useParams, useNavigate, Link } from "@tanstack/react-router";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
   useChannelBot,
   useDeleteChannelBot,
+  useUpdateChannelBot,
   useVerifyChannelBot,
 } from "@/hooks/use-channel-bots";
 import {
@@ -17,7 +18,9 @@ import { useOrgs } from "@/hooks/use-orgs";
 import { useAuthStore } from "@/stores/auth-store";
 import {
   createChannelConversationSchema,
+  updateChannelBotSchema,
   type CreateChannelConversationFormData,
+  type UpdateChannelBotFormData,
 } from "@/schemas/channels";
 import { ApiError } from "@/lib/api-client";
 import { formatDate, formatRelativeTime } from "@/lib/utils";
@@ -63,6 +66,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import type {
+  ChannelBotDetail,
   ChannelBotStatus,
   ChannelConversationItem,
   ChannelPlatform,
@@ -75,6 +79,7 @@ function statusBadgeVariant(
     case "active":
       return "success";
     case "pending":
+    case "pending_webhook":
       return "warning";
     case "failed":
       return "destructive";
@@ -557,6 +562,177 @@ function DeleteBotDialog({
   );
 }
 
+function EditVerificationSection({
+  bot,
+}: {
+  readonly bot: ChannelBotDetail;
+}) {
+  const botId = bot.id;
+  const updateBot = useUpdateChannelBot();
+  const {
+    register,
+    handleSubmit,
+    reset,
+    formState: { errors, isDirty },
+  } = useForm<UpdateChannelBotFormData>({
+    resolver: zodResolver(updateChannelBotSchema),
+    defaultValues: {
+      verification_token: "",
+      encrypt_key: "",
+      app_id: "",
+      app_secret: "",
+    },
+  });
+
+  useEffect(() => {
+    reset({
+      verification_token: "",
+      encrypt_key: "",
+      app_id: "",
+      app_secret: "",
+    });
+  }, [botId, reset]);
+
+  function onSubmit(data: UpdateChannelBotFormData) {
+    const payload = {
+      verification_token: data.verification_token?.trim() || undefined,
+      encrypt_key: data.encrypt_key?.trim() || undefined,
+      app_id: data.app_id?.trim() || undefined,
+      app_secret: data.app_secret?.trim() || undefined,
+    };
+
+    if (
+      !payload.verification_token &&
+      !payload.encrypt_key &&
+      !payload.app_id &&
+      !payload.app_secret
+    ) {
+      toast.error("Enter at least one value to update");
+      return;
+    }
+
+    updateBot.mutate(
+      { id: botId, data: payload },
+      {
+        onSuccess: () => {
+          toast.success("Verification settings updated");
+          reset({
+            verification_token: "",
+            encrypt_key: "",
+            app_id: "",
+            app_secret: "",
+          });
+        },
+        onError: (err) => {
+          toast.error(
+            err instanceof ApiError
+              ? err.message
+              : "Failed to update verification settings",
+          );
+        },
+      },
+    );
+  }
+
+  return (
+    <DetailSection title="Edit Verification">
+      <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+        <div className="space-y-2">
+          <div className="flex items-center justify-between gap-3">
+            <Label htmlFor="verification_token">Verification Token</Label>
+            {bot.lark_verification_token_configured && (
+              <Badge variant="outline" className="text-[10px] uppercase tracking-wide">
+                Configured
+              </Badge>
+            )}
+          </div>
+          <Input
+            id="verification_token"
+            type="password"
+            placeholder="Paste the Event Subscriptions Verification Token"
+            {...register("verification_token")}
+          />
+          <p className="text-xs text-muted-foreground">
+            Required by Lark/Feishu webhook verification. Found in Event
+            Subscriptions → Security.
+          </p>
+          {errors.verification_token && (
+            <p className="text-xs text-destructive">
+              {errors.verification_token.message}
+            </p>
+          )}
+        </div>
+
+        <div className="space-y-2">
+          <div className="flex items-center justify-between gap-3">
+            <Label htmlFor="encrypt_key">Encrypt Key</Label>
+            {bot.lark_encrypt_key_configured && (
+              <Badge variant="outline" className="text-[10px] uppercase tracking-wide">
+                Configured
+              </Badge>
+            )}
+          </div>
+          <Input
+            id="encrypt_key"
+            type="password"
+            placeholder="Optional Encrypt Key from Event Subscriptions"
+            {...register("encrypt_key")}
+          />
+          <p className="text-xs text-muted-foreground">
+            Optional. Leave blank to keep the current value. Use the API or CLI
+            with an empty `encrypt_key` to clear it explicitly.
+          </p>
+          {errors.encrypt_key && (
+            <p className="text-xs text-destructive">
+              {errors.encrypt_key.message}
+            </p>
+          )}
+        </div>
+
+        <div className="space-y-2">
+          <Label htmlFor="app_id">App ID</Label>
+          <Input
+            id="app_id"
+            placeholder="cli_xxxxxxxxxx"
+            {...register("app_id")}
+          />
+          {errors.app_id && (
+            <p className="text-xs text-destructive">{errors.app_id.message}</p>
+          )}
+        </div>
+
+        <div className="space-y-2">
+          <div className="flex items-center justify-between gap-3">
+            <Label htmlFor="app_secret">App Secret</Label>
+            {bot.app_secret_configured && (
+              <Badge variant="outline" className="text-[10px] uppercase tracking-wide">
+                Configured
+              </Badge>
+            )}
+          </div>
+          <Input
+            id="app_secret"
+            type="password"
+            placeholder="Paste a new App Secret if needed"
+            {...register("app_secret")}
+          />
+          {errors.app_secret && (
+            <p className="text-xs text-destructive">
+              {errors.app_secret.message}
+            </p>
+          )}
+        </div>
+
+        <div className="flex justify-end">
+          <Button type="submit" disabled={updateBot.isPending || !isDirty}>
+            {updateBot.isPending ? "Saving..." : "Save Verification Settings"}
+          </Button>
+        </div>
+      </form>
+    </DetailSection>
+  );
+}
+
 export function ChannelBotDetailPage() {
   const { botId } = useParams({ strict: false }) as { botId: string };
   const navigate = useNavigate();
@@ -675,6 +851,21 @@ export function ChannelBotDetailPage() {
         }
       />
 
+      {bot.status === "pending_webhook" && (
+        <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4">
+          <p className="text-sm font-medium text-foreground">
+            Pending webhook verification
+          </p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {bot.platform === "lark" || bot.platform === "feishu"
+              ? bot.lark_verification_token_configured
+                ? "Once Lark/Feishu delivers a verified inbound message, this bot will automatically move to Active."
+                : "Set the Verification Token below, and set Encrypt Key too if it is enabled in the Lark/Feishu console. After the next verified inbound message, this bot will automatically move to Active."
+              : `Once ${platformLabel(bot.platform)} delivers a verified inbound message, this bot will automatically move to Active.`}
+          </p>
+        </div>
+      )}
+
       {/* Bot Information */}
       <DetailSection title="Bot Information">
         <DetailRow
@@ -708,6 +899,10 @@ export function ChannelBotDetailPage() {
           value={String(bot.conversations_count)}
         />
       </DetailSection>
+
+      {(bot.platform === "lark" || bot.platform === "feishu") && (
+        <EditVerificationSection bot={bot} />
+      )}
 
       {/* Conversation Routes */}
       <ConversationsSection

@@ -2028,6 +2028,14 @@ pub enum ChannelBotCommands {
         /// Read app secret from this environment variable
         #[arg(long)]
         app_secret_env: Option<String>,
+        /// Lark/Feishu verification token. Falls back to
+        /// NYXID_LARK_VERIFICATION_TOKEN when omitted.
+        #[arg(long)]
+        verification_token: Option<String>,
+        /// Optional Lark/Feishu Encrypt Key. Falls back to
+        /// NYXID_LARK_ENCRYPT_KEY when omitted.
+        #[arg(long)]
+        encrypt_key: Option<String>,
         /// Platform public key (required for Discord)
         #[arg(long)]
         public_key: Option<String>,
@@ -2035,6 +2043,30 @@ pub enum ChannelBotCommands {
         /// that org). Omit for a personal bot.
         #[arg(long, value_name = "ORG_ID")]
         org: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Update an existing bot's label or platform verification material
+    Update {
+        /// Bot ID
+        id: String,
+        /// New label
+        #[arg(long)]
+        label: Option<String>,
+        /// Lark/Feishu verification token. Falls back to
+        /// NYXID_LARK_VERIFICATION_TOKEN when omitted.
+        #[arg(long)]
+        verification_token: Option<String>,
+        /// Optional Lark/Feishu Encrypt Key. Falls back to
+        /// NYXID_LARK_ENCRYPT_KEY when omitted.
+        #[arg(long)]
+        encrypt_key: Option<String>,
+        /// Lark/Feishu App ID
+        #[arg(long)]
+        app_id: Option<String>,
+        /// Lark/Feishu App Secret or Slack signing secret
+        #[arg(long, hide = true)]
+        app_secret: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },
