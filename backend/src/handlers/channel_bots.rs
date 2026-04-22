@@ -82,6 +82,21 @@ fn normalize_optional_field(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
 
+fn ensure_lark_verify_material_present(
+    bot: &crate::models::channel_bot::ChannelBot,
+) -> AppResult<()> {
+    if matches!(bot.platform.as_str(), "lark" | "feishu")
+        && bot.lark_verification_token_encrypted.is_none()
+    {
+        return Err(AppError::ValidationError(format!(
+            "Lark/Feishu bot is missing Verification Token. PATCH /api/v1/channel-bots/{} with verification_token before verify.",
+            bot.id
+        )));
+    }
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Response types
 // ---------------------------------------------------------------------------
@@ -684,6 +699,8 @@ pub async fn verify_bot(
         .verify_bot_token(&state.http_client, &bot_token)
         .await?;
 
+    ensure_lark_verify_material_present(&bot)?;
+
     // Re-register webhook with a fresh secret. The original raw secret is not
     // stored (only its SHA-256 hash), so we generate a new one and update the
     // stored hash accordingly.
@@ -743,4 +760,50 @@ pub async fn verify_bot(
         status,
         webhook_registered,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn make_lark_bot(has_verification_token: bool) -> crate::models::channel_bot::ChannelBot {
+        crate::models::channel_bot::ChannelBot {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: uuid::Uuid::new_v4().to_string(),
+            platform: "lark".to_string(),
+            label: "Test Lark Bot".to_string(),
+            bot_token_encrypted: vec![0; 16],
+            platform_bot_id: "cli_test".to_string(),
+            platform_bot_username: "testbot".to_string(),
+            webhook_registered: false,
+            webhook_secret_hash: "unused".to_string(),
+            app_id: Some("cli_test".to_string()),
+            app_secret_encrypted: None,
+            lark_verification_token_encrypted: has_verification_token.then(|| vec![1, 2, 3]),
+            lark_encrypt_key_encrypted: None,
+            public_key: None,
+            status: "pending_webhook".to_string(),
+            is_active: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn verify_requires_lark_verification_token_to_be_configured() {
+        let bot = make_lark_bot(false);
+        let err = ensure_lark_verify_material_present(&bot).unwrap_err();
+
+        assert!(matches!(err, AppError::ValidationError(_)));
+        assert!(err.to_string().contains("missing Verification Token"));
+        assert!(err.to_string().contains(&bot.id));
+    }
+
+    #[test]
+    fn verify_allows_lark_bot_when_verification_token_is_present() {
+        let bot = make_lark_bot(true);
+        ensure_lark_verify_material_present(&bot)
+            .expect("verification token should satisfy verify precondition");
+    }
 }
