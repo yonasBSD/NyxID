@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 
 use anyhow::{Context, Result, bail};
 use comfy_table::{Table, presets::UTF8_FULL_CONDENSED};
@@ -214,25 +214,24 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             if custom {
                 let label_val = match label {
                     Some(l) => l,
-                    None => prompt_line("Label: ")?,
+                    None => prompt_line("Label: ", "label")?,
                 };
                 let endpoint = match endpoint_url {
                     Some(u) => u,
-                    None => prompt_line("Endpoint URL: ")?,
+                    None => prompt_line("Endpoint URL: ", "endpoint-url")?,
                 };
                 let method = match auth_method {
                     Some(m) => m,
                     None => prompt_line_default(
-                        "Auth method [bearer/header/query/path/basic/body/bot_bearer]: ",
+                        "Auth method [bearer/header/query/path/basic/body/bot_bearer/none]: ",
                         "bearer",
+                        "auth-method",
                     )?,
                 };
                 // Default key name depends on method; `body` wants `app_secret`,
                 // header wants `X-API-Key`, etc. `bot_bearer` is a fixed
                 // `Authorization: Bot <token>` format so we don't prompt.
-                let key_name = if method == "bot_bearer" {
-                    auth_key_name.unwrap_or_else(|| "Authorization".to_string())
-                } else {
+                let key_name = if requires_auth_key_name_prompt(&method, auth_key_name.is_some()) {
                     match auth_key_name {
                         Some(k) => k,
                         None => {
@@ -242,9 +241,15 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                             } else {
                                 "Auth key name: "
                             };
-                            prompt_line_default(&format!("{label}[{default_key}] "), default_key)?
+                            prompt_line_default(
+                                &format!("{label}[{default_key}] "),
+                                default_key,
+                                "auth-key-name",
+                            )?
                         }
                     }
+                } else {
+                    auth_key_name.unwrap_or_else(|| "Authorization".to_string())
                 };
 
                 body.insert("label".into(), Value::String(label_val));
@@ -323,7 +328,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
 
             // Resolve credential: --credential flag > --credential-env > interactive prompt
             // Skip if routing through a node (credentials live on the node)
-            if !body.contains_key("node_id") {
+            if requires_credential_prompt(&effective_auth_method, body.contains_key("node_id")) {
                 let token_exchange_fields = if !custom && effective_auth_method == "token_exchange"
                 {
                     catalog_token_exchange_fields.clone()
@@ -344,7 +349,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 } else {
                     let prompt =
                         credential_prompt_label(&effective_auth_method, &effective_auth_key_name);
-                    rpassword::prompt_password(&prompt)?
+                    prompt_password(&prompt, "credential")?
                 };
                 if cred_value.is_empty() {
                     bail!(
@@ -679,8 +684,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 std::env::var(env_var)
                     .with_context(|| format!("Environment variable {env_var} not set"))?
             } else {
-                rpassword::prompt_password("New credential: ")
-                    .map_err(|e| anyhow::anyhow!("{e}"))?
+                prompt_password("New credential: ", "credential")?
             };
             if credential.is_empty() {
                 bail!("Credential is required");
@@ -761,7 +765,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 std::env::var(env_var)
                     .with_context(|| format!("Environment variable {env_var} not set"))?
             } else {
-                rpassword::prompt_password("OAuth client secret: ")?
+                prompt_password("OAuth client secret: ", "client-secret")?
             };
             if client_secret.is_empty() {
                 bail!("Client secret is required");
@@ -1094,7 +1098,16 @@ fn print_add_result(api: &ApiClient, result: &Value, output: OutputFormat) -> Re
     Ok(())
 }
 
-fn prompt_line(prompt: &str) -> Result<String> {
+fn ensure_stdin_is_tty(flag: &str) -> Result<()> {
+    if std::io::stdin().is_terminal() {
+        Ok(())
+    } else {
+        bail!("stdin is not a TTY; pass --{flag} or run from an interactive shell");
+    }
+}
+
+fn prompt_line(prompt: &str, flag: &str) -> Result<String> {
+    ensure_stdin_is_tty(flag)?;
     eprint!("{prompt}");
     std::io::stderr().flush()?;
     let mut input = String::new();
@@ -1106,7 +1119,8 @@ fn prompt_line(prompt: &str) -> Result<String> {
     Ok(trimmed)
 }
 
-fn prompt_line_default(prompt: &str, default: &str) -> Result<String> {
+fn prompt_line_default(prompt: &str, default: &str, flag: &str) -> Result<String> {
+    ensure_stdin_is_tty(flag)?;
     eprint!("{prompt}");
     std::io::stderr().flush()?;
     let mut input = String::new();
@@ -1117,6 +1131,11 @@ fn prompt_line_default(prompt: &str, default: &str) -> Result<String> {
     } else {
         Ok(trimmed.to_string())
     }
+}
+
+fn prompt_password(prompt: &str, flag: &str) -> Result<String> {
+    ensure_stdin_is_tty(flag)?;
+    Ok(rpassword::prompt_password(prompt)?)
 }
 
 /// Returns true when the CLI is running somewhere we can't reasonably
@@ -1145,6 +1164,14 @@ fn is_headless_environment() -> bool {
         }
     }
     false
+}
+
+fn requires_auth_key_name_prompt(method: &str, auth_key_name_provided: bool) -> bool {
+    !auth_key_name_provided && method != "bot_bearer" && method != "none"
+}
+
+fn requires_credential_prompt(method: &str, has_node: bool) -> bool {
+    !has_node && method != "none"
 }
 
 /// Default auth key name for a given auth method. Mirrors the frontend
@@ -1246,9 +1273,9 @@ fn prompt_token_exchange_credential(fields: &[TokenExchangeField]) -> Result<Str
             None => format!("{}: ", field.label),
         };
         let value = if field.secret {
-            rpassword::prompt_password(&prompt_label)?
+            prompt_password(&prompt_label, "credential")?
         } else {
-            prompt_line(&prompt_label)?
+            prompt_line(&prompt_label, "credential")?
         };
         let trimmed = value.trim();
         if trimmed.is_empty() {
@@ -1262,6 +1289,30 @@ fn prompt_token_exchange_credential(fields: &[TokenExchangeField]) -> Result<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn none_auth_skips_auth_key_name_and_credential_prompts() {
+        assert!(!requires_auth_key_name_prompt("none", false));
+        assert!(!requires_credential_prompt("none", false));
+    }
+
+    #[test]
+    fn bearer_without_overrides_requires_auth_key_name_and_credential_prompts() {
+        assert!(requires_auth_key_name_prompt("bearer", false));
+        assert!(requires_credential_prompt("bearer", false));
+    }
+
+    #[test]
+    fn bot_bearer_skips_auth_key_name_prompt_but_still_requires_credential() {
+        assert!(!requires_auth_key_name_prompt("bot_bearer", false));
+        assert!(requires_credential_prompt("bot_bearer", false));
+    }
+
+    #[test]
+    fn node_routing_skips_credential_prompt_regardless_of_method() {
+        assert!(!requires_credential_prompt("bearer", true));
+        assert!(!requires_credential_prompt("none", true));
+    }
 
     #[test]
     fn default_auth_key_name_maps_known_methods() {
