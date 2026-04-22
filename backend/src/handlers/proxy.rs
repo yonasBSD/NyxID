@@ -1683,6 +1683,29 @@ async fn execute_proxy_inner(
 
                     return Ok(response);
                 }
+                Err(err @ AppError::NodeCredentialMissing(_)) => {
+                    // A different fallback node may have the credential
+                    // configured locally, so we still try the rest of
+                    // the pool. Preserve the original error class in
+                    // `last_error` so if every attempt ends up reporting
+                    // a missing credential the caller sees the specific
+                    // 8004 / 502 rather than a generic `NodeOffline` —
+                    // which is the contract issue #418 asks for.
+                    tracing::warn!(
+                        node_id = %node_id,
+                        "Node rejected proxy request: credential missing locally, trying next"
+                    );
+
+                    let db_clone = state.db.clone();
+                    let nid = node_id.to_string();
+                    let err_msg = "Node credential missing".to_string();
+                    tokio::spawn(async move {
+                        let _ = node_metrics_service::record_error(db_clone, nid, err_msg).await;
+                    });
+
+                    last_error = Some(err);
+                    continue;
+                }
                 Err(AppError::NodeOffline(_) | AppError::NodeProxyTimeout) => {
                     tracing::warn!(node_id = %node_id, "Node proxy failed, trying next");
 
