@@ -579,6 +579,58 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
+    // 10b. GitHub (Personal Access Token)
+    if !slug_exists!("github-pat") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "github-pat".to_string(),
+            name: "GitHub (API Key)".to_string(),
+            description: Some(
+                "GitHub REST API access using a Personal Access Token \
+                 (classic or fine-grained) instead of OAuth."
+                    .to_string(),
+            ),
+            provider_type: "api_key".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: Some(
+                "Create a classic token at https://github.com/settings/tokens \
+                 or a fine-grained token at \
+                 https://github.com/settings/personal-access-tokens. \
+                 Grant only the scopes you need."
+                    .to_string(),
+            ),
+            api_key_url: Some("https://github.com/settings/tokens".to_string()),
+            icon_url: None,
+            documentation_url: Some(
+                "https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens"
+                    .to_string(),
+            ),
+            is_active: true,
+            credential_mode: "user".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "github-pat", "Seeded default provider: GitHub PAT");
+        seeded_count += 1;
+    }
+
     // 11. Facebook (OAuth2)
     if !slug_exists!("facebook") {
         let provider = ProviderConfig {
@@ -1651,6 +1703,20 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_method: None,
         service_auth_key_name: None,
         description: None,
+    },
+    DefaultServiceSeed {
+        provider_slug: "github-pat",
+        service_slug: "api-github-pat",
+        service_name: "GitHub API (Personal Access Token)",
+        base_url: "https://api.github.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: Some("bearer"),
+        service_auth_key_name: Some("Authorization"),
+        description: Some(
+            "GitHub REST API access using a Personal Access Token (classic or fine-grained). \
+             Use this when you want a long-lived static credential instead of OAuth.",
+        ),
     },
     DefaultServiceSeed {
         provider_slug: "facebook",
