@@ -1938,30 +1938,62 @@
     const ownerField = document.getElementById("scope-owner-field");
     const ownerSelect = document.getElementById("scope-owner");
     const platformSelect = document.getElementById("scope-platform");
-    const readChk = document.getElementById("scope-read");
-    const writeChk = document.getElementById("scope-write");
+    const scopeChipRow = document.getElementById("scope-chips");
     const expiryInput = document.getElementById("scope-expiry");
     const callbackInput = document.getElementById("scope-callback-url");
     const ratePerSecondInput = document.getElementById("scope-rate-per-second");
     const rateBurstInput = document.getElementById("scope-rate-burst");
+    const allowAllServicesChk = document.getElementById("scope-allow-all-services");
+    const allowAllNodesChk = document.getElementById("scope-allow-all-nodes");
     const cancelBtn2 = document.getElementById("scope-cancel");
     const submitBtn = document.getElementById("scope-submit");
     const statusEl = document.getElementById("scope-picker-status");
 
     if (stepLabel) stepLabel.textContent = "Step 1 of 2 · configure scope";
 
+    // --- Scopes: render one chip per valid scope. Must stay in lock-step
+    // with backend VALID_API_KEY_SCOPES (services/key_service.rs) and the
+    // frontend's API_KEY_SCOPES (schemas/api-keys.ts) — any scope the
+    // backend rejects will fail validation server-side.
+    const SCOPE_OPTIONS = [
+      "read",
+      "write",
+      "admin",
+      "openid",
+      "profile",
+      "email",
+      "services:read",
+      "services:write",
+      "proxy",
+    ];
+    const DEFAULT_SCOPES = new Set(["read", "write"]);
+    const prefillScopeSet = PREFILL.scopes
+      ? new Set(PREFILL.scopes.split(/\s+/).filter(Boolean))
+      : null;
+    for (const scope of SCOPE_OPTIONS) {
+      const chip = document.createElement("label");
+      chip.className = "wizard-scope-chip";
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.value = scope;
+      input.dataset.scope = scope;
+      input.checked = prefillScopeSet
+        ? prefillScopeSet.has(scope)
+        : DEFAULT_SCOPES.has(scope);
+      const text = document.createElement("span");
+      text.textContent = scope;
+      chip.appendChild(input);
+      chip.appendChild(text);
+      scopeChipRow.appendChild(chip);
+    }
+
     // --- Prefill: any CLI-supplied flag goes straight into the form.
     if (PREFILL.name) nameInput.value = PREFILL.name;
     if (PREFILL.platform) platformSelect.value = PREFILL.platform;
-    if (PREFILL.scopes) {
-      const parts = PREFILL.scopes.split(/\s+/).filter(Boolean);
-      readChk.checked = parts.includes("read");
-      writeChk.checked = parts.includes("write");
-    }
     if (PREFILL.expiresInDays) expiryInput.value = PREFILL.expiresInDays;
     if (PREFILL.callbackUrl) callbackInput.value = PREFILL.callbackUrl;
 
-    // --- Scope-specific state for multi-selects.
+    // --- Access-scope state for the Services / Nodes multi-selects.
     let availableServices = [];
     let availableNodes = [];
     let servicesFetched = false;
@@ -1969,10 +2001,8 @@
 
     const serviceWrap = document.getElementById("scope-services-wrap");
     const serviceList = document.getElementById("scope-services-list");
-    const serviceCount = document.getElementById("scope-services-count");
     const nodeWrap = document.getElementById("scope-nodes-wrap");
     const nodeList = document.getElementById("scope-nodes-list");
-    const nodeCount = document.getElementById("scope-nodes-count");
 
     // --- Owner picker: fetch orgs once, populate selector if any.
     // List is best-effort — failure hides the field entirely so the
@@ -2009,18 +2039,12 @@
     })();
 
     // --- Service / node multi-select machinery.
-    function updateSelectionCount(listEl, countEl) {
-      const checked = listEl.querySelectorAll('input[type="checkbox"]:checked').length;
-      const total = listEl.querySelectorAll('input[type="checkbox"]').length;
-      countEl.textContent = `${checked} of ${total} selected`;
-    }
-
-    function renderMultiList(listEl, items, idKey, labelFn, preselectCsv) {
+    function renderMultiList(listEl, items, labelFn, preselectCsv, emptyMsg) {
       listEl.innerHTML = "";
       if (items.length === 0) {
         const empty = document.createElement("div");
         empty.className = "wizard-field-hint";
-        empty.textContent = "Nothing to select.";
+        empty.textContent = emptyMsg || "Nothing to select.";
         listEl.appendChild(empty);
         return;
       }
@@ -2028,20 +2052,20 @@
         (preselectCsv || "").split(",").map(s => s.trim()).filter(Boolean),
       );
       for (const item of items) {
-        const id = item[idKey] || item.id || item._id || "";
+        const id = item.id || item._id || "";
         if (!id) continue;
-        const label = document.createElement("label");
-        label.className = "wizard-checkbox";
-        label.setAttribute("role", "listitem");
+        const row = document.createElement("label");
+        row.className = "wizard-checkbox wizard-multi-item";
+        row.setAttribute("role", "listitem");
         const cb = document.createElement("input");
         cb.type = "checkbox";
         cb.value = id;
         if (preselect.has(id)) cb.checked = true;
-        label.appendChild(cb);
+        row.appendChild(cb);
         const text = document.createElement("span");
-        text.textContent = labelFn(item);
-        label.appendChild(text);
-        listEl.appendChild(label);
+        labelFn(text, item);
+        row.appendChild(text);
+        listEl.appendChild(row);
       }
     }
 
@@ -2049,20 +2073,37 @@
       if (servicesFetched) return;
       servicesFetched = true;
       try {
-        const resp = await proxyJson("GET", "/api/proxy/api/v1/user-services");
-        availableServices = Array.isArray(resp?.services)
-          ? resp.services
+        // `/api/v1/keys` returns the unified KeyListResponse used by the
+        // frontend — has `label` AND `slug` per entry, plus the flags we
+        // need to filter out auto-connected and inactive services.
+        const resp = await proxyJson("GET", "/api/proxy/api/v1/keys");
+        const raw = Array.isArray(resp?.keys)
+          ? resp.keys
           : Array.isArray(resp)
             ? resp
             : [];
+        availableServices = raw.filter(
+          (s) => s && s.is_active !== false && s.auto_connected !== true,
+        );
         renderMultiList(
           serviceList,
           availableServices,
-          "id",
-          (s) => s.slug ? `${s.slug}${s.label ? " · " + s.label : ""}` : (s.label || s.id || ""),
+          (textEl, s) => {
+            // "<label> (<slug>)" — label is the primary identifier, slug
+            // is the stable proxy-path identifier shown in muted text.
+            const labelPart = s.label || s.slug || s.id || "";
+            textEl.textContent = labelPart;
+            if (s.slug && s.slug !== s.label) {
+              const slugEl = document.createElement("span");
+              slugEl.className = "wizard-multi-item-meta";
+              slugEl.textContent = `(${s.slug})`;
+              textEl.appendChild(document.createTextNode(" "));
+              textEl.appendChild(slugEl);
+            }
+          },
           PREFILL.allowedServicesCsv,
+          "No services configured yet.",
         );
-        updateSelectionCount(serviceList, serviceCount);
       } catch (err) {
         serviceList.innerHTML = "";
         const e = document.createElement("div");
@@ -2085,11 +2126,19 @@
         renderMultiList(
           nodeList,
           availableNodes,
-          "id",
-          (n) => n.name ? `${n.name}${n.status ? " · " + n.status : ""}` : (n.id || ""),
+          (textEl, n) => {
+            textEl.textContent = n.name || n.id || "";
+            if (n.status) {
+              const statusEl = document.createElement("span");
+              statusEl.className = "wizard-multi-item-meta";
+              statusEl.textContent = `· ${n.status}`;
+              textEl.appendChild(document.createTextNode(" "));
+              textEl.appendChild(statusEl);
+            }
+          },
           PREFILL.allowedNodesCsv,
+          "No nodes registered yet.",
         );
-        updateSelectionCount(nodeList, nodeCount);
       } catch (err) {
         nodeList.innerHTML = "";
         const e = document.createElement("div");
@@ -2099,65 +2148,34 @@
       }
     }
 
-    // Wire service/node mode radios. "Select specific" toggles the
-    // list visibility and triggers a one-shot fetch (subsequent toggles
-    // don't refetch — the data rarely changes mid-flow).
-    function wireScopeRadios(name, wrap, fetcher, listEl, countEl) {
-      const radios = form.querySelectorAll(`input[name="${name}"]`);
-      radios.forEach(r => r.addEventListener("change", async () => {
-        if (r.value === "specific" && r.checked) {
+    // Wire "Allow all" checkboxes. Unchecking reveals the list card and
+    // triggers a one-shot fetch; re-checking hides the card again. The
+    // data rarely changes mid-flow so we don't refetch on re-open.
+    function wireAllowAllCheckbox(allowAllChk, wrap, fetcher) {
+      allowAllChk.addEventListener("change", async () => {
+        if (allowAllChk.checked) {
+          wrap.hidden = true;
+        } else {
           wrap.hidden = false;
           await fetcher();
-        } else if (r.value === "all" && r.checked) {
-          wrap.hidden = true;
-        }
-      }));
-      listEl.addEventListener("change", (e) => {
-        if (e.target.matches('input[type="checkbox"]')) {
-          updateSelectionCount(listEl, countEl);
         }
       });
     }
-    wireScopeRadios("scope-service-mode", serviceWrap, fetchServicesOnce, serviceList, serviceCount);
-    wireScopeRadios("scope-node-mode", nodeWrap, fetchNodesOnce, nodeList, nodeCount);
+    wireAllowAllCheckbox(allowAllServicesChk, serviceWrap, fetchServicesOnce);
+    wireAllowAllCheckbox(allowAllNodesChk, nodeWrap, fetchNodesOnce);
 
-    // "select all" / "clear" buttons for each multi-select.
-    function wireMultiToolbar(allBtn, noneBtn, listEl, countEl) {
-      allBtn.addEventListener("click", () => {
-        listEl.querySelectorAll('input[type="checkbox"]').forEach(c => { c.checked = true; });
-        updateSelectionCount(listEl, countEl);
-      });
-      noneBtn.addEventListener("click", () => {
-        listEl.querySelectorAll('input[type="checkbox"]').forEach(c => { c.checked = false; });
-        updateSelectionCount(listEl, countEl);
-      });
-    }
-    wireMultiToolbar(
-      document.getElementById("scope-services-all"),
-      document.getElementById("scope-services-none"),
-      serviceList, serviceCount,
-    );
-    wireMultiToolbar(
-      document.getElementById("scope-nodes-all"),
-      document.getElementById("scope-nodes-none"),
-      nodeList, nodeCount,
-    );
-
-    // Apply CLI-supplied allow-all / specific prefill AFTER the radios
-    // are wired so the change event fires and the list loads when
-    // "specific" is prefilled.
+    // Apply CLI-supplied prefill AFTER wiring so the change event fires
+    // and the list loads when a specific-CSV is prefilled. `allowAll*`
+    // prefill is implicit: the default checkbox is already checked, so
+    // there's nothing to do beyond not overriding.
     if (PREFILL.allowedServicesCsv) {
-      const specific = form.querySelector('input[name="scope-service-mode"][value="specific"]');
-      specific.checked = true;
-      specific.dispatchEvent(new Event("change"));
+      allowAllServicesChk.checked = false;
+      allowAllServicesChk.dispatchEvent(new Event("change"));
     }
     if (PREFILL.allowedNodesCsv) {
-      const specific = form.querySelector('input[name="scope-node-mode"][value="specific"]');
-      specific.checked = true;
-      specific.dispatchEvent(new Event("change"));
+      allowAllNodesChk.checked = false;
+      allowAllNodesChk.dispatchEvent(new Event("change"));
     }
-    // `allowAll*` prefill is implicit: the default radio is already
-    // "all", so there's nothing to do beyond not overriding.
 
     // --- Show the panel.
     document.querySelectorAll(".wizard-step-panel").forEach(p => {
@@ -2179,11 +2197,11 @@
         nameInput.focus();
         return;
       }
-      const scopeParts = [];
-      if (readChk.checked) scopeParts.push("read");
-      if (writeChk.checked) scopeParts.push("write");
+      const scopeParts = Array.from(
+        scopeChipRow.querySelectorAll('input[type="checkbox"]:checked'),
+      ).map((c) => c.value);
       if (scopeParts.length === 0) {
-        errBanner.textContent = "Pick at least one of read / write.";
+        errBanner.textContent = "Pick at least one scope.";
         errBanner.hidden = false;
         return;
       }
@@ -2238,8 +2256,7 @@
         body.rate_limit_burst = n;
       }
 
-      const serviceMode = form.querySelector('input[name="scope-service-mode"]:checked').value;
-      if (serviceMode === "all") {
+      if (allowAllServicesChk.checked) {
         body.allow_all_services = true;
       } else {
         const ids = Array.from(
@@ -2248,8 +2265,7 @@
         body.allow_all_services = false;
         body.allowed_service_ids = ids;
       }
-      const nodeMode = form.querySelector('input[name="scope-node-mode"]:checked').value;
-      if (nodeMode === "all") {
+      if (allowAllNodesChk.checked) {
         body.allow_all_nodes = true;
       } else {
         const ids = Array.from(

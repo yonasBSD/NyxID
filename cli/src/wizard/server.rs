@@ -291,7 +291,7 @@ fn allowlist_for(kind: FlowKind) -> Vec<ProxyRoute> {
         // scope-picker panel can emit — not the full
         // `CreateApiKeyRequest` surface. Keeps privileged extras off
         // the wire even if the wizard page were compromised. Extra
-        // reads: `/orgs` for the owner picker, `/user-services` and
+        // reads: `/orgs` for the owner picker, `/keys` and
         // `/nodes` to populate the scope multi-selects lazily (only
         // fetched when the user picks "Select specific").
         FlowKind::ApiKeyCreate => vec![
@@ -302,7 +302,7 @@ fn allowlist_for(kind: FlowKind) -> Vec<ProxyRoute> {
             },
             ProxyRoute {
                 method: Method::GET,
-                path_template: "/api/v1/user-services",
+                path_template: "/api/v1/keys",
                 body_fields: &[],
             },
             ProxyRoute {

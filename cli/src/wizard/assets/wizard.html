@@ -147,15 +147,11 @@
         </div>
 
         <div class="wizard-field">
-          <label for="scope-scopes">Scopes</label>
-          <div class="wizard-checkbox-row">
-            <label class="wizard-checkbox">
-              <input type="checkbox" id="scope-read" checked> read
-            </label>
-            <label class="wizard-checkbox">
-              <input type="checkbox" id="scope-write" checked> write
-            </label>
-          </div>
+          <label>Scopes</label>
+          <div class="wizard-scope-chip-row" id="scope-chips" role="group" aria-label="Scopes"></div>
+          <span class="wizard-field-hint">
+            Must match the backend's allowed scope set. Pick at least one.
+          </span>
         </div>
 
         <div class="wizard-field">
@@ -171,49 +167,57 @@
           </span>
         </div>
 
-        <fieldset class="wizard-scope-group">
-          <legend>Service access</legend>
-          <label class="wizard-radio">
-            <input type="radio" name="scope-service-mode" value="all" checked>
-            All services
-          </label>
-          <label class="wizard-radio">
-            <input type="radio" name="scope-service-mode" value="specific">
-            Select specific services
-          </label>
-          <div class="wizard-multi-wrap" id="scope-services-wrap" hidden>
-            <div class="wizard-multi-toolbar">
-              <button type="button" class="wizard-btn-tiny" id="scope-services-all">select all</button>
-              <button type="button" class="wizard-btn-tiny" id="scope-services-none">clear</button>
-              <span class="wizard-field-hint" id="scope-services-count">0 selected</span>
-            </div>
-            <div class="wizard-multi-list" id="scope-services-list" role="list">
-              <div class="wizard-field-hint">Loading…</div>
-            </div>
-          </div>
-        </fieldset>
+        <section class="wizard-access-card" aria-labelledby="access-scope-title">
+          <h2 class="wizard-access-title" id="access-scope-title">Access Scope</h2>
+          <p class="wizard-access-desc">
+            Restrict which services and nodes this key can access via proxy.
+          </p>
 
-        <fieldset class="wizard-scope-group">
-          <legend>Node access</legend>
-          <label class="wizard-radio">
-            <input type="radio" name="scope-node-mode" value="all" checked>
-            All nodes
-          </label>
-          <label class="wizard-radio">
-            <input type="radio" name="scope-node-mode" value="specific">
-            Select specific nodes
-          </label>
-          <div class="wizard-multi-wrap" id="scope-nodes-wrap" hidden>
-            <div class="wizard-multi-toolbar">
-              <button type="button" class="wizard-btn-tiny" id="scope-nodes-all">select all</button>
-              <button type="button" class="wizard-btn-tiny" id="scope-nodes-none">clear</button>
-              <span class="wizard-field-hint" id="scope-nodes-count">0 selected</span>
+          <div class="wizard-access-group">
+            <div class="wizard-access-subheading">
+              <svg class="wizard-access-icon" viewBox="0 0 24 24" width="16" height="16"
+                   fill="none" stroke="currentColor" stroke-width="2"
+                   stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+              </svg>
+              <span>Services</span>
             </div>
-            <div class="wizard-multi-list" id="scope-nodes-list" role="list">
-              <div class="wizard-field-hint">Loading…</div>
+            <label class="wizard-checkbox">
+              <input type="checkbox" id="scope-allow-all-services" checked>
+              <span>Allow all services</span>
+            </label>
+            <div class="wizard-access-list-card" id="scope-services-wrap" hidden>
+              <p class="wizard-field-hint">Select allowed services:</p>
+              <div class="wizard-multi-list" id="scope-services-list" role="list">
+                <div class="wizard-field-hint">Loading…</div>
+              </div>
             </div>
           </div>
-        </fieldset>
+
+          <div class="wizard-access-group">
+            <div class="wizard-access-subheading">
+              <svg class="wizard-access-icon" viewBox="0 0 24 24" width="16" height="16"
+                   fill="none" stroke="currentColor" stroke-width="2"
+                   stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="2" y="3" width="20" height="7" rx="1.5"/>
+                <rect x="2" y="14" width="20" height="7" rx="1.5"/>
+                <line x1="6" y1="6.5" x2="6.01" y2="6.5"/>
+                <line x1="6" y1="17.5" x2="6.01" y2="17.5"/>
+              </svg>
+              <span>Nodes</span>
+            </div>
+            <label class="wizard-checkbox">
+              <input type="checkbox" id="scope-allow-all-nodes" checked>
+              <span>Allow all nodes</span>
+            </label>
+            <div class="wizard-access-list-card" id="scope-nodes-wrap" hidden>
+              <p class="wizard-field-hint">Select allowed nodes:</p>
+              <div class="wizard-multi-list" id="scope-nodes-list" role="list">
+                <div class="wizard-field-hint">Loading…</div>
+              </div>
+            </div>
+          </div>
+        </section>
 
         <fieldset class="wizard-scope-group">
           <legend>Rate limit (optional)</legend>
