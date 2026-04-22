@@ -352,6 +352,17 @@ pub struct DeleteKeyResponse {
     pub message: String,
 }
 
+fn validate_optional_label_for_update(label: Option<&str>) -> AppResult<()> {
+    if let Some(label) = label
+        && (label.is_empty() || label.len() > 200)
+    {
+        return Err(AppError::ValidationError(
+            "Label must be between 1 and 200 characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[utoipa::path(
     post,
     path = "/api/v1/keys",
@@ -610,6 +621,13 @@ pub async fn update_key(
     // actually applied (thirty-first-round Codex P2). The deferred
     // label-write block lives after the strict push succeeds, right
     // alongside the `endpoint_url` / `openapi_spec_url` commits.
+    //
+    // But the *validation* still has to happen up front. Otherwise an
+    // invalid label on an existing service would let the handler rotate
+    // a credential and even push it to a node, then fail only when the
+    // deferred label write runs — returning an error despite the
+    // credential change having already applied.
+    validate_optional_label_for_update(body.label.as_deref())?;
 
     // NOTE: `body.endpoint_url` is intentionally NOT written to the DB
     // here. For node-routed services we must keep the endpoint URL and
@@ -1476,5 +1494,29 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         ssh_certificate_ttl_minutes: view.ssh_certificate_ttl_minutes,
         openapi_spec_url: view.openapi_spec_url,
         credential_source: view.credential_source.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_optional_label_for_update;
+    use crate::errors::AppError;
+
+    #[test]
+    fn update_label_validation_accepts_none_and_valid_lengths() {
+        assert!(validate_optional_label_for_update(None).is_ok());
+        assert!(validate_optional_label_for_update(Some("ok")).is_ok());
+        assert!(validate_optional_label_for_update(Some(&"x".repeat(200))).is_ok());
+    }
+
+    #[test]
+    fn update_label_validation_rejects_empty_and_too_long_values() {
+        let err = validate_optional_label_for_update(Some(""))
+            .expect_err("empty label should be rejected before any mutation");
+        assert!(matches!(err, AppError::ValidationError(_)));
+
+        let err = validate_optional_label_for_update(Some(&"x".repeat(201)))
+            .expect_err("overlong label should be rejected before any mutation");
+        assert!(matches!(err, AppError::ValidationError(_)));
     }
 }
