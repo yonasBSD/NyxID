@@ -8,8 +8,9 @@
 //! Webhook verification uses HMAC-SHA256 over the request body, with the
 //! verification token stored on the [`ChannelBot`] document.
 //!
-//! Message parsing handles the standard `im.message.receive_v1` event schema
-//! and the `url_verification` challenge flow.
+//! Message parsing handles the standard `im.message.receive_v1` event schema,
+//! interactive card callbacks via `card.action.trigger`, and the
+//! `url_verification` challenge flow.
 //!
 //! Tenant token acquisition goes through the generic
 //! [`provider_token_exchange_service`] helpers so the channel adapter and
@@ -239,6 +240,61 @@ fn parse_message_event(
     })
 }
 
+/// Parse a `card.action.trigger` event into an [`InboundMessage`].
+fn parse_card_action_event(
+    header: &serde_json::Value,
+    event: &serde_json::Value,
+    raw: serde_json::Value,
+) -> Option<InboundMessage> {
+    let context = event.get("context")?;
+    let chat_id = context.get("open_chat_id").and_then(|v| v.as_str())?;
+    let chat_type = context
+        .get("chat_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("group");
+
+    let action = event.get("action");
+    let text = serde_json::to_string(&serde_json::json!({
+        "tag": action.and_then(|a| a.get("tag")).and_then(|v| v.as_str()),
+        "value": action.and_then(|a| a.get("value")).cloned(),
+        "form_value": action.and_then(|a| a.get("form_value")).cloned(),
+        "open_message_id": context.get("open_message_id").and_then(|v| v.as_str()),
+    }))
+    .ok()?;
+
+    let sender_id = event
+        .get("operator")
+        .and_then(|o| o.get("open_id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+
+    let sender_name = event
+        .get("operator")
+        .and_then(|o| o.get("name"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    let reply_to = context
+        .get("open_message_id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    Some(InboundMessage {
+        platform_message_id: header.get("event_id").and_then(|v| v.as_str())?.to_string(),
+        conversation_id: chat_id.to_string(),
+        conversation_type: map_conversation_type(chat_type).to_string(),
+        sender_platform_id: sender_id,
+        sender_display_name: sender_name,
+        content_type: "card_action".to_string(),
+        text: Some(text),
+        attachments: Vec::new(),
+        reply_to_platform_message_id: reply_to,
+        thread_id: None,
+        raw_data: raw,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // PlatformAdapter implementation
 // ---------------------------------------------------------------------------
@@ -332,17 +388,20 @@ impl PlatformAdapter for LarkFamilyAdapter {
             None => return Ok(Vec::new()),
         };
 
-        // Only handle im.message.receive_v1 events
-        let event_type = payload
-            .get("header")
-            .and_then(|h| h.get("event_type"))
-            .and_then(|v| v.as_str());
+        let header = match payload.get("header") {
+            Some(h) => h,
+            None => return Ok(Vec::new()),
+        };
 
-        if event_type != Some("im.message.receive_v1") {
-            return Ok(Vec::new());
-        }
+        let event_type = header.get("event_type").and_then(|v| v.as_str());
 
-        match parse_message_event(event, payload.clone()) {
+        let parsed = match event_type {
+            Some("im.message.receive_v1") => parse_message_event(event, payload.clone()),
+            Some("card.action.trigger") => parse_card_action_event(header, event, payload.clone()),
+            _ => None,
+        };
+
+        match parsed {
             Some(msg) => Ok(vec![msg]),
             None => Ok(Vec::new()),
         }
@@ -642,6 +701,127 @@ mod tests {
             },
             "event": {
                 "chat_id": "oc_xxx"
+            }
+        });
+        let raw = serde_json::to_vec(&body).unwrap();
+        let msgs = adapter.parse_inbound(&raw).await.unwrap();
+        assert!(msgs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn parse_card_action_button_click() {
+        let adapter = LarkFamilyAdapter::lark(test_cache());
+        let body = serde_json::json!({
+            "schema": "2.0",
+            "header": {
+                "event_id": "ev_btn",
+                "event_type": "card.action.trigger",
+                "create_time": "1700000002"
+            },
+            "event": {
+                "operator": {
+                    "open_id": "ou_operator123",
+                    "name": "Alice"
+                },
+                "action": {
+                    "tag": "button",
+                    "value": {
+                        "button_id": "approve",
+                        "step": 1
+                    }
+                },
+                "context": {
+                    "open_chat_id": "oc_chat123",
+                    "chat_type": "p2p",
+                    "open_message_id": "om_xxx"
+                }
+            }
+        });
+        let raw = serde_json::to_vec(&body).unwrap();
+        let msgs = adapter.parse_inbound(&raw).await.unwrap();
+
+        assert_eq!(msgs.len(), 1);
+        let m = &msgs[0];
+        assert_eq!(m.content_type, "card_action");
+        assert_eq!(m.platform_message_id, "ev_btn");
+        assert_eq!(m.reply_to_platform_message_id.as_deref(), Some("om_xxx"));
+
+        let envelope: serde_json::Value = serde_json::from_str(m.text.as_deref().unwrap()).unwrap();
+        assert_eq!(envelope["tag"], "button");
+        assert_eq!(envelope["value"]["button_id"], "approve");
+        assert_eq!(envelope["open_message_id"], "om_xxx");
+    }
+
+    #[tokio::test]
+    async fn parse_card_action_form_submit() {
+        let adapter = LarkFamilyAdapter::feishu(test_cache());
+        let body = serde_json::json!({
+            "schema": "2.0",
+            "header": {
+                "event_id": "ev_form",
+                "event_type": "card.action.trigger"
+            },
+            "event": {
+                "operator": {
+                    "open_id": "ou_form_user"
+                },
+                "action": {
+                    "tag": "form_submit",
+                    "value": {
+                        "submission": "confirm",
+                        "source": "footer"
+                    },
+                    "form_value": {
+                        "environment": "prod",
+                        "reason": "deploy ready"
+                    }
+                },
+                "context": {
+                    "open_chat_id": "oc_form_chat",
+                    "open_message_id": "om_form_msg"
+                }
+            }
+        });
+        let raw = serde_json::to_vec(&body).unwrap();
+        let msgs = adapter.parse_inbound(&raw).await.unwrap();
+
+        assert_eq!(msgs.len(), 1);
+        let m = &msgs[0];
+        let envelope: serde_json::Value = serde_json::from_str(m.text.as_deref().unwrap()).unwrap();
+        assert_eq!(envelope["tag"], "form_submit");
+        assert_eq!(envelope["value"]["submission"], "confirm");
+        assert_eq!(envelope["value"]["source"], "footer");
+        assert_eq!(envelope["form_value"]["environment"], "prod");
+        assert_eq!(envelope["form_value"]["reason"], "deploy ready");
+        assert_eq!(
+            m.raw_data["event"]["action"]["value"]["submission"],
+            "confirm"
+        );
+        assert_eq!(
+            m.raw_data["event"]["action"]["form_value"]["environment"],
+            "prod"
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_card_action_missing_chat_id_returns_empty() {
+        let adapter = LarkFamilyAdapter::lark(test_cache());
+        let body = serde_json::json!({
+            "schema": "2.0",
+            "header": {
+                "event_id": "ev_missing_chat",
+                "event_type": "card.action.trigger"
+            },
+            "event": {
+                "operator": {
+                    "open_id": "ou_missing"
+                },
+                "action": {
+                    "tag": "button"
+                },
+                "context": {
+                    "open_message_id": "om_missing"
+                }
             }
         });
         let raw = serde_json::to_vec(&body).unwrap();
