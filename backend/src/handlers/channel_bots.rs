@@ -432,6 +432,7 @@ pub async fn update_bot(
 ) -> AppResult<Json<ChannelBotDetailResponse>> {
     let actor = auth_user.user_id.to_string();
     let (owner_id, bot) = resolve_bot_owner_for_write(&state, &actor, &bot_id).await?;
+    let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
 
     let label = match body.label.as_deref() {
         Some(value) if value.trim().is_empty() => {
@@ -523,6 +524,8 @@ pub async fn update_bot(
     let updated = channel_bot_service::update_bot(
         &state.db,
         &state.encryption_keys,
+        &state.http_client,
+        adapter.as_ref(),
         &bot_id,
         &owner_id,
         crate::services::channel_bot_service::UpdateBotParams {
