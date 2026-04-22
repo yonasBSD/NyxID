@@ -8,8 +8,8 @@
 //! Webhook verification follows Lark / Feishu's actual Event Subscription
 //! contract: every payload carries a Verification Token, and Encrypt Key is
 //! optional. When Encrypt Key is configured, the request body is wrapped as
-//! `{"encrypt":"..."}` and must be signature-checked + AES-256-CBC decrypted
-//! before token validation or event parsing.
+//! `{"encrypt":"..."}` and the raw request body must be signature-checked
+//! before AES-256-CBC decryption, token validation, or event parsing.
 //!
 //! Message parsing handles the standard `im.message.receive_v1` event schema,
 //! interactive card callbacks via `card.action.trigger`, and the
@@ -142,7 +142,7 @@ impl LarkFamilyAdapter {
         let raw_payload = parse_lark_payload(body, "invalid Lark/Feishu webhook JSON")?;
         let configured_encrypt_key = secrets.and_then(|s| s.lark_encrypt_key.as_deref());
 
-        let (effective_body, effective_payload, was_encrypted) = if let Some(encrypt_value) =
+        let (effective_body, effective_payload) = if let Some(encrypt_value) =
             extract_encrypt_value(&raw_payload)
         {
             let encrypt_key = configured_encrypt_key.ok_or_else(|| {
@@ -150,30 +150,25 @@ impl LarkFamilyAdapter {
                     "encrypt key not configured for bot".to_string(),
                 )
             })?;
+            verify_signed_request(headers, encrypt_key, body)?;
             let decrypted_body = decrypt_event_body(encrypt_key, encrypt_value)?;
             let decrypted_payload = parse_lark_payload(
                 &decrypted_body,
                 "invalid decrypted Lark/Feishu webhook JSON",
             )?;
-            (decrypted_body, decrypted_payload, true)
+            (decrypted_body, decrypted_payload)
         } else {
             if configured_encrypt_key.is_some() {
                 return Err(AppError::ChannelWebhookVerificationFailed(
                     "encrypt key configured for bot but webhook payload was plaintext".to_string(),
                 ));
             }
-            (body.to_vec(), raw_payload, false)
+            (body.to_vec(), raw_payload)
         };
-
-        let is_challenge = is_url_verification(&effective_payload);
-
-        if was_encrypted && !is_challenge {
-            verify_signed_request(headers, configured_encrypt_key.unwrap_or_default(), body)?;
-        }
 
         verify_lark_token(bot, secrets, &effective_payload)?;
 
-        let challenge_response = if is_challenge {
+        let challenge_response = if is_url_verification(&effective_payload) {
             let challenge = effective_payload
                 .get("challenge")
                 .and_then(|value| value.as_str())
@@ -201,6 +196,8 @@ impl LarkFamilyAdapter {
 // Official references used for this verifier:
 // - Feishu Event Subscription security docs:
 //   https://open.feishu.cn/document/server-docs/event-subscription-guide/event-subscription-configure-/encrypt-key-encryption-configuration-case?lang=en-US
+//   Authenticate the raw request body without decrypting first, then decrypt
+//   only after the signature passes.
 //   Signature = hex(SHA256(X-Lark-Request-Timestamp + X-Lark-Request-Nonce + encrypt_key + raw_body_bytes)).
 // - Same doc for encrypted events:
 //   the request body is {"encrypt":"..."}; base64-decode it, use the first 16 bytes as IV,
@@ -989,13 +986,17 @@ mod tests {
     async fn prepare_webhook_encrypted_challenge_returns_challenge_response() {
         let adapter = LarkFamilyAdapter::lark(test_cache());
         let bot = make_test_bot("lark");
+        let timestamp = "1710000000";
+        let nonce = "challenge-nonce";
         let encrypt_key = "test-encrypt-key";
         let plaintext = challenge_body("verify_token", "encrypted-challenge");
         let body = encrypted_request_body(encrypt_key, &plaintext);
+        let signature = sign_request(timestamp, nonce, encrypt_key, &body);
+        let headers = signed_headers(timestamp, nonce, Some(&signature));
         let secrets = make_lark_secrets(Some("verify_token"), Some(encrypt_key));
 
         let prepared = adapter
-            .prepare_webhook(&bot, Some(&secrets), &axum::http::HeaderMap::new(), &body)
+            .prepare_webhook(&bot, Some(&secrets), &headers, &body)
             .await
             .expect("encrypted challenge should be accepted");
 
@@ -1003,6 +1004,25 @@ mod tests {
             prepared.challenge_response,
             Some(serde_json::json!({ "challenge": "encrypted-challenge" }))
         );
+    }
+
+    #[tokio::test]
+    async fn prepare_webhook_encrypted_challenge_rejects_invalid_signature_before_decrypt() {
+        let adapter = LarkFamilyAdapter::lark(test_cache());
+        let bot = make_test_bot("lark");
+        let encrypt_key = "test-encrypt-key";
+        let plaintext = challenge_body("verify_token", "encrypted-challenge");
+        let body = encrypted_request_body(encrypt_key, &plaintext);
+        let headers = signed_headers("1710000000", "challenge-nonce", Some("deadbeef"));
+        let secrets = make_lark_secrets(Some("verify_token"), Some(encrypt_key));
+
+        let err = adapter
+            .prepare_webhook(&bot, Some(&secrets), &headers, &body)
+            .await
+            .expect_err("invalid signature should fail before decrypt");
+
+        assert!(matches!(err, AppError::ChannelWebhookVerificationFailed(_)));
+        assert!(err.to_string().contains("signature verification failed"));
     }
 
     // -- parse_inbound -------------------------------------------------------
