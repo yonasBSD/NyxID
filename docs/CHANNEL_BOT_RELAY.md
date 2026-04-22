@@ -278,6 +278,8 @@ erDiagram
         string status "pending | active | failed | invalid"
         string app_id "Lark/Feishu only"
         bytes app_secret_encrypted "Lark/Feishu only"
+        bytes lark_verification_token_encrypted "Lark/Feishu only"
+        bytes lark_encrypt_key_encrypted "Lark/Feishu only, optional"
         string public_key "Discord only"
         bool is_active
         datetime created_at
@@ -343,12 +345,12 @@ classDiagram
     class PlatformAdapter {
         <<trait>>
         +platform_id() str
-        +verify_webhook(bot, headers, body) Result
+        +prepare_webhook(bot, secrets, headers, body) PreparedWebhook
+        +verify_webhook(bot, secrets, headers, body) Result
         +parse_inbound(body) Result~Vec~InboundMessage~~
         +send_reply(http, bot, conversation_id, reply) Result~String~
         +register_webhook(http, bot, url, secret) Result
         +verify_bot_token(http, token) Result~BotIdentity~
-        +handle_challenge(body) Option~JSON~
     }
 
     class TelegramAdapter {
@@ -368,8 +370,9 @@ classDiagram
     class LarkFamilyAdapter {
         -base_url: String
         +platform_id() "lark" or "feishu"
-        -HMAC-SHA256 verification
-        -url_verification challenge
+        -Verification Token check
+        -Optional Encrypt Key signature + AES-256-CBC decrypt
+        -url_verification handled after bot lookup
         -App access token caching
     }
 
@@ -386,10 +389,15 @@ classDiagram
 |---|---|---|---|---|
 | **Telegram** | Bot token (`123:ABC...`) | `X-Telegram-Bot-Api-Secret-Token` header (constant-time) | None | `POST /bot{token}/sendMessage` |
 | **Discord** | Bot token + Application ID | Ed25519 signature (`X-Signature-Ed25519` + `X-Signature-Timestamp`) | `PING` -> `PONG` interaction response | `POST /channels/{id}/messages` with `Authorization: Bot {token}` |
-| **Lark** | App ID + App Secret | HMAC-SHA256 on `X-Lark-Signature` header | `url_verification` event -> echo `challenge` | `POST /im/v1/messages` with tenant access token |
-| **Feishu** | App ID + App Secret (same as Lark) | Same as Lark | Same as Lark | Same as Lark, different base URL (`open.feishu.cn`) |
+| **Lark** | App ID + App Secret for tenant access token; Verification Token for inbound webhook auth; optional Encrypt Key for signed/encrypted delivery | Always verify Verification Token. If Encrypt Key is configured, also require `X-Lark-Signature` with `hex(SHA256(timestamp + nonce + encrypt_key + raw_body))`, then decrypt `{\"encrypt\":\"...\"}` using AES-256-CBC, PKCS7, IV = first 16 bytes, key = `SHA256(encrypt_key)` | `url_verification` -> verify token first, then echo `challenge` | `POST /im/v1/messages` with tenant access token |
+| **Feishu** | Same as Lark | Same as Lark | Same as Lark | Same as Lark, different base URL (`open.feishu.cn`) |
 
-For the Lark/Feishu platform family, `register_webhook()` remains a no-op. Configure the webhook URL and subscribe to both `im.message.receive_v1` and `card.action.trigger` only in the Lark/Feishu Developer Console.
+For the Lark/Feishu platform family, `register_webhook()` remains a no-op. Configure the webhook URL and subscribe to both `im.message.receive_v1` and `card.action.trigger` only in the Lark/Feishu Developer Console. The console inputs map to NyxID fields as follows:
+
+- **App ID** -> `ChannelBot.app_id`
+- **App Secret** -> `ChannelBot.app_secret_encrypted`
+- **Verification Token** -> `ChannelBot.lark_verification_token_encrypted`
+- **Encrypt Key** -> `ChannelBot.lark_encrypt_key_encrypted` (optional)
 
 ### Adding New Platforms
 
@@ -611,6 +619,7 @@ flowchart TD
 | `POST` | `/api/v1/channel-bots` | Register a new bot |
 | `GET` | `/api/v1/channel-bots` | List user's bots |
 | `GET` | `/api/v1/channel-bots/{id}` | Get bot details |
+| `PATCH` | `/api/v1/channel-bots/{id}` | Update bot label or platform verification material |
 | `DELETE` | `/api/v1/channel-bots/{id}` | Delete bot (deregisters webhook) |
 | `POST` | `/api/v1/channel-bots/{id}/verify` | Re-verify bot token and webhook |
 
@@ -679,7 +688,22 @@ graph TD
 |---|---|
 | **SSRF** | Callback URLs validated: HTTPS-only in production, block RFC 1918/loopback ranges, optional domain allowlist |
 | **Bot token storage** | AES-256 encrypted at rest (same pattern as `UserApiKey.credential_encrypted`). Never returned in API responses. Only `platform_bot_username` is exposed. |
-| **Webhook forgery** | Per-platform verification: Telegram secret header, Discord Ed25519, Lark HMAC-SHA256. All constant-time comparison. |
+| **Webhook forgery** | Per-platform verification: Telegram secret header, Discord Ed25519, Lark / Feishu Verification Token checks plus optional Encrypt Key signature verification and AES decryption. All comparisons use constant-time equality where applicable. |
+
+### Migrating a stuck Lark / Feishu bot
+
+Bots created before issue #455 may have the right App ID / App Secret but still remain in `pending_webhook` because the inbound Verification Token and optional Encrypt Key were never stored separately.
+
+To self-heal an existing bot:
+
+1. Read the bot's Event Subscriptions settings in the Lark / Feishu console.
+2. Update the bot with its Verification Token and, if enabled in the console, its Encrypt Key.
+3. Wait for the next verified inbound webhook or `url_verification` challenge. NyxID will auto-promote the bot from `pending_webhook` to `active` after successful verification.
+
+You can update the bot either via the API or the CLI:
+
+- `PATCH /api/v1/channel-bots/{id}` with `{ "verification_token": "...", "encrypt_key": "..." }`
+- `nyxid channel-bot update <BOT_ID> --verification-token ... [--encrypt-key ...]`
 | **Replay attacks** | Callbacks include `X-NyxID-Timestamp`. Agents should reject messages older than 5 minutes. |
 | **Callback authentication** | `X-NyxID-Signature` is HMAC-SHA256 of the request body, keyed with the API key's hash. Agents verify this to confirm the request came from NyxID. |
 | **Agent impersonation** | Async reply endpoint requires the calling API key to match the conversation's `agent_api_key_id`. |

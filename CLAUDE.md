@@ -258,7 +258,7 @@ All API routes under `/api/v1`:
 - `/api-keys/external` -- user's external API keys / credentials (list, update, delete)
 - `/user-services` -- user's proxy routing config (list, update, delete)
 - `/catalog` -- read-only service catalog for users (list templates, get template by slug, `?include_all=true` for full discovery including system services). Supports `/{slug}/endpoints` for OpenAPI endpoint discovery via hardened spec fetch.
-- `/channel-bots` -- channel bot registration CRUD
+- `/channel-bots` -- channel bot registration CRUD + PATCH updates for platform verification material
 - `/channel-conversations` -- conversation-to-agent routing (CRUD). Maps platform conversations to agent API keys.
 - `/channel-relay/reply` -- agent async reply to a platform conversation. **Only async replies are supported** — sync 200+body replies from agent callbacks were removed per ADR-013 / NyxID#221. Agents must return 202 to the callback and post replies here.
 - `/channel-relay/messages/{conversation_id}` -- message history for agents
@@ -275,6 +275,19 @@ All API routes under `/api/v1`:
 - `/oauth/token` -- also supports `grant_type=client_credentials` (service accounts), `grant_type=urn:ietf:params:oauth:grant-type:token-exchange` (RFC 8693 delegated access and social token exchange via `subject_token_type=id_token` for native mobile Google/GitHub login)
 
 Top-level: `/health`, `/.well-known/openid-configuration`, `/oauth/*`, `/mcp`, `/llms.txt`, `/llms-full.txt`
+
+## Channel Bot Notes
+
+For Lark / Feishu channel bots, the developer console fields are used for different purposes and must not be conflated:
+
+- **App ID** + **App Secret** authenticate outbound NyxID calls to the Lark / Feishu APIs so NyxID can fetch tenant access tokens and send replies.
+- **Verification Token** is required for inbound webhook verification. NyxID compares it against `header.token` on v2 events or top-level `token` on v1 / `url_verification` payloads.
+- **Encrypt Key** is optional. When configured in the Lark / Feishu Event Subscriptions console, NyxID verifies `X-Lark-Signature`, decrypts the `encrypt` payload, and then validates the Verification Token on the decrypted JSON.
+
+If an older Lark / Feishu bot is stuck in `pending_webhook`, patch the bot with its Verification Token and optional Encrypt Key, then wait for the next verified inbound to auto-promote it to `active`:
+
+- `PATCH /api/v1/channel-bots/{id}`
+- `nyxid channel-bot update <ID> --verification-token ... [--encrypt-key ...] [--app-id ...] [--app-secret ...]`
 
 ## Environment Variables
 
@@ -403,6 +416,12 @@ nyxid api-key show <ID_OR_NAME>         # Show key details + bindings
 nyxid api-key bind <ID_OR_NAME> --service <SLUG> --credential <LABEL>  # Credential override
 nyxid api-key rotate <ID_OR_NAME>       # Rotate API key
 nyxid api-key delete <ID_OR_NAME>       # Delete API key
+
+# Channel bots
+nyxid channel-bot register --platform telegram --label support --token-env TELEGRAM_BOT_TOKEN
+nyxid channel-bot register --platform lark --label support --token-env LARK_BOT_TOKEN --app-id cli_xxx --app-secret-env LARK_APP_SECRET --verification-token vtoken_xxx
+nyxid channel-bot update <BOT_ID> --verification-token vtoken_xxx --encrypt-key key_xxx
+NYXID_LARK_VERIFICATION_TOKEN=vtoken_xxx NYXID_LARK_ENCRYPT_KEY=key_xxx nyxid channel-bot update <BOT_ID>
 
 # Frontend (from frontend/)
 npm run dev                             # Dev server (port 3000)
