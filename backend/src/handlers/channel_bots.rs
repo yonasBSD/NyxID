@@ -21,7 +21,7 @@ use crate::services::{audit_service, channel_bot_service, org_service};
 // Request types
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct CreateChannelBotRequest {
     pub platform: String,
     pub bot_token: String,
@@ -44,7 +44,7 @@ pub struct CreateChannelBotRequest {
     pub target_org_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct UpdateChannelBotRequest {
     #[serde(default)]
     pub label: Option<String>,
@@ -67,14 +67,61 @@ pub struct ChannelBotListQuery {
     pub org_id: Option<String>,
 }
 
-// Redact bot_token in Debug output to prevent credential leakage.
+impl std::fmt::Debug for CreateChannelBotRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreateChannelBotRequest")
+            .field("platform", &self.platform)
+            .field("bot_token", &"[REDACTED]")
+            .field("label", &self.label)
+            .field("app_id", &self.app_id)
+            .field(
+                "app_secret",
+                &self.app_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "verification_token",
+                &self.verification_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "encrypt_key",
+                &self.encrypt_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("public_key", &self.public_key)
+            .field("target_org_id", &self.target_org_id)
+            .finish()
+    }
+}
+
 impl std::fmt::Display for CreateChannelBotRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "CreateChannelBotRequest {{ platform: {}, label: {}, bot_token: [REDACTED] }}",
-            self.platform, self.label
-        )
+        std::fmt::Debug::fmt(self, f)
+    }
+}
+
+impl std::fmt::Debug for UpdateChannelBotRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UpdateChannelBotRequest")
+            .field("label", &self.label)
+            .field(
+                "verification_token",
+                &self.verification_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "encrypt_key",
+                &self.encrypt_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("app_id", &self.app_id)
+            .field(
+                "app_secret",
+                &self.app_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
+}
+
+impl std::fmt::Display for UpdateChannelBotRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(self, f)
     }
 }
 
