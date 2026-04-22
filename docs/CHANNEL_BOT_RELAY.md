@@ -389,6 +389,8 @@ classDiagram
 | **Lark** | App ID + App Secret | HMAC-SHA256 on `X-Lark-Signature` header | `url_verification` event -> echo `challenge` | `POST /im/v1/messages` with tenant access token |
 | **Feishu** | App ID + App Secret (same as Lark) | Same as Lark | Same as Lark | Same as Lark, different base URL (`open.feishu.cn`) |
 
+For the Lark/Feishu platform family, `register_webhook()` remains a no-op. Configure the webhook URL and subscribe to both `im.message.receive_v1` and `card.action.trigger` only in the Lark/Feishu Developer Console.
+
 ### Adding New Platforms
 
 To add a new platform (e.g. WhatsApp, Slack, LINE), create a single adapter file implementing `PlatformAdapter`:
