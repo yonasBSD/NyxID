@@ -12,7 +12,12 @@ export type ChannelPlatform =
  */
 export type ConversationPlatform = ChannelPlatform | "device";
 
-export type ChannelBotStatus = "pending" | "active" | "failed" | "invalid";
+export type ChannelBotStatus =
+  | "pending"
+  | "pending_webhook"
+  | "active"
+  | "failed"
+  | "invalid";
 
 export type ConversationType = "private" | "group" | "channel" | "device";
 
@@ -64,10 +69,22 @@ export interface CreateChannelBotRequest {
   readonly app_id?: string;
   /** Lark/Feishu: app secret. Slack: app signing secret. */
   readonly app_secret?: string;
+  /** Lark/Feishu only */
+  readonly verification_token?: string;
+  /** Lark/Feishu only */
+  readonly encrypt_key?: string;
   /** Discord only */
   readonly public_key?: string;
   /** Create this bot under the given org (caller must be admin). */
   readonly target_org_id?: string;
+}
+
+export interface UpdateChannelBotRequest {
+  readonly label?: string;
+  readonly verification_token?: string;
+  readonly encrypt_key?: string;
+  readonly app_id?: string;
+  readonly app_secret?: string;
 }
 
 export interface CreateChannelBotResponse {
