@@ -59,6 +59,9 @@ export interface ChannelBotListResponse {
 
 export interface ChannelBotDetail extends ChannelBotItem {
   readonly conversations_count: number;
+  readonly app_secret_configured: boolean;
+  readonly lark_verification_token_configured: boolean;
+  readonly lark_encrypt_key_configured: boolean;
 }
 
 export interface CreateChannelBotRequest {

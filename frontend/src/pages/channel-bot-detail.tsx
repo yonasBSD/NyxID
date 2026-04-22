@@ -66,6 +66,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import type {
+  ChannelBotDetail,
   ChannelBotStatus,
   ChannelConversationItem,
   ChannelPlatform,
@@ -562,10 +563,11 @@ function DeleteBotDialog({
 }
 
 function EditVerificationSection({
-  botId,
+  bot,
 }: {
-  readonly botId: string;
+  readonly bot: ChannelBotDetail;
 }) {
+  const botId = bot.id;
   const updateBot = useUpdateChannelBot();
   const {
     register,
@@ -636,7 +638,14 @@ function EditVerificationSection({
     <DetailSection title="Edit Verification">
       <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
         <div className="space-y-2">
-          <Label htmlFor="verification_token">Verification Token</Label>
+          <div className="flex items-center justify-between gap-3">
+            <Label htmlFor="verification_token">Verification Token</Label>
+            {bot.lark_verification_token_configured && (
+              <Badge variant="outline" className="text-[10px] uppercase tracking-wide">
+                Configured
+              </Badge>
+            )}
+          </div>
           <Input
             id="verification_token"
             type="password"
@@ -655,7 +664,14 @@ function EditVerificationSection({
         </div>
 
         <div className="space-y-2">
-          <Label htmlFor="encrypt_key">Encrypt Key</Label>
+          <div className="flex items-center justify-between gap-3">
+            <Label htmlFor="encrypt_key">Encrypt Key</Label>
+            {bot.lark_encrypt_key_configured && (
+              <Badge variant="outline" className="text-[10px] uppercase tracking-wide">
+                Configured
+              </Badge>
+            )}
+          </div>
           <Input
             id="encrypt_key"
             type="password"
@@ -686,7 +702,14 @@ function EditVerificationSection({
         </div>
 
         <div className="space-y-2">
-          <Label htmlFor="app_secret">App Secret</Label>
+          <div className="flex items-center justify-between gap-3">
+            <Label htmlFor="app_secret">App Secret</Label>
+            {bot.app_secret_configured && (
+              <Badge variant="outline" className="text-[10px] uppercase tracking-wide">
+                Configured
+              </Badge>
+            )}
+          </div>
           <Input
             id="app_secret"
             type="password"
@@ -834,8 +857,11 @@ export function ChannelBotDetailPage() {
             Pending webhook verification
           </p>
           <p className="mt-1 text-sm text-muted-foreground">
-            Once Lark delivers a verified inbound message, this bot will
-            automatically move to Active.
+            {bot.platform === "lark" || bot.platform === "feishu"
+              ? bot.lark_verification_token_configured
+                ? "Once Lark/Feishu delivers a verified inbound message, this bot will automatically move to Active."
+                : "Set the Verification Token below, and set Encrypt Key too if it is enabled in the Lark/Feishu console. After the next verified inbound message, this bot will automatically move to Active."
+              : `Once ${platformLabel(bot.platform)} delivers a verified inbound message, this bot will automatically move to Active.`}
           </p>
         </div>
       )}
@@ -875,7 +901,7 @@ export function ChannelBotDetailPage() {
       </DetailSection>
 
       {(bot.platform === "lark" || bot.platform === "feishu") && (
-        <EditVerificationSection botId={botId} />
+        <EditVerificationSection bot={bot} />
       )}
 
       {/* Conversation Routes */}
