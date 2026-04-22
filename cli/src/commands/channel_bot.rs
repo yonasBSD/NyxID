@@ -141,6 +141,10 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
                 body["verification_token"] = Value::String(value.to_string());
                 changed = true;
             }
+            // encrypt_key uses three-state semantics: omitted = no change;
+            // explicit empty string = clear; non-empty = set.
+            // Other fields (label, verification_token, app_id, app_secret)
+            // only accept non-empty values.
             if let Some(value) = resolved_encrypt_key {
                 body["encrypt_key"] = Value::String(value);
                 changed = true;
