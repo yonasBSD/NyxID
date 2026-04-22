@@ -22,6 +22,21 @@ pub struct CreateBotResult {
     pub webhook_secret: String,
 }
 
+#[derive(Clone, Copy)]
+pub enum SecretPatch<'a> {
+    Unchanged,
+    Clear,
+    Set(&'a str),
+}
+
+pub struct UpdateBotParams<'a> {
+    pub label: Option<&'a str>,
+    pub verification_token: Option<&'a str>,
+    pub encrypt_key: SecretPatch<'a>,
+    pub app_id: Option<&'a str>,
+    pub app_secret: Option<&'a str>,
+}
+
 /// Register a new channel bot for the given user.
 ///
 /// Verifies the token with the platform, encrypts it, generates a webhook
@@ -40,6 +55,8 @@ pub async fn create_bot(
     app_id: Option<&str>,
     app_secret: Option<&str>,
     public_key: Option<&str>,
+    verification_token: Option<&str>,
+    encrypt_key: Option<&str>,
 ) -> AppResult<CreateBotResult> {
     // Validate label
     if label.is_empty() || label.len() > 200 {
@@ -71,6 +88,16 @@ pub async fn create_bot(
     if adapter.platform_id() == "slack" && app_secret.map(|s| s.trim().is_empty()).unwrap_or(true) {
         return Err(AppError::ValidationError(
             "Slack signing secret is required (pass via app_secret)".to_string(),
+        ));
+    }
+
+    if matches!(adapter.platform_id(), "lark" | "feishu")
+        && verification_token
+            .map(|value| value.trim().is_empty())
+            .unwrap_or(true)
+    {
+        return Err(AppError::ValidationError(
+            "Lark/Feishu Verification Token is required".to_string(),
         ));
     }
 
@@ -132,6 +159,14 @@ pub async fn create_bot(
         Some(secret) => Some(encryption_keys.encrypt(secret.as_bytes()).await?),
         None => None,
     };
+    let lark_verification_token_encrypted = match verification_token {
+        Some(token) => Some(encryption_keys.encrypt(token.as_bytes()).await?),
+        None => None,
+    };
+    let lark_encrypt_key_encrypted = match encrypt_key {
+        Some(key) => Some(encryption_keys.encrypt(key.as_bytes()).await?),
+        None => None,
+    };
 
     let now = Utc::now();
     let bot = ChannelBot {
@@ -146,6 +181,8 @@ pub async fn create_bot(
         webhook_secret_hash: secret_hash,
         app_id: app_id.map(String::from),
         app_secret_encrypted,
+        lark_verification_token_encrypted,
+        lark_encrypt_key_encrypted,
         public_key: public_key.map(String::from),
         status: "pending".to_string(),
         is_active: true,
@@ -161,6 +198,84 @@ pub async fn create_bot(
         bot,
         webhook_secret: raw_secret,
     })
+}
+
+pub async fn update_bot(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    bot_id: &str,
+    user_id: &str,
+    params: UpdateBotParams<'_>,
+) -> AppResult<ChannelBot> {
+    let mut set_doc = doc! {
+        "updated_at": bson::DateTime::from_chrono(Utc::now()),
+    };
+    let mut unset_doc = doc! {};
+
+    if let Some(label) = params.label {
+        if label.is_empty() || label.len() > 200 {
+            return Err(AppError::ValidationError(
+                "Label must be between 1 and 200 characters".to_string(),
+            ));
+        }
+        set_doc.insert("label", label);
+    }
+
+    if let Some(verification_token) = params.verification_token {
+        let encrypted = encryption_keys
+            .encrypt(verification_token.as_bytes())
+            .await?;
+        set_doc.insert(
+            "lark_verification_token_encrypted",
+            bson::Binary {
+                subtype: bson::spec::BinarySubtype::Generic,
+                bytes: encrypted,
+            },
+        );
+    }
+
+    match params.encrypt_key {
+        SecretPatch::Unchanged => {}
+        SecretPatch::Clear => {
+            unset_doc.insert("lark_encrypt_key_encrypted", "");
+        }
+        SecretPatch::Set(value) => {
+            let encrypted = encryption_keys.encrypt(value.as_bytes()).await?;
+            set_doc.insert(
+                "lark_encrypt_key_encrypted",
+                bson::Binary {
+                    subtype: bson::spec::BinarySubtype::Generic,
+                    bytes: encrypted,
+                },
+            );
+        }
+    }
+
+    if let Some(app_id) = params.app_id {
+        set_doc.insert("app_id", app_id);
+    }
+
+    if let Some(app_secret) = params.app_secret {
+        let encrypted = encryption_keys.encrypt(app_secret.as_bytes()).await?;
+        set_doc.insert(
+            "app_secret_encrypted",
+            bson::Binary {
+                subtype: bson::spec::BinarySubtype::Generic,
+                bytes: encrypted,
+            },
+        );
+    }
+
+    let mut update_doc = doc! { "$set": set_doc };
+    if !unset_doc.is_empty() {
+        update_doc.insert("$unset", unset_doc);
+    }
+
+    db.collection::<ChannelBot>(COLLECTION_NAME)
+        .update_one(doc! { "_id": bot_id, "user_id": user_id }, update_doc)
+        .await?;
+
+    get_bot_for_user(db, bot_id, user_id).await
 }
 
 /// Register the webhook URL with the platform and activate the bot.
