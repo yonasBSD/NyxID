@@ -1060,23 +1060,37 @@ nyxid channel-bot register --platform telegram --label "My Support Bot" --token-
 # Discord (requires public key for signature verification)
 nyxid channel-bot register --platform discord --label "My Discord Bot" --token-env DISCORD_BOT_TOKEN --public-key "ed25519_public_key_hex"
 
-# Lark / Feishu (requires app credentials)
-nyxid channel-bot register --platform lark --label "My Lark Bot" --token-env LARK_BOT_TOKEN --app-id "cli_xxx" --app-secret-env LARK_APP_SECRET
+# Lark (requires app credentials + verification token; optional encrypt key)
+nyxid channel-bot register --platform lark --label "My Lark Bot" --token-env LARK_BOT_TOKEN --app-id "cli_xxx" --app-secret-env LARK_APP_SECRET --verification-token "vtoken_xxx" --encrypt-key "encrypt_key_xxx"
+
+# Feishu (same flags as Lark)
+nyxid channel-bot register --platform feishu --label "My Feishu Bot" --token-env FEISHU_BOT_TOKEN --app-id "cli_xxx" --app-secret-env FEISHU_APP_SECRET --verification-token "vtoken_xxx" --encrypt-key "encrypt_key_xxx"
 
 # Slack (pass the xoxb- bot user token and the app's signing secret)
 nyxid channel-bot register --platform slack --label "My Slack Bot" --token-env SLACK_BOT_TOKEN --app-secret-env SLACK_SIGNING_SECRET
 ```
 
-For Telegram, NyxID auto-registers the webhook. For Discord/Lark/Feishu/Slack, configure the webhook URL in the platform's developer console: `https://<your-nyxid>/api/v1/webhooks/channel/<platform>/<bot-id>`. The bot auto-activates on first successful webhook delivery. For Slack, paste the URL into the app's **Event Subscriptions** page — Slack's `url_verification` handshake is answered automatically.
+For Telegram, NyxID auto-registers the webhook. For Discord/Lark/Feishu/Slack, configure the webhook URL in the platform's developer console: `https://<your-nyxid>/api/v1/webhooks/channel/<platform>/<bot-id>`. Telegram/Discord/Slack bots auto-activate on first successful webhook delivery. Lark/Feishu bots promote from `pending_webhook` to `active` only after inbound webhook verification passes, which requires the bot's Verification Token to be set correctly. Encrypt Key is optional, but if it is enabled in the Lark/Feishu console it must also be set on the bot. The CLI falls back to `NYXID_LARK_VERIFICATION_TOKEN` and `NYXID_LARK_ENCRYPT_KEY` when `--verification-token` or `--encrypt-key` are omitted. For Slack, paste the URL into the app's **Event Subscriptions** page — Slack's `url_verification` handshake is answered automatically.
 
 ### Manage bots
 
 ```bash
 nyxid channel-bot list                          # list registered bots
 nyxid channel-bot show <ID>                     # bot details + conversation count
+nyxid channel-bot update <ID> --label "New Label" --verification-token "vtoken_xxx" --encrypt-key "encrypt_key_xxx" --app-id "cli_xxx" --app-secret "secret_xxx"
 nyxid channel-bot verify <ID>                   # re-verify token and webhook
 nyxid channel-bot delete <ID> --yes             # deregister bot
 ```
+
+### Fix a stuck Lark / Feishu bot
+
+If an existing Lark / Feishu bot is stuck in `pending_webhook`, the owner should update the bot with the correct Verification Token and, if the Lark / Feishu console has encryption enabled, the matching Encrypt Key:
+
+```bash
+nyxid channel-bot update <ID> --verification-token "vtoken_xxx" --encrypt-key "encrypt_key_xxx"
+```
+
+The same fix is available in the web UI bot detail page, which uses `PATCH /api/v1/channel-bots/{id}` under the hood. After the next verified inbound webhook is received, NyxID auto-promotes the bot to `active`.
 
 ### Configure conversation routing
 
@@ -1352,4 +1366,3 @@ This skill may be invoked autonomously by the agent when a user request involves
 ## Trust Statement
 
 By using this skill, requests are sent to your configured NyxID instance. NyxID forwards those requests to downstream services using your stored credentials. Only install this skill if you trust your NyxID instance operator.
-
