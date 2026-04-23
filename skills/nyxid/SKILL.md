@@ -1135,12 +1135,17 @@ For Telegram, `conversation_id` is the `chat.id` (a number like `-1001234567890`
 
 Slack specifics: inbound events land on `/api/v1/webhooks/channel/slack/{bot_id}` and are HMAC-verified against the app's signing secret (`v0:{ts}:{body}` with a 5-minute replay window). NyxID ACKs with HTTP 200 inside Slack's 3-second window and processes in a background task. Outbound replies go through `chat.postMessage`; threaded replies anchor on the thread root via `metadata.thread_ts`. Rate-limit signals (HTTP 429 with `Retry-After`, or `{"ok":false,"error":"ratelimited"}`) surface as a clearly-labeled error so the agent can decide when to retry.
 
-The callback payload includes normalized fields (`content.text`, `sender`, etc.) and the full `raw_platform_data` (original Telegram/Discord/Lark/Slack JSON). The callback is the **only** place the message body exists inside NyxID — it's built in-memory from the live webhook parse and once the callback returns, NyxID retains nothing but metadata.
+The callback payload includes normalized fields (`content.text`, `sender`, etc.), the full `raw_platform_data` (original Telegram/Discord/Lark/Slack JSON), and a per-callback `reply_token` (RS256 JWT) the agent can use to post its async reply without holding the agent API key. The callback is the **only** place the message body exists inside NyxID — it's built in-memory from the live webhook parse and once the callback returns, NyxID retains nothing but metadata.
 
-### Agent-facing endpoints (API-key authenticated)
+### Agent-facing endpoints
 
 ```bash
-# Async reply — this is the only way for an agent to respond
+# Async reply — this is the only way for an agent to respond.
+# Authorization: Bearer <agent API key> OR <reply_token from the callback payload>.
+# The reply_token is single-use, bound to this inbound_message_id + conversation_id
+# + api_key_id + platform, and expires after JWT_RELAY_REPLY_TTL_SECS (default 30 min).
+# Intended for runtimes (e.g. Aevatar) that don't want to persist agent API keys.
+# See docs/CHANNEL_BOT_RELAY.md#reply-token for the full claim table and semantics.
 POST /api/v1/channel-relay/reply
 { "message_id": "<inbound-msg-id>", "reply": { "text": "..." } }
 
