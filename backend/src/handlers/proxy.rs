@@ -8,7 +8,7 @@ use axum::{
 use futures::{SinkExt, StreamExt, TryStreamExt};
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use tokio_stream::wrappers::ReceiverStream;
 use utoipa::ToSchema;
 
@@ -18,6 +18,7 @@ use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, legacy_http_service_type_filter,
 };
 use crate::models::user::{COLLECTION_NAME as USERS, User};
+use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
 use crate::models::user_service_connection::{
     COLLECTION_NAME as USER_SERVICE_CONNECTIONS, UserServiceConnection,
 };
@@ -26,7 +27,7 @@ use crate::services::node_ws_manager::{NodeProxyRequest, ProxyResponseType, Stre
 use crate::services::{
     action_description, approval_service, audit_service, chatgpt_translator, delegation_service,
     identity_service, llm_usage_service, node_metrics_service, node_routing_service, node_service,
-    notification_service, proxy_service, sse_parser,
+    notification_service, proxy_service, sse_parser, user_service_service,
 };
 
 /// Response headers that are safe to forward back to the client.
@@ -3903,6 +3904,7 @@ pub struct ProxyServicesQuery {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ProxyServicesResponse {
     pub services: Vec<ProxyServiceItem>,
+    pub custom_services: Vec<ProxyServiceItem>,
     pub total: u64,
     pub page: u64,
     pub per_page: u64,
@@ -4027,10 +4029,286 @@ pub async fn list_proxy_services(
         })
         .collect();
 
+    let visible_user_services =
+        user_service_service::list_user_services_with_sources(&state.db, &user_id_str).await?;
+    let custom_user_services: Vec<_> = visible_user_services
+        .into_iter()
+        .map(|entry| entry.service)
+        .filter(|service| service.catalog_service_id.is_none() && service.service_type == "http")
+        .collect();
+
+    let endpoint_ids: Vec<&str> = custom_user_services
+        .iter()
+        .map(|service| service.endpoint_id.as_str())
+        .collect();
+    let endpoints: Vec<UserEndpoint> = if endpoint_ids.is_empty() {
+        vec![]
+    } else {
+        state
+            .db
+            .collection::<UserEndpoint>(USER_ENDPOINTS)
+            .find(doc! { "_id": { "$in": &endpoint_ids } })
+            .await?
+            .try_collect()
+            .await?
+    };
+    let endpoint_by_id: HashMap<String, UserEndpoint> = endpoints
+        .into_iter()
+        .map(|endpoint| (endpoint.id.clone(), endpoint))
+        .collect();
+
+    let mut custom_services: Vec<ProxyServiceItem> = custom_user_services
+        .into_iter()
+        .filter_map(|service| {
+            let endpoint = endpoint_by_id.get(&service.endpoint_id)?;
+            endpoint.openapi_spec_url.as_ref()?;
+
+            let name = if endpoint.label.trim().is_empty() {
+                service.slug.clone()
+            } else {
+                endpoint.label.clone()
+            };
+
+            Some(ProxyServiceItem {
+                id: service.id.clone(),
+                name,
+                slug: service.slug.clone(),
+                description: None,
+                service_category: "custom".to_string(),
+                connected: true,
+                requires_connection: false,
+                has_node_binding: service.node_id.is_some(),
+                proxy_url: format!("{base}/api/v1/proxy/{}/{{path}}", service.id),
+                proxy_url_slug: format!("{base}/api/v1/proxy/s/{}/{{path}}", service.slug),
+                docs_url: Some(format!("{base}/api/v1/proxy/services/{}/docs", service.id)),
+                openapi_url: Some(format!(
+                    "{base}/api/v1/proxy/services/{}/openapi.json",
+                    service.id
+                )),
+                asyncapi_url: None,
+                streaming_supported: false,
+                websocket_supported: false,
+            })
+        })
+        .collect();
+    custom_services.sort_by(|left, right| {
+        left.name
+            .to_lowercase()
+            .cmp(&right.name.to_lowercase())
+            .then_with(|| left.slug.cmp(&right.slug))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
     Ok(Json(ProxyServicesResponse {
         services: items,
+        custom_services,
         total,
         page,
         per_page,
     }))
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::{ProxyServicesQuery, list_proxy_services};
+    use crate::models::downstream_service::{
+        COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+    };
+    use crate::models::org_membership::{
+        COLLECTION_NAME as ORG_MEMBERSHIPS, OrgMembership, OrgRole,
+    };
+    use crate::models::user::COLLECTION_NAME as USERS;
+    use crate::models::user::UserType;
+    use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
+    use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+    use crate::test_utils::{
+        connect_test_database, test_app_state, test_auth_user, test_membership, test_user,
+        test_user_endpoint, test_user_service,
+    };
+    use axum::{
+        Json,
+        extract::{Query, State},
+    };
+    use uuid::Uuid;
+
+    fn catalog_service(service_id: &str) -> DownstreamService {
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.id = service_id.to_string();
+        service.slug = "catalog-service".to_string();
+        service.name = "Catalog Service".to_string();
+        service.base_url = "https://catalog.example.com".to_string();
+        service.openapi_spec_url = Some("https://example.com/catalog-openapi.json".to_string());
+        service
+    }
+
+    #[tokio::test]
+    async fn list_proxy_services_separates_custom_services_and_dedupes_catalog_backed_rows() {
+        let Some(db) = connect_test_database("proxy_services_custom").await else {
+            eprintln!("skipping proxy integration test: no local MongoDB available");
+            return;
+        };
+
+        let caller_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_many([
+                test_user(&caller_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ])
+            .await
+            .unwrap();
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org_id, &caller_id, OrgRole::Member, None))
+            .await
+            .unwrap();
+
+        let catalog = catalog_service(&Uuid::new_v4().to_string());
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(catalog.clone())
+            .await
+            .unwrap();
+
+        let custom_endpoint = test_user_endpoint(
+            &Uuid::new_v4().to_string(),
+            &caller_id,
+            "Personal Custom",
+            "https://personal.example.com",
+            Some("https://example.com/personal-openapi.json"),
+            None,
+        );
+        let custom_service = test_user_service(
+            &Uuid::new_v4().to_string(),
+            &caller_id,
+            "personal-custom",
+            &custom_endpoint.id,
+            None,
+            Some("node-1"),
+        );
+        let no_spec_endpoint = test_user_endpoint(
+            &Uuid::new_v4().to_string(),
+            &caller_id,
+            "No Spec",
+            "https://nospec.example.com",
+            None,
+            None,
+        );
+        let no_spec_service = test_user_service(
+            &Uuid::new_v4().to_string(),
+            &caller_id,
+            "no-spec",
+            &no_spec_endpoint.id,
+            None,
+            None,
+        );
+        let catalog_backed_endpoint = test_user_endpoint(
+            &Uuid::new_v4().to_string(),
+            &caller_id,
+            "Catalog Backed",
+            "https://catalog-user.example.com",
+            Some("https://example.com/catalog-user-openapi.json"),
+            Some(&catalog.id),
+        );
+        let catalog_backed_service = test_user_service(
+            &Uuid::new_v4().to_string(),
+            &caller_id,
+            "catalog-backed",
+            &catalog_backed_endpoint.id,
+            Some(&catalog.id),
+            None,
+        );
+        let org_endpoint = test_user_endpoint(
+            &Uuid::new_v4().to_string(),
+            &org_id,
+            "Org Shared",
+            "https://org.example.com",
+            Some("https://example.com/org-openapi.json"),
+            None,
+        );
+        let org_service = test_user_service(
+            &Uuid::new_v4().to_string(),
+            &org_id,
+            "org-shared",
+            &org_endpoint.id,
+            None,
+            None,
+        );
+
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_many([
+                custom_endpoint.clone(),
+                no_spec_endpoint,
+                catalog_backed_endpoint,
+                org_endpoint.clone(),
+            ])
+            .await
+            .unwrap();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_many([
+                custom_service.clone(),
+                no_spec_service.clone(),
+                catalog_backed_service.clone(),
+                org_service.clone(),
+            ])
+            .await
+            .unwrap();
+
+        let state = test_app_state(db);
+        let Json(response) = list_proxy_services(
+            State(state),
+            test_auth_user(&caller_id),
+            Query(ProxyServicesQuery {
+                page: None,
+                per_page: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.total, 1);
+        assert_eq!(response.page, 1);
+        assert_eq!(response.per_page, 50);
+        assert_eq!(response.services.len(), 1);
+        assert_eq!(response.services[0].id, catalog.id);
+
+        let custom_ids: Vec<&str> = response
+            .custom_services
+            .iter()
+            .map(|service| service.id.as_str())
+            .collect();
+        assert!(custom_ids.contains(&custom_service.id.as_str()));
+        assert!(custom_ids.contains(&org_service.id.as_str()));
+        assert!(!custom_ids.contains(&catalog_backed_service.id.as_str()));
+        assert!(!custom_ids.contains(&no_spec_service.id.as_str()));
+
+        let personal = response
+            .custom_services
+            .iter()
+            .find(|service| service.id == custom_service.id)
+            .expect("personal custom service should be included");
+        let expected_docs_url = format!(
+            "http://localhost:3001/api/v1/proxy/services/{}/docs",
+            custom_service.id
+        );
+        let expected_openapi_url = format!(
+            "http://localhost:3001/api/v1/proxy/services/{}/openapi.json",
+            custom_service.id
+        );
+        assert_eq!(personal.name, custom_endpoint.label);
+        assert_eq!(personal.slug, custom_service.slug);
+        assert_eq!(personal.service_category, "custom");
+        assert!(personal.connected);
+        assert!(!personal.requires_connection);
+        assert!(personal.has_node_binding);
+        assert_eq!(
+            personal.docs_url.as_deref(),
+            Some(expected_docs_url.as_str())
+        );
+        assert_eq!(
+            personal.openapi_url.as_deref(),
+            Some(expected_openapi_url.as_str())
+        );
+        assert!(personal.asyncapi_url.is_none());
+        assert!(!personal.streaming_supported);
+        assert!(!personal.websocket_supported);
+    }
 }
