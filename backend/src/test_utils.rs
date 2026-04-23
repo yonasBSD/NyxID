@@ -120,6 +120,9 @@ pub(crate) fn test_app_config() -> AppConfig {
         invite_code_required: false,
         email_auth_enabled: false,
         auto_verify_email: false,
+        telemetry_dsn: None,
+        telemetry_host: None,
+        share_analytics: false,
     }
 }
 
@@ -164,6 +167,7 @@ pub(crate) fn test_app_state(db: mongodb::Database) -> AppState {
         )),
         ws_passthrough_count: Arc::new(AtomicUsize::new(0)),
         token_exchange_cache: Arc::new(TokenExchangeCache::new()),
+        telemetry: None,
     }
 }
 
