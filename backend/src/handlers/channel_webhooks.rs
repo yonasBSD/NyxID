@@ -462,6 +462,31 @@ async fn handle_webhook_inner_with_deps(
             .ok()
         };
 
+        let reply_token = match crate::crypto::jwt::generate_relay_reply_token(
+            state.jwt_keys,
+            state.config,
+            &api_key.id,
+            &route.conversation.id,
+            &stored_message.id,
+            &route.conversation.platform,
+        ) {
+            Ok(token) => token,
+            Err(e) => {
+                tracing::error!(
+                    message_id = %stored_message.id,
+                    error = %e,
+                    "failed to generate relay reply token"
+                );
+                let _ = channel_relay_service::update_callback_status(
+                    state.db,
+                    &stored_message.id,
+                    "failed",
+                )
+                .await;
+                continue;
+            }
+        };
+
         // Build the callback payload
         let payload = channel_relay_service::build_callback_payload(
             &stored_message,
@@ -469,6 +494,7 @@ async fn handle_webhook_inner_with_deps(
             &route.api_key_id,
             &api_key.name,
             inbound,
+            Some(reply_token),
         );
 
         // Forward to the agent's callback URL
@@ -607,6 +633,7 @@ mod tests {
             jwt_public_key_path: key_dir.join("public.pem").display().to_string(),
             jwt_issuer: "http://localhost:3001".to_string(),
             jwt_access_ttl_secs: 900,
+            jwt_relay_reply_ttl_secs: 1800,
             jwt_refresh_ttl_secs: 604800,
             google_client_id: None,
             google_client_secret: None,
@@ -923,6 +950,21 @@ mod tests {
         .await
         .expect("agent callback should be delivered");
         assert_eq!(delivered.len(), 1);
+        let payload = &delivered[0];
+        let reply_token = payload
+            .get("reply_token")
+            .and_then(|value| value.as_str())
+            .expect("callback payload should include reply_token");
+        let claims =
+            crate::crypto::jwt::validate_relay_reply_token(&jwt_keys, &config, reply_token)
+                .expect("reply_token should validate");
+        assert_eq!(claims.api_key_id, api_key_id);
+        assert_eq!(claims.conversation_id, conversation_id);
+        assert_eq!(
+            claims.inbound_message_id,
+            payload["message_id"].as_str().expect("payload message id")
+        );
+        assert_eq!(claims.platform, "lark");
 
         let _ = shutdown_tx.send(());
 

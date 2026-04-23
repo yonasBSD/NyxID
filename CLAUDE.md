@@ -260,7 +260,7 @@ All API routes under `/api/v1`:
 - `/catalog` -- read-only service catalog for users (list templates, get template by slug, `?include_all=true` for full discovery including system services). Supports `/{slug}/endpoints` for OpenAPI endpoint discovery via hardened spec fetch.
 - `/channel-bots` -- channel bot registration CRUD + PATCH updates for platform verification material
 - `/channel-conversations` -- conversation-to-agent routing (CRUD). Maps platform conversations to agent API keys.
-- `/channel-relay/reply` -- agent async reply to a platform conversation. **Only async replies are supported** — sync 200+body replies from agent callbacks were removed per ADR-013 / NyxID#221. Agents must return 202 to the callback and post replies here.
+- `/channel-relay/reply` -- agent async reply to a platform conversation. **Only async replies are supported** — sync 200+body replies from agent callbacks were removed per ADR-013 / NyxID#221. Agents must return 202 to the callback and post replies here. Accepts two auth modes: (a) the agent's API key (`Authorization: Bearer nyxid_ag_…`), scoped by `conversation.agent_api_key_id`; or (b) a per-callback reply token (`Authorization: Bearer <reply_token>`) delivered in the inbound callback payload's `reply_token` field. Reply tokens are RS256 JWTs with `aud="channel-relay/reply"`, bound to one `inbound_message_id` + `conversation_id` + `api_key_id` + `platform`, single-use (enforced via MongoDB `reply_token_uses`), and valid for `JWT_RELAY_REPLY_TTL_SECS` (default 30 min). Intended for downstream runtimes (e.g. Aevatar) that want to reply without persisting agent API keys.
 - `/channel-relay/messages/{conversation_id}` -- message history for agents
 - `/channel-relay/resolve-sender` -- resolve platform sender to NyxID user
 - `/channel-events/{conversation_id}` -- HTTP Event Gateway ingress (NyxID#221, ADR-013). Accepts device event envelopes `{event_id, source, type, timestamp, payload, metadata}`, converts to `CallbackPayload` with `platform="device"`, and forwards through the channel relay pipeline. Per-channel rate limited (default 100/s), idempotent via in-memory LRU dedup (5min TTL), metadata-only logging to `channel_event_logs` (no payload persistence).
@@ -315,6 +315,7 @@ JWT_PUBLIC_KEY_PATH=keys/public.pem
 JWT_ISSUER=nyxid
 JWT_ACCESS_TTL_SECS=900             # 15 minutes
 JWT_REFRESH_TTL_SECS=604800         # 7 days
+JWT_RELAY_REPLY_TTL_SECS=1800       # 30 minutes (per-callback reply token TTL)
 SA_TOKEN_TTL_SECS=3600              # 1 hour (service account tokens)
 ENVIRONMENT=development
 RATE_LIMIT_PER_SECOND=10
