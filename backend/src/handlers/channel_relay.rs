@@ -203,6 +203,12 @@ fn message_to_item(msg: &crate::models::channel_message::ChannelMessage) -> Mess
     }
 }
 
+/// Padding applied to `ReplyTokenUse.exp_at` on insert so the TTL index does
+/// not GC a usage record while the validator would still accept the same
+/// token. Covers the validator's `RELAY_REPLY_CLOCK_SKEW_SECS` acceptance
+/// window past `exp` plus MongoDB's ~60s TTL-monitor sweep interval.
+const REPLY_TOKEN_USE_TTL_BUFFER_SECS: i64 = 120;
+
 #[derive(Debug)]
 struct ReplyRequestContext {
     original: ChannelMessage,
@@ -224,6 +230,10 @@ fn extract_bearer_token(headers: &HeaderMap) -> AppResult<Option<String>> {
         .map(std::string::ToString::to_string))
 }
 
+/// Peek at the (unverified) JWT payload to decide which auth branch this
+/// request belongs to. Signature verification is intentionally deferred to
+/// `validate_relay_reply_token` — a forged `aud` here only routes the
+/// request into the reply-token pipeline, which then fails signature.
 fn token_targets_reply_audience(token: &str) -> bool {
     let parts: Vec<&str> = token.splitn(3, '.').collect();
     if parts.len() < 2 {
@@ -304,7 +314,12 @@ async fn consume_reply_token_use(
     state: &AppState,
     claims: &jwt::RelayReplyClaims,
 ) -> AppResult<()> {
-    let exp_at = chrono::DateTime::from_timestamp(claims.exp, 0)
+    // Pad `exp_at` beyond the validator's clock-skew tolerance so the TTL
+    // index never GCs a usage record while the same JWT would still pass
+    // validation on a skewed verifier. `REPLY_TOKEN_USE_TTL_BUFFER_SECS`
+    // covers both the validator's `exp + RELAY_REPLY_CLOCK_SKEW_SECS`
+    // acceptance window and MongoDB's 60s TTL-monitor sweep interval.
+    let exp_at = chrono::DateTime::from_timestamp(claims.exp + REPLY_TOKEN_USE_TTL_BUFFER_SECS, 0)
         .ok_or_else(|| AppError::Unauthorized("Invalid relay reply token".to_string()))?;
     let usage = ReplyTokenUse {
         id: claims.jti.clone(),
@@ -357,6 +372,21 @@ async fn resolve_reply_token_context(
         ));
     }
 
+    // Device conversations have no bot and no reply surface (ADR-013).
+    // Reject with the shared device error before `load_active_bot` would
+    // surface an `Internal` 500 on the missing `channel_bot_id`.
+    if is_device_reply_forbidden(&original.platform, &conversation.platform) {
+        return Err(AppError::DeviceChannelReplyNotAllowed);
+    }
+
+    // Unlike the API-key branch we do NOT re-check
+    // `conversation.agent_api_key_id` against `claims.api_key_id`. The token
+    // was minted for this specific inbound message; allowing the agent who
+    // received that callback to complete its reply — even if the
+    // conversation has since been reassigned — avoids dropping in-flight
+    // LLM responses. Scope narrowness is enforced by the token's other
+    // bindings (conversation_id, inbound_message_id) and by the live
+    // `api_key.is_active` re-check below.
     let api_key = load_active_api_key(state, &claims.api_key_id).await?;
     let bot = load_active_bot(state, &original).await?;
 
@@ -1040,9 +1070,10 @@ mod tests {
         let db = fixture.state.db.clone();
 
         let now = Utc::now().timestamp();
+        // Push well past the clock-skew tolerance so the token is unambiguously expired.
         let claims = jwt::RelayReplyClaims {
-            exp: now - 1,
-            iat: now - 10,
+            exp: now - 120,
+            iat: now - 130,
             ..valid_reply_claims(&fixture)
         };
         let token = encode_reply_claims(&fixture.state, &claims);
@@ -1169,6 +1200,44 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, AppError::Unauthorized(msg) if msg.contains("platform mismatch")));
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reply_token_context_rejects_device_conversation() {
+        let Some(fixture) = setup_reply_token_fixture("reply_token_device_guard").await else {
+            eprintln!("skipping channel_relay reply-token test: no local MongoDB available");
+            return;
+        };
+        let db = fixture.state.db.clone();
+
+        db.collection::<ChannelConversation>(CONVERSATIONS)
+            .update_one(
+                doc! { "_id": &fixture.conversation.id },
+                doc! { "$set": { "platform": "device" } },
+            )
+            .await
+            .unwrap();
+
+        let token = jwt::generate_relay_reply_token(
+            &fixture.state.jwt_keys,
+            &fixture.state.config,
+            &fixture.api_key.id,
+            &fixture.conversation.id,
+            &fixture.message.id,
+            "device",
+        )
+        .unwrap();
+
+        let err = resolve_reply_token_context(
+            &fixture.state,
+            &token,
+            &reply_request(&fixture.message.id),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, AppError::DeviceChannelReplyNotAllowed));
         db.drop().await.unwrap();
     }
 

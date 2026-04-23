@@ -695,23 +695,21 @@ pub fn validate_relay_reply_token(
     token: &str,
 ) -> Result<RelayReplyClaims, AppError> {
     let mut validation = Validation::new(Algorithm::RS256);
+    // Expiry, audience, and required-claim enforcement is done manually below
+    // against `RelayReplyClaims` so the ordering matches the locked design in
+    // issue #469 and we can apply a symmetric clock-skew window to `exp`.
     validation.validate_exp = false;
     validation.validate_nbf = false;
     validation.validate_aud = false;
     validation.required_spec_claims.clear();
 
-    let token_data =
-        decode::<RelayReplyClaims>(token, &keys.decoding, &validation).map_err(|e| {
-            match e.kind() {
-                jsonwebtoken::errors::ErrorKind::ExpiredSignature => AppError::TokenExpired,
-                _ => AppError::Unauthorized("Invalid relay reply token".to_string()),
-            }
-        })?;
+    let token_data = decode::<RelayReplyClaims>(token, &keys.decoding, &validation)
+        .map_err(|_| AppError::Unauthorized("Invalid relay reply token".to_string()))?;
 
     let claims = token_data.claims;
     let now = Utc::now().timestamp();
 
-    if claims.exp <= now {
+    if claims.exp + RELAY_REPLY_CLOCK_SKEW_SECS <= now {
         return Err(AppError::TokenExpired);
     }
     if claims.iat > now + RELAY_REPLY_CLOCK_SKEW_SECS {
@@ -1239,6 +1237,22 @@ mod tests {
     fn relay_reply_token_rejects_expired_token() {
         let (keys, config) = test_keys_and_config();
         let now = Utc::now().timestamp();
+        // Past the clock-skew tolerance window, so it's unambiguously expired.
+        let claims = RelayReplyClaims {
+            exp: now - RELAY_REPLY_CLOCK_SKEW_SECS - 5,
+            iat: now - RELAY_REPLY_CLOCK_SKEW_SECS - 15,
+            ..reply_claims(&config)
+        };
+        let token = encode_reply_claims(&keys, &claims);
+
+        let result = validate_relay_reply_token(&keys, &config, &token);
+        assert!(matches!(result, Err(AppError::TokenExpired)));
+    }
+
+    #[test]
+    fn relay_reply_token_accepts_within_clock_skew_of_exp() {
+        let (keys, config) = test_keys_and_config();
+        let now = Utc::now().timestamp();
         let claims = RelayReplyClaims {
             exp: now - 1,
             iat: now - 10,
@@ -1246,8 +1260,8 @@ mod tests {
         };
         let token = encode_reply_claims(&keys, &claims);
 
-        let result = validate_relay_reply_token(&keys, &config, &token);
-        assert!(matches!(result, Err(AppError::TokenExpired)));
+        validate_relay_reply_token(&keys, &config, &token)
+            .expect("token just past exp but within skew should still validate");
     }
 
     #[test]
