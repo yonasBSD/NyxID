@@ -1135,12 +1135,13 @@ For Telegram, `conversation_id` is the `chat.id` (a number like `-1001234567890`
 
 Slack specifics: inbound events land on `/api/v1/webhooks/channel/slack/{bot_id}` and are HMAC-verified against the app's signing secret (`v0:{ts}:{body}` with a 5-minute replay window). NyxID ACKs with HTTP 200 inside Slack's 3-second window and processes in a background task. Outbound replies go through `chat.postMessage`; threaded replies anchor on the thread root via `metadata.thread_ts`. Rate-limit signals (HTTP 429 with `Retry-After`, or `{"ok":false,"error":"ratelimited"}`) surface as a clearly-labeled error so the agent can decide when to retry.
 
-The callback payload includes normalized fields (`content.text`, `sender`, etc.) and the full `raw_platform_data` (original Telegram/Discord/Lark/Slack JSON). The callback is the **only** place the message body exists inside NyxID — it's built in-memory from the live webhook parse and once the callback returns, NyxID retains nothing but metadata.
+The callback payload includes normalized fields (`content.text`, `sender`, etc.), the full `raw_platform_data` (original Telegram/Discord/Lark/Slack JSON), and a per-callback `reply_token` (RS256 JWT) the agent can use to post its async reply without holding the agent API key. The callback is the **only** place the message body exists inside NyxID — it's built in-memory from the live webhook parse and once the callback returns, NyxID retains nothing but metadata.
 
-### Agent-facing endpoints (API-key authenticated)
+### Agent-facing endpoints
 
 ```bash
-# Async reply — this is the only way for an agent to respond
+# Async reply — this is the only way for an agent to respond.
+# Authorization: Bearer <agent API key> OR <reply_token from the callback payload>.
 POST /api/v1/channel-relay/reply
 { "message_id": "<inbound-msg-id>", "reply": { "text": "..." } }
 
@@ -1152,6 +1153,19 @@ GET /api/v1/channel-relay/resolve-sender?platform=telegram&platform_id=12345
 ```
 
 > **ADR-013 note:** `GET /channel-relay/messages/...` returns only routing metadata (direction, platform, sender ids, delivery status, timestamps). Agents that need conversation bodies must retain their own history.
+
+#### Reply token (dual-auth on `/channel-relay/reply`)
+
+The callback payload includes a short-lived `reply_token` (RS256 JWT) the agent can present as `Authorization: Bearer <reply_token>` instead of the agent API key. Intended for runtimes that don't want to persist agent credentials (e.g. Aevatar).
+
+- **Shape:** RS256 JWT. `aud = "channel-relay/reply"` (rejected everywhere else). `token_type = "relay_reply"`.
+- **Claim bindings:** `api_key_id`, `conversation_id`, `inbound_message_id`, `platform` — all four must match the reply request, and the request body's `message_id` must equal `inbound_message_id`.
+- **TTL:** `JWT_RELAY_REPLY_TTL_SECS` (default `1800` = 30 min). 60s clock-skew tolerance on both `iat` and `exp`.
+- **Single-use:** `jti` is consumed on first successful reply; reuse returns `401 "Reply token already used"`.
+- **Revocation coupling:** On every reply NyxID re-checks that the bound `api_key_id` (and the channel bot) is still active — revoking the key invalidates all outstanding tokens immediately.
+- **Null tokens:** If NyxID failed to mint a token, `reply_token` is `null` in the callback; fall back to the agent API key on the reply call.
+
+Agents that already hold the API key can ignore `reply_token` entirely and keep using `Authorization: Bearer nyxid_ag_...`.
 
 ## HTTP Event Gateway — device/analyzer events
 
