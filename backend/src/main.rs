@@ -69,6 +69,8 @@ pub struct AppState {
     /// Per-channel rate limiter keyed by conversation_id, for the HTTP Event
     /// Gateway (NyxID#221). Distinct from `per_agent_limiter`.
     pub per_channel_event_limiter: mw::rate_limit::SharedPerChannelEventLimiter,
+    /// Per-upstream-message edit limiter for progressive channel relay edits.
+    pub per_message_edit_limiter: mw::rate_limit::SharedPerMessageEditRateLimiter,
     /// Best-effort idempotency cache for inbound channel events.
     pub event_dedup_cache: Arc<EventDedupCache>,
     /// Active WebSocket passthrough connection count (for resource limiting)
@@ -356,6 +358,10 @@ async fn main() {
         config.channel_event_dedup_capacity,
         std::time::Duration::from_secs(config.channel_event_dedup_ttl_secs),
     ));
+    let per_message_edit_limiter = Arc::new(mw::rate_limit::PerMessageEditRateLimiter::new(
+        config.channel_relay_edit_rate_limit_per_second,
+        config.channel_relay_edit_rate_limit_burst,
+    ));
 
     // Create shared state
     let state = AppState {
@@ -373,6 +379,7 @@ async fn main() {
         ssh_session_manager,
         per_agent_limiter: Arc::new(mw::rate_limit::PerAgentRateLimiter::new()),
         per_channel_event_limiter,
+        per_message_edit_limiter,
         event_dedup_cache,
         ws_passthrough_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         token_exchange_cache: Arc::new(TokenExchangeCache::new()),
@@ -422,6 +429,14 @@ async fn main() {
         loop {
             interval.tick().await;
             cleanup_event_limiter.cleanup();
+        }
+    });
+    let cleanup_edit_limiter = state.per_message_edit_limiter.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            cleanup_edit_limiter.cleanup();
         }
     });
     let cleanup_event_dedup = state.event_dedup_cache.clone();
