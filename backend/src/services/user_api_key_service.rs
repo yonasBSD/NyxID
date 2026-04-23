@@ -589,7 +589,7 @@ pub async fn update_api_key(
     Ok(())
 }
 
-<<<<<<< feat/cli-remote-pairing
+
 /// Revoke an API key (sets status = "revoked", clears credential).
 pub async fn revoke_api_key(db: &mongodb::Database, user_id: &str, key_id: &str) -> AppResult<()> {
     let result = db
@@ -674,8 +674,7 @@ pub async fn revoke_api_key_if_pending(
     Ok(result.matched_count > 0)
 }
 
-=======
->>>>>>> main
+
 /// Delete an API key. Fails if any active UserService references it.
 pub async fn delete_api_key(db: &mongodb::Database, user_id: &str, key_id: &str) -> AppResult<()> {
     // Verify ownership
