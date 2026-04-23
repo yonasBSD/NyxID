@@ -207,13 +207,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             }
 
             if let Some(ref custom_slug) = custom_slug {
-                if oauth || device_code {
-                    eprintln!(
-                        "Warning: ignoring --slug because OAuth and device-code flows use the catalog slug."
-                    );
-                } else {
-                    validate_service_slug(custom_slug)?;
-                }
+                validate_service_slug(custom_slug)?;
             }
 
             // OAuth flow
@@ -221,10 +215,13 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 return run_oauth_add(
                     &mut api,
                     slug,
-                    via_node.as_deref(),
-                    &additional_scopes,
-                    org.as_deref(),
-                    openapi_spec_url.as_deref(),
+                    CatalogAddFlowOptions {
+                        custom_slug: custom_slug.as_deref(),
+                        via_node: via_node.as_deref(),
+                        additional_scopes: &additional_scopes,
+                        target_org_id: org.as_deref(),
+                        openapi_spec_url: openapi_spec_url.as_deref(),
+                    },
                     &auth,
                 )
                 .await;
@@ -235,10 +232,13 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 return run_device_code_add(
                     &mut api,
                     slug,
-                    via_node.as_deref(),
-                    &additional_scopes,
-                    org.as_deref(),
-                    openapi_spec_url.as_deref(),
+                    CatalogAddFlowOptions {
+                        custom_slug: custom_slug.as_deref(),
+                        via_node: via_node.as_deref(),
+                        additional_scopes: &additional_scopes,
+                        target_org_id: org.as_deref(),
+                        openapi_spec_url: openapi_spec_url.as_deref(),
+                    },
                     &auth,
                 )
                 .await;
@@ -877,10 +877,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
 async fn run_oauth_add(
     api: &mut ApiClient,
     slug: Option<String>,
-    via_node: Option<&str>,
-    additional_scopes: &[String],
-    target_org_id: Option<&str>,
-    openapi_spec_url: Option<&str>,
+    options: CatalogAddFlowOptions<'_>,
     auth: &crate::cli::AuthArgs,
 ) -> Result<()> {
     let slug = slug.ok_or_else(|| anyhow::anyhow!("Catalog slug is required for --oauth"))?;
@@ -895,15 +892,18 @@ async fn run_oauth_add(
     let mut key_body = serde_json::Map::new();
     key_body.insert("service_slug".into(), Value::String(slug.clone()));
     key_body.insert("label".into(), Value::String(label));
-    if let Some(node_id) = via_node {
+    if let Some(custom_slug) = options.custom_slug {
+        key_body.insert("slug".into(), Value::String(custom_slug.to_string()));
+    }
+    if let Some(node_id) = options.via_node {
         key_body.insert("node_id".into(), Value::String(node_id.to_string()));
     }
-    if let Some(org_id) = target_org_id {
+    if let Some(org_id) = options.target_org_id {
         key_body.insert("target_org_id".into(), Value::String(org_id.to_string()));
     }
     // Forward the three-state spec URL as-is: `None` omits the field so the
     // catalog default applies; `Some("")` opts out; `Some(url)` overrides.
-    if let Some(url) = openapi_spec_url {
+    if let Some(url) = options.openapi_spec_url {
         key_body.insert("openapi_spec_url".into(), Value::String(url.to_string()));
     }
     let key_result: Value = api.post("/keys", &Value::Object(key_body)).await?;
@@ -911,7 +911,7 @@ async fn run_oauth_add(
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Created key response did not include an id"))?;
 
-    if via_node.is_some() {
+    if options.via_node.is_some() {
         // For node-routed services the OAuth flow runs on the node itself, so
         // we can't kick off the browser here. Print a copy-paste friendly
         // next-step command that includes any --scope values the caller
@@ -920,7 +920,7 @@ async fn run_oauth_add(
         print_add_result(api, &key_result, auth.output)?;
         eprintln!();
         eprintln!("Next step: run this on the node that owns the credential:");
-        let scope_suffix = format_scope_suffix(additional_scopes);
+        let scope_suffix = format_scope_suffix(options.additional_scopes);
         eprintln!("  nyxid node credentials setup --service {slug}{scope_suffix}");
         return Ok(());
     }
@@ -933,10 +933,10 @@ async fn run_oauth_add(
         "/providers/{provider_id}/connect/oauth?redirect_path={}",
         urlencoding::encode(&redirect_path)
     );
-    if !additional_scopes.is_empty() {
+    if !options.additional_scopes.is_empty() {
         initiate_path.push_str(&format!(
             "&scope={}",
-            urlencoding::encode(&additional_scopes.join(","))
+            urlencoding::encode(&options.additional_scopes.join(","))
         ));
     }
     // Org-targeted OAuth: the provider token must be stored under the org's
@@ -944,7 +944,7 @@ async fn run_oauth_add(
     // UserApiKey we just created under the same org id. Without this query
     // param, the token would land on the admin's personal scope and the
     // org-owned UserApiKey would stay pending_auth forever.
-    if let Some(org_id) = target_org_id {
+    if let Some(org_id) = options.target_org_id {
         initiate_path.push_str(&format!("&target_org_id={}", urlencoding::encode(org_id)));
     }
     let initiate: Value = api.get(&initiate_path).await?;
@@ -971,10 +971,7 @@ async fn run_oauth_add(
 async fn run_device_code_add(
     api: &mut ApiClient,
     slug: Option<String>,
-    via_node: Option<&str>,
-    additional_scopes: &[String],
-    target_org_id: Option<&str>,
-    openapi_spec_url: Option<&str>,
+    options: CatalogAddFlowOptions<'_>,
     auth: &crate::cli::AuthArgs,
 ) -> Result<()> {
     let slug = slug.ok_or_else(|| anyhow::anyhow!("Catalog slug is required for --device-code"))?;
@@ -988,13 +985,16 @@ async fn run_device_code_add(
     let mut key_body = serde_json::Map::new();
     key_body.insert("service_slug".into(), Value::String(slug.clone()));
     key_body.insert("label".into(), Value::String(label));
-    if let Some(node_id) = via_node {
+    if let Some(custom_slug) = options.custom_slug {
+        key_body.insert("slug".into(), Value::String(custom_slug.to_string()));
+    }
+    if let Some(node_id) = options.via_node {
         key_body.insert("node_id".into(), Value::String(node_id.to_string()));
     }
-    if let Some(org_id) = target_org_id {
+    if let Some(org_id) = options.target_org_id {
         key_body.insert("target_org_id".into(), Value::String(org_id.to_string()));
     }
-    if let Some(url) = openapi_spec_url {
+    if let Some(url) = options.openapi_spec_url {
         key_body.insert("openapi_spec_url".into(), Value::String(url.to_string()));
     }
     let key_result: Value = api.post("/keys", &Value::Object(key_body)).await?;
@@ -1002,11 +1002,11 @@ async fn run_device_code_add(
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Created key response did not include an id"))?;
 
-    if via_node.is_some() {
+    if options.via_node.is_some() {
         print_add_result(api, &key_result, auth.output)?;
         eprintln!();
         eprintln!("Next step: run this on the node that owns the credential:");
-        let scope_suffix = format_scope_suffix(additional_scopes);
+        let scope_suffix = format_scope_suffix(options.additional_scopes);
         eprintln!("  nyxid node credentials setup --service {slug}{scope_suffix}");
         return Ok(());
     }
@@ -1027,10 +1027,14 @@ async fn run_device_code_add(
         path.push('=');
         path.push_str(&urlencoding::encode(val));
     };
-    if !additional_scopes.is_empty() {
-        append(&mut initiate_path, "scope", &additional_scopes.join(","));
+    if !options.additional_scopes.is_empty() {
+        append(
+            &mut initiate_path,
+            "scope",
+            &options.additional_scopes.join(","),
+        );
     }
-    if let Some(org_id) = target_org_id {
+    if let Some(org_id) = options.target_org_id {
         append(&mut initiate_path, "target_org_id", org_id);
     }
     let initiate: Value = api.post(&initiate_path, &serde_json::json!({})).await?;
@@ -1294,6 +1298,14 @@ struct TokenExchangeField {
     label: String,
     placeholder: Option<String>,
     secret: bool,
+}
+
+struct CatalogAddFlowOptions<'a> {
+    custom_slug: Option<&'a str>,
+    via_node: Option<&'a str>,
+    additional_scopes: &'a [String],
+    target_org_id: Option<&'a str>,
+    openapi_spec_url: Option<&'a str>,
 }
 
 /// Parse the `token_exchange_credential_fields` array out of a raw catalog

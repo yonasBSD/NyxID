@@ -452,6 +452,9 @@ nyxid service add --custom --slug home-assistant --label "Home Assistant" \
 nyxid service add llm-openai --slug llm-openai-prod --credential-env OPENAI_PROD_KEY
 nyxid service add llm-openai --slug llm-openai-staging --credential-env OPENAI_STAGING_KEY
 
+# `--slug` also works with OAuth and device-code flows
+nyxid service add api-lark --oauth --slug lark-team-engineering
+
 # Catalog-backed key that suppresses the catalog's default spec URL
 nyxid service add llm-openai --openapi-spec-url ""
 
