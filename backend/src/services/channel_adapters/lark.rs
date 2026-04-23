@@ -421,6 +421,41 @@ fn build_edit_request(edit: &OutboundEdit) -> (reqwest::Method, serde_json::Valu
     )
 }
 
+/// Classify documented Feishu/Lark edit errors into NyxID error buckets.
+///
+/// Verified against the current official Feishu markdown docs:
+/// - Text/post edit (`PUT /im/v1/messages/{message_id}`):
+///   https://open.feishu.cn/document/server-docs/im-v1/message/update.md
+/// - Card edit (`PATCH /im/v1/messages/{message_id}`):
+///   https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/patch.md
+///
+/// Specifically mapped codes:
+/// - `230020`: frequency limit -> `RateLimited`
+/// - `230011`, `230031`, `230050`, `230071`, `230072`, `230073`, `230074`,
+///   `230075`, `230110`: message state / editability conflicts -> `Conflict`
+/// - `230001`, `230022`, `230025`, `230028`, `230054`, `230099`: invalid
+///   request or invalid content -> `ValidationError`
+///
+/// Intentionally not specialized:
+/// - `230002` appears only in the text/post edit doc and is documented as
+///   "The bot can not be outside the group", not message-not-found.
+/// - Any code not listed above falls back to `ChannelPlatformError` so we do
+///   not invent classifications beyond what the official docs support.
+fn classify_edit_error(platform: &str, code: i64, msg: &str) -> AppError {
+    match code {
+        230020 => AppError::RateLimited,
+        230011 | 230031 | 230050 | 230071 | 230072 | 230073 | 230074 | 230075 | 230110 => {
+            AppError::Conflict(format!("{platform} refused edit (code {code}): {msg}"))
+        }
+        230001 | 230022 | 230025 | 230028 | 230054 | 230099 => {
+            AppError::ValidationError(format!("{platform} refused edit (code {code}): {msg}"))
+        }
+        _ => AppError::ChannelPlatformError(format!(
+            "{platform} edit message failed (code {code}): {msg}"
+        )),
+    }
+}
+
 /// Detect the content type from the Lark `message_type` field.
 fn detect_content_type(message_type: &str) -> &'static str {
     match message_type {
@@ -751,22 +786,7 @@ impl PlatformAdapter for LarkFamilyAdapter {
             .and_then(|v| v.as_str())
             .unwrap_or("unknown error");
 
-        match code {
-            230020 => Err(AppError::RateLimited),
-            230011 | 230031 | 230050 | 230071 | 230072 | 230073 | 230074 | 230075 | 230110 => {
-                Err(AppError::Conflict(format!(
-                    "{} refused edit (code {code}): {msg}",
-                    self.platform
-                )))
-            }
-            230001 | 230022 | 230025 | 230028 | 230054 | 230099 => Err(AppError::ValidationError(
-                format!("{} refused edit (code {code}): {msg}", self.platform),
-            )),
-            _ => Err(AppError::ChannelPlatformError(format!(
-                "{} edit message failed (code {code}): {msg}",
-                self.platform
-            ))),
-        }
+        Err(classify_edit_error(&self.platform, code, msg))
     }
 
     async fn register_webhook(

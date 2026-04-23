@@ -813,6 +813,7 @@ pub async fn update_reply(
     OptionalAuthUser(auth_user): OptionalAuthUser,
     Json(body): Json<UpdateReplyRequest>,
 ) -> AppResult<Json<UpdateReplyResponse>> {
+    // Deliberately rate-limit before auth/DB work so unauth floods fail on one cheap hashmap check.
     check_message_edit_rate_limit(&state, &body.message_id)?;
 
     let EditRequestContext {
