@@ -139,6 +139,18 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
 
             let mut api = ApiClient::from_auth(&auth)?;
 
+            // Resolve `--via-node <ID_OR_NAME>` to a node ID up-front so that
+            // node names shown by `nyxid node list` and in the docs (e.g.
+            // `--via-node my-laptop`) work the same as node UUIDs.
+            let via_node = match via_node {
+                Some(raw) => Some(
+                    crate::commands::node::resolve_node_id(&mut api, &raw)
+                        .await
+                        .with_context(|| format!("Could not resolve node '{raw}'"))?,
+                ),
+                None => None,
+            };
+
             // Normalize --scope inputs: split each entry on comma/whitespace so
             // users can write `--scope a,b --scope "c d"` or `--scope a --scope b`.
             let additional_scopes: Vec<String> = scopes
@@ -406,6 +418,11 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
         } => {
             let mut api = ApiClient::from_auth(&auth)?;
 
+            // Accept either a node ID or a node name (from `nyxid node list`).
+            let via_node = crate::commands::node::resolve_node_id(&mut api, &via_node)
+                .await
+                .with_context(|| format!("Could not resolve node '{via_node}'"))?;
+
             let principals_str = principals.as_deref().unwrap_or("");
             let principal_list: Vec<&str> = principals_str
                 .split(',')
@@ -630,7 +647,11 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             if no_node {
                 body.insert("node_id".into(), Value::String(String::new()));
             } else if let Some(nid) = node_id {
-                body.insert("node_id".into(), Value::String(nid));
+                // Accept either a node ID or a node name (from `nyxid node list`).
+                let resolved = crate::commands::node::resolve_node_id(&mut api, &nid)
+                    .await
+                    .with_context(|| format!("Could not resolve node '{nid}'"))?;
+                body.insert("node_id".into(), Value::String(resolved));
             }
             if active {
                 body.insert("is_active".into(), Value::Bool(true));
@@ -706,6 +727,16 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             auth,
         } => {
             let mut api = ApiClient::from_auth(&auth)?;
+
+            // Accept either a node ID or a node name (from `nyxid node list`).
+            let node = match node {
+                Some(raw) => Some(
+                    crate::commands::node::resolve_node_id(&mut api, &raw)
+                        .await
+                        .with_context(|| format!("Could not resolve node '{raw}'"))?,
+                ),
+                None => None,
+            };
 
             let svc: Value = api.get(&format!("/keys/{id}")).await?;
             let service_id = svc["user_service_id"]
