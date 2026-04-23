@@ -2380,6 +2380,58 @@ pub async fn revoke_key(
     Ok(())
 }
 
+/// Atomic variant of `revoke_key` used by the browser `only_if_pending`
+/// cleanup path. The destructive step is gated by a single
+/// `update_one` that includes `status == pending_auth` in its filter,
+/// so a concurrent OAuth/device-code callback flipping the key to
+/// `active` cannot be followed by a revoke. On a lost race we
+/// short-circuit before touching the `UserService` or node binding.
+///
+/// Returns `Ok(true)` when the revoke actually happened, `Ok(false)`
+/// when the credential was no longer `pending_auth` and cleanup was
+/// skipped.
+pub async fn revoke_key_if_pending(
+    db: &mongodb::Database,
+    user_id: &str,
+    actor_user_id: &str,
+    service_id: &str,
+) -> AppResult<bool> {
+    let svc = user_service_service::get_user_service(db, user_id, service_id).await?;
+
+    // A UserService with no api_key_id can't be in `pending_auth`
+    // (only credential-backed flows have that status) — report it
+    // as "not pending" so the handler leaves the key alone. The
+    // unconditional DELETE path still works for those, users just
+    // don't get the race-free cleanup semantics they didn't need.
+    let Some(ak_id) = svc.api_key_id.as_deref() else {
+        return Ok(false);
+    };
+
+    // Atomic gate: flips pending_auth -> revoked in one write. If
+    // the provider callback already flipped to `active`, the filter
+    // misses and we report `false` without touching anything else.
+    let flipped = user_api_key_service::revoke_api_key_if_pending(db, user_id, ak_id).await?;
+    if !flipped {
+        return Ok(false);
+    }
+
+    // API key was in pending_auth and is now revoked (by the atomic
+    // status-filter update above). Tear down the owning UserService
+    // and any node binding to keep the records consistent.
+    user_service_service::deactivate_user_service(db, user_id, actor_user_id, service_id).await?;
+    node_service::sync_node_binding_for_user_service(
+        db,
+        user_id,
+        actor_user_id,
+        svc.catalog_service_id.as_deref(),
+        None,
+        svc.node_id.as_deref(),
+    )
+    .await?;
+
+    Ok(true)
+}
+
 fn build_key_view(
     svc: &UserService,
     ep: &UserEndpoint,

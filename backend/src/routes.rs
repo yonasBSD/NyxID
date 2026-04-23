@@ -596,6 +596,24 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
             get(handlers::catalog::list_catalog_endpoints),
         );
 
+    let cli_pairing_routes = Router::new()
+        .route("/", post(handlers::cli_pairings::create_pairing))
+        .route("/claim", post(handlers::cli_pairings::claim_pairing))
+        .route("/{id}/poll", get(handlers::cli_pairings::poll_pairing))
+        .route(
+            "/{id}/reserve-action",
+            post(handlers::cli_pairings::reserve_action),
+        )
+        .route(
+            "/{id}/rewind-action",
+            post(handlers::cli_pairings::rewind_action),
+        )
+        .route(
+            "/{id}/complete",
+            post(handlers::cli_pairings::complete_pairing),
+        )
+        .route("/{id}/cancel", post(handlers::cli_pairings::cancel_pairing));
+
     let channel_bot_routes = Router::new()
         .route(
             "/",
@@ -766,6 +784,7 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
             patch(handlers::orgs::set_primary_org),
         )
         .nest("/catalog", catalog_routes)
+        .nest("/cli-pairings", cli_pairing_routes)
         .nest("/channel-bots", channel_bot_routes)
         .nest("/channel-conversations", channel_conversation_routes)
         .route(

@@ -149,8 +149,25 @@ pub enum Commands {
     },
     /// Show the NyxID project repository URL
     Repo(RepoArgs),
+    /// Resume a `--no-wait` remote pairing and pick up the result
+    Pairing {
+        #[command(subcommand)]
+        command: PairingCommands,
+    },
     /// Show CLI version and project links
     Info,
+}
+
+#[derive(Subcommand)]
+pub enum PairingCommands {
+    /// Poll an existing pairing (created by `--no-wait`) until it
+    /// completes or expires; print the kind-specific success summary.
+    Resume {
+        /// Pairing id returned on stdout by the `--no-wait` invocation.
+        id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
 }
 
 #[derive(Args)]
@@ -534,6 +551,11 @@ pub enum ServiceCommands {
         /// `NYXID_NO_WIZARD=1` for a single invocation.
         #[arg(long, alias = "no-wizard")]
         terminal: bool,
+        /// Remote-pair mode: create a pairing, print the URL + code,
+        /// and EXIT without polling. Resume with `nyxid pairing resume
+        /// <PAIRING_ID>` once the browser wizard is done.
+        #[arg(long)]
+        no_wait: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -721,6 +743,12 @@ pub enum ApiKeyCommands {
         /// Equivalent to setting `NYXID_NO_WIZARD=1` for a single invocation.
         #[arg(long, alias = "no-wizard")]
         terminal: bool,
+        /// Remote-pair mode: create a pairing, print the URL + code,
+        /// and EXIT without polling. Pick up the result later with
+        /// `nyxid pairing resume <PAIRING_ID>`. Useful for AI agents
+        /// that can't hold a long-running subprocess.
+        #[arg(long)]
+        no_wait: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -747,6 +775,11 @@ pub enum ApiKeyCommands {
         /// Equivalent to setting `NYXID_NO_WIZARD=1` for a single invocation.
         #[arg(long, alias = "no-wizard")]
         terminal: bool,
+        /// Remote-pair mode: create a pairing, print the URL + code,
+        /// and EXIT without polling. Resume with `nyxid pairing resume
+        /// <PAIRING_ID>` once the browser wizard is done.
+        #[arg(long)]
+        no_wait: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -1001,6 +1034,11 @@ pub enum NodeCommands {
         /// for a single invocation.
         #[arg(long, alias = "no-wizard")]
         terminal: bool,
+        /// Remote-pair mode: create a pairing, print the URL + code,
+        /// and EXIT without polling. Resume with `nyxid pairing resume
+        /// <PAIRING_ID>` once the browser wizard is done.
+        #[arg(long)]
+        no_wait: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -1024,6 +1062,11 @@ pub enum NodeCommands {
         /// `NYXID_NO_WIZARD=1` for a single invocation.
         #[arg(long, alias = "no-wizard")]
         terminal: bool,
+        /// Remote-pair mode: create a pairing, print the URL + code,
+        /// and EXIT without polling. Resume with `nyxid pairing resume
+        /// <PAIRING_ID>` once the browser wizard is done.
+        #[arg(long)]
+        no_wait: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },

@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
 };
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
@@ -363,6 +363,14 @@ pub struct UpdateKeyRequest {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct DeleteKeyResponse {
     pub message: String,
+    /// `true` when the key was actually revoked, `false` when the
+    /// request hit the `only_if_pending=true` guard and was a no-op
+    /// because the key is no longer `pending_auth`. Callers use this
+    /// to distinguish "we cleaned up the abandoned placeholder" from
+    /// "the provider callback already converted the placeholder into
+    /// an active key, so leave it alone".
+    #[serde(default)]
+    pub deleted: bool,
 }
 
 /// Extract the Lark / Feishu `app_id` from a plaintext credential string.
@@ -1527,14 +1535,29 @@ pub async fn update_key(
     Ok(Json(response))
 }
 
+/// Query params for `DELETE /api/v1/keys/{key_id}`. The browser
+/// unload-time cleanup for abandoned OAuth / device-code
+/// placeholders passes `only_if_pending=true` so a key that
+/// already flipped to `active` (provider callback won the race
+/// with `beforeunload`) is left alone instead of being revoked
+/// out from under the user. Unknown fields are rejected to catch
+/// typos during integration.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteKeyQuery {
+    #[serde(default)]
+    pub only_if_pending: Option<bool>,
+}
+
 #[utoipa::path(
     delete,
     path = "/api/v1/keys/{key_id}",
     params(
-        ("key_id" = String, Path, description = "User service ID")
+        ("key_id" = String, Path, description = "User service ID"),
+        ("only_if_pending" = Option<bool>, Query, description = "When true, skip the delete if the key is no longer pending_auth")
     ),
     responses(
-        (status = 200, description = "Key revoked", body = DeleteKeyResponse),
+        (status = 200, description = "Key revoked (or skipped when only_if_pending)", body = DeleteKeyResponse),
         (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse),
         (status = 404, description = "Key not found", body = crate::errors::ErrorResponse)
     ),
@@ -1546,6 +1569,7 @@ pub async fn delete_key(
     auth_user: AuthUser,
     tele: TelemetryContext,
     Path(key_id): Path<String>,
+    Query(query): Query<DeleteKeyQuery>,
 ) -> AppResult<Json<DeleteKeyResponse>> {
     let actor = auth_user.user_id.to_string();
     let user_id_str = resolve_key_write_owner(&state, &actor, &key_id).await?;
@@ -1555,6 +1579,28 @@ pub async fn delete_key(
         return Err(crate::errors::AppError::BadRequest(
             "Auto-connected services cannot be deleted".to_string(),
         ));
+    }
+
+    // Conditional-delete gate for the browser's unload-time
+    // cleanup path and the OAuth/device-code Cancel flow (see
+    // `abandonPlaceholderKey` in the cli-pair OAuth/device-code
+    // flows). When set, we delegate to `revoke_key_if_pending`
+    // which closes the status check and the revoke inside a
+    // single atomic MongoDB update — a provider callback that
+    // flips `pending_auth -> active` between the check and the
+    // destructive write cannot slip through.
+    if query.only_if_pending.unwrap_or(false) {
+        let flipped =
+            unified_key_service::revoke_key_if_pending(&state.db, &user_id_str, &actor, &key_id)
+                .await?;
+        return Ok(Json(DeleteKeyResponse {
+            message: if flipped {
+                "Key revoked successfully".to_string()
+            } else {
+                "Key is no longer pending_auth; delete skipped".to_string()
+            },
+            deleted: flipped,
+        }));
     }
 
     unified_key_service::revoke_key(&state.db, &user_id_str, &actor, &key_id).await?;
@@ -1575,6 +1621,7 @@ pub async fn delete_key(
 
     Ok(Json(DeleteKeyResponse {
         message: "Key revoked successfully".to_string(),
+        deleted: true,
     }))
 }
 

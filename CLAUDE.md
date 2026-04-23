@@ -321,6 +321,31 @@ SA_TOKEN_TTL_SECS=3600              # 1 hour (service account tokens)
 ENVIRONMENT=development
 RATE_LIMIT_PER_SECOND=10
 RATE_LIMIT_BURST=30
+TRUSTED_PROXY_IPS=                     # Comma-separated list of reverse-proxy IPs
+                                        # whose `X-Forwarded-For` / `X-Real-IP` may
+                                        # be trusted for per-IP rate-limit keying
+                                        # (CLI-pairing claim: 5/60s). Empty default
+                                        # means "trust only the TCP peer" — safe for
+                                        # direct-exposure deployments. Behind nginx /
+                                        # ALB / Fly.io, set this to the proxy IPs so
+                                        # each user gets their own bucket instead of
+                                        # colliding on a single proxy-wide bucket.
+                                        # ONLY list proxies you've configured to
+                                        # overwrite client-supplied forwarded
+                                        # headers. See docs/ENV.md.
+
+# CLI remote pairing (optional)
+CLI_PAIRING_HMAC_KEY=                   # 64 hex chars; keys `CliPairing.code_hash`
+                                        # so a DB snapshot cannot brute-force the
+                                        # ~2^40 pairing-code space. Leave unset
+                                        # unless you need to rotate it independently
+                                        # of ENCRYPTION_KEY / the JWT signing key:
+                                        # the backend derives from ENCRYPTION_KEY
+                                        # when set, otherwise from the JWT private
+                                        # key PEM. Both are stable per-worker so
+                                        # multi-instance deployments stay in sync
+                                        # without extra config. See docs/ENV.md.
+
 CHANNEL_RELAY_CALLBACK_TIMEOUT_SECS=30          # Callback timeout for inbound agent delivery (default: 30)
 CHANNEL_RELAY_MAX_BOTS_PER_USER=5               # Maximum bots a user can register (default: 5)
 CHANNEL_RELAY_MESSAGE_TTL_DAYS=30               # Channel message TTL in MongoDB (default: 30 days)

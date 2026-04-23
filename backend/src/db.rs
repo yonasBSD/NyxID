@@ -713,6 +713,39 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     )
     .await?;
 
+    // ── cli_pairings (remote CLI pairing / Mode B wizard flow) ──
+    let cli_pairings = db.collection::<mongodb::bson::Document>("cli_pairings");
+    // `code_hash` is the primary lookup on `claim`; unique so a freak
+    // SHA-256 collision fails fast instead of silently binding to the
+    // wrong user.
+    cli_pairings
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "code_hash": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    // `user_id` is used for scoped list/cancel operations.
+    cli_pairings
+        .create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
+        .await?;
+    // TTL sweep: auto-delete expired records so leaked codes stop
+    // being valid even if the handler-side `expires_at` check is
+    // bypassed.
+    cli_pairings
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Duration::from_secs(0))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
     // Drop old sparse unique indexes that conflict with partial filter indexes
     // (MongoDB won't replace an index with different options on the same keys)
     let _ = db

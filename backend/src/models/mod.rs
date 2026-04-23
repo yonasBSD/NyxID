@@ -10,6 +10,7 @@ pub mod channel_bot;
 pub mod channel_conversation;
 pub mod channel_event_log;
 pub mod channel_message;
+pub mod cli_pairing;
 pub mod consent;
 pub mod default_request_header;
 pub mod downstream_service;

@@ -118,6 +118,7 @@ fn command_names(command: &Commands) -> (&'static str, &'static str) {
         Commands::Admin { .. } => ("admin", "subcommand"),
         Commands::Telemetry { .. } => ("telemetry", "subcommand"),
         Commands::Repo(_) => ("repo", "repo"),
+        Commands::Pairing { .. } => ("pairing", "subcommand"),
         Commands::Info => ("repo", "info"),
     }
 }
@@ -204,6 +205,7 @@ async fn run(cli: Cli) -> Result<()> {
 
         // Project links
         Commands::Repo(args) => commands::repo::run_repo(args).await,
+        Commands::Pairing { command } => commands::pairing::run(command).await,
         Commands::Info => commands::repo::run_info().await,
     }
 }

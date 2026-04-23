@@ -74,6 +74,27 @@ pub struct AppConfig {
     pub rate_limit_per_second: u64,
     /// Max burst size for rate limiter
     pub rate_limit_burst: u32,
+    /// Allowlist of reverse-proxy IPs whose `X-Forwarded-For` /
+    /// `X-Real-IP` headers may be trusted for rate-limit keying.
+    /// When the TCP peer is not in this list, forwarded headers are
+    /// ignored and the peer IP is used instead — so a direct-exposure
+    /// deployment can't be tricked into per-header buckets.
+    ///
+    /// Parsed from the comma-separated `TRUSTED_PROXY_IPS` env var.
+    /// Empty (the default) is the strict mode: nothing trusted.
+    pub trusted_proxy_ips: Vec<std::net::IpAddr>,
+
+    /// Explicit HMAC key (64 hex chars = 32 bytes) used to derive
+    /// `CliPairing.code_hash`. When unset, the backend derives the
+    /// key from `ENCRYPTION_KEY` (if configured) or from the JWT
+    /// private key PEM — see `derive_cli_pairing_hmac_key` in
+    /// `main.rs` for the full priority chain. Set explicitly only
+    /// when you want to rotate the pairing HMAC independently of
+    /// both `ENCRYPTION_KEY` and the JWT signing key. Threaded
+    /// through `AppConfig` (rather than read via `std::env::var`
+    /// at the call site) so ops can introspect the resolved value
+    /// via the same path as every other env-backed setting.
+    pub cli_pairing_hmac_key: Option<String>,
 
     /// Service account token TTL in seconds (default: 3600 = 1 hour)
     pub sa_token_ttl_secs: i64,
@@ -272,6 +293,15 @@ impl std::fmt::Debug for AppConfig {
             )
             .field("rate_limit_per_second", &self.rate_limit_per_second)
             .field("rate_limit_burst", &self.rate_limit_burst)
+            .field("trusted_proxy_ips", &self.trusted_proxy_ips)
+            .field(
+                "cli_pairing_hmac_key",
+                if self.cli_pairing_hmac_key.is_some() {
+                    &"Some([REDACTED])"
+                } else {
+                    &"None"
+                },
+            )
             .field("sa_token_ttl_secs", &self.sa_token_ttl_secs)
             .field("cookie_domain", &self.cookie_domain)
             .field("telegram_bot_token", &"[REDACTED]")
@@ -410,6 +440,29 @@ fn parse_bool_env(name: &str, default: bool) -> bool {
     }
 }
 
+/// Parse the comma-separated `TRUSTED_PROXY_IPS` env var into a Vec of
+/// IP addresses. Entries that fail to parse are dropped with a warning
+/// so a typo can't silently extend trust to unparsed input; startup
+/// still succeeds because direct-exposure deployments are the common
+/// case and don't need this set.
+fn parse_trusted_proxy_ips(raw: Option<String>) -> Vec<std::net::IpAddr> {
+    let Some(raw) = raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
+        return Vec::new();
+    };
+    let mut ips = Vec::new();
+    for entry in raw.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        match entry.parse::<std::net::IpAddr>() {
+            Ok(ip) => ips.push(ip),
+            Err(err) => tracing::warn!(
+                entry = %entry,
+                error = %err,
+                "TRUSTED_PROXY_IPS entry is not a valid IP address; dropping",
+            ),
+        }
+    }
+    ips
+}
+
 /// Parse the `INVITE_CODE_REQUIRED` env var.
 ///
 /// Defaults to `true` (invite codes required) when the variable is unset or
@@ -511,6 +564,10 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(30),
+            trusted_proxy_ips: parse_trusted_proxy_ips(env::var("TRUSTED_PROXY_IPS").ok()),
+            cli_pairing_hmac_key: env::var("CLI_PAIRING_HMAC_KEY")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
 
             sa_token_ttl_secs: env::var("SA_TOKEN_TTL_SECS")
                 .ok()
@@ -933,6 +990,8 @@ mod tests {
             encryption_key_previous: None,
             rate_limit_per_second: 10,
             rate_limit_burst: 30,
+            trusted_proxy_ips: vec![],
+            cli_pairing_hmac_key: None,
             sa_token_ttl_secs: 3600,
             telemetry_dsn: None,
             telemetry_host: None,
@@ -1150,6 +1209,47 @@ mod tests {
     fn validate_ssh_runtime_config_accepts_valid_values() {
         let cfg = make_config("http://localhost:3001", "dev", &"ab".repeat(32));
         cfg.validate_ssh_runtime_config();
+    }
+
+    #[test]
+    fn trusted_proxy_ips_unset_defaults_to_empty() {
+        assert!(parse_trusted_proxy_ips(None).is_empty());
+        assert!(parse_trusted_proxy_ips(Some(String::new())).is_empty());
+        assert!(parse_trusted_proxy_ips(Some("   ".to_string())).is_empty());
+    }
+
+    #[test]
+    fn trusted_proxy_ips_parses_single_ipv4() {
+        let parsed = parse_trusted_proxy_ips(Some("10.0.0.1".to_string()));
+        assert_eq!(
+            parsed,
+            vec![std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1))]
+        );
+    }
+
+    #[test]
+    fn trusted_proxy_ips_parses_comma_separated_list() {
+        let parsed = parse_trusted_proxy_ips(Some("10.0.0.1, 127.0.0.1 ,::1".to_string()));
+        assert_eq!(
+            parsed,
+            vec![
+                std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1)),
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+            ]
+        );
+    }
+
+    #[test]
+    fn trusted_proxy_ips_drops_invalid_entries() {
+        let parsed = parse_trusted_proxy_ips(Some("10.0.0.1, not-an-ip, 127.0.0.1".to_string()));
+        assert_eq!(
+            parsed,
+            vec![
+                std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1)),
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            ]
+        );
     }
 
     #[test]

@@ -114,24 +114,26 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             org,
             openapi_spec_url,
             terminal,
+            no_wait,
             auth,
         } => {
-            // Wizard dispatch (docs/CLI_WIZARD_V2.md §3.1): open the
-            // browser wizard when the invocation isn't "scripted-complete"
-            // and stdout is a TTY. Flags compatible with prefill (slug,
-            // label, via-node, endpoint-url) just seed the form; flags
-            // that declare a specific scripted flow (--credential,
+            // Wizard dispatch (docs/CLI_WIZARD_V2.md §3.1): route to
+            // the browser flow when the invocation isn't "scripted-
+            // complete". Flags compatible with prefill (slug, label,
+            // via-node, endpoint-url) just seed the form; flags that
+            // declare a specific scripted flow (--credential,
             // --credential-env, --oauth, --device-code, --custom,
-            // --auth-method, --auth-key-name, --output json) fall through
-            // to the existing non-interactive path so we don't change
-            // scripted behavior for existing users.
+            // --auth-method, --auth-key-name, --output json) fall
+            // through to the existing non-interactive path so scripted
+            // behavior for existing users is unchanged.
             //
-            // Headless contexts (SSH sessions, explicit opt-out, no local
-            // display on Linux) also fall through — on those boxes we
-            // can't reliably open a browser, so we preserve the pre-wizard
-            // rpassword prompt path. Set `NYXID_NO_WIZARD=1` to force the
-            // scripted path from any interactive invocation.
-            use std::io::IsTerminal;
+            // Headless contexts (SSH sessions, no local display on
+            // Linux, AI-agent bash tool) NO LONGER fall through to the
+            // stdin-prompt path by default — `run_ai_key_wizard` picks
+            // the remote-pairing transport for them (prints a code +
+            // URL the user opens on another device). Set
+            // `NYXID_NO_WIZARD=1` to restore the pre-wizard stdin
+            // prompt path for CI jobs or scripts that rely on it.
             let interactive_output = matches!(auth.output, OutputFormat::Table);
             let explicit_scripted = credential.is_some()
                 || credential_env.is_some()
@@ -144,12 +146,14 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 || !scopes.is_empty()
                 || org.is_some()
                 || openapi_spec_url.is_some();
-            let headless = is_headless_environment();
+            // `--no-wait` forces the pairing variant even when a local
+            // browser is available and wins over `--output json`
+            // (agent wrappers use JSON specifically to automate the
+            // pairing handoff). Only `--terminal` and explicit
+            // scripted flags override it.
             if !explicit_scripted
                 && !terminal
-                && interactive_output
-                && std::io::stdout().is_terminal()
-                && !headless
+                && (no_wait || (interactive_output && crate::wizard::is_browser_flow_eligible()))
             {
                 let prefill = crate::wizard::WizardPrefill {
                     slug: slug.clone(),
@@ -157,7 +161,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                     via_node: via_node.clone(),
                     endpoint_url: endpoint_url.clone(),
                 };
-                return crate::wizard::run_ai_key_wizard(&auth, prefill).await;
+                return crate::wizard::run_ai_key_wizard(&auth, prefill, no_wait).await;
             }
 
             let mut api = ApiClient::from_auth(&auth)?;
@@ -1234,6 +1238,12 @@ fn prompt_password(prompt: &str, flag: &str) -> Result<String> {
 ///
 /// We intentionally skip this detection on macOS / Windows when not in
 /// SSH — there's always a GUI available, so the wizard should run.
+/// Retained (behind `#[cfg(test)]`) because the headless-detection
+/// tests at the bottom of this file still exercise the exact same
+/// logic that `wizard::is_wizard_eligible` encodes canonically. The
+/// tests guard against a regression where the two predicates drift;
+/// if `is_wizard_eligible` changes rules, these tests fail first.
+#[cfg(test)]
 fn is_headless_environment() -> bool {
     if std::env::var_os("NYXID_NO_WIZARD").is_some() {
         return true;

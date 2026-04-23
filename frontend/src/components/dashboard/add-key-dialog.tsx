@@ -1707,17 +1707,32 @@ function OwnerPicker({
 export function AddKeyDialog({
   open,
   onOpenChange,
+  prefillSlug,
 }: {
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
+  /**
+   * When set, the dialog opens with this catalog slug already
+   * selected (skips the catalog picker). Used by the cli-pair
+   * fallback handoff for auth flavors the remote-pairing path
+   * can't finish — without this the user would land on the
+   * generic catalog grid and have to hunt for the right entry.
+   */
+  readonly prefillSlug?: string;
 }) {
   const navigate = useNavigate();
   const createKey = useCreateKey();
+  const { data: catalogEntries } = useCatalog();
   const [step, setStep] = useState<WizardStep>("catalog");
   const [selectedEntry, setSelectedEntry] = useState<CatalogEntry | null>(null);
   const [form, setForm] = useState<FormState>(INITIAL_FORM);
   const [authKey, setAuthKey] = useState<KeyInfo | null>(null);
   const [targetOrgId, setTargetOrgId] = useState<string | null>(null);
+  // Guards `prefillSlug` against running its auto-select more than
+  // once per dialog open. Without this, re-renders would re-select
+  // the catalog entry and snap the user back to the routing step
+  // if they tried to navigate backwards.
+  const appliedPrefillRef = useRef<string | null>(null);
 
   function resetWizard() {
     setStep("catalog");
@@ -1725,6 +1740,7 @@ export function AddKeyDialog({
     setForm(INITIAL_FORM);
     setAuthKey(null);
     setTargetOrgId(null);
+    appliedPrefillRef.current = null;
   }
 
   function handleOpenChange(next: boolean) {
@@ -1746,6 +1762,21 @@ export function AddKeyDialog({
     });
     setStep("routing");
   }
+
+  // Auto-select from `prefillSlug` once the catalog resolves. Only
+  // fires on initial open (tracked via `appliedPrefillRef`) so a
+  // user who navigates back to the catalog step can pick something
+  // else. Silently no-ops if the slug isn't in the catalog — the
+  // catalog step will render and the user can pick manually.
+  useEffect(() => {
+    if (!open || !prefillSlug || !catalogEntries) return;
+    if (appliedPrefillRef.current === prefillSlug) return;
+    const match = catalogEntries.find((e) => e.slug === prefillSlug);
+    if (!match) return;
+    appliedPrefillRef.current = prefillSlug;
+    handleSelectCatalog(match);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, prefillSlug, catalogEntries]);
 
   function handleSelectCustom() {
     setSelectedEntry(null);

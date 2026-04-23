@@ -744,6 +744,8 @@ mod tests {
             encryption_key_previous: None,
             rate_limit_per_second: 10,
             rate_limit_burst: 30,
+            trusted_proxy_ips: vec![],
+            cli_pairing_hmac_key: None,
             sa_token_ttl_secs: 3600,
             telemetry_dsn: None,
             telemetry_host: None,

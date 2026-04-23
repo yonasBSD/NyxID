@@ -28,6 +28,8 @@
 
 mod server;
 
+pub mod pairing;
+
 use anyhow::{Result, anyhow};
 use serde::Deserialize;
 
@@ -139,6 +141,36 @@ pub struct ApiKeyCreateAckPayload {
     pub api_key_id: String,
 }
 
+/// Typed completion payload for the pairing-transport flavor of
+/// `nyxid service add` (ai-key). Unlike the DisplayOnce flows, the
+/// user's downstream credential never round-trips through the pairing
+/// record — only non-secret identifiers: the new `UserService` id,
+/// the slug, and the label.
+///
+/// Importantly, the final proxy URL is NOT carried in the ack. The
+/// frontend runs on `FRONTEND_URL` and the proxy endpoint lives on
+/// `BASE_URL` — so a browser-side `window.location.origin` would be
+/// wrong on split-origin deployments. The CLI already knows its own
+/// `base_url` from `AuthArgs` and builds the proxy URL from that
+/// (see `print_wizard_summary` in this module) which is the single
+/// source of truth.
+///
+/// Same `deny_unknown_fields` guard keeps the payload narrow against
+/// a buggy browser page.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AiKeyPairingAckPayload {
+    pub acknowledged: bool,
+    /// Retained on the struct (not currently printed) so scripted
+    /// callers and audit code can read the `UserService` id without
+    /// re-querying. `deny_unknown_fields` requires explicit
+    /// enumeration, so keeping it here also documents the wire shape.
+    #[allow(dead_code)]
+    pub service_id: String,
+    pub slug: String,
+    pub label: String,
+}
+
 /// Outcome of a wizard run, returned to the caller for shaping terminal
 /// output. Variants are flow-specific so the leak surface stays narrow:
 /// the ai-key flow keeps its existing untyped body (a slug+label+url
@@ -148,6 +180,12 @@ pub struct ApiKeyCreateAckPayload {
 #[derive(Debug, Clone)]
 pub enum WizardOutcome {
     AiKeyCompleted(serde_json::Value),
+    /// Pairing-transport equivalent of `AiKeyCompleted`. Separate
+    /// variant so the local-server and pairing paths keep distinct
+    /// printers — the local server's body is an untyped `Value` built
+    /// by the in-wizard SPA, while the pairing ack is the narrow
+    /// typed payload above.
+    AiKeyPaired(AiKeyPairingAckPayload),
     RotationAcknowledged(RotationAckPayload),
     NodeRegisterAcknowledged(NodeRegisterAckPayload),
     ApiKeyCreateAcknowledged(ApiKeyCreateAckPayload),
@@ -186,28 +224,60 @@ pub async fn run_flow(
 /// `prefill` carries any CLI-supplied values the user typed on the
 /// command line (slug, label, via-node, endpoint-url) — the wizard
 /// opens with those pre-selected/pre-filled.
-pub async fn run_ai_key_wizard(auth: &crate::cli::AuthArgs, prefill: WizardPrefill) -> Result<()> {
+pub async fn run_ai_key_wizard(
+    auth: &crate::cli::AuthArgs,
+    prefill: WizardPrefill,
+    no_wait: bool,
+) -> Result<()> {
+    if no_wait {
+        let prefill_json = pairing::prefill_ai_key(&prefill);
+        return pairing::run_no_wait_pairing(auth, pairing::PairingFlow::AiKey, prefill_json).await;
+    }
+
     let base_url = auth.resolved_base_url()?;
-    let access_token = crate::auth::resolve_access_token(auth)?;
-    let base_url_root = base_url.trim_end_matches('/').to_string();
-    let proxy = ProxyContext {
-        base_url_root,
-        access_token,
-        profile: auth.profile.clone(),
+
+    let outcome = if is_wizard_eligible() {
+        let access_token = crate::auth::resolve_access_token(auth)?;
+        let base_url_root = base_url.trim_end_matches('/').to_string();
+        let proxy = ProxyContext {
+            base_url_root,
+            access_token,
+            profile: auth.profile.clone(),
+        };
+        run_flow("ai-key", proxy, prefill).await?
+    } else {
+        let prefill_json = pairing::prefill_ai_key(&prefill);
+        pairing::run_display_once_pairing(auth, pairing::PairingFlow::AiKey, prefill_json).await?
     };
 
-    match run_flow("ai-key", proxy, prefill).await? {
+    match outcome {
         WizardOutcome::AiKeyCompleted(body) => {
             attract_terminal("NyxID wizard complete");
             print_wizard_summary(&body, &base_url);
+            Ok(())
+        }
+        WizardOutcome::AiKeyPaired(ack) => {
+            attract_terminal("NyxID wizard complete");
+            // Field allowlist: slug / label from the backend-created
+            // UserService (non-secret by construction). `proxy_url`
+            // is intentionally NOT in the ack — split-origin
+            // deployments (FRONTEND_URL != BASE_URL) would produce
+            // the wrong host. `print_wizard_summary` builds it from
+            // the CLI's own `base_url`, which is authoritative.
+            let pseudo_body = serde_json::json!({
+                "slug": ack.slug,
+                "label": ack.label,
+            });
+            print_wizard_summary(&pseudo_body, &base_url);
             Ok(())
         }
         WizardOutcome::RotationAcknowledged(_)
         | WizardOutcome::NodeRegisterAcknowledged(_)
         | WizardOutcome::ApiKeyCreateAcknowledged(_) => {
             // Defensive: a DisplayOnce outcome can't reach the ai-key
-            // handler (server::handle_complete dispatches by FlowKind),
-            // but if it ever did we'd refuse to print anything from it.
+            // handler (server::handle_complete and the pairing client
+            // dispatch by FlowKind / PairingFlow), but if it ever did
+            // we'd refuse to print anything from it.
             Err(anyhow!(
                 "internal: ai-key wizard returned a display-once outcome (flow dispatch broken)"
             ))
@@ -215,6 +285,14 @@ pub async fn run_ai_key_wizard(auth: &crate::cli::AuthArgs, prefill: WizardPrefi
         WizardOutcome::Cancelled => {
             attract_terminal("NyxID wizard cancelled");
             eprintln!("✗ Wizard cancelled. No service was created.");
+            // The remote-pairing path may have been cancelled by the
+            // web UI bouncing to the main Keys page for an
+            // unsupported flow (OAuth/device-code in split-origin,
+            // token-exchange, etc.). Hint at the Keys page so the
+            // user knows where to finish.
+            eprintln!(
+                "  If this provider needs OAuth / multi-field setup, finish adding the service in the NyxID web UI under Keys."
+            );
             std::process::exit(1);
         }
         WizardOutcome::TimedOut => {
@@ -230,25 +308,52 @@ pub async fn run_ai_key_wizard(auth: &crate::cli::AuthArgs, prefill: WizardPrefi
 /// Shared entry point for the `nyxid node register-token` wizard.
 /// Scripted / headless path lives in `commands::node` and stays
 /// byte-identical to pre-wizard behavior.
+///
+/// When the environment can run a local browser, spins up the local
+/// axum server; otherwise falls back to the remote pairing transport
+/// ([`pairing::run_display_once_pairing`]) which emits a code + pair
+/// URL and polls the backend for the ack. Either way the returned
+/// `WizardOutcome` shape is the same, so the terminal output below
+/// doesn't branch.
 pub async fn run_node_register_token_wizard(
     auth: &crate::cli::AuthArgs,
     prefill: NodeRegisterPrefill,
+    no_wait: bool,
 ) -> Result<()> {
-    let base_url = auth.resolved_base_url()?;
-    let access_token = crate::auth::resolve_access_token(auth)?;
-    let base_url_root = base_url.trim_end_matches('/').to_string();
-    let proxy = ProxyContext {
-        base_url_root,
-        access_token,
-        profile: auth.profile.clone(),
-    };
+    if no_wait {
+        let prefill_json = pairing::prefill_node_register(&prefill);
+        return pairing::run_no_wait_pairing(
+            auth,
+            pairing::PairingFlow::NodeRegisterToken,
+            prefill_json,
+        )
+        .await;
+    }
 
-    let outcome = server::run_flow(
-        server::FlowKind::NodeRegisterToken,
-        proxy,
-        server::PrefillData::NodeRegister(prefill),
-    )
-    .await?;
+    let outcome = if is_wizard_eligible() {
+        let base_url = auth.resolved_base_url()?;
+        let access_token = crate::auth::resolve_access_token(auth)?;
+        let base_url_root = base_url.trim_end_matches('/').to_string();
+        let proxy = ProxyContext {
+            base_url_root,
+            access_token,
+            profile: auth.profile.clone(),
+        };
+        server::run_flow(
+            server::FlowKind::NodeRegisterToken,
+            proxy,
+            server::PrefillData::NodeRegister(prefill),
+        )
+        .await?
+    } else {
+        let prefill_json = pairing::prefill_node_register(&prefill);
+        pairing::run_display_once_pairing(
+            auth,
+            pairing::PairingFlow::NodeRegisterToken,
+            prefill_json,
+        )
+        .await?
+    };
 
     match outcome {
         WizardOutcome::NodeRegisterAcknowledged(ack) => {
@@ -291,25 +396,45 @@ pub async fn run_node_register_token_wizard(
 /// Shared entry point for the `nyxid api-key create` wizard. All CLI
 /// flags are plumbed through as `prefill` so a user who typed values on
 /// the command line sees them pre-selected in the browser.
+///
+/// Headless-env branch routes through [`pairing::run_display_once_pairing`];
+/// the outcome dispatch below is identical for both paths because
+/// `ApiKeyCreateAckPayload` is shared across transports.
 pub async fn run_api_key_create_wizard(
     auth: &crate::cli::AuthArgs,
     prefill: ApiKeyCreatePrefill,
+    no_wait: bool,
 ) -> Result<()> {
-    let base_url = auth.resolved_base_url()?;
-    let access_token = crate::auth::resolve_access_token(auth)?;
-    let base_url_root = base_url.trim_end_matches('/').to_string();
-    let proxy = ProxyContext {
-        base_url_root,
-        access_token,
-        profile: auth.profile.clone(),
-    };
+    if no_wait {
+        let prefill_json = pairing::prefill_api_key_create(&prefill);
+        return pairing::run_no_wait_pairing(
+            auth,
+            pairing::PairingFlow::ApiKeyCreate,
+            prefill_json,
+        )
+        .await;
+    }
 
-    let outcome = server::run_flow(
-        server::FlowKind::ApiKeyCreate,
-        proxy,
-        server::PrefillData::ApiKeyCreate(prefill),
-    )
-    .await?;
+    let outcome = if is_wizard_eligible() {
+        let base_url = auth.resolved_base_url()?;
+        let access_token = crate::auth::resolve_access_token(auth)?;
+        let base_url_root = base_url.trim_end_matches('/').to_string();
+        let proxy = ProxyContext {
+            base_url_root,
+            access_token,
+            profile: auth.profile.clone(),
+        };
+        server::run_flow(
+            server::FlowKind::ApiKeyCreate,
+            proxy,
+            server::PrefillData::ApiKeyCreate(prefill),
+        )
+        .await?
+    } else {
+        let prefill_json = pairing::prefill_api_key_create(&prefill);
+        pairing::run_display_once_pairing(auth, pairing::PairingFlow::ApiKeyCreate, prefill_json)
+            .await?
+    };
 
     match outcome {
         WizardOutcome::ApiKeyCreateAcknowledged(ack) => {
@@ -351,11 +476,13 @@ pub async fn run_api_key_create_wizard(
 pub async fn run_api_key_rotate_wizard(
     auth: &crate::cli::AuthArgs,
     prefill: RotatePrefill,
+    no_wait: bool,
 ) -> Result<()> {
     run_rotation_wizard(
         auth,
         server::FlowKind::ApiKeyRotate,
         prefill,
+        no_wait,
         |display, id| {
             eprintln!("✓ API key '{display}' rotated. New value was shown in the browser.");
             eprintln!("  ID: {id}");
@@ -371,11 +498,13 @@ pub async fn run_api_key_rotate_wizard(
 pub async fn run_node_rotate_token_wizard(
     auth: &crate::cli::AuthArgs,
     prefill: RotatePrefill,
+    no_wait: bool,
 ) -> Result<()> {
     run_rotation_wizard(
         auth,
         server::FlowKind::NodeRotateToken,
         prefill,
+        no_wait,
         |display, id| {
             eprintln!(
                 "✓ Node '{display}' token rotated. New auth token + signing secret were shown in the browser."
@@ -407,21 +536,55 @@ async fn run_rotation_wizard(
     auth: &crate::cli::AuthArgs,
     flow_kind: server::FlowKind,
     prefill: RotatePrefill,
+    no_wait: bool,
     success_summary: impl FnOnce(&str, &str),
     resource_label: &'static str,
     rerun_command: &'static str,
 ) -> Result<()> {
-    let base_url = auth.resolved_base_url()?;
-    let access_token = crate::auth::resolve_access_token(auth)?;
-    let base_url_root = base_url.trim_end_matches('/').to_string();
-    let proxy = ProxyContext {
-        base_url_root,
-        access_token,
-        profile: auth.profile.clone(),
-    };
+    if no_wait {
+        let pairing_flow = match flow_kind {
+            server::FlowKind::ApiKeyRotate => pairing::PairingFlow::ApiKeyRotate,
+            server::FlowKind::NodeRotateToken => pairing::PairingFlow::NodeRotateToken,
+            other => {
+                return Err(anyhow!(
+                    "internal: run_rotation_wizard called with non-rotation FlowKind {other:?}"
+                ));
+            }
+        };
+        let prefill_json = pairing::prefill_rotate(&prefill);
+        return pairing::run_no_wait_pairing(auth, pairing_flow, prefill_json).await;
+    }
+
     let display_name_for_summary = prefill.display_name.clone();
 
-    let outcome = server::run_flow(flow_kind, proxy, server::PrefillData::Rotate(prefill)).await?;
+    let outcome = if is_wizard_eligible() {
+        let base_url = auth.resolved_base_url()?;
+        let access_token = crate::auth::resolve_access_token(auth)?;
+        let base_url_root = base_url.trim_end_matches('/').to_string();
+        let proxy = ProxyContext {
+            base_url_root,
+            access_token,
+            profile: auth.profile.clone(),
+        };
+        server::run_flow(flow_kind, proxy, server::PrefillData::Rotate(prefill)).await?
+    } else {
+        // Map the local-server FlowKind to the pairing-transport
+        // PairingFlow. Rotation flows in the local server are the same
+        // two (api-key-rotate, node-rotate-token) that the pairing
+        // transport supports; other kinds aren't reachable from
+        // `run_rotation_wizard`.
+        let pairing_flow = match flow_kind {
+            server::FlowKind::ApiKeyRotate => pairing::PairingFlow::ApiKeyRotate,
+            server::FlowKind::NodeRotateToken => pairing::PairingFlow::NodeRotateToken,
+            other => {
+                return Err(anyhow!(
+                    "internal: run_rotation_wizard called with non-rotation FlowKind {other:?}"
+                ));
+            }
+        };
+        let prefill_json = pairing::prefill_rotate(&prefill);
+        pairing::run_display_once_pairing(auth, pairing_flow, prefill_json).await?
+    };
 
     match outcome {
         WizardOutcome::RotationAcknowledged(ack) => {
@@ -434,6 +597,7 @@ async fn run_rotation_wizard(
             Ok(())
         }
         WizardOutcome::AiKeyCompleted(_)
+        | WizardOutcome::AiKeyPaired(_)
         | WizardOutcome::NodeRegisterAcknowledged(_)
         | WizardOutcome::ApiKeyCreateAcknowledged(_) => {
             // Defensive: server dispatch shouldn't produce these for a
@@ -467,10 +631,61 @@ async fn run_rotation_wizard(
     }
 }
 
+/// Print a terminal summary for a pairing picked up via
+/// `nyxid pairing resume`. The CLI doesn't have the rich CLI-side
+/// context the original command had (resolved id-or-name, display
+/// labels), so the output is slightly terser than the `run_*_wizard`
+/// success summaries — but it uses the same field-allowlist
+/// discipline (only non-secret identifiers from the ack, no
+/// `format!("{ack:?}")`).
+pub fn print_resume_summary(outcome: &WizardOutcome, base_url: &str) {
+    match outcome {
+        WizardOutcome::AiKeyPaired(ack) => {
+            let pseudo = serde_json::json!({
+                "slug": ack.slug,
+                "label": ack.label,
+            });
+            print_wizard_summary(&pseudo, base_url);
+        }
+        WizardOutcome::ApiKeyCreateAcknowledged(ack) => {
+            eprintln!("✓ API key created. New value was shown in the browser.");
+            eprintln!("  ID: {}", ack.api_key_id);
+            eprintln!("  Set as environment variable:");
+            eprintln!("    export NYXID_API_KEY=\"<value-from-browser>\"");
+        }
+        WizardOutcome::NodeRegisterAcknowledged(ack) => {
+            eprintln!("✓ Registration token generated. New value was shown in the browser.");
+            eprintln!("  Token ID: {}", ack.token_id);
+            eprintln!("  Register a node with:");
+            eprintln!(
+                "    nyxid node register --token <token-from-browser> --url ws://<server>/api/v1/nodes/ws"
+            );
+        }
+        WizardOutcome::RotationAcknowledged(ack) => {
+            eprintln!("✓ Rotation complete. New value was shown in the browser.");
+            eprintln!("  Resource ID: {}", ack.resource_id);
+            eprintln!("  The previous credential is now revoked.");
+        }
+        WizardOutcome::AiKeyCompleted(_) => {
+            // Cross-transport artifact — local-server wizard only.
+            // Not reachable from `pairing resume`, but keep the
+            // match exhaustive.
+        }
+        WizardOutcome::Cancelled => {
+            eprintln!("✗ Pairing was cancelled.");
+        }
+        WizardOutcome::TimedOut => {
+            eprintln!("✗ Pairing expired before it was completed. Run the original command again.");
+        }
+    }
+}
+
 /// Returns true when the CLI is running somewhere we can reasonably
 /// open a local browser for the wizard. False on SSH / explicit opt-out
 /// / Linux without DISPLAY/WAYLAND, in which case the caller falls
-/// through to the existing scripted (non-wizard) path.
+/// through to the remote-pairing transport (see
+/// [`is_browser_flow_eligible`]) — or ultimately to the scripted
+/// stdin path when the user opts out entirely.
 ///
 /// Mirrors `cli::commands::service::is_headless_environment` (kept
 /// private there to avoid widening the public surface) but inverts the
@@ -489,6 +704,56 @@ pub fn is_wizard_eligible() -> bool {
         }
     }
     true
+}
+
+/// Returns true when the caller should route through the unified
+/// wizard-or-pairing path instead of falling through to the scripted
+/// stdin prompts. The wizard helper itself picks the local-browser
+/// flavor when `is_wizard_eligible` says a browser can launch, and
+/// the remote-pairing fallback otherwise (agent bash tool, SSH
+/// session, Docker container, etc.).
+///
+/// The predicate distinguishes three environments:
+///
+/// 1. **Fully headless** (agent bash tools, subprocess wrappers,
+///    SSH without display, CI containers) — stdin is NOT a TTY.
+///    The scripted fallback would hang on the first missing-arg
+///    prompt, so route through the browser / remote-pairing path
+///    unconditionally. This is the main agent-use-case: the agent
+///    relays the printed URL + code to the user, the user completes
+///    the wizard on a phone or desktop, and the CLI polls for the
+///    ack. Users who are scripted but DO have all args can opt out
+///    of the pairing detour with `NYXID_NO_WIZARD=1` or `--terminal`.
+///
+/// 2. **Interactive stdin + piped stdout**
+///    (`nyxid api-key create > key.txt`, `| jq ...`) — the user is
+///    clearly scripting output but can still answer prompts.
+///    Fall through to the stdin-prompt path so redirection keeps
+///    working without the user learning any flags.
+///
+/// 3. **Interactive stdin + interactive stdout** — normal
+///    foreground use; route to the wizard.
+///
+/// `NYXID_NO_WIZARD=1` forces the scripted path regardless of TTY
+/// state, and `--no-wait` at the call site always chooses remote
+/// pairing for agents that want a resumable handoff.
+pub fn is_browser_flow_eligible() -> bool {
+    // Explicit opt-out — same env var as the local-wizard predicate.
+    if std::env::var_os("NYXID_NO_WIZARD").is_some() {
+        return false;
+    }
+    // Fully headless (no stdin TTY): scripted path can't prompt,
+    // so the wizard/remote-pairing path is the only way the
+    // command can complete without the caller re-running with
+    // every flag supplied manually.
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        return true;
+    }
+    // Interactive stdin — scripted path works. Route to wizard
+    // only when stdout is ALSO a TTY; a piped/redirected stdout
+    // means the user is scripting output and expects the
+    // stdin-prompt path (existing `> key.txt` / `| jq` patterns).
+    std::io::IsTerminal::is_terminal(&std::io::stdout())
 }
 
 /// Ring a terminal bell + emit the OSC-9 notification sequence so the
