@@ -52,12 +52,25 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Rust: backend build + test
-  # Tests are pure units; no MongoDB or env vars needed. If integration tests
-  # that hit a real DB are added later, re-introduce the mongodb service here.
+  # Handler + service tests call `connect_test_database` which probes a local
+  # MongoDB on 27017 (no auth) then 27018 (auth, used by the dev docker-compose
+  # override) and skips when neither is reachable. The service container below
+  # satisfies the 27017 probe so those tests actually run instead of silently
+  # skipping.
   # ---------------------------------------------------------------------------
   backend-test:
     name: Backend Test
     runs-on: ubuntu-latest
+    services:
+      mongodb:
+        image: mongo:8.0
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand({ ping: 1 })'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v6
       - name: Install system dependencies
