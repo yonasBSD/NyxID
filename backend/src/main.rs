@@ -19,6 +19,9 @@ mod routes;
 mod services;
 mod ssh_cli;
 
+#[cfg(test)]
+mod test_utils;
+
 use std::sync::Arc;
 
 use crate::db::DbHandle;
