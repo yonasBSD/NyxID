@@ -1142,10 +1142,6 @@ The callback payload includes normalized fields (`content.text`, `sender`, etc.)
 ```bash
 # Async reply — this is the only way for an agent to respond.
 # Authorization: Bearer <agent API key> OR <reply_token from the callback payload>.
-# The reply_token is single-use, bound to this inbound_message_id + conversation_id
-# + api_key_id + platform, and expires after JWT_RELAY_REPLY_TTL_SECS (default 30 min).
-# Intended for runtimes (e.g. Aevatar) that don't want to persist agent API keys.
-# See docs/CHANNEL_BOT_RELAY.md#reply-token for the full claim table and semantics.
 POST /api/v1/channel-relay/reply
 { "message_id": "<inbound-msg-id>", "reply": { "text": "..." } }
 
@@ -1157,6 +1153,19 @@ GET /api/v1/channel-relay/resolve-sender?platform=telegram&platform_id=12345
 ```
 
 > **ADR-013 note:** `GET /channel-relay/messages/...` returns only routing metadata (direction, platform, sender ids, delivery status, timestamps). Agents that need conversation bodies must retain their own history.
+
+#### Reply token (dual-auth on `/channel-relay/reply`)
+
+The callback payload includes a short-lived `reply_token` (RS256 JWT) the agent can present as `Authorization: Bearer <reply_token>` instead of the agent API key. Intended for runtimes that don't want to persist agent credentials (e.g. Aevatar).
+
+- **Shape:** RS256 JWT. `aud = "channel-relay/reply"` (rejected everywhere else). `token_type = "relay_reply"`.
+- **Claim bindings:** `api_key_id`, `conversation_id`, `inbound_message_id`, `platform` — all four must match the reply request, and the request body's `message_id` must equal `inbound_message_id`.
+- **TTL:** `JWT_RELAY_REPLY_TTL_SECS` (default `1800` = 30 min). 60s clock-skew tolerance on both `iat` and `exp`.
+- **Single-use:** `jti` is consumed on first successful reply; reuse returns `401 "Reply token already used"`.
+- **Revocation coupling:** On every reply NyxID re-checks that the bound `api_key_id` (and the channel bot) is still active — revoking the key invalidates all outstanding tokens immediately.
+- **Null tokens:** If NyxID failed to mint a token, `reply_token` is `null` in the callback; fall back to the agent API key on the reply call.
+
+Agents that already hold the API key can ignore `reply_token` entirely and keep using `Authorization: Bearer nyxid_ag_...`.
 
 ## HTTP Event Gateway — device/analyzer events
 
