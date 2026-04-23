@@ -59,6 +59,7 @@ import {
 import {
   Bot,
   Check,
+  ExternalLink,
   MessageSquare,
   Plus,
   ShieldCheck,
@@ -562,6 +563,65 @@ function DeleteBotDialog({
   );
 }
 
+/**
+ * Renders the Lark / Feishu developer-console permission deep link the
+ * backend attaches to `permission_setup_url`. Clicking it lands the user
+ * on their app's "Permissions & Scopes" page with the scopes NyxID's
+ * adapter requires already pre-checked, ready for "Bulk Enable".
+ *
+ * Renders nothing when the backend didn't return a URL (non-Lark bots,
+ * or Lark bots without an `app_id` configured) so the section
+ * disappears cleanly outside the supported flows.
+ */
+function LarkPermissionSetupSection({
+  bot,
+}: {
+  readonly bot: ChannelBotDetail;
+}) {
+  if (!bot.permission_setup_url) {
+    return null;
+  }
+  const scopes = bot.permission_setup_scopes ?? [];
+
+  return (
+    <DetailSection title="Configure Permissions">
+      <p className="text-sm text-muted-foreground">
+        Open this link to grant the scopes NyxID's adapter needs in the
+        Lark/Feishu developer console. The required scopes are
+        pre-selected — confirm and bulk-enable them to finish setup.
+      </p>
+      {scopes.length > 0 && (
+        <div className="mt-3">
+          <p className="text-xs font-medium text-text-tertiary uppercase tracking-wide">
+            Scopes pre-selected
+          </p>
+          <ul className="mt-2 flex flex-wrap gap-2">
+            {scopes.map((scope) => (
+              <li key={scope}>
+                <Badge variant="outline" className="font-mono text-xs">
+                  {scope}
+                </Badge>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      <div className="mt-4">
+        <Button asChild size="sm">
+          <a
+            href={bot.permission_setup_url}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Open Permissions Page
+            <ExternalLink className="ml-2 h-4 w-4" />
+          </a>
+        </Button>
+      </div>
+    </DetailSection>
+  );
+}
+
 function EditVerificationSection({
   bot,
 }: {
@@ -901,7 +961,10 @@ export function ChannelBotDetailPage() {
       </DetailSection>
 
       {(bot.platform === "lark" || bot.platform === "feishu") && (
-        <EditVerificationSection bot={bot} />
+        <>
+          <LarkPermissionSetupSection bot={bot} />
+          <EditVerificationSection bot={bot} />
+        </>
       )}
 
       {/* Conversation Routes */}

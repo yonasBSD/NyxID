@@ -15,7 +15,7 @@ use crate::services::channel_adapters::openclaw::OpenClawAdapter;
 use crate::services::channel_adapters::slack::SlackAdapter;
 use crate::services::channel_adapters::telegram::TelegramAdapter;
 use crate::services::channel_platform::PlatformAdapter;
-use crate::services::{audit_service, channel_bot_service, org_service};
+use crate::services::{audit_service, channel_bot_service, lark_permission, org_service};
 
 // ---------------------------------------------------------------------------
 // Request types
@@ -189,6 +189,15 @@ pub struct ChannelBotDetailResponse {
     pub updated_at: String,
     /// Effective owner user_id (see `ChannelBotItem::user_id`).
     pub user_id: String,
+    /// Lark/Feishu only: deep link to the developer console permissions
+    /// page with the scopes NyxID's adapter needs already pre-selected.
+    /// `None` for non-Lark platforms or when the bot has no `app_id`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission_setup_url: Option<String>,
+    /// Lark/Feishu only: the scope keys encoded in `permission_setup_url`,
+    /// echoed back so the UI can render the list under the link.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission_setup_scopes: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -197,6 +206,13 @@ pub struct CreateChannelBotResponse {
     pub platform: String,
     pub platform_bot_username: String,
     pub status: String,
+    /// Lark/Feishu only: deep link to the developer console permissions
+    /// page (see `ChannelBotDetailResponse::permission_setup_url`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission_setup_url: Option<String>,
+    /// Lark/Feishu only: scopes pre-selected in `permission_setup_url`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission_setup_scopes: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -319,6 +335,28 @@ pub fn resolve_adapter(
             "unsupported platform: {other}. Supported: telegram, discord, lark, feishu, slack, openclaw"
         ))),
     }
+}
+
+/// Derive the Lark/Feishu permission setup URL for a bot, if applicable.
+///
+/// Returns `(Some(url), Some(scopes))` for Lark/Feishu bots that have an
+/// `app_id` configured, and `(None, None)` for every other case so the
+/// caller can drop both fields from the response payload uniformly.
+fn lark_permission_payload(
+    bot: &crate::models::channel_bot::ChannelBot,
+) -> (Option<String>, Option<Vec<String>>) {
+    let region = match lark_permission::region_for_channel_platform(&bot.platform) {
+        Some(r) => r,
+        None => return (None, None),
+    };
+    let app_id = match bot.app_id.as_deref() {
+        Some(value) if !value.is_empty() => value,
+        _ => return (None, None),
+    };
+    let scopes = crate::services::channel_adapters::lark::REQUIRED_BOT_SCOPES;
+    let url = lark_permission::build_permission_setup_url(region, app_id, scopes);
+    let scope_strings = scopes.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+    (Some(url), Some(scope_strings))
 }
 
 fn bot_to_item(bot: &crate::models::channel_bot::ChannelBot) -> ChannelBotItem {
@@ -477,6 +515,9 @@ pub async fn create_bot(
         auth_user.api_key_name.clone(),
     );
 
+    let (permission_setup_url, permission_setup_scopes) =
+        lark_permission_payload(&create_result.bot);
+
     Ok((
         StatusCode::CREATED,
         Json(CreateChannelBotResponse {
@@ -484,6 +525,8 @@ pub async fn create_bot(
             platform: create_result.bot.platform,
             platform_bot_username: create_result.bot.platform_bot_username,
             status: "active".to_string(),
+            permission_setup_url,
+            permission_setup_scopes,
         }),
     ))
 }
@@ -627,6 +670,8 @@ pub async fn update_bot(
         auth_user.api_key_name.clone(),
     );
 
+    let (permission_setup_url, permission_setup_scopes) = lark_permission_payload(&updated);
+
     Ok(Json(ChannelBotDetailResponse {
         id: updated.id,
         platform: updated.platform,
@@ -643,6 +688,8 @@ pub async fn update_bot(
         created_at: updated.created_at.to_rfc3339(),
         updated_at: updated.updated_at.to_rfc3339(),
         user_id: updated.user_id,
+        permission_setup_url,
+        permission_setup_scopes,
     }))
 }
 
@@ -679,6 +726,8 @@ pub async fn get_bot(
         })
         .await?;
 
+    let (permission_setup_url, permission_setup_scopes) = lark_permission_payload(&bot);
+
     Ok(Json(ChannelBotDetailResponse {
         id: bot.id,
         platform: bot.platform,
@@ -695,6 +744,8 @@ pub async fn get_bot(
         created_at: bot.created_at.to_rfc3339(),
         updated_at: bot.updated_at.to_rfc3339(),
         user_id: bot.user_id,
+        permission_setup_url,
+        permission_setup_scopes,
     }))
 }
 
@@ -861,5 +912,70 @@ mod tests {
         let bot = make_lark_bot(true);
         ensure_lark_verify_material_present(&bot)
             .expect("verification token should satisfy verify precondition");
+    }
+
+    fn make_telegram_bot() -> crate::models::channel_bot::ChannelBot {
+        crate::models::channel_bot::ChannelBot {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: uuid::Uuid::new_v4().to_string(),
+            platform: "telegram".to_string(),
+            label: "TG Bot".to_string(),
+            bot_token_encrypted: vec![0; 8],
+            platform_bot_id: "123".to_string(),
+            platform_bot_username: "tgbot".to_string(),
+            webhook_registered: false,
+            webhook_secret_hash: "hash".to_string(),
+            app_id: None,
+            app_secret_encrypted: None,
+            lark_verification_token_encrypted: None,
+            lark_encrypt_key_encrypted: None,
+            public_key: None,
+            status: "pending".to_string(),
+            is_active: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn lark_permission_payload_for_lark_bot_returns_url_and_scopes() {
+        let bot = make_lark_bot(true);
+        let (url, scopes) = lark_permission_payload(&bot);
+        let url = url.expect("Lark bot with app_id should produce a permission URL");
+        assert!(url.starts_with("https://open.larksuite.com/app/cli_test/auth?q="));
+        assert!(url.ends_with("&op_from=openapi"));
+        assert_eq!(
+            scopes.unwrap(),
+            vec![
+                "im:message".to_string(),
+                "im:message:send_as_bot".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn lark_permission_payload_skips_non_lark_platforms() {
+        let bot = make_telegram_bot();
+        let (url, scopes) = lark_permission_payload(&bot);
+        assert!(url.is_none());
+        assert!(scopes.is_none());
+    }
+
+    #[test]
+    fn lark_permission_payload_skips_lark_bot_without_app_id() {
+        let mut bot = make_lark_bot(true);
+        bot.app_id = None;
+        let (url, scopes) = lark_permission_payload(&bot);
+        assert!(url.is_none());
+        assert!(scopes.is_none());
+    }
+
+    #[test]
+    fn lark_permission_payload_uses_feishu_host_for_china_region() {
+        let mut bot = make_lark_bot(true);
+        bot.platform = "feishu".to_string();
+        let (url, _) = lark_permission_payload(&bot);
+        let url = url.expect("Feishu bot should produce a permission URL");
+        assert!(url.starts_with("https://open.feishu.cn/app/cli_test/auth?q="));
     }
 }

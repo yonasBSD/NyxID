@@ -8,11 +8,12 @@ use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
+use crate::models::user_api_key::UserApiKey;
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::mw::auth::AuthUser;
 use crate::services::{
-    credential_push_service, node_service, org_service, unified_key_service, user_api_key_service,
-    user_endpoint_service, user_service_service,
+    catalog_service, credential_push_service, lark_permission, node_service, org_service,
+    unified_key_service, user_api_key_service, user_endpoint_service, user_service_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -291,6 +292,17 @@ pub struct KeyResponse {
     /// Mirrors the same field on the `/user-services` response so the
     /// frontend can group AI Services by personal vs each org section.
     pub credential_source: crate::handlers::user_services_handler::CredentialSourceResponse,
+    /// Lark / Feishu only: deep link to the developer console permissions
+    /// page with the catalog's required scopes pre-selected. Surfaced for
+    /// `api-lark-bot` / `api-feishu-bot` keys whose stored credential
+    /// includes an `app_id`. `None` for every other service so the field
+    /// is omitted from the JSON.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission_setup_url: Option<String>,
+    /// Scope keys encoded in `permission_setup_url`, echoed so the UI
+    /// can render the list of scopes that will be granted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission_setup_scopes: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -351,6 +363,101 @@ pub struct UpdateKeyRequest {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct DeleteKeyResponse {
     pub message: String,
+}
+
+/// Extract the Lark / Feishu `app_id` from a plaintext credential string.
+///
+/// `api-lark-bot` and `api-feishu-bot` keys store the credential as a JSON
+/// object `{"app_id": "...", "app_secret": "..."}` (the
+/// `lark_family_token_exchange_config` credential schema). For OAuth-based
+/// `api-lark` / `api-feishu` keys with BYO app credentials the app id
+/// arrives via `user_oauth_client_id_encrypted` instead — that path is
+/// handled separately by `extract_app_id_from_api_key`.
+///
+/// Returns `None` when the credential isn't valid JSON or doesn't contain
+/// a non-empty `app_id` field, so the caller can short-circuit cleanly
+/// instead of treating a parse failure as an error.
+fn extract_app_id_from_credential(credential: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(credential).ok()?;
+    let app_id = value.get("app_id")?.as_str()?.trim();
+    if app_id.is_empty() {
+        None
+    } else {
+        Some(app_id.to_string())
+    }
+}
+
+/// Decrypt a `UserApiKey` and pull out the Lark / Feishu app id, checking
+/// both the `token_exchange` JSON credential blob and the BYO OAuth client
+/// id field. All decrypt / parse failures are silently dropped to `None`
+/// because this is best-effort metadata for a UI deep link, not a security
+/// boundary — a missing URL just degrades to the manual setup flow.
+async fn extract_app_id_from_api_key(
+    encryption_keys: &crate::crypto::aes::EncryptionKeys,
+    api_key: &UserApiKey,
+) -> Option<String> {
+    if let Some(blob) = api_key.credential_encrypted.as_ref()
+        && !blob.is_empty()
+        && let Ok(bytes) = encryption_keys.decrypt(blob).await
+        && let Ok(plaintext) = String::from_utf8(bytes)
+        && let Some(app_id) = extract_app_id_from_credential(&plaintext)
+    {
+        return Some(app_id);
+    }
+
+    if let Some(blob) = api_key.user_oauth_client_id_encrypted.as_ref()
+        && !blob.is_empty()
+        && let Ok(bytes) = encryption_keys.decrypt(blob).await
+        && let Ok(plaintext) = String::from_utf8(bytes)
+    {
+        let trimmed = plaintext.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    None
+}
+
+/// Derive the Lark / Feishu permission setup URL for an AI Services key,
+/// or `(None, None)` when the key isn't a Lark variant or we can't
+/// resolve an app id. This is best-effort surface metadata: any I/O or
+/// decryption failure resolves to "no URL" so the rest of the response
+/// still ships.
+async fn derive_lark_permission_for_key(
+    state: &AppState,
+    user_id: &str,
+    catalog_service_id: Option<&str>,
+    catalog_service_slug: Option<&str>,
+    api_key_id: Option<&str>,
+) -> (Option<String>, Option<Vec<String>>) {
+    let region = catalog_service_slug.and_then(lark_permission::region_for_catalog_service_slug);
+    let region = match region {
+        Some(r) => r,
+        None => return (None, None),
+    };
+
+    let api_key_id = match api_key_id {
+        Some(id) => id,
+        None => return (None, None),
+    };
+    let api_key = match user_api_key_service::get_api_key(&state.db, user_id, api_key_id).await {
+        Ok(k) => k,
+        Err(_) => return (None, None),
+    };
+
+    let app_id = match extract_app_id_from_api_key(&state.encryption_keys, &api_key).await {
+        Some(id) => id,
+        None => return (None, None),
+    };
+
+    let scopes = match catalog_service_id {
+        Some(id) => catalog_service::get_required_permissions(&state.db, id).await,
+        None => Vec::new(),
+    };
+    let scope_refs: Vec<&str> = scopes.iter().map(String::as_str).collect();
+    let url = lark_permission::build_permission_setup_url(region, &app_id, &scope_refs);
+    (Some(url), Some(scopes))
 }
 
 fn validate_optional_label_for_update(label: Option<&str>) -> AppResult<()> {
@@ -545,6 +652,25 @@ pub async fn create_key(
         },
     );
 
+    // For Lark/Feishu services, derive the developer-console permission
+    // setup deep link so the create response can hand it back to the
+    // CLI / UI in the same round-trip. `key_response_from_result` leaves
+    // `catalog_service_slug` empty (it has no catalog row to look up), so
+    // fall back to the request's `service_slug` to drive the region check.
+    let (permission_url, permission_scopes) = derive_lark_permission_for_key(
+        &state,
+        &user_id_str,
+        response.catalog_service_id.as_deref(),
+        response
+            .catalog_service_slug
+            .as_deref()
+            .or(body.service_slug.as_deref()),
+        response.api_key_id.as_deref(),
+    )
+    .await;
+    response.permission_setup_url = permission_url;
+    response.permission_setup_scopes = permission_scopes;
+
     Ok(Json(response))
 }
 
@@ -598,7 +724,22 @@ pub async fn get_key(
     // the only layer that knows whether the actor is the direct owner or
     // accessing via an org membership.
     view.credential_source = access.source;
-    Ok(Json(key_response_from_view(view)))
+    let owner_id = access.owner_id.clone();
+    let catalog_id = view.catalog_service_id.clone();
+    let catalog_slug = view.catalog_service_slug.clone();
+    let api_key_id = view.api_key_id.clone();
+    let mut response = key_response_from_view(view);
+    let (permission_url, permission_scopes) = derive_lark_permission_for_key(
+        &state,
+        &owner_id,
+        catalog_id.as_deref(),
+        catalog_slug.as_deref(),
+        api_key_id.as_deref(),
+    )
+    .await;
+    response.permission_setup_url = permission_url;
+    response.permission_setup_scopes = permission_scopes;
+    Ok(Json(response))
 }
 
 #[utoipa::path(
@@ -1369,7 +1510,21 @@ pub async fn update_key(
 
     // Return refreshed view
     let updated = unified_key_service::get_key(&state.db, &user_id_str, &key_id).await?;
-    Ok(Json(key_response_from_view(updated)))
+    let catalog_id = updated.catalog_service_id.clone();
+    let catalog_slug = updated.catalog_service_slug.clone();
+    let api_key_id = updated.api_key_id.clone();
+    let mut response = key_response_from_view(updated);
+    let (permission_url, permission_scopes) = derive_lark_permission_for_key(
+        &state,
+        &user_id_str,
+        catalog_id.as_deref(),
+        catalog_slug.as_deref(),
+        api_key_id.as_deref(),
+    )
+    .await;
+    response.permission_setup_url = permission_url;
+    response.permission_setup_scopes = permission_scopes;
+    Ok(Json(response))
 }
 
 #[utoipa::path(
@@ -1485,6 +1640,10 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
         // into the actor's own user_id, not into an org.
         credential_source:
             crate::handlers::user_services_handler::CredentialSourceResponse::Personal,
+        // The Lark/Feishu permission deep link is derived in the handler
+        // after this builder runs; see `derive_lark_permission_for_key`.
+        permission_setup_url: None,
+        permission_setup_scopes: None,
     }
 }
 
@@ -1533,13 +1692,184 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         ssh_certificate_ttl_minutes: view.ssh_certificate_ttl_minutes,
         openapi_spec_url: view.openapi_spec_url,
         credential_source: view.credential_source.into(),
+        permission_setup_url: None,
+        permission_setup_scopes: None,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::validate_optional_label_for_update;
+    use std::sync::Arc;
+
+    use super::{
+        extract_app_id_from_api_key, extract_app_id_from_credential,
+        validate_optional_label_for_update,
+    };
+    use crate::crypto::aes::EncryptionKeys;
+    use crate::crypto::local_key_provider::LocalKeyProvider;
     use crate::errors::AppError;
+    use crate::models::user_api_key::UserApiKey;
+    use chrono::Utc;
+
+    fn test_encryption_keys() -> EncryptionKeys {
+        EncryptionKeys::with_provider(Arc::new(LocalKeyProvider::new([0x22; 32], None)))
+    }
+
+    fn make_blank_api_key() -> UserApiKey {
+        UserApiKey {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: uuid::Uuid::new_v4().to_string(),
+            label: "test".to_string(),
+            credential_type: "api_key".to_string(),
+            credential_encrypted: None,
+            access_token_encrypted: None,
+            refresh_token_encrypted: None,
+            token_scopes: None,
+            expires_at: None,
+            provider_config_id: None,
+            user_oauth_client_id_encrypted: None,
+            user_oauth_client_secret_encrypted: None,
+            status: "active".to_string(),
+            last_used_at: None,
+            error_message: None,
+            source: None,
+            source_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn extract_app_id_handles_token_exchange_credential_json() {
+        let credential = r#"{"app_id":"cli_a40bc75349bcfff1","app_secret":"shh"}"#;
+        assert_eq!(
+            extract_app_id_from_credential(credential),
+            Some("cli_a40bc75349bcfff1".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_app_id_trims_whitespace_and_rejects_empty() {
+        let credential = r#"{"app_id":"  ","app_secret":"shh"}"#;
+        assert_eq!(extract_app_id_from_credential(credential), None);
+
+        let credential = r#"{"app_id":"  cli_xyz  ","app_secret":"shh"}"#;
+        assert_eq!(
+            extract_app_id_from_credential(credential),
+            Some("cli_xyz".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_app_id_returns_none_for_non_json_credential() {
+        // Plain bearer tokens / API keys don't parse as JSON; the helper
+        // must short-circuit cleanly so non-Lark services keep working.
+        assert_eq!(extract_app_id_from_credential("sk-test-abc123"), None);
+        assert_eq!(extract_app_id_from_credential(""), None);
+        assert_eq!(extract_app_id_from_credential(r#"{"other":"value"}"#), None);
+    }
+
+    #[tokio::test]
+    async fn extract_from_api_key_reads_token_exchange_credential_blob() {
+        let keys = test_encryption_keys();
+        let mut api_key = make_blank_api_key();
+        let plaintext = r#"{"app_id":"cli_token_exchange","app_secret":"shh"}"#;
+        api_key.credential_encrypted = Some(keys.encrypt(plaintext.as_bytes()).await.unwrap());
+
+        let app_id = extract_app_id_from_api_key(&keys, &api_key).await;
+        assert_eq!(app_id, Some("cli_token_exchange".to_string()));
+    }
+
+    #[tokio::test]
+    async fn extract_from_api_key_falls_back_to_byo_oauth_client_id() {
+        let keys = test_encryption_keys();
+        let mut api_key = make_blank_api_key();
+        api_key.user_oauth_client_id_encrypted =
+            Some(keys.encrypt(b"  cli_byo_oauth  ").await.unwrap());
+
+        let app_id = extract_app_id_from_api_key(&keys, &api_key).await;
+        assert_eq!(app_id, Some("cli_byo_oauth".to_string()));
+    }
+
+    #[tokio::test]
+    async fn extract_from_api_key_prefers_credential_blob_over_byo_oauth_id() {
+        // When both fields are populated (rare but possible during
+        // migration overlap), the JSON credential wins because that's
+        // the authoritative source for token-exchange services that
+        // also happen to have a BYO OAuth client recorded.
+        let keys = test_encryption_keys();
+        let mut api_key = make_blank_api_key();
+        let plaintext = r#"{"app_id":"cli_from_blob","app_secret":"shh"}"#;
+        api_key.credential_encrypted = Some(keys.encrypt(plaintext.as_bytes()).await.unwrap());
+        api_key.user_oauth_client_id_encrypted =
+            Some(keys.encrypt(b"cli_from_oauth").await.unwrap());
+
+        let app_id = extract_app_id_from_api_key(&keys, &api_key).await;
+        assert_eq!(app_id, Some("cli_from_blob".to_string()));
+    }
+
+    #[tokio::test]
+    async fn extract_from_api_key_returns_none_when_decrypt_fails() {
+        // A blob that wasn't produced by this key set must not panic
+        // and must not fall through to a misleading partial value —
+        // best-effort means silently degrade to no URL.
+        let writer_keys = test_encryption_keys();
+        let mut api_key = make_blank_api_key();
+        let plaintext = r#"{"app_id":"cli_xyz","app_secret":"shh"}"#;
+        api_key.credential_encrypted =
+            Some(writer_keys.encrypt(plaintext.as_bytes()).await.unwrap());
+
+        // Use a completely different key set to read it back.
+        let reader_keys =
+            EncryptionKeys::with_provider(Arc::new(LocalKeyProvider::new([0x99; 32], None)));
+        let app_id = extract_app_id_from_api_key(&reader_keys, &api_key).await;
+        assert_eq!(app_id, None);
+    }
+
+    #[tokio::test]
+    async fn extract_from_api_key_returns_none_when_credential_blob_is_invalid_utf8() {
+        let keys = test_encryption_keys();
+        let mut api_key = make_blank_api_key();
+        // Encrypt raw bytes that aren't valid UTF-8 (eg an arbitrary
+        // binary blob someone shoved into credential_encrypted).
+        api_key.credential_encrypted = Some(keys.encrypt(&[0xff, 0xfe, 0xfd]).await.unwrap());
+
+        let app_id = extract_app_id_from_api_key(&keys, &api_key).await;
+        assert_eq!(app_id, None);
+    }
+
+    #[tokio::test]
+    async fn extract_from_api_key_returns_none_when_credential_blob_lacks_app_id() {
+        // A token-exchange JSON object missing `app_id` (or with an
+        // empty / whitespace-only one) must not produce a URL.
+        let keys = test_encryption_keys();
+        let mut api_key = make_blank_api_key();
+        let plaintext = r#"{"app_secret":"shh"}"#;
+        api_key.credential_encrypted = Some(keys.encrypt(plaintext.as_bytes()).await.unwrap());
+
+        let app_id = extract_app_id_from_api_key(&keys, &api_key).await;
+        assert_eq!(app_id, None);
+    }
+
+    #[tokio::test]
+    async fn extract_from_api_key_returns_none_for_blank_blobs_and_unset_fields() {
+        let keys = test_encryption_keys();
+        let api_key = make_blank_api_key();
+
+        // Both encrypted fields unset → None.
+        assert_eq!(extract_app_id_from_api_key(&keys, &api_key).await, None);
+
+        // Empty (zero-length) blob is treated as "absent" — exercises
+        // the `!blob.is_empty()` guard so we don't try to decrypt
+        // empty ciphertext.
+        let mut api_key_with_empty = make_blank_api_key();
+        api_key_with_empty.credential_encrypted = Some(Vec::new());
+        api_key_with_empty.user_oauth_client_id_encrypted = Some(Vec::new());
+        assert_eq!(
+            extract_app_id_from_api_key(&keys, &api_key_with_empty).await,
+            None
+        );
+    }
 
     #[test]
     fn update_label_validation_accepts_none_and_valid_lengths() {

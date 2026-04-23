@@ -9,6 +9,7 @@ pub mod channel_event;
 pub mod developer_app;
 pub mod endpoint;
 pub mod external_key;
+pub mod lark_permission;
 pub mod mcp;
 pub mod mfa;
 pub mod node;
