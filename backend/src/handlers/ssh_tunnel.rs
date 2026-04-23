@@ -21,7 +21,7 @@ use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{AuthMethod, AuthUser};
 use crate::services::{
     approval_service, audit_service, node_routing_service, node_service, notification_service,
-    ssh_service,
+    ssh_service, user_service_service,
 };
 
 use super::services_helpers::fetch_service;
@@ -859,6 +859,9 @@ pub(crate) async fn authorize_ssh_access(
             let channel =
                 notification_service::get_or_create_channel(&state.db, &timeout_recipient).await?;
             let timeout_secs = channel.approval_timeout_secs;
+            let approval_service_slug =
+                resolve_ssh_approval_service_slug(&state.db, owner_for_resolution, &service)
+                    .await?;
             let approval_request = approval_service::create_approval_request(
                 &state.db,
                 &state.config,
@@ -868,7 +871,7 @@ pub(crate) async fn authorize_ssh_access(
                 primary_owner,
                 service_id,
                 &service.name,
-                &service.slug,
+                &approval_service_slug,
                 requester_type,
                 &auth_user.approval_requester_id(),
                 None,
@@ -895,6 +898,34 @@ pub(crate) async fn authorize_ssh_access(
     }
 
     Ok(())
+}
+
+async fn resolve_ssh_approval_service_slug(
+    db: &mongodb::Database,
+    owner_user_id: &str,
+    service: &crate::models::downstream_service::DownstreamService,
+) -> AppResult<String> {
+    let user_service =
+        user_service_service::find_by_catalog_service_id(db, owner_user_id, &service.id).await?;
+    Ok(ssh_approval_display_slug(
+        user_service.as_ref().map(|svc| svc.slug.as_str()),
+        &service.slug,
+        &service.name,
+    ))
+}
+
+fn ssh_approval_display_slug(
+    user_service_slug: Option<&str>,
+    backing_slug: &str,
+    service_name: &str,
+) -> String {
+    if let Some(slug) = user_service_slug {
+        return slug.to_string();
+    }
+    if !backing_slug.starts_with("_ssh_") {
+        return backing_slug.to_string();
+    }
+    service_name.to_string()
 }
 
 async fn read_direct_ssh_banner(
@@ -1026,7 +1057,10 @@ fn close_node_ssh_tunnel(
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_SSH_BANNER_BYTES, ssh_banner_validated, validate_runtime_ssh_target};
+    use super::{
+        MAX_SSH_BANNER_BYTES, ssh_approval_display_slug, ssh_banner_validated,
+        validate_runtime_ssh_target,
+    };
     use crate::models::downstream_service::SshServiceConfig;
 
     #[test]
@@ -1049,6 +1083,30 @@ mod tests {
             error
                 .to_string()
                 .contains("did not present an SSH identification banner")
+        );
+    }
+
+    #[test]
+    fn ssh_approval_display_slug_prefers_user_service_slug() {
+        assert_eq!(
+            ssh_approval_display_slug(Some("my-server"), "_ssh_1234", "Shared Label"),
+            "my-server"
+        );
+    }
+
+    #[test]
+    fn ssh_approval_display_slug_keeps_legacy_backing_slug_when_human_readable() {
+        assert_eq!(
+            ssh_approval_display_slug(None, "legacy-ssh-slug", "Shared Label"),
+            "legacy-ssh-slug"
+        );
+    }
+
+    #[test]
+    fn ssh_approval_display_slug_falls_back_to_name_for_internal_backing_slug() {
+        assert_eq!(
+            ssh_approval_display_slug(None, "_ssh_1234", "Shared Label"),
+            "Shared Label"
         );
     }
 
