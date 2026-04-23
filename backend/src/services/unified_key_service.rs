@@ -377,6 +377,10 @@ pub async fn create_key(
 ) -> AppResult<CreateKeyResult> {
     let node_id = node_id.filter(|nid| !nid.is_empty());
 
+    if let Some(node_id) = node_id {
+        node_service::ensure_node_writable_by_actor(db, actor_user_id, node_id).await?;
+    }
+
     if let Some(slug) = service_slug {
         // -- Catalog path --
         use crate::models::service_provider_requirement::{
@@ -2582,6 +2586,63 @@ mod tests {
         assert_eq!(api_key_count, 0);
         assert_eq!(endpoint_count, 0);
         assert!(!service.get_bool("is_active").unwrap());
+    }
+
+    #[tokio::test]
+    async fn create_key_with_missing_node_fails_before_inserting_resources() {
+        let Some(db) = connect_test_database().await else {
+            eprintln!("skipping unified_key_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let encryption_keys = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let err = create_key(
+            &db,
+            &encryption_keys,
+            &user_id,
+            &user_id,
+            None,
+            Some("https://api.example.com"),
+            "",
+            "Node Routed Service",
+            Some("node-routed-service"),
+            Some("bearer"),
+            Some("Authorization"),
+            Some("missing-node"),
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+        )
+        .await
+        .err()
+        .expect("missing node should fail");
+
+        assert!(
+            matches!(err, AppError::NodeNotFound(ref message) if message == "Node not found"),
+            "expected NodeNotFound, got {err}"
+        );
+
+        let endpoint_count = db
+            .collection::<mongodb::bson::Document>(USER_ENDPOINTS)
+            .count_documents(doc! { "user_id": &user_id })
+            .await
+            .unwrap();
+        let api_key_count = db
+            .collection::<mongodb::bson::Document>(USER_API_KEYS)
+            .count_documents(doc! { "user_id": &user_id })
+            .await
+            .unwrap();
+        let service_count = db
+            .collection::<mongodb::bson::Document>(USER_SERVICES)
+            .count_documents(doc! { "user_id": &user_id })
+            .await
+            .unwrap();
+
+        assert_eq!(endpoint_count, 0);
+        assert_eq!(api_key_count, 0);
+        assert_eq!(service_count, 0);
     }
 
     #[test]
