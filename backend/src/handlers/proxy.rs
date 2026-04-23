@@ -828,7 +828,7 @@ async fn execute_proxy_inner(
         node_route,
         target,
         has_server_credential,
-        _resolved_user_service_id,
+        resolved_user_service_id,
         node_routing_required,
     ) = if let Some(mut pre) = pre_resolved {
         effective_owner_for_approval = Some(pre.effective_owner_id.clone());
@@ -1207,37 +1207,49 @@ async fn execute_proxy_inner(
     };
 
     // === Delegated Credentials ===
-    // Resolve delegated credentials before the node/standard branch split so that
-    // node-routed requests also get path-injection prefixes (e.g. Telegram Bot API
-    // `/bot<TOKEN>/method`) and header/query credential injection.
+    // Delegation resolves a legacy `UserProviderToken` and injects it as a
+    // header / bearer / query / path credential. That flow belongs to the
+    // pre-streamlined-services world where the user "connected" a provider
+    // separately from choosing a service. The new-path `UserService` carries
+    // its own `UserApiKey` credential plus an `auth_method` snapshot, so the
+    // proxy already injects the right credential directly from
+    // `target.credential` -- calling delegation on top would either
+    // double-inject (if both paths hold credentials) or hard-fail with
+    // "Provider ... connection required" for users who only set up their
+    // credential via AI Services (no UserProviderToken ever created).
     //
-    // For node-routed services the node agent injects credentials locally, so
-    // a missing server-side provider token is not fatal.
-    let delegated_owner = effective_owner_for_approval
-        .as_deref()
-        .unwrap_or(&user_id_str);
-    let delegated_result = delegation_service::resolve_delegated_credentials(
-        &state.db,
-        &state.encryption_keys,
-        delegated_owner,
-        service_id,
-    )
-    .await;
-
-    let delegated = match delegated_result {
-        Ok(creds) => creds,
-        Err(e) if node_route.is_some() => {
-            tracing::debug!(
-                service_id = %service_id,
-                error = %e,
-                "Server-side provider credentials unavailable; node agent will inject credentials"
-            );
-            vec![]
-        }
-        Err(e) => {
-            return Err(AppError::BadRequest(format!(
-                "Provider credentials not available: {e}"
-            )));
+    // Skip delegation entirely when the target came from the new path.
+    // For node-routed legacy services the node agent injects credentials
+    // locally, so a missing server-side provider token is not fatal.
+    let delegated = if resolved_user_service_id.is_some() {
+        Vec::new()
+    } else {
+        let delegated_owner = effective_owner_for_approval
+            .as_deref()
+            .unwrap_or(&user_id_str);
+        match delegation_service::resolve_delegated_credentials(
+            &state.db,
+            &state.encryption_keys,
+            delegated_owner,
+            service_id,
+        )
+        .await
+        {
+            Ok(creds) => creds,
+            Err(e) if node_route.is_some() => {
+                tracing::debug!(
+                    service_id = %service_id,
+                    error = %e,
+                    "Server-side provider credentials unavailable; \
+                     node agent will inject credentials"
+                );
+                vec![]
+            }
+            Err(e) => {
+                return Err(AppError::BadRequest(format!(
+                    "Provider credentials not available: {e}"
+                )));
+            }
         }
     };
 
