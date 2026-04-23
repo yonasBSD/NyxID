@@ -1213,10 +1213,13 @@ async fn execute_proxy_inner(
     //
     // For node-routed services the node agent injects credentials locally, so
     // a missing server-side provider token is not fatal.
+    let delegated_owner = effective_owner_for_approval
+        .as_deref()
+        .unwrap_or(&user_id_str);
     let delegated_result = delegation_service::resolve_delegated_credentials(
         &state.db,
         &state.encryption_keys,
-        &user_id_str,
+        delegated_owner,
         service_id,
     )
     .await;

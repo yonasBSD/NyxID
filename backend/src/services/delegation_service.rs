@@ -155,7 +155,19 @@ pub async fn resolve_delegated_credentials(
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_delegated_injection;
+    use chrono::Utc;
+    use mongodb::bson::doc;
+
+    use super::{normalize_delegated_injection, resolve_delegated_credentials};
+    use crate::config::AppConfig;
+    use crate::crypto::aes::EncryptionKeys;
+    use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
+    use crate::models::service_provider_requirement::{
+        COLLECTION_NAME as REQUIREMENTS, ServiceProviderRequirement,
+    };
+    use crate::models::user_provider_token::{
+        COLLECTION_NAME as USER_PROVIDER_TOKENS, UserProviderToken,
+    };
 
     #[test]
     fn telegram_bot_legacy_bearer_injection_is_mapped_to_path() {
@@ -180,5 +192,216 @@ mod tests {
 
         assert_eq!(method, "bearer");
         assert_eq!(key, "Authorization");
+    }
+
+    async fn connect_test_database() -> Option<mongodb::Database> {
+        let db_name = format!("nyxid_test_delegation_service_{}", uuid::Uuid::new_v4());
+        let candidates = [
+            format!(
+                "mongodb://nyxid:nyxid_dev_password@127.0.0.1:27018/{db_name}?authSource=admin"
+            ),
+            format!("mongodb://127.0.0.1:27017/{db_name}"),
+        ];
+
+        for uri in candidates {
+            let Ok(client) = mongodb::Client::with_uri_str(&uri).await else {
+                continue;
+            };
+            let db = client.database(&db_name);
+            if db.run_command(doc! { "ping": 1 }).await.is_ok() {
+                return Some(db);
+            }
+        }
+
+        None
+    }
+
+    fn test_encryption_keys() -> EncryptionKeys {
+        let config = AppConfig {
+            port: 3001,
+            base_url: "http://localhost:3001".to_string(),
+            frontend_url: "http://localhost:3000".to_string(),
+            cors_allowed_origins: vec![],
+            database_url: "mongodb://ignored-for-test".to_string(),
+            database_max_connections: 10,
+            environment: "test".to_string(),
+            jwt_private_key_path: "keys/private.pem".to_string(),
+            jwt_public_key_path: "keys/public.pem".to_string(),
+            jwt_issuer: "nyxid".to_string(),
+            jwt_access_ttl_secs: 900,
+            jwt_refresh_ttl_secs: 604800,
+            google_client_id: None,
+            google_client_secret: None,
+            github_client_id: None,
+            github_client_secret: None,
+            apple_client_id: None,
+            apple_team_id: None,
+            apple_key_id: None,
+            apple_private_key_path: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_username: None,
+            smtp_password: None,
+            smtp_from_address: None,
+            encryption_key: Some("11".repeat(32)),
+            encryption_key_previous: None,
+            rate_limit_per_second: 10,
+            rate_limit_burst: 30,
+            sa_token_ttl_secs: 3600,
+            cookie_domain: None,
+            telegram_bot_token: None,
+            telegram_webhook_secret: None,
+            telegram_webhook_url: None,
+            telegram_bot_username: None,
+            approval_expiry_interval_secs: 5,
+            fcm_service_account_path: None,
+            fcm_project_id: None,
+            apns_key_path: None,
+            apns_key_id: None,
+            apns_team_id: None,
+            apns_topic: None,
+            apns_sandbox: true,
+            key_provider: "local".to_string(),
+            aws_kms_key_arn: None,
+            aws_kms_key_arn_previous: None,
+            gcp_kms_key_name: None,
+            gcp_kms_key_name_previous: None,
+            node_heartbeat_interval_secs: 30,
+            node_heartbeat_timeout_secs: 90,
+            node_proxy_timeout_secs: 30,
+            node_registration_token_ttl_secs: 3600,
+            node_max_per_user: 10,
+            node_max_ws_connections: 100,
+            node_max_stream_duration_secs: 300,
+            node_hmac_signing_enabled: true,
+            proxy_max_body_size: 100 * 1024 * 1024,
+            proxy_stream_idle_timeout_secs: 60,
+            ssh_max_sessions_per_user: 4,
+            ssh_connect_timeout_secs: 10,
+            ssh_max_tunnel_duration_secs: 3600,
+            ws_passthrough_max_connections: 200,
+            channel_relay_callback_timeout_secs: 30,
+            channel_relay_max_bots_per_user: 5,
+            channel_relay_message_ttl_days: 30,
+            channel_event_rate_limit_per_second: 100,
+            channel_event_rate_limit_burst: 200,
+            channel_event_dedup_capacity: 32_768,
+            channel_event_dedup_ttl_secs: 300,
+            invite_code_required: false,
+            email_auth_enabled: false,
+            auto_verify_email: false,
+        };
+        EncryptionKeys::from_config(&config)
+    }
+
+    #[tokio::test]
+    async fn resolve_delegated_credentials_uses_org_owner_tokens_when_passed_owner_id() {
+        let Some(db) = connect_test_database().await else {
+            eprintln!("skipping delegation_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let encryption_keys = test_encryption_keys();
+        let now = Utc::now();
+        let actor_user_id = uuid::Uuid::new_v4().to_string();
+        let org_user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+
+        let provider = ProviderConfig {
+            id: provider_id.clone(),
+            slug: "github".to_string(),
+            name: "GitHub".to_string(),
+            description: None,
+            provider_type: "oauth2".to_string(),
+            authorization_url: Some("https://github.com/login/oauth/authorize".to_string()),
+            token_url: Some("https://github.com/login/oauth/access_token".to_string()),
+            revocation_url: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: true,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: None,
+            is_active: true,
+            credential_mode: "user".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: false,
+            created_by: "test".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+
+        let requirement = ServiceProviderRequirement {
+            id: uuid::Uuid::new_v4().to_string(),
+            service_id: service_id.clone(),
+            provider_config_id: provider_id.clone(),
+            required: true,
+            scopes: None,
+            injection_method: "bearer".to_string(),
+            injection_key: Some("Authorization".to_string()),
+            created_at: now,
+            updated_at: now,
+        };
+        db.collection::<ServiceProviderRequirement>(REQUIREMENTS)
+            .insert_one(&requirement)
+            .await
+            .unwrap();
+
+        let token = UserProviderToken {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: org_user_id.clone(),
+            provider_config_id: provider_id,
+            credential_user_id: None,
+            token_type: "oauth2".to_string(),
+            access_token_encrypted: Some(
+                encryption_keys.encrypt(b"org-access-token").await.unwrap(),
+            ),
+            refresh_token_encrypted: None,
+            token_scopes: Some("repo".to_string()),
+            expires_at: None,
+            api_key_encrypted: None,
+            status: "active".to_string(),
+            last_refreshed_at: None,
+            last_used_at: None,
+            error_message: None,
+            label: Some("Org GitHub".to_string()),
+            metadata: Some(
+                [("actor_user_id".to_string(), actor_user_id)]
+                    .into_iter()
+                    .collect(),
+            ),
+            gateway_url: None,
+            created_at: now,
+            updated_at: now,
+        };
+        db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+            .insert_one(&token)
+            .await
+            .unwrap();
+
+        let credentials =
+            resolve_delegated_credentials(&db, &encryption_keys, &org_user_id, &service_id)
+                .await
+                .unwrap();
+
+        assert_eq!(credentials.len(), 1);
+        assert_eq!(credentials[0].provider_slug, "github");
+        assert_eq!(credentials[0].injection_method, "bearer");
+        assert_eq!(credentials[0].injection_key, "Authorization");
+        assert_eq!(credentials[0].credential, "org-access-token");
     }
 }
