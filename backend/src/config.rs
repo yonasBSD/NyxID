@@ -11,6 +11,13 @@ pub struct AppConfig {
     pub frontend_url: String,
     /// Additional CORS allowed origins (comma-separated, e.g. "http://localhost:5847,http://localhost:3000")
     pub cors_allowed_origins: Vec<String>,
+    /// Additional origins trusted for browser CSRF (comma-separated).
+    /// These are merged with `frontend_url` + `base_url` when checking the
+    /// `Origin` / `Referer` header on cookie-authenticated state-changing
+    /// requests. Keep this strictly narrower than `CORS_ALLOWED_ORIGINS`:
+    /// only include origins that legitimately perform cookie-authenticated
+    /// state changes. Bearer / API-key callers never need to be listed here.
+    pub csrf_trusted_origins: Vec<String>,
     /// MongoDB connection string
     pub database_url: String,
     /// Maximum database connection pool size
@@ -422,6 +429,12 @@ impl AppConfig {
             frontend_url: env::var("FRONTEND_URL")
                 .unwrap_or_else(|_| "http://localhost:3000".to_string()),
             cors_allowed_origins: env::var("CORS_ALLOWED_ORIGINS")
+                .unwrap_or_default()
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            csrf_trusted_origins: env::var("CSRF_TRUSTED_ORIGINS")
                 .unwrap_or_default()
                 .split(',')
                 .map(|s| s.trim().to_string())
@@ -871,6 +884,7 @@ mod tests {
             base_url: base_url.to_string(),
             frontend_url: "http://localhost:3000".to_string(),
             cors_allowed_origins: vec![],
+            csrf_trusted_origins: vec![],
             database_url: "mongodb://localhost:27017/nyxid".to_string(),
             database_max_connections: 10,
             environment: environment.to_string(),
