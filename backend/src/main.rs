@@ -388,7 +388,7 @@ async fn main() {
     let jwt_private_key_pem = std::fs::read(&config.jwt_private_key_path)
         .expect("Failed to read JWT private key for CLI-pairing HMAC seed");
     let cli_pairing_hmac_key = Arc::new(derive_cli_pairing_hmac_key(
-        std::env::var("CLI_PAIRING_HMAC_KEY").ok().as_deref(),
+        config.cli_pairing_hmac_key.as_deref(),
         config.encryption_key.as_deref(),
         Some(&jwt_private_key_pem),
     ));

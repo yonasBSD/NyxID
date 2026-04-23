@@ -80,6 +80,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         rate_limit_per_second: 10,
         rate_limit_burst: 30,
         trusted_proxy_ips: vec![],
+        cli_pairing_hmac_key: None,
         sa_token_ttl_secs: 3600,
         cookie_domain: None,
         telegram_bot_token: None,

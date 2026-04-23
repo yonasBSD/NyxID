@@ -84,6 +84,18 @@ pub struct AppConfig {
     /// Empty (the default) is the strict mode: nothing trusted.
     pub trusted_proxy_ips: Vec<std::net::IpAddr>,
 
+    /// Explicit HMAC key (64 hex chars = 32 bytes) used to derive
+    /// `CliPairing.code_hash`. When unset, the backend derives the
+    /// key from `ENCRYPTION_KEY` (if configured) or from the JWT
+    /// private key PEM — see `derive_cli_pairing_hmac_key` in
+    /// `main.rs` for the full priority chain. Set explicitly only
+    /// when you want to rotate the pairing HMAC independently of
+    /// both `ENCRYPTION_KEY` and the JWT signing key. Threaded
+    /// through `AppConfig` (rather than read via `std::env::var`
+    /// at the call site) so ops can introspect the resolved value
+    /// via the same path as every other env-backed setting.
+    pub cli_pairing_hmac_key: Option<String>,
+
     /// Service account token TTL in seconds (default: 3600 = 1 hour)
     pub sa_token_ttl_secs: i64,
 
@@ -282,6 +294,14 @@ impl std::fmt::Debug for AppConfig {
             .field("rate_limit_per_second", &self.rate_limit_per_second)
             .field("rate_limit_burst", &self.rate_limit_burst)
             .field("trusted_proxy_ips", &self.trusted_proxy_ips)
+            .field(
+                "cli_pairing_hmac_key",
+                if self.cli_pairing_hmac_key.is_some() {
+                    &"Some([REDACTED])"
+                } else {
+                    &"None"
+                },
+            )
             .field("sa_token_ttl_secs", &self.sa_token_ttl_secs)
             .field("cookie_domain", &self.cookie_domain)
             .field("telegram_bot_token", &"[REDACTED]")
@@ -545,6 +565,9 @@ impl AppConfig {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(30),
             trusted_proxy_ips: parse_trusted_proxy_ips(env::var("TRUSTED_PROXY_IPS").ok()),
+            cli_pairing_hmac_key: env::var("CLI_PAIRING_HMAC_KEY")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
 
             sa_token_ttl_secs: env::var("SA_TOKEN_TTL_SECS")
                 .ok()
@@ -968,6 +991,7 @@ mod tests {
             rate_limit_per_second: 10,
             rate_limit_burst: 30,
             trusted_proxy_ips: vec![],
+            cli_pairing_hmac_key: None,
             sa_token_ttl_secs: 3600,
             telemetry_dsn: None,
             telemetry_host: None,
