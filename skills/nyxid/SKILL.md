@@ -947,6 +947,12 @@ nyxid proxy request api-telegram-bot getWebhookInfo -m POST -d '{}'
 nyxid service add api-lark-bot
 # CLI prompts for app_id AND app_secret. NyxID stores both encrypted and
 # handles the tenant_access_token exchange transparently on every call.
+# After register, the CLI prints a `Configure Permissions:` block with a
+# deep link into the Lark developer console's Permissions & Scopes page,
+# scopes pre-selected from the catalog's `required_permissions`. The
+# same link is surfaced by `nyxid service show api-lark-bot-<id>` and on
+# the web UI key detail page. Use it instead of telling the user to
+# search for scope keys manually.
 # Just hit the Lark API path directly -- no manual token management:
 nyxid proxy request api-lark-bot /open-apis/im/v1/chats -m GET
 
@@ -1072,6 +1078,8 @@ nyxid channel-bot register --platform slack --label "My Slack Bot" --token-env S
 
 For Telegram, NyxID auto-registers the webhook. For Discord/Lark/Feishu/Slack, configure the webhook URL in the platform's developer console: `https://<your-nyxid>/api/v1/webhooks/channel/<platform>/<bot-id>`. Telegram/Discord/Slack bots auto-activate on first successful webhook delivery. Lark/Feishu bots promote from `pending_webhook` to `active` only after inbound webhook verification passes, which requires the bot's Verification Token to be set correctly. Encrypt Key is optional, but if it is enabled in the Lark/Feishu console it must also be set on the bot. The CLI falls back to `NYXID_LARK_VERIFICATION_TOKEN` and `NYXID_LARK_ENCRYPT_KEY` when `--verification-token` or `--encrypt-key` are omitted. For Slack, paste the URL into the app's **Event Subscriptions** page — Slack's `url_verification` handshake is answered automatically.
 
+**Lark/Feishu permission setup link (NyxID#167).** For Lark/Feishu bots, every response that includes the bot's `app_id` also carries a `permission_setup_url` and `permission_setup_scopes` field. The URL deep-links into the developer console's Permissions & Scopes page with the scopes NyxID's adapter needs (`im:message`, `im:message:send_as_bot`) already pre-checked, ready for "Bulk Enable". The CLI prints it as a `Configure Permissions:` block after `nyxid channel-bot register`, `nyxid channel-bot show`, and `nyxid channel-bot update` (table mode); the web UI renders it as a "Configure Permissions" section on the bot detail page. When helping a user set up a Lark/Feishu bot, point them at this link instead of asking them to manually search for scope keys in the developer console.
+
 ### Manage bots
 
 ```bash
@@ -1091,6 +1099,8 @@ nyxid channel-bot update <ID> --verification-token "vtoken_xxx" --encrypt-key "e
 ```
 
 The same fix is available in the web UI bot detail page, which uses `PATCH /api/v1/channel-bots/{id}` under the hood. After the next verified inbound webhook is received, NyxID auto-promotes the bot to `active`.
+
+If the bot is also missing required scopes (a common parallel symptom), surface the `permission_setup_url` from `nyxid channel-bot show <ID>` — clicking it opens the developer console with NyxID's required scopes pre-selected so the owner can grant them in one click.
 
 ### Configure conversation routing
 

@@ -62,6 +62,13 @@ export interface ChannelBotDetail extends ChannelBotItem {
   readonly app_secret_configured: boolean;
   readonly lark_verification_token_configured: boolean;
   readonly lark_encrypt_key_configured: boolean;
+  /** Lark/Feishu only: deep link to the developer console permissions
+   *  page with the scopes NyxID's adapter needs already pre-selected.
+   *  `null` for non-Lark platforms or when the bot has no `app_id`. */
+  readonly permission_setup_url?: string | null;
+  /** Lark/Feishu only: scope keys encoded in `permission_setup_url`,
+   *  echoed back so the UI can render the list under the link. */
+  readonly permission_setup_scopes?: readonly string[] | null;
 }
 
 export interface CreateChannelBotRequest {
@@ -95,6 +102,8 @@ export interface CreateChannelBotResponse {
   readonly platform: ChannelPlatform;
   readonly platform_bot_username: string;
   readonly status: ChannelBotStatus;
+  readonly permission_setup_url?: string | null;
+  readonly permission_setup_scopes?: readonly string[] | null;
 }
 
 export interface ChannelConversationItem {

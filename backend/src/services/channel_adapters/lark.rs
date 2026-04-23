@@ -40,6 +40,19 @@ use crate::services::provider_token_exchange_service::{self, TokenExchangeCache}
 
 type Aes256CbcDec = cbc::Decryptor<Aes256>;
 
+/// Lark / Feishu scope keys this adapter relies on for inbound + outbound
+/// message handling. Used to pre-select the right checkboxes when we hand
+/// the user a permission setup link (see `services::lark_permission`).
+///
+/// Keep in sync with the Lark/Feishu open APIs this file actually calls:
+/// - `im.message.receive_v1` event subscription → `im:message`
+/// - `POST /open-apis/im/v1/messages` (text + interactive cards) →
+///   `im:message:send_as_bot`
+///
+/// `card.action.trigger` callbacks ride on the same event subscription as
+/// inbound messages, so they don't need their own scope.
+pub const REQUIRED_BOT_SCOPES: &[&str] = &["im:message", "im:message:send_as_bot"];
+
 /// Build the `TokenExchangeConfig` that matches Lark / Feishu's tenant
 /// token endpoint. Shared with the proxy catalog seeds so there is exactly
 /// one definition in the tree.

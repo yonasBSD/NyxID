@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use crate::api::ApiClient;
 use crate::cli::{OutputFormat, ServiceCommands};
+use crate::commands::lark_permission::print_permission_block;
 
 /// Parse one or more `--default-header NAME=VALUE[:overridable]` flag values
 /// into a JSON-shaped list that the backend `validate_headers` helper will
@@ -594,6 +595,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
 
                     eprintln!();
                     eprintln!("Proxy URL:  {}/api/v1/proxy/s/{slug}/", api.base_url_root());
+                    print_permission_block(&svc);
                 }
             }
             Ok(())
@@ -673,11 +675,19 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 );
             }
 
-            let _: Value = api
+            let result: Value = api
                 .put(&format!("/keys/{id}"), &Value::Object(body))
                 .await?;
 
-            eprintln!("Service updated.");
+            match auth.output {
+                OutputFormat::Json => {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                }
+                OutputFormat::Table => {
+                    eprintln!("Service updated.");
+                    print_permission_block(&result);
+                }
+            }
             Ok(())
         }
 
@@ -1124,6 +1134,7 @@ fn print_add_result(api: &ApiClient, result: &Value, output: OutputFormat) -> Re
             eprintln!("Status:    {status}");
             eprintln!();
             eprintln!("Proxy URL: {}/api/v1/proxy/s/{slug}/", api.base_url_root());
+            print_permission_block(result);
         }
     }
     Ok(())

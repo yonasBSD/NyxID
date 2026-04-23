@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use crate::api::ApiClient;
 use crate::cli::{ChannelBotCommands, ChannelRouteCommands, OutputFormat};
+use crate::commands::lark_permission::print_permission_block;
 
 pub async fn run(command: ChannelBotCommands) -> Result<()> {
     match command {
@@ -94,6 +95,7 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
                     eprintln!("Platform: {platform}");
                     eprintln!("Username: {username}");
                     eprintln!("Status:   {status}");
+                    print_permission_block(&result);
                 }
             }
             Ok(())
@@ -183,6 +185,7 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
                     eprintln!("Platform: {}", result["platform"].as_str().unwrap_or("-"));
                     eprintln!("Label:    {}", result["label"].as_str().unwrap_or("-"));
                     eprintln!("Status:   {}", result["status"].as_str().unwrap_or("-"));
+                    print_permission_block(&result);
                 }
             }
             Ok(())
@@ -282,6 +285,7 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
                     eprintln!("Conversations:  {conversations}");
                     eprintln!("Created:        {created}");
                     eprintln!("Updated:        {updated}");
+                    print_permission_block(&bot);
                 }
             }
             Ok(())
