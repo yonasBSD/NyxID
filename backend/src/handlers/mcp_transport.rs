@@ -14,7 +14,7 @@ use crate::crypto::jwt;
 use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth;
-use crate::services::{audit_service, mcp_service, ssh_service};
+use crate::services::{audit_service, mcp_service, ssh_service, user_service_service};
 
 // ---------------------------------------------------------------------------
 // JSON-RPC 2.0 types
@@ -1482,10 +1482,11 @@ async fn handle_mcp_ssh_exec(
         .min(300) as u32;
 
     // Resolve service by slug or ID
-    let service_id = match resolve_ssh_service_id(&state.db, service_ref).await {
-        Ok(id) => id,
-        Err(msg) => return tool_result(request_id, &msg, true),
-    };
+    let service_id =
+        match resolve_ssh_service_id(&state.db, auth.user_id.as_str(), service_ref).await {
+            Ok(id) => id,
+            Err(msg) => return tool_result(request_id, &msg, true),
+        };
 
     // Get SSH config
     let ssh_svc = match ssh_service::get_ssh_service(&state.db, &service_id).await {
@@ -1572,40 +1573,70 @@ async fn handle_mcp_ssh_list(
         COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
     };
     use futures::TryStreamExt;
+    use std::collections::HashMap;
 
-    let filter = doc! {
-        "is_active": true,
-        "service_type": "ssh",
-    };
+    let user_services =
+        match user_service_service::list_user_services(&state.db, &auth.user_id).await {
+            Ok(services) => services
+                .into_iter()
+                .filter(|svc| svc.service_type == "ssh")
+                .collect::<Vec<_>>(),
+            Err(e) => {
+                tracing::error!("Failed to query user SSH services: {e}");
+                return tool_result(request_id, "Failed to list SSH services", true);
+            }
+        };
 
-    let services: Vec<DownstreamService> = match state
-        .db
-        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .find(filter)
-        .await
-    {
-        Ok(cursor) => match cursor.try_collect().await {
-            Ok(svcs) => svcs,
+    let downstream_service_ids: Vec<String> = user_services
+        .iter()
+        .filter_map(|svc| svc.catalog_service_id.clone())
+        .collect();
+    let downstream_services: Vec<DownstreamService> = if downstream_service_ids.is_empty() {
+        Vec::new()
+    } else {
+        match state
+            .db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find(doc! {
+                "_id": { "$in": &downstream_service_ids },
+                "is_active": true,
+                "service_type": "ssh",
+            })
+            .await
+        {
+            Ok(cursor) => match cursor.try_collect().await {
+                Ok(svcs) => svcs,
+                Err(e) => {
+                    tracing::error!("Failed to query SSH services: {e}");
+                    return tool_result(request_id, "Failed to list SSH services", true);
+                }
+            },
             Err(e) => {
                 tracing::error!("Failed to query SSH services: {e}");
                 return tool_result(request_id, "Failed to list SSH services", true);
             }
-        },
-        Err(e) => {
-            tracing::error!("Failed to query SSH services: {e}");
-            return tool_result(request_id, "Failed to list SSH services", true);
         }
     };
+    let downstream_by_id: HashMap<&str, &DownstreamService> = downstream_services
+        .iter()
+        .map(|svc| (svc.id.as_str(), svc))
+        .collect();
 
-    let results: Vec<serde_json::Value> = services
+    let results: Vec<serde_json::Value> = user_services
         .iter()
         .filter_map(|svc| {
-            let ssh = svc.ssh_config.as_ref()?;
+            let downstream_service = svc
+                .catalog_service_id
+                .as_deref()
+                .and_then(|id| downstream_by_id.get(id).copied())?;
+            let ssh = downstream_service.ssh_config.as_ref()?;
             Some(serde_json::json!({
-                "service_id": svc.id,
-                "name": svc.name,
+                "service_id": downstream_service.id,
+                "name": downstream_service.name,
+                // User-facing SSH slugs live on `UserService`. The backing
+                // `DownstreamService.slug` is internal for new rows.
                 "slug": svc.slug,
-                "description": svc.description,
+                "description": downstream_service.description,
                 "host": ssh.host,
                 "port": ssh.port,
                 "certificate_auth_enabled": ssh.certificate_auth_enabled,
@@ -1635,29 +1666,40 @@ async fn handle_mcp_ssh_list(
     tool_result(request_id, &text, false)
 }
 
-/// Resolve an SSH service by slug or UUID ID.
+/// Resolve slug refs through the caller's `UserService` so SSH backing
+/// `DownstreamService.slug` can stay internal without cross-user lookups.
 async fn resolve_ssh_service_id(
     db: &mongodb::Database,
+    user_id: &str,
     service_ref: &str,
 ) -> Result<String, String> {
-    use crate::models::downstream_service::{
-        COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
-    };
-
     // Try UUID parse first
     if uuid::Uuid::try_parse(service_ref).is_ok() {
+        let user_service =
+            user_service_service::find_by_catalog_service_id(db, user_id, service_ref)
+                .await
+                .map_err(|e| format!("Database error: {e}"))?
+                .ok_or_else(|| format!("SSH service not found: {service_ref}"))?;
+
+        if user_service.service_type != "ssh" {
+            return Err(format!("SSH service not found: {service_ref}"));
+        }
+
         return Ok(service_ref.to_string());
     }
 
-    // Otherwise resolve by slug
-    let service = db
-        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .find_one(doc! { "slug": service_ref, "service_type": "ssh", "is_active": true })
+    let service = user_service_service::find_by_slug(db, user_id, service_ref)
         .await
         .map_err(|e| format!("Database error: {e}"))?
         .ok_or_else(|| format!("SSH service not found: {service_ref}"))?;
 
-    Ok(service.id)
+    if service.service_type != "ssh" {
+        return Err(format!("SSH service not found: {service_ref}"));
+    }
+
+    service
+        .catalog_service_id
+        .ok_or_else(|| format!("SSH service not found: {service_ref}"))
 }
 
 /// Internal SSH command execution (reusable by REST handler and MCP handler).
@@ -1829,7 +1871,9 @@ async fn execute_ssh_command_internal(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
     use crate::services::mcp_service::{McpToolService, McpToolSource};
+    use crate::test_utils::{connect_test_database, test_user_service};
 
     fn api_key_auth(allowed_service_ids: Vec<String>) -> McpAuthContext {
         McpAuthContext {
@@ -1944,5 +1988,76 @@ mod tests {
         // OAuth/session auth is never "scoped" in this sense.
         let oauth = McpAuthContext::user("user-1".into());
         assert!(!is_scoped_api_key(&oauth));
+    }
+
+    #[tokio::test]
+    async fn resolve_ssh_service_id_scopes_slug_lookup_to_user() {
+        let Some(db) = connect_test_database("mcp_ssh_resolve").await else {
+            eprintln!("skipping mcp_transport integration test: no local MongoDB available");
+            return;
+        };
+
+        let downstream_service_id = uuid::Uuid::new_v4().to_string();
+        let mut ssh_service = test_user_service(
+            &uuid::Uuid::new_v4().to_string(),
+            "user-a",
+            "shared-label",
+            "ep-1",
+            Some(&downstream_service_id),
+            None,
+        );
+        ssh_service.service_type = "ssh".to_string();
+
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(&ssh_service)
+            .await
+            .unwrap();
+
+        let resolved = resolve_ssh_service_id(&db, "user-a", "shared-label")
+            .await
+            .expect("owner should resolve SSH slug");
+        assert_eq!(resolved, downstream_service_id);
+
+        let err = resolve_ssh_service_id(&db, "user-b", "shared-label")
+            .await
+            .expect_err("other users should not resolve someone else's SSH slug");
+        assert_eq!(err, "SSH service not found: shared-label");
+    }
+
+    #[tokio::test]
+    async fn resolve_ssh_service_id_scopes_uuid_lookup_to_user() {
+        let Some(db) = connect_test_database("mcp_ssh_resolve").await else {
+            eprintln!("skipping mcp_transport integration test: no local MongoDB available");
+            return;
+        };
+
+        let downstream_service_id = uuid::Uuid::new_v4().to_string();
+        let mut ssh_service = test_user_service(
+            &uuid::Uuid::new_v4().to_string(),
+            "user-a",
+            "shared-label",
+            "ep-1",
+            Some(&downstream_service_id),
+            None,
+        );
+        ssh_service.service_type = "ssh".to_string();
+
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(&ssh_service)
+            .await
+            .unwrap();
+
+        let resolved = resolve_ssh_service_id(&db, "user-a", &downstream_service_id)
+            .await
+            .expect("owner should resolve SSH service UUID");
+        assert_eq!(resolved, downstream_service_id);
+
+        let err = resolve_ssh_service_id(&db, "user-b", &downstream_service_id)
+            .await
+            .expect_err("other users should not resolve someone else's SSH UUID");
+        assert_eq!(
+            err,
+            format!("SSH service not found: {downstream_service_id}")
+        );
     }
 }

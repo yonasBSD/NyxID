@@ -128,11 +128,12 @@ fn normalize_identity_config(config: &IdentityConfig) -> AppResult<IdentityConfi
     })
 }
 
-/// Validate a slug: 1-64 chars, lowercase alphanumeric + hyphens.
-fn validate_slug(slug: &str) -> AppResult<()> {
-    if slug.is_empty() || slug.len() > 64 {
+/// Validate a slug: 1-80 chars, lowercase alphanumeric + hyphens, no
+/// leading/trailing/consecutive hyphens.
+pub(crate) fn validate_slug(slug: &str) -> AppResult<()> {
+    if slug.is_empty() || slug.len() > 80 {
         return Err(AppError::ValidationError(
-            "Slug must be between 1 and 64 characters".to_string(),
+            "Slug must be between 1 and 80 characters".to_string(),
         ));
     }
     if !slug
@@ -146,6 +147,11 @@ fn validate_slug(slug: &str) -> AppResult<()> {
     if slug.starts_with('-') || slug.ends_with('-') {
         return Err(AppError::ValidationError(
             "Slug must not start or end with a hyphen".to_string(),
+        ));
+    }
+    if slug.contains("--") {
+        return Err(AppError::ValidationError(
+            "Slug must not contain consecutive hyphens".to_string(),
         ));
     }
     Ok(())
@@ -1495,5 +1501,15 @@ mod tests {
         assert!(validate_auth_method("lark_token_exchange").is_err());
         assert!(validate_auth_method("oauth2").is_err());
         assert!(validate_auth_method("").is_err());
+    }
+
+    #[test]
+    fn validate_slug_accepts_eighty_characters_and_rejects_double_hyphens() {
+        validate_slug(&"a".repeat(80)).expect("80-char slug should validate");
+        assert!(matches!(
+            validate_slug("bad--slug"),
+            Err(AppError::ValidationError(message))
+                if message == "Slug must not contain consecutive hyphens"
+        ));
     }
 }

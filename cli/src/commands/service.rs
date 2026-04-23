@@ -59,6 +59,26 @@ pub(crate) fn parse_default_headers(raw: &[String]) -> Result<Vec<serde_json::Va
     Ok(out)
 }
 
+fn validate_service_slug(slug: &str) -> Result<()> {
+    if slug.is_empty() || slug.len() > 80 {
+        bail!("Service slug must be between 1 and 80 characters");
+    }
+
+    let valid = slug
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && !slug.starts_with('-')
+        && !slug.ends_with('-')
+        && !slug.contains("--");
+    if !valid {
+        bail!(
+            "Service slug must contain only lowercase letters, digits, and single hyphens (no leading, trailing, or consecutive hyphens)"
+        );
+    }
+
+    Ok(())
+}
+
 // Backend `UpdateUserServiceRequest::node_id` semantics:
 //   ""        -> clear node_id (switch to direct routing)
 //   Some(id)  -> set node_id
@@ -80,6 +100,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
         ServiceCommands::Add {
             slug,
             custom,
+            custom_slug,
             oauth,
             device_code,
             via_node,
@@ -117,6 +138,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 || oauth
                 || device_code
                 || custom
+                || custom_slug.is_some()
                 || auth_method.is_some()
                 || auth_key_name.is_some()
                 || !scopes.is_empty()
@@ -181,6 +203,16 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                         "--scope is only supported with --oauth or --device-code \
                          (use one of those flags, or --custom to create a direct-credential endpoint)"
                     );
+                }
+            }
+
+            if let Some(ref custom_slug) = custom_slug {
+                if oauth || device_code {
+                    eprintln!(
+                        "Warning: ignoring --slug because OAuth and device-code flows use the catalog slug."
+                    );
+                } else {
+                    validate_service_slug(custom_slug)?;
                 }
             }
 
@@ -266,6 +298,9 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 };
 
                 body.insert("label".into(), Value::String(label_val));
+                if let Some(ref custom_slug) = custom_slug {
+                    body.insert("slug".into(), Value::String(custom_slug.clone()));
+                }
                 body.insert("endpoint_url".into(), Value::String(endpoint));
                 body.insert("auth_method".into(), Value::String(method.clone()));
                 body.insert("auth_key_name".into(), Value::String(key_name.clone()));
@@ -277,6 +312,9 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                     anyhow::anyhow!("Provide a catalog slug or use --custom for a custom endpoint")
                 })?;
                 body.insert("service_slug".into(), Value::String(slug.clone()));
+                if let Some(ref custom_slug) = custom_slug {
+                    body.insert("slug".into(), Value::String(custom_slug.clone()));
+                }
 
                 // Fetch catalog entry to validate slug and pull defaults
                 // (name, auth method, auth key name, token_exchange credential
@@ -1399,6 +1437,33 @@ mod tests {
     fn credential_prompt_body_without_key_name_falls_back() {
         assert_eq!(credential_prompt_label("body", ""), "Enter credential: ");
         assert_eq!(credential_prompt_label("body", "   "), "Enter credential: ");
+    }
+
+    #[test]
+    fn custom_service_slug_validator_accepts_valid_slugs() {
+        for slug in ["custom-service", "api2", "service-2026"] {
+            validate_service_slug(slug)
+                .unwrap_or_else(|e| panic!("expected '{slug}' to validate: {e}"));
+        }
+    }
+
+    #[test]
+    fn custom_service_slug_validator_rejects_invalid_slugs() {
+        let too_long = "a".repeat(81);
+        for slug in [
+            "",
+            "Bad-Slug",
+            "-leading",
+            "trailing-",
+            "double--hyphen",
+            "with_underscore",
+            too_long.as_str(),
+        ] {
+            assert!(
+                validate_service_slug(slug).is_err(),
+                "expected '{slug}' to be rejected"
+            );
+        }
     }
 
     #[test]
