@@ -23,12 +23,23 @@ use crate::services::{
 };
 
 const AUTO_PROVISION_SOURCE: &str = "auto_provision";
+const MAX_SERVICE_SLUG_LEN: usize = 80;
+const HUMAN_SLUG_SUFFIX_MAX: u8 = 9;
+const RANDOM_SLUG_SUFFIX_ATTEMPTS: usize = 5;
+const RANDOM_SLUG_SUFFIX_LEN: usize = 4;
+const USER_SERVICE_SLUG_INSERT_RETRIES: usize = 3;
 
-/// Generate a slug from a label: lowercase, replace non-alphanumeric with
-/// hyphens, collapse runs, then append a 4-char random alphanumeric suffix.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SlugCollisionStrategy {
+    PreserveExact,
+    AutoDisambiguate,
+}
+
+/// Generate a clean slug base from a label so the first saved service keeps
+/// the label-derived slug without random noise.
 fn generate_slug_from_label(label: &str) -> String {
     let base: String = label
-        .to_lowercase()
+        .to_ascii_lowercase()
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect::<String>()
@@ -39,14 +50,22 @@ fn generate_slug_from_label(label: &str) -> String {
 
     let base = if base.is_empty() {
         "service".to_string()
-    } else if base.len() > 80 {
-        base[..80].to_string()
     } else {
         base
     };
 
+    let truncated: String = base.chars().take(MAX_SERVICE_SLUG_LEN).collect();
+    let truncated = truncated.trim_end_matches('-');
+    if truncated.is_empty() {
+        "service".to_string()
+    } else {
+        truncated.to_string()
+    }
+}
+
+fn random_slug_suffix() -> String {
     let mut rng = rand::thread_rng();
-    let suffix: String = (0..4)
+    (0..RANDOM_SLUG_SUFFIX_LEN)
         .map(|_| {
             let idx: u8 = rng.gen_range(0..36);
             if idx < 10 {
@@ -55,26 +74,58 @@ fn generate_slug_from_label(label: &str) -> String {
                 (b'a' + idx - 10) as char
             }
         })
-        .collect();
-
-    format!("{base}-{suffix}")
+        .collect()
 }
 
-/// Find a unique slug for a user by appending `-2`, `-3`, etc. if the base
-/// slug already exists.
+fn slug_candidate_with_suffix(base_slug: &str, suffix: &str) -> String {
+    let max_base_len = MAX_SERVICE_SLUG_LEN.saturating_sub(suffix.len() + 1);
+    let trimmed_base: String = base_slug.chars().take(max_base_len).collect();
+    let trimmed_base = trimmed_base.trim_end_matches('-');
+    let prefix = if trimmed_base.is_empty() {
+        "service"
+    } else {
+        trimmed_base
+    };
+    format!("{prefix}-{suffix}")
+}
+
+/// Keep normal service slugs readable; only add numbering and random entropy
+/// after the preferred slug is already taken.
 async fn resolve_unique_slug(
     db: &mongodb::Database,
     user_id: &str,
     base_slug: &str,
+    strategy: SlugCollisionStrategy,
 ) -> AppResult<String> {
-    if user_service_service::find_by_slug(db, user_id, base_slug)
+    let base_slug = match strategy {
+        SlugCollisionStrategy::PreserveExact => {
+            user_service_service::validate_slug(base_slug)?;
+            base_slug.to_string()
+        }
+        SlugCollisionStrategy::AutoDisambiguate => {
+            // Legacy catalog slugs may violate the stricter current validator
+            // (historic `--` allowed, 64->80 cap). Sanitize quietly so auto-
+            // derived paths never fail on data that predates this validator.
+            match user_service_service::validate_slug(base_slug) {
+                Ok(()) => base_slug.to_string(),
+                Err(_) => generate_slug_from_label(base_slug),
+            }
+        }
+    };
+
+    if user_service_service::find_by_slug(db, user_id, &base_slug)
         .await?
         .is_none()
     {
-        return Ok(base_slug.to_string());
+        return Ok(base_slug);
     }
-    for n in 2..=100 {
-        let candidate = format!("{base_slug}-{n}");
+
+    if strategy == SlugCollisionStrategy::PreserveExact {
+        return Err(exact_slug_conflict(&base_slug));
+    }
+
+    for n in 2..=HUMAN_SLUG_SUFFIX_MAX {
+        let candidate = slug_candidate_with_suffix(&base_slug, &n.to_string());
         if user_service_service::find_by_slug(db, user_id, &candidate)
             .await?
             .is_none()
@@ -82,9 +133,24 @@ async fn resolve_unique_slug(
             return Ok(candidate);
         }
     }
+
+    for _ in 0..RANDOM_SLUG_SUFFIX_ATTEMPTS {
+        let candidate = slug_candidate_with_suffix(&base_slug, &random_slug_suffix());
+        if user_service_service::find_by_slug(db, user_id, &candidate)
+            .await?
+            .is_none()
+        {
+            return Ok(candidate);
+        }
+    }
+
     Err(AppError::Conflict(
         "Too many services with the same slug".to_string(),
     ))
+}
+
+fn exact_slug_conflict(slug: &str) -> AppError {
+    AppError::Conflict(format!("Service slug '{slug}' is already in use"))
 }
 
 fn auto_provision_source_id(user_id: &str, catalog_service_id: &str) -> String {
@@ -98,6 +164,10 @@ fn is_duplicate_key_error(error: &mongodb::error::Error) -> bool {
         return we.code == 11000;
     }
     false
+}
+
+fn is_duplicate_slug_app_error(error: &AppError) -> bool {
+    matches!(error, AppError::DatabaseError(db_error) if is_duplicate_key_error(db_error))
 }
 
 fn identity_config_from_downstream_service(
@@ -501,6 +571,11 @@ pub async fn create_key(
             validate_token_exchange_catalog_credential(&svc, credential)?;
         }
 
+        let requested_slug = match slug_override {
+            Some(slug) if !slug.is_empty() => (slug, SlugCollisionStrategy::PreserveExact),
+            _ => (svc.slug.as_str(), SlugCollisionStrategy::AutoDisambiguate),
+        };
+
         // Determine provider_config_id for the api key
         let provider_config_id = svc.provider_config_id.as_deref();
 
@@ -603,9 +678,6 @@ pub async fn create_key(
             )
         };
 
-        // Auto-suffix slug if one already exists for this user (e.g. llm-openai -> llm-openai-2)
-        let unique_slug = resolve_unique_slug(db, user_id, &svc.slug).await?;
-
         let catalog_identity =
             identity.unwrap_or_else(|| identity_config_from_downstream_service(&svc));
 
@@ -622,26 +694,46 @@ pub async fn create_key(
         // proxy actually applies.
         let (snap_auth_method, snap_auth_key_name) =
             derive_effective_auth(&svc, provider_requirement.as_ref());
-
-        let service = user_service_service::create_user_service(
-            db,
-            user_id,
-            actor_user_id,
-            &unique_slug,
-            &endpoint.id,
-            api_key.as_ref().map(|k| k.id.as_str()),
-            &snap_auth_method,
-            &snap_auth_key_name,
-            Some(&svc.id),
-            node_id,
-            0,
-            &svc.service_type,
-            None,
-            None,
-            None,
-            &catalog_identity,
-        )
-        .await?;
+        let endpoint_id = endpoint.id.clone();
+        let api_key_id = api_key.as_ref().map(|k| k.id.clone());
+        let catalog_service_id = svc.id.clone();
+        let service_type = svc.service_type.clone();
+        let base_slug = requested_slug.0.to_string();
+        let strategy = requested_slug.1;
+        let retry_node_id = node_id.map(str::to_string);
+        let mut attempts_left = USER_SERVICE_SLUG_INSERT_RETRIES;
+        let service = loop {
+            let resolved_slug = resolve_unique_slug(db, user_id, &base_slug, strategy).await?;
+            match user_service_service::create_user_service(
+                db,
+                user_id,
+                actor_user_id,
+                &resolved_slug,
+                &endpoint_id,
+                api_key_id.as_deref(),
+                &snap_auth_method,
+                &snap_auth_key_name,
+                Some(&catalog_service_id),
+                retry_node_id.as_deref(),
+                0,
+                &service_type,
+                None,
+                None,
+                None,
+                &catalog_identity,
+            )
+            .await
+            {
+                Ok(service) => break service,
+                Err(error) if is_duplicate_slug_app_error(&error) => {
+                    if attempts_left == 0 || strategy == SlugCollisionStrategy::PreserveExact {
+                        return Err(exact_slug_conflict(&resolved_slug));
+                    }
+                    attempts_left -= 1;
+                }
+                Err(error) => return Err(error),
+            }
+        };
 
         // Auto-sync NodeServiceBinding for the catalog service. The binding
         // is owned by the org (when target_org_id is set), but the node is
@@ -699,9 +791,14 @@ pub async fn create_key(
             ));
         }
 
-        let slug = match slug_override {
-            Some(s) if !s.is_empty() => s.to_string(),
-            _ => generate_slug_from_label(label),
+        let requested_slug = match slug_override {
+            Some(slug) if !slug.is_empty() => {
+                (slug.to_string(), SlugCollisionStrategy::PreserveExact)
+            }
+            _ => (
+                generate_slug_from_label(label),
+                SlugCollisionStrategy::AutoDisambiguate,
+            ),
         };
 
         // Build SSH config (generates CA keypair)
@@ -722,12 +819,16 @@ pub async fn create_key(
 
         let now = Utc::now();
         let base_url = ssh_service::target_base_url(&built_ssh_config.host, built_ssh_config.port);
-
-        // Create DownstreamService with SSH config
+        let empty_credential = encryption_keys.encrypt(b"").await?;
+        let internal_ds_slug = format!("_ssh_{ds_id}");
         let ds = DownstreamService {
             id: ds_id.clone(),
             name: label.to_string(),
-            slug: slug.to_string(),
+            // New SSH rows keep an internal UUID-derived backing slug so the
+            // global `downstream_services.slug` index never blocks two users
+            // from sharing the same visible `UserService.slug`. Legacy SSH
+            // rows may still carry human-readable slugs until a later cleanup.
+            slug: internal_ds_slug,
             description: None,
             base_url: base_url.clone(),
             service_type: "ssh".to_string(),
@@ -735,7 +836,7 @@ pub async fn create_key(
             auth_method: "none".to_string(),
             auth_type: Some("ssh".to_string()),
             auth_key_name: String::new(),
-            credential_encrypted: encryption_keys.encrypt(b"").await?,
+            credential_encrypted: empty_credential.clone(),
             openapi_spec_url: None,
             asyncapi_spec_url: None,
             streaming_supported: false,
@@ -770,11 +871,6 @@ pub async fn create_key(
             created_at: now,
             updated_at: now,
         };
-
-        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-            .insert_one(&ds)
-            .await?;
-
         // Custom SSH services don't have OpenAPI specs; ignore any URL sent.
         let endpoint = user_endpoint_service::create_endpoint(
             db,
@@ -805,27 +901,47 @@ pub async fn create_key(
             },
         )
         .await?;
-
-        let unique_slug = resolve_unique_slug(db, user_id, &slug).await?;
-        let service = user_service_service::create_user_service(
-            db,
-            user_id,
-            actor_user_id,
-            &unique_slug,
-            &endpoint.id,
-            Some(&api_key.id),
-            "none",
-            "",
-            Some(&ds_id),
-            node_id,
-            0,
-            "ssh",
-            None,
-            None,
-            None,
-            &user_service_service::IdentityConfig::none(),
-        )
-        .await?;
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&ds)
+            .await?;
+        let endpoint_id = endpoint.id.clone();
+        let api_key_id = api_key.id.clone();
+        let base_slug = requested_slug.0.clone();
+        let strategy = requested_slug.1;
+        let retry_node_id = node_id.map(str::to_string);
+        let mut attempts_left = USER_SERVICE_SLUG_INSERT_RETRIES;
+        let service = loop {
+            let resolved_slug = resolve_unique_slug(db, user_id, &base_slug, strategy).await?;
+            match user_service_service::create_user_service(
+                db,
+                user_id,
+                actor_user_id,
+                &resolved_slug,
+                &endpoint_id,
+                Some(&api_key_id),
+                "none",
+                "",
+                Some(&ds_id),
+                retry_node_id.as_deref(),
+                0,
+                "ssh",
+                None,
+                None,
+                None,
+                &user_service_service::IdentityConfig::none(),
+            )
+            .await
+            {
+                Ok(service) => break service,
+                Err(error) if is_duplicate_slug_app_error(&error) => {
+                    if attempts_left == 0 || strategy == SlugCollisionStrategy::PreserveExact {
+                        return Err(exact_slug_conflict(&resolved_slug));
+                    }
+                    attempts_left -= 1;
+                }
+                Err(error) => return Err(error),
+            }
+        };
 
         // Auto-sync NodeServiceBinding for the custom SSH service. See
         // comment in the catalog branch above for why both user_id and
@@ -859,12 +975,17 @@ pub async fn create_key(
             ));
         }
 
-        let slug = match slug_override {
-            Some(s) if !s.is_empty() => s.to_string(),
-            _ => generate_slug_from_label(label),
+        let requested_slug = match slug_override {
+            Some(slug) if !slug.is_empty() => {
+                (slug.to_string(), SlugCollisionStrategy::PreserveExact)
+            }
+            _ => (
+                generate_slug_from_label(label),
+                SlugCollisionStrategy::AutoDisambiguate,
+            ),
         };
-        let am = auth_method.unwrap_or("bearer");
-        let akn = auth_key_name.unwrap_or("Authorization");
+        let am = auth_method.unwrap_or("bearer").to_string();
+        let akn = auth_key_name.unwrap_or("Authorization").to_string();
         let is_no_auth = am == "none";
 
         // Validate: credential required for direct routing unless no-auth
@@ -920,27 +1041,45 @@ pub async fn create_key(
             )
         };
 
-        let unique_slug = resolve_unique_slug(db, user_id, &slug).await?;
         let custom_identity = identity.unwrap_or_else(user_service_service::IdentityConfig::none);
-        let service = user_service_service::create_user_service(
-            db,
-            user_id,
-            actor_user_id,
-            &unique_slug,
-            &endpoint.id,
-            api_key.as_ref().map(|k| k.id.as_str()),
-            am,
-            akn,
-            None,
-            node_id,
-            0,
-            "http",
-            None,
-            None,
-            None,
-            &custom_identity,
-        )
-        .await?;
+        let endpoint_id = endpoint.id.clone();
+        let api_key_id = api_key.as_ref().map(|k| k.id.clone());
+        let base_slug = requested_slug.0.clone();
+        let strategy = requested_slug.1;
+        let retry_node_id = node_id.map(str::to_string);
+        let mut attempts_left = USER_SERVICE_SLUG_INSERT_RETRIES;
+        let service = loop {
+            let resolved_slug = resolve_unique_slug(db, user_id, &base_slug, strategy).await?;
+            match user_service_service::create_user_service(
+                db,
+                user_id,
+                actor_user_id,
+                &resolved_slug,
+                &endpoint_id,
+                api_key_id.as_deref(),
+                &am,
+                &akn,
+                None,
+                retry_node_id.as_deref(),
+                0,
+                "http",
+                None,
+                None,
+                None,
+                &custom_identity,
+            )
+            .await
+            {
+                Ok(service) => break service,
+                Err(error) if is_duplicate_slug_app_error(&error) => {
+                    if attempts_left == 0 || strategy == SlugCollisionStrategy::PreserveExact {
+                        return Err(exact_slug_conflict(&resolved_slug));
+                    }
+                    attempts_left -= 1;
+                }
+                Err(error) => return Err(error),
+            }
+        };
 
         // Auto-sync NodeServiceBinding (no-op for custom HTTP without catalog_service_id).
         node_service::sync_node_binding_for_user_service(
@@ -1122,7 +1261,14 @@ pub async fn auto_provision_no_auth_services(
             continue;
         }
 
-        let unique_slug = match resolve_unique_slug(db, user_id, &svc.slug).await {
+        let unique_slug = match resolve_unique_slug(
+            db,
+            user_id,
+            &svc.slug,
+            SlugCollisionStrategy::AutoDisambiguate,
+        )
+        .await
+        {
             Ok(slug) => slug,
             Err(e) => {
                 tracing::warn!(
@@ -2389,16 +2535,19 @@ mod tests {
     use mongodb::bson::doc;
 
     use super::{
-        AUTO_PROVISION_SOURCE, OpenApiSpecUrlInput, UpdateCredentialAction,
-        auto_provision_source_id, build_key_view, classify_update_credential_action, create_key,
-        derive_effective_auth, direct_credential_type_for_service,
-        direct_credential_type_from_auth_method, identity_config_from_downstream_service,
-        resolve_openapi_spec_url, revoke_key, validate_token_exchange_catalog_credential,
+        AUTO_PROVISION_SOURCE, OpenApiSpecUrlInput, SlugCollisionStrategy, SshCreateParams,
+        UpdateCredentialAction, auto_provision_source_id, build_key_view,
+        classify_update_credential_action, create_key, derive_effective_auth,
+        direct_credential_type_for_service, direct_credential_type_from_auth_method,
+        generate_slug_from_label, identity_config_from_downstream_service,
+        resolve_openapi_spec_url, resolve_unique_slug, revoke_key,
+        validate_token_exchange_catalog_credential,
     };
     use crate::errors::AppError;
     use crate::models::downstream_service::{
         CredentialFieldSpec, DownstreamService, TokenExchangeConfig,
     };
+    use crate::models::node::{COLLECTION_NAME as NODES, Node, NodeMetrics, NodeStatus};
     use crate::models::service_provider_requirement::ServiceProviderRequirement;
     use crate::models::user_api_key::COLLECTION_NAME as USER_API_KEYS;
     use crate::models::user_api_key::UserApiKey;
@@ -2406,6 +2555,7 @@ mod tests {
     use crate::models::user_endpoint::UserEndpoint;
     use crate::models::user_service::COLLECTION_NAME as USER_SERVICES;
     use crate::models::user_service::UserService;
+    use crate::services::user_service_service::validate_slug;
     use crate::test_utils::{connect_test_database, test_encryption_keys};
 
     fn sample_api_key(credential_type: &str) -> UserApiKey {
@@ -2543,6 +2693,70 @@ mod tests {
         }
     }
 
+    async fn insert_user_service_slug(db: &mongodb::Database, user_id: &str, slug: &str) {
+        let mut service = sample_service("bearer");
+        service.id = uuid::Uuid::new_v4().to_string();
+        service.user_id = user_id.to_string();
+        service.slug = slug.to_string();
+
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(&service)
+            .await
+            .unwrap();
+    }
+
+    async fn insert_active_node(db: &mongodb::Database, user_id: &str, node_id: &str) {
+        let now = Utc::now();
+        let node = Node {
+            id: node_id.to_string(),
+            user_id: user_id.to_string(),
+            name: format!("node-{node_id}"),
+            status: NodeStatus::Online,
+            auth_token_hash: "deadbeef".repeat(8),
+            signing_secret_encrypted: None,
+            signing_secret_hash: "feedface".repeat(8),
+            last_heartbeat_at: Some(now),
+            connected_at: Some(now),
+            metadata: None,
+            metrics: NodeMetrics::default(),
+            is_active: true,
+            created_at: now,
+            updated_at: now,
+        };
+
+        db.collection::<Node>(NODES)
+            .insert_one(&node)
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn generate_slug_from_label_is_deterministic() {
+        let label = "My Cool Service 2024!!!";
+
+        assert_eq!(generate_slug_from_label(label), "my-cool-service-2024");
+        assert_eq!(
+            generate_slug_from_label(label),
+            generate_slug_from_label(label),
+        );
+    }
+
+    #[test]
+    fn generate_slug_from_label_falls_back_to_service_for_empty_inputs() {
+        for label in ["", "   \t\n", "你好世界", "🔥✨"] {
+            assert_eq!(generate_slug_from_label(label), "service");
+        }
+    }
+
+    #[test]
+    fn generate_slug_from_label_truncates_to_eighty_characters() {
+        let label = "a".repeat(120);
+        let slug = generate_slug_from_label(&label);
+
+        assert_eq!(slug.len(), 80);
+        assert_eq!(slug, "a".repeat(80));
+    }
+
     #[test]
     fn derive_effective_auth_uses_spr_when_svc_is_none() {
         // Anthropic-style catalog shape: the DownstreamService stores `none`
@@ -2601,6 +2815,362 @@ mod tests {
 
         assert_eq!(method, "bearer");
         assert_eq!(key, "Authorization");
+    }
+
+    #[tokio::test]
+    async fn resolve_unique_slug_keeps_base_when_available() {
+        let Some(db) = connect_test_database("unified_key_slug").await else {
+            eprintln!("skipping unified_key_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let resolved = resolve_unique_slug(
+            &db,
+            &user_id,
+            "clean-service",
+            SlugCollisionStrategy::AutoDisambiguate,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resolved, "clean-service");
+    }
+
+    #[tokio::test]
+    async fn resolve_unique_slug_uses_small_numeric_suffixes_before_randomness() {
+        let Some(db) = connect_test_database("unified_key_slug").await else {
+            eprintln!("skipping unified_key_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        insert_user_service_slug(&db, &user_id, "clean-service").await;
+        insert_user_service_slug(&db, &user_id, "clean-service-2").await;
+
+        let resolved = resolve_unique_slug(
+            &db,
+            &user_id,
+            "clean-service",
+            SlugCollisionStrategy::AutoDisambiguate,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resolved, "clean-service-3");
+    }
+
+    #[tokio::test]
+    async fn resolve_unique_slug_falls_back_to_random_suffix_after_nine() {
+        let Some(db) = connect_test_database("unified_key_slug").await else {
+            eprintln!("skipping unified_key_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        insert_user_service_slug(&db, &user_id, "clean-service").await;
+        for suffix in 2..=9 {
+            insert_user_service_slug(&db, &user_id, &format!("clean-service-{suffix}")).await;
+        }
+
+        let resolved = resolve_unique_slug(
+            &db,
+            &user_id,
+            "clean-service",
+            SlugCollisionStrategy::AutoDisambiguate,
+        )
+        .await
+        .unwrap();
+
+        let random_suffix = resolved
+            .strip_prefix("clean-service-")
+            .expect("random suffix should preserve the base slug");
+        assert_eq!(random_suffix.len(), 4);
+        assert!(
+            random_suffix
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        );
+        assert!(resolved.len() <= 80);
+    }
+
+    #[tokio::test]
+    async fn resolve_unique_slug_rejects_taken_user_supplied_slug() {
+        let Some(db) = connect_test_database("unified_key_slug").await else {
+            eprintln!("skipping unified_key_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        insert_user_service_slug(&db, &user_id, "clean-service").await;
+
+        let err = resolve_unique_slug(
+            &db,
+            &user_id,
+            "clean-service",
+            SlugCollisionStrategy::PreserveExact,
+        )
+        .await
+        .expect_err("duplicate user-provided slug should conflict");
+
+        assert!(matches!(
+            err,
+            AppError::Conflict(message) if message == "Service slug 'clean-service' is already in use"
+        ));
+    }
+
+    #[tokio::test]
+    async fn resolve_unique_slug_sanitizes_legacy_base_for_auto_disambiguate() {
+        let Some(db) = connect_test_database("unified_key_slug").await else {
+            eprintln!("skipping unified_key_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let resolved = resolve_unique_slug(
+            &db,
+            &user_id,
+            "legacy--slug",
+            SlugCollisionStrategy::AutoDisambiguate,
+        )
+        .await
+        .unwrap();
+
+        validate_slug(&resolved).expect("sanitized slug should validate");
+        assert!(!resolved.contains("--"));
+    }
+
+    #[tokio::test]
+    async fn resolve_unique_slug_rejects_invalid_base_for_preserve_exact() {
+        let Some(db) = connect_test_database("unified_key_slug").await else {
+            eprintln!("skipping unified_key_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let err = resolve_unique_slug(
+            &db,
+            &user_id,
+            "bad--slug",
+            SlugCollisionStrategy::PreserveExact,
+        )
+        .await
+        .expect_err("invalid exact slug should fail validation");
+
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn create_key_recovers_from_concurrent_service_slug_race() {
+        let Some(db) = connect_test_database("unified_key_slug_race").await else {
+            eprintln!("skipping unified_key_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let encryption_keys = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let (left, right) = tokio::join!(
+            create_key(
+                &db,
+                &encryption_keys,
+                &user_id,
+                &user_id,
+                None,
+                Some("https://api.example.com"),
+                "secret-token",
+                "Race Service",
+                None,
+                Some("bearer"),
+                Some("Authorization"),
+                None,
+                None,
+                None,
+                OpenApiSpecUrlInput::Inherit,
+            ),
+            create_key(
+                &db,
+                &encryption_keys,
+                &user_id,
+                &user_id,
+                None,
+                Some("https://api.example.com"),
+                "secret-token",
+                "Race Service",
+                None,
+                Some("bearer"),
+                Some("Authorization"),
+                None,
+                None,
+                None,
+                OpenApiSpecUrlInput::Inherit,
+            )
+        );
+
+        let left = left.expect("left create should succeed");
+        let right = right.expect("right create should succeed");
+
+        assert_ne!(left.service.slug, right.service.slug);
+        validate_slug(&left.service.slug).expect("left slug should validate");
+        validate_slug(&right.service.slug).expect("right slug should validate");
+    }
+
+    #[tokio::test]
+    async fn create_key_allows_same_ssh_label_for_different_users() {
+        let Some(db) = connect_test_database("unified_key_ssh_slug_scope").await else {
+            eprintln!("skipping unified_key_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let encryption_keys = test_encryption_keys();
+        let user_a = uuid::Uuid::new_v4().to_string();
+        let user_b = uuid::Uuid::new_v4().to_string();
+        let node_a = uuid::Uuid::new_v4().to_string();
+        let node_b = uuid::Uuid::new_v4().to_string();
+        insert_active_node(&db, &user_a, &node_a).await;
+        insert_active_node(&db, &user_b, &node_b).await;
+
+        let created_a = create_key(
+            &db,
+            &encryption_keys,
+            &user_a,
+            &user_a,
+            None,
+            None,
+            "",
+            "Shared Label",
+            None,
+            None,
+            None,
+            Some(&node_a),
+            Some(SshCreateParams {
+                host: "server-a.example.com",
+                port: 22,
+                certificate_auth: true,
+                principals: vec!["ubuntu".to_string()],
+                certificate_ttl_minutes: 60,
+            }),
+            None,
+            OpenApiSpecUrlInput::Inherit,
+        )
+        .await
+        .expect("user A SSH create should succeed");
+
+        let created_b = create_key(
+            &db,
+            &encryption_keys,
+            &user_b,
+            &user_b,
+            None,
+            None,
+            "",
+            "Shared Label",
+            None,
+            None,
+            None,
+            Some(&node_b),
+            Some(SshCreateParams {
+                host: "server-b.example.com",
+                port: 22,
+                certificate_auth: true,
+                principals: vec!["ubuntu".to_string()],
+                certificate_ttl_minutes: 60,
+            }),
+            None,
+            OpenApiSpecUrlInput::Inherit,
+        )
+        .await
+        .expect("user B SSH create should succeed");
+
+        assert_eq!(created_a.service.slug, "shared-label");
+        assert_eq!(created_b.service.slug, "shared-label");
+        validate_slug(&created_a.service.slug).expect("user A slug should validate");
+        validate_slug(&created_b.service.slug).expect("user B slug should validate");
+
+        let ds_a_id = created_a
+            .service
+            .catalog_service_id
+            .as_deref()
+            .expect("SSH service should keep a backing downstream_service id");
+        let ds_b_id = created_b
+            .service
+            .catalog_service_id
+            .as_deref()
+            .expect("SSH service should keep a backing downstream_service id");
+        let ds_a = db
+            .collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+            .find_one(doc! { "_id": ds_a_id })
+            .await
+            .unwrap()
+            .expect("user A downstream_service should exist");
+        let ds_b = db
+            .collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+            .find_one(doc! { "_id": ds_b_id })
+            .await
+            .unwrap()
+            .expect("user B downstream_service should exist");
+
+        assert_eq!(ds_a.slug, format!("_ssh_{}", ds_a.id));
+        assert_eq!(ds_b.slug, format!("_ssh_{}", ds_b.id));
+        assert_ne!(ds_a.slug, ds_b.slug);
+
+        let owner_service_a = crate::services::user_service_service::find_by_catalog_service_id(
+            &db, &user_a, ds_a_id,
+        )
+        .await
+        .unwrap()
+        .expect("user A lookup by backing downstream_service should exist");
+        let owner_service_b = crate::services::user_service_service::find_by_catalog_service_id(
+            &db, &user_b, ds_b_id,
+        )
+        .await
+        .unwrap()
+        .expect("user B lookup by backing downstream_service should exist");
+        assert_eq!(owner_service_a.slug, "shared-label");
+        assert_eq!(owner_service_b.slug, "shared-label");
+    }
+
+    #[tokio::test]
+    async fn create_key_uses_explicit_slug_override_for_catalog_services() {
+        let Some(db) = connect_test_database("unified_key_service").await else {
+            eprintln!("skipping unified_key_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let encryption_keys = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let mut catalog = sample_catalog_service();
+        catalog.id = uuid::Uuid::new_v4().to_string();
+        catalog.slug = format!("catalog-{}", uuid::Uuid::new_v4());
+
+        db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        let created = create_key(
+            &db,
+            &encryption_keys,
+            &user_id,
+            &user_id,
+            Some(&catalog.slug),
+            None,
+            "secret-token",
+            "Catalog Service",
+            Some("explicit-slug"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(created.service.slug, "explicit-slug");
     }
 
     #[tokio::test]

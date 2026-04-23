@@ -104,6 +104,13 @@ nyxid service add --custom                                # add custom endpoint 
 > For API key services, just run `nyxid service add <slug>` without flags. The CLI securely prompts for the key (input hidden). Never ask the user to paste secrets into chat or set environment variables manually.
 > For automation/scripting only: `--credential-env <VAR>` reads from an environment variable.
 
+**Slug rules for `service add`:**
+
+- Lowercase letters, digits, and hyphens only. 1-80 characters. No leading, trailing, or consecutive hyphens.
+- Slugs are unique **within your own namespace** only -- two users can have services with the same slug without conflict.
+- When `--slug` is omitted, NyxID derives the slug from `--label` (or the catalog slug) and appends `-2`, `-3`, ... if you already own one with that name. No random suffixes.
+- When `--slug <NAME>` is set and you already own a service with that slug, NyxID returns a **409 Conflict**. The CLI will not silently rename user-supplied slugs -- pick a different slug and retry.
+
 ### Requesting additional OAuth scopes
 
 Some OAuth providers (Lark, Google, GitHub, Atlassian, ...) expose many scopes but NyxID's catalog only configures a sensible default set. When a user needs a capability that isn't covered -- for example Lark's contact/attendance APIs -- add extra scopes on top of the defaults with `--scope`:
@@ -183,8 +190,8 @@ Running `nyxid service add <slug>` with no scripted flags on an interactive TTY 
 
 **Safety posture:** everything is local -- the browser never talks to the NyxID backend directly. The wizard's narrow allowlist of endpoints is proxied through the local server with the user's bearer token attached server-side, so the access token never hits the browser. A 10-second heartbeat watchdog cancels the CLI if the browser tab is closed without clicking Done; a 30-minute ceiling catches walked-away tabs.
 
-**Prefill flags** (safe to combine with the wizard -- they just seed the form):
-`--slug`, `--label`, `--via-node`, `--endpoint-url`.
+**Prefill args** (safe to combine with the wizard -- they just seed the form):
+the positional catalog slug (e.g. `llm-openai`), `--label`, `--via-node`, `--endpoint-url`. Passing `--slug` bypasses the wizard and runs the scripted terminal flow instead (see the fallback triggers below).
 
 ### Wizard transport selection: two predicates, two transports
 
@@ -270,10 +277,10 @@ Terminal (scripted stdin-prompt) mode is selected when **any** of the following 
 
 - `--terminal` (alias `--no-wizard`) is passed on the command line -- **per-invocation override**, useful for a one-off scripted call on a GUI machine.
 - `NYXID_NO_WIZARD=1` is set in the environment -- **sticky** across all invocations. Right choice for CI runners, Dockerfiles, and systemd units that want the pre-wizard behavior.
-- A **scripted flag** is present (tells the CLI the caller already decided the flow): `--oauth`, `--device-code`, `--credential-env`, `--credential`, `--custom`, `--auth-method`, `--auth-key-name`, `--scope`, `--org`, `--openapi-spec-url`, or `--output json` (unless combined with `--no-wait`, which always uses remote pairing).
+- A **scripted flag** is present (tells the CLI the caller already decided the flow): `--oauth`, `--device-code`, `--credential-env`, `--credential`, `--custom`, `--slug`, `--auth-method`, `--auth-key-name`, `--scope`, `--org`, `--openapi-spec-url`, or `--output json` (unless combined with `--no-wait`, which always uses remote pairing).
 - stdin is a TTY **and** stdout is piped / redirected -- the user is clearly scripting output (`nyxid api-key create > key.txt`, `| jq`), so the CLI respects that and uses the stdin-prompt path.
 
-Note: fully-headless environments (agents, SSH without display, CI containers) NO LONGER fall through to stdin-prompt mode. They route through remote pairing instead, because the scripted path would otherwise hang on the first missing-arg prompt. Set `NYXID_NO_WIZARD=1` to opt out if a caller genuinely wants the stdin-prompt behavior on a headless box (rare — usually means all args are supplied via flags).
+Note: fully-headless environments (agents, SSH without display, CI containers) NO LONGER fall through to stdin-prompt mode. They route through remote pairing (Mode B) or the local wizard (Mode A via `open`/`xdg-open`/`start`) depending on whether a local browser can actually launch — see the transport-selection table above. Set `NYXID_NO_WIZARD=1` to opt out if a caller genuinely wants the stdin-prompt behavior on a headless box (rare — usually means all args are supplied via flags).
 
 Examples:
 
@@ -516,6 +523,18 @@ nyxid service add --custom --label "My API" \
   --endpoint-url https://api.example.com/v1 \
   --openapi-spec-url https://api.example.com/openapi.json \
   --credential-env MY_API_TOKEN
+
+# Pick a custom slug instead of letting NyxID derive one from --label
+nyxid service add --custom --slug home-assistant --label "Home Assistant" \
+  --endpoint-url https://ha.local:8123/api \
+  --credential-env HA_TOKEN
+
+# `--slug` also works on catalog-backed keys for running multiple instances
+nyxid service add llm-openai --slug llm-openai-prod --credential-env OPENAI_PROD_KEY
+nyxid service add llm-openai --slug llm-openai-staging --credential-env OPENAI_STAGING_KEY
+
+# `--slug` also works with OAuth and device-code flows
+nyxid service add api-lark --oauth --slug lark-team-engineering
 
 # Catalog-backed key that suppresses the catalog's default spec URL
 nyxid service add llm-openai --openapi-spec-url ""
@@ -926,7 +945,7 @@ nyxid node credentials remove --service <SLUG>         # remove credential
 
 ## SSH Remote Access
 
-All SSH commands accept service ID, slug, or name (auto-resolves):
+All SSH commands accept service ID, slug, or name (auto-resolves). SSH slugs are scoped per-user -- two users can each have an SSH service with the same slug without conflict. MCP SSH tools (`ssh_exec`, `ssh_list`) only see the caller's own services.
 
 ```bash
 nyxid ssh exec <SERVICE> --principal ubuntu -- uptime

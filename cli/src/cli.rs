@@ -496,6 +496,9 @@ pub enum ServiceCommands {
         /// Add a fully custom endpoint (interactive prompts)
         #[arg(long)]
         custom: bool,
+        /// Custom slug for this service (omit to auto-derive from the label/catalog slug; must be unique per user).
+        #[arg(long = "slug", value_name = "SLUG")]
+        custom_slug: Option<String>,
         /// Use OAuth flow for authentication
         #[arg(long)]
         oauth: bool,
@@ -1327,6 +1330,88 @@ mod tests {
             Commands::Service {
                 command: ServiceCommands::Add { terminal, .. },
             } => assert!(!terminal, "terminal should default to false"),
+            _ => panic!("unexpected parse result"),
+        }
+    }
+
+    #[test]
+    fn service_add_accepts_custom_slug_flag_without_shadowing_catalog_slug() {
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "service",
+            "add",
+            "llm-openai",
+            "--slug",
+            "my-custom-service",
+        ])
+        .expect("service add should parse both catalog slug and custom slug flag");
+
+        match cli.command {
+            Commands::Service {
+                command:
+                    ServiceCommands::Add {
+                        slug, custom_slug, ..
+                    },
+            } => {
+                assert_eq!(slug.as_deref(), Some("llm-openai"));
+                assert_eq!(custom_slug.as_deref(), Some("my-custom-service"));
+            }
+            _ => panic!("unexpected parse result"),
+        }
+    }
+
+    #[test]
+    fn service_add_oauth_accepts_custom_slug_flag() {
+        let cli = Cli::try_parse_from([
+            "nyxid", "service", "add", "api-lark", "--oauth", "--slug", "my-lark",
+        ])
+        .expect("service add oauth should parse custom slug");
+
+        match cli.command {
+            Commands::Service {
+                command:
+                    ServiceCommands::Add {
+                        slug,
+                        custom_slug,
+                        oauth,
+                        ..
+                    },
+            } => {
+                assert_eq!(slug.as_deref(), Some("api-lark"));
+                assert_eq!(custom_slug.as_deref(), Some("my-lark"));
+                assert!(oauth);
+            }
+            _ => panic!("unexpected parse result"),
+        }
+    }
+
+    #[test]
+    fn service_add_device_code_accepts_custom_slug_flag() {
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "service",
+            "add",
+            "llm-openai",
+            "--device-code",
+            "--slug",
+            "openai-team-a",
+        ])
+        .expect("service add device-code should parse custom slug");
+
+        match cli.command {
+            Commands::Service {
+                command:
+                    ServiceCommands::Add {
+                        slug,
+                        custom_slug,
+                        device_code,
+                        ..
+                    },
+            } => {
+                assert_eq!(slug.as_deref(), Some("llm-openai"));
+                assert_eq!(custom_slug.as_deref(), Some("openai-team-a"));
+                assert!(device_code);
+            }
             _ => panic!("unexpected parse result"),
         }
     }

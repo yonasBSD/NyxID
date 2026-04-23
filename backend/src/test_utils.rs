@@ -20,19 +20,30 @@ use crate::services::node_ws_manager::NodeWsManager;
 use crate::services::provider_token_exchange_service::TokenExchangeCache;
 use crate::services::ssh_service::SshSessionManager;
 
-/// Connect to a fresh per-test MongoDB database. Tries the docker-compose
-/// instance first, then a plain local mongod. Returns `None` if neither is
-/// reachable so integration tests can skip cleanly in environments without
-/// a running MongoDB.
+/// Connect to a fresh per-test MongoDB database. Tries a plain local mongod
+/// (standard port, no auth — matches CI's service container) first, then the
+/// docker-compose override on 27018. Returns `None` if neither is reachable
+/// so integration tests can skip cleanly in environments without a running
+/// MongoDB.
+///
+/// The probe uses short server-selection / connect timeouts so a missing
+/// MongoDB fails the test in well under a second instead of the driver's
+/// 30s default per URI (which previously made absence-of-mongo look like
+/// a ~60s-per-test hang in CI before the tests eventually skipped).
 pub(crate) async fn connect_test_database(prefix: &str) -> Option<mongodb::Database> {
     let db_name = format!("nyxid_test_{prefix}_{}", uuid::Uuid::new_v4());
     let candidates = [
-        format!("mongodb://nyxid:nyxid_dev_password@127.0.0.1:27018/{db_name}?authSource=admin"),
         format!("mongodb://127.0.0.1:27017/{db_name}"),
+        format!("mongodb://nyxid:nyxid_dev_password@127.0.0.1:27018/{db_name}?authSource=admin"),
     ];
 
     for uri in candidates {
-        let Ok(client) = mongodb::Client::with_uri_str(&uri).await else {
+        let Ok(mut options) = mongodb::options::ClientOptions::parse(&uri).await else {
+            continue;
+        };
+        options.server_selection_timeout = Some(Duration::from_millis(250));
+        options.connect_timeout = Some(Duration::from_millis(250));
+        let Ok(client) = mongodb::Client::with_options(options) else {
             continue;
         };
         let db = client.database(&db_name);
