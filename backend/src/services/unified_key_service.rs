@@ -377,6 +377,10 @@ pub async fn create_key(
 ) -> AppResult<CreateKeyResult> {
     let node_id = node_id.filter(|nid| !nid.is_empty());
 
+    if let Some(node_id) = node_id {
+        node_service::ensure_node_writable_by_actor(db, actor_user_id, node_id).await?;
+    }
+
     if let Some(slug) = service_slug {
         // -- Catalog path --
         use crate::models::service_provider_requirement::{
@@ -2169,8 +2173,9 @@ pub async fn revoke_key(
     let svc = user_service_service::get_user_service(db, user_id, service_id).await?;
     user_service_service::deactivate_user_service(db, user_id, actor_user_id, service_id).await?;
     if let Some(ref ak_id) = svc.api_key_id {
-        user_api_key_service::revoke_api_key(db, user_id, ak_id).await?;
+        user_api_key_service::delete_api_key(db, user_id, ak_id).await?;
     }
+    user_endpoint_service::delete_endpoint(db, user_id, &svc.endpoint_id).await?;
 
     // Deactivate the node binding if this service was node-routed. The
     // delete path clears the node, so the actor only matters for the
@@ -2288,21 +2293,26 @@ mod tests {
     use std::collections::HashMap;
 
     use chrono::Utc;
+    use mongodb::bson::doc;
 
     use super::{
         AUTO_PROVISION_SOURCE, OpenApiSpecUrlInput, UpdateCredentialAction,
-        auto_provision_source_id, build_key_view, classify_update_credential_action,
+        auto_provision_source_id, build_key_view, classify_update_credential_action, create_key,
         direct_credential_type_for_service, direct_credential_type_from_auth_method,
-        identity_config_from_downstream_service, resolve_openapi_spec_url,
+        identity_config_from_downstream_service, resolve_openapi_spec_url, revoke_key,
         validate_token_exchange_catalog_credential,
     };
     use crate::errors::AppError;
     use crate::models::downstream_service::{
         CredentialFieldSpec, DownstreamService, TokenExchangeConfig,
     };
+    use crate::models::user_api_key::COLLECTION_NAME as USER_API_KEYS;
     use crate::models::user_api_key::UserApiKey;
+    use crate::models::user_endpoint::COLLECTION_NAME as USER_ENDPOINTS;
     use crate::models::user_endpoint::UserEndpoint;
+    use crate::models::user_service::COLLECTION_NAME as USER_SERVICES;
     use crate::models::user_service::UserService;
+    use crate::test_utils::{connect_test_database, test_encryption_keys};
 
     fn sample_api_key(credential_type: &str) -> UserApiKey {
         UserApiKey {
@@ -2420,6 +2430,118 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    #[tokio::test]
+    async fn revoke_key_hard_deletes_backing_endpoint_and_api_key() {
+        let Some(db) = connect_test_database("unified_key_service").await else {
+            eprintln!("skipping unified_key_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let encryption_keys = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let created = create_key(
+            &db,
+            &encryption_keys,
+            &user_id,
+            &user_id,
+            None,
+            Some("https://api.example.com"),
+            "secret-token",
+            "Custom Service",
+            Some("custom-service"),
+            Some("bearer"),
+            Some("Authorization"),
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+        )
+        .await
+        .unwrap();
+
+        revoke_key(&db, &user_id, &user_id, &created.service.id)
+            .await
+            .unwrap();
+
+        let api_key_count = db
+            .collection::<mongodb::bson::Document>(USER_API_KEYS)
+            .count_documents(doc! { "_id": &created.api_key.as_ref().unwrap().id })
+            .await
+            .unwrap();
+        let endpoint_count = db
+            .collection::<mongodb::bson::Document>(USER_ENDPOINTS)
+            .count_documents(doc! { "_id": &created.endpoint.id })
+            .await
+            .unwrap();
+        let service = db
+            .collection::<mongodb::bson::Document>(USER_SERVICES)
+            .find_one(doc! { "_id": &created.service.id })
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(api_key_count, 0);
+        assert_eq!(endpoint_count, 0);
+        assert!(!service.get_bool("is_active").unwrap());
+    }
+
+    #[tokio::test]
+    async fn create_key_with_missing_node_fails_before_inserting_resources() {
+        let Some(db) = connect_test_database("unified_key_service").await else {
+            eprintln!("skipping unified_key_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let encryption_keys = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let err = create_key(
+            &db,
+            &encryption_keys,
+            &user_id,
+            &user_id,
+            None,
+            Some("https://api.example.com"),
+            "",
+            "Node Routed Service",
+            Some("node-routed-service"),
+            Some("bearer"),
+            Some("Authorization"),
+            Some("missing-node"),
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+        )
+        .await
+        .err()
+        .expect("missing node should fail");
+
+        assert!(
+            matches!(err, AppError::NodeNotFound(ref message) if message == "Node not found"),
+            "expected NodeNotFound, got {err}"
+        );
+
+        let endpoint_count = db
+            .collection::<mongodb::bson::Document>(USER_ENDPOINTS)
+            .count_documents(doc! { "user_id": &user_id })
+            .await
+            .unwrap();
+        let api_key_count = db
+            .collection::<mongodb::bson::Document>(USER_API_KEYS)
+            .count_documents(doc! { "user_id": &user_id })
+            .await
+            .unwrap();
+        let service_count = db
+            .collection::<mongodb::bson::Document>(USER_SERVICES)
+            .count_documents(doc! { "user_id": &user_id })
+            .await
+            .unwrap();
+
+        assert_eq!(endpoint_count, 0);
+        assert_eq!(api_key_count, 0);
+        assert_eq!(service_count, 0);
     }
 
     #[test]

@@ -7,6 +7,7 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 mod api_docs;
+mod cleanup_cli;
 mod config;
 mod crypto;
 mod db;
@@ -18,6 +19,9 @@ mod mw;
 mod routes;
 mod services;
 mod ssh_cli;
+
+#[cfg(test)]
+mod test_utils;
 
 use std::sync::Arc;
 
@@ -92,6 +96,9 @@ enum Commands {
     Login(login_cli::LoginArgs),
     /// SSH client helper commands for certificate issuance and ProxyCommand integration.
     Ssh(ssh_cli::SshCli),
+    /// Scan for and hard-delete orphaned user_endpoints and user_api_keys left
+    /// over by pre-fix revoke flows. Prints a preview and prompts before deleting.
+    CleanupOrphans(cleanup_cli::CleanupArgs),
 }
 
 #[tokio::main]
@@ -110,7 +117,9 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer().with_target(true))
         .init();
 
-    match cli.command {
+    // Login and Ssh don't touch the database; handle them before we connect.
+    // Other subcommands (like CleanupOrphans) fall through to the post-DB path.
+    let post_db_command = match cli.command {
         Some(Commands::Login(args)) => {
             if let Err(error) = login_cli::run(args).await {
                 eprintln!("Login failed: {error}");
@@ -125,8 +134,8 @@ async fn main() {
             }
             return;
         }
-        None => {}
-    }
+        other => other,
+    };
 
     // Load configuration
     let mut config = AppConfig::from_env();
@@ -140,6 +149,13 @@ async fn main() {
     // Handle CLI commands (exit without starting server)
     if let Some(email) = cli.promote_admin {
         run_promote_admin(&db, &email).await;
+        return;
+    }
+    if let Some(Commands::CleanupOrphans(args)) = post_db_command {
+        if let Err(error) = cleanup_cli::run(&db, args).await {
+            eprintln!("Cleanup failed: {error}");
+            std::process::exit(1);
+        }
         return;
     }
 
