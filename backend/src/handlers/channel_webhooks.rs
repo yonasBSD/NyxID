@@ -626,6 +626,7 @@ mod tests {
             base_url: "http://localhost:3001".to_string(),
             frontend_url: "http://localhost:3000".to_string(),
             cors_allowed_origins: vec![],
+            csrf_trusted_origins: vec![],
             database_url,
             database_max_connections: 10,
             environment: "development".to_string(),
