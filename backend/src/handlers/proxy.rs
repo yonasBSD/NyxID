@@ -934,7 +934,9 @@ async fn execute_proxy_inner(
                     user,
                     &target.service,
                     &state.db,
-                ).await {
+                )
+                .await
+                {
                     Ok(assertion) => {
                         identity_headers.push(("X-NyxID-Identity-Token".to_string(), assertion));
                     }
