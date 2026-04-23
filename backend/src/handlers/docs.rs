@@ -171,16 +171,18 @@ pub async fn service_openapi_json(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Path(service_id): Path<String>,
-) -> AppResult<Json<serde_json::Value>> {
+) -> AppResult<Response> {
     auth_user.ensure_rest_proxy_access()?;
 
     let caller_user_id = auth_user.user_id.to_string();
 
     match resolve_service_or_user_service(&state, &service_id, &caller_user_id).await? {
-        ResolvedService::Catalog(service) => Ok(Json(
-            api_docs_service::fetch_downstream_openapi_spec(&service, &state.config.base_url)
-                .await?,
-        )),
+        ResolvedService::Catalog(service) => {
+            let spec =
+                api_docs_service::fetch_downstream_openapi_spec(&service, &state.config.base_url)
+                    .await?;
+            Ok(Json(spec).into_response())
+        }
         ResolvedService::Owned {
             user_endpoint,
             owner_id,
@@ -192,12 +194,12 @@ pub async fn service_openapi_json(
                 ));
             };
 
-            Ok(Json(
-                api_docs_service::fetch_spec_json_scoped(spec_url, &owner_id)
-                    .await?
-                    .as_ref()
-                    .clone(),
-            ))
+            // Serialize the shared `Arc<Value>` directly into bytes so we
+            // don't deep-clone the parsed spec tree on every cache hit.
+            let spec = api_docs_service::fetch_spec_json_scoped(spec_url, &owner_id).await?;
+            let body = serde_json::to_vec(spec.as_ref())
+                .map_err(|err| AppError::Internal(format!("serialize openapi spec: {err}")))?;
+            Ok(([(header::CONTENT_TYPE, "application/json")], body).into_response())
         }
     }
 }
@@ -257,7 +259,7 @@ mod tests {
         test_user_service,
     };
     use axum::{
-        Json,
+        body::to_bytes,
         extract::{Path, State},
     };
     use uuid::Uuid;
@@ -321,13 +323,23 @@ mod tests {
         cache_test_spec(SPEC_URL, Some(&caller_id), openapi_spec());
 
         let state = test_app_state(db);
-        let Json(spec) = service_openapi_json(
+        let response = service_openapi_json(
             State(state),
             test_auth_user(&caller_id),
             Path(user_service.id),
         )
         .await
         .unwrap();
+
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .map(|v| v.to_str().unwrap()),
+            Some("application/json"),
+        );
+        let body_bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let spec: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
 
         assert_eq!(spec["openapi"], "3.1.0");
         assert!(spec["paths"]["/ping"]["get"].is_object());
