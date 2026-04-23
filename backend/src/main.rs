@@ -232,9 +232,10 @@ async fn main() {
         .await
         .expect("Failed to seed default OAuth clients");
 
-    // Backfill `proxy` scope on dynamic-registration clients created before
-    // MCP scope enforcement landed (idempotent).
-    services::oauth_client_service::migrate_dynamic_clients_add_proxy_scope(&db)
+    // Backfill default MCP scopes on dynamic-registration clients whenever
+    // the default set grows (e.g. issue #434 added `roles`/`groups`).
+    // Idempotent.
+    services::oauth_client_service::migrate_dynamic_clients_grant_default_mcp_scopes(&db)
         .await
         .expect("Failed to migrate dynamic OAuth clients");
 

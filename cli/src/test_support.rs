@@ -4,8 +4,6 @@
 //! `api`, and `telemetry::consent`) must share a single mutex or they
 //! race. Using one shared `OnceLock<Mutex<()>>` here ensures that.
 
-#![cfg(test)]
-
 use std::sync::{Mutex, OnceLock};
 
 /// Return the process-global env-mutation lock. Acquire this for the
