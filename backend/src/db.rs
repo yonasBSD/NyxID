@@ -949,6 +949,21 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    // ── reply_token_uses ──
+    let reply_token_uses = db.collection::<mongodb::bson::Document>("reply_token_uses");
+    reply_token_uses
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "exp_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Duration::from_secs(0))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
     // ── channel_event_logs ──
     // ADR-013 metadata-only event forwarding ledger. No payload content is
     // stored; see models::channel_event_log::ChannelEventLog.
