@@ -2258,7 +2258,10 @@ pub async fn execute_tool(
                     config,
                     user,
                     &target.service,
-                ) {
+                    db,
+                )
+                .await
+                {
                     Ok(assertion) => {
                         identity_headers.push(("X-NyxID-Identity-Token".to_string(), assertion));
                     }
