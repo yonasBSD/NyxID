@@ -244,6 +244,13 @@ async fn main() {
         .await
         .expect("Failed to seed default services");
 
+    // Heal UserService rows whose `auth_method` was snapshotted as the raw
+    // catalog `"none"` instead of the SPR-derived injection config, which
+    // stops the proxy from injecting the caller's stored credential.
+    services::user_service_service::backfill_stale_catalog_auth_snapshots(&db)
+        .await
+        .expect("Failed to backfill stale UserService auth_method snapshots");
+
     // Seed system roles for RBAC (idempotent)
     services::role_service::seed_system_roles(&db)
         .await

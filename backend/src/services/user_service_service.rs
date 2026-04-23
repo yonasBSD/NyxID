@@ -1303,6 +1303,104 @@ pub async fn deactivate_user_service(
     Ok(())
 }
 
+/// Migrate stale `UserService.auth_method = "none"` snapshots taken from
+/// provider-delegated catalog entries (Anthropic, OpenAI, Gemini, ...)
+/// before the provisioning path derived the effective injection config
+/// from the SPR.
+///
+/// Background: `DownstreamService` rows for those services intentionally
+/// store `auth_method = "none"` on the catalog row and carry the real
+/// injection config on the `ServiceProviderRequirement`. Earlier versions
+/// of `unified_key_service::create_key` copied the raw
+/// `svc.auth_method` / `svc.auth_key_name` onto the UserService, so the
+/// proxy (which reads `auth_method` straight off the UserService) never
+/// injected the caller's credential and upstream returned
+/// `"x-api-key header is required"`.
+///
+/// Scope:
+/// - Match by `catalog_service_id` (so we never touch custom-endpoint
+///   UserServices that carry no catalog link).
+/// - Require `auth_method = "none"` AND `auth_key_name = ""` so an
+///   admin's deliberate `"none"` customization with a named key is left
+///   alone.
+/// - Require `api_key_id` to be set -- auto-provisioned no-auth rows
+///   (which have no api_key_id) are handled separately by
+///   `reconcile_stale_auto_provisions` and must not be mutated here.
+///
+/// Idempotent: once the snapshot matches the SPR, `auth_method` is no
+/// longer `"none"` and the filter no longer matches the row.
+pub async fn backfill_stale_catalog_auth_snapshots(db: &mongodb::Database) -> AppResult<()> {
+    use crate::models::downstream_service::{
+        COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+    };
+    use crate::models::service_provider_requirement::{
+        COLLECTION_NAME as SPR_COLLECTION, ServiceProviderRequirement,
+    };
+
+    let stale_catalog_services: Vec<DownstreamService> = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find(doc! { "auth_method": "none", "is_active": true })
+        .await?
+        .try_collect()
+        .await?;
+
+    let mut updated: u64 = 0;
+    for svc in stale_catalog_services {
+        let Some(spr) = db
+            .collection::<ServiceProviderRequirement>(SPR_COLLECTION)
+            .find_one(doc! { "service_id": &svc.id })
+            .await?
+        else {
+            continue;
+        };
+
+        let injection_key = spr
+            .injection_key
+            .clone()
+            .unwrap_or_else(|| "Authorization".to_string());
+
+        let result = db
+            .collection::<UserService>(COLLECTION_NAME)
+            .update_many(
+                doc! {
+                    "catalog_service_id": &svc.id,
+                    "auth_method": "none",
+                    "auth_key_name": "",
+                    "api_key_id": { "$ne": null },
+                },
+                doc! {
+                    "$set": {
+                        "auth_method": &spr.injection_method,
+                        "auth_key_name": &injection_key,
+                        "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                    }
+                },
+            )
+            .await?;
+
+        if result.modified_count > 0 {
+            tracing::info!(
+                catalog_slug = %svc.slug,
+                injection_method = %spr.injection_method,
+                injection_key = %injection_key,
+                matched = result.matched_count,
+                modified = result.modified_count,
+                "Migrated stale UserService auth_method snapshots"
+            );
+            updated += result.modified_count;
+        }
+    }
+
+    if updated > 0 {
+        tracing::info!(
+            count = updated,
+            "UserService auth_method snapshot migration complete"
+        );
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

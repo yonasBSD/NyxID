@@ -304,6 +304,33 @@ fn normalized_provider_credential_type(provider_type: &str) -> &'static str {
     }
 }
 
+/// Compute the effective `(auth_method, auth_key_name)` for a catalog service.
+///
+/// For provider-delegated services, the `DownstreamService` itself stores
+/// `auth_method = "none"` and `auth_key_name = ""` -- the real injection
+/// method/key live on the `ServiceProviderRequirement`. Callers that need
+/// to snapshot these onto a `UserService` or show them to the client must
+/// derive the effective values here, matching
+/// `catalog_service::build_catalog_entry`.
+pub(crate) fn derive_effective_auth(
+    svc: &DownstreamService,
+    spr: Option<&crate::models::service_provider_requirement::ServiceProviderRequirement>,
+) -> (String, String) {
+    let auth_method = if svc.auth_method == "none" {
+        spr.map(|r| r.injection_method.clone())
+            .unwrap_or_else(|| svc.auth_method.clone())
+    } else {
+        svc.auth_method.clone()
+    };
+    let auth_key_name = if svc.auth_key_name.is_empty() {
+        spr.and_then(|r| r.injection_key.clone())
+            .unwrap_or_else(|| "Authorization".to_string())
+    } else {
+        svc.auth_key_name.clone()
+    };
+    (auth_method, auth_key_name)
+}
+
 fn direct_credential_type_from_auth_method(auth_method: &str) -> Option<&'static str> {
     match auth_method {
         "none" => None,
@@ -582,6 +609,20 @@ pub async fn create_key(
         let catalog_identity =
             identity.unwrap_or_else(|| identity_config_from_downstream_service(&svc));
 
+        // Snapshot the *effective* auth_method / auth_key_name onto the
+        // UserService. The `DownstreamService` itself stores `auth_method
+        // = "none"` for provider-delegated catalog entries (Anthropic,
+        // OpenAI, Gemini, ...) and instead carries the real injection
+        // config on the `ServiceProviderRequirement`. The proxy reads
+        // `auth_method` directly off the UserService snapshot -- if we
+        // snapshot the raw "none" we'd never inject the credential at
+        // proxy time even though the user stored a valid `UserApiKey`.
+        // Mirrors `catalog_service::build_catalog_entry` exactly so the
+        // auth shape the frontend sees in the catalog equals what the
+        // proxy actually applies.
+        let (snap_auth_method, snap_auth_key_name) =
+            derive_effective_auth(&svc, provider_requirement.as_ref());
+
         let service = user_service_service::create_user_service(
             db,
             user_id,
@@ -589,8 +630,8 @@ pub async fn create_key(
             &unique_slug,
             &endpoint.id,
             api_key.as_ref().map(|k| k.id.as_str()),
-            &svc.auth_method,
-            &svc.auth_key_name,
+            &snap_auth_method,
+            &snap_auth_key_name,
             Some(&svc.id),
             node_id,
             0,
@@ -2298,14 +2339,15 @@ mod tests {
     use super::{
         AUTO_PROVISION_SOURCE, OpenApiSpecUrlInput, UpdateCredentialAction,
         auto_provision_source_id, build_key_view, classify_update_credential_action, create_key,
-        direct_credential_type_for_service, direct_credential_type_from_auth_method,
-        identity_config_from_downstream_service, resolve_openapi_spec_url, revoke_key,
-        validate_token_exchange_catalog_credential,
+        derive_effective_auth, direct_credential_type_for_service,
+        direct_credential_type_from_auth_method, identity_config_from_downstream_service,
+        resolve_openapi_spec_url, revoke_key, validate_token_exchange_catalog_credential,
     };
     use crate::errors::AppError;
     use crate::models::downstream_service::{
         CredentialFieldSpec, DownstreamService, TokenExchangeConfig,
     };
+    use crate::models::service_provider_requirement::ServiceProviderRequirement;
     use crate::models::user_api_key::COLLECTION_NAME as USER_API_KEYS;
     use crate::models::user_api_key::UserApiKey;
     use crate::models::user_endpoint::COLLECTION_NAME as USER_ENDPOINTS;
@@ -2430,6 +2472,83 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    fn sample_spr(
+        injection_method: &str,
+        injection_key: Option<&str>,
+    ) -> ServiceProviderRequirement {
+        ServiceProviderRequirement {
+            id: "spr-1".to_string(),
+            service_id: "cat-1".to_string(),
+            provider_config_id: "prov-1".to_string(),
+            required: true,
+            scopes: None,
+            injection_method: injection_method.to_string(),
+            injection_key: injection_key.map(String::from),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn derive_effective_auth_uses_spr_when_svc_is_none() {
+        // Anthropic-style catalog shape: the DownstreamService stores `none`
+        // and the real injection config lives on the SPR. The effective
+        // tuple must come from the SPR or the proxy won't inject the
+        // caller's credential.
+        let mut svc = sample_catalog_service();
+        svc.auth_method = "none".to_string();
+        svc.auth_key_name = "".to_string();
+
+        let spr = sample_spr("header", Some("x-api-key"));
+        let (method, key) = derive_effective_auth(&svc, Some(&spr));
+
+        assert_eq!(method, "header");
+        assert_eq!(key, "x-api-key");
+    }
+
+    #[test]
+    fn derive_effective_auth_preserves_non_none_svc_fields() {
+        // If the catalog already carries explicit auth config, the SPR
+        // does not override. Avoids double-derivation for services that
+        // don't use the provider-delegated pattern.
+        let mut svc = sample_catalog_service();
+        svc.auth_method = "bearer".to_string();
+        svc.auth_key_name = "Authorization".to_string();
+
+        let spr = sample_spr("header", Some("x-api-key"));
+        let (method, key) = derive_effective_auth(&svc, Some(&spr));
+
+        assert_eq!(method, "bearer");
+        assert_eq!(key, "Authorization");
+    }
+
+    #[test]
+    fn derive_effective_auth_falls_back_to_none_when_no_spr() {
+        let mut svc = sample_catalog_service();
+        svc.auth_method = "none".to_string();
+        svc.auth_key_name = "".to_string();
+
+        let (method, key) = derive_effective_auth(&svc, None);
+
+        assert_eq!(method, "none");
+        // No SPR, empty catalog -> Authorization is the safe default the
+        // build_catalog_entry logic also picks.
+        assert_eq!(key, "Authorization");
+    }
+
+    #[test]
+    fn derive_effective_auth_defaults_key_when_spr_has_no_injection_key() {
+        let mut svc = sample_catalog_service();
+        svc.auth_method = "none".to_string();
+        svc.auth_key_name = "".to_string();
+
+        let spr = sample_spr("bearer", None);
+        let (method, key) = derive_effective_auth(&svc, Some(&spr));
+
+        assert_eq!(method, "bearer");
+        assert_eq!(key, "Authorization");
     }
 
     #[tokio::test]
