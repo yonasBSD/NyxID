@@ -538,12 +538,34 @@ Downstream -> Client:   {"type":"auth_ok"}
 
 With `consume_trigger: true` the client's first visible frame is `auth_ok`, not `auth_required`. The credential substitution for `${credential}` uses the service's held LLAT (or bearer); the client only ever sends its NyxID bearer.
 
-**Admins: configure via REST.** `ws_frame_injections` is an admin-only field today. `nyxid service update` does not yet expose it, and user-owned custom endpoints cannot set it through the user API. Admins configure catalog entries via the dashboard or directly:
+**User-owned custom services: configure via CLI.** Home Assistant is normally
+added as a custom endpoint today, so configure the WebSocket auth-frame preset
+when creating the user-owned service:
 
 ```bash
-# Requires admin role on the bearer
-curl -X PUT "https://nyx-api.chrono-ai.fun/api/v1/services/$SERVICE_ID" \
-  -H "Authorization: Bearer $ADMIN_ACCESS_TOKEN" \
+nyxid service add --custom \
+  --slug my-ha \
+  --label "Home Assistant" \
+  --endpoint-url "https://ha.local:8123/api" \
+  --auth-method bearer \
+  --auth-key-name Authorization \
+  --credential-env HA_TOKEN \
+  --ws-frame-preset home-assistant
+```
+
+To add or clear the preset on an existing user service:
+
+```bash
+nyxid service update "$USER_SERVICE_ID" --ws-frame-preset home-assistant
+nyxid service update "$USER_SERVICE_ID" --ws-frame-clear
+```
+
+Raw REST uses the user-service update endpoint (the route is `PUT`, not
+`PATCH`):
+
+```bash
+curl -X PUT "https://nyx-api.chrono-ai.fun/api/v1/user-services/$USER_SERVICE_ID" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"ws_frame_injections":[{
     "trigger":{"json_field_equals":{"path":"$.type","value":"auth_required"}},
@@ -553,6 +575,11 @@ curl -X PUT "https://nyx-api.chrono-ai.fun/api/v1/services/$SERVICE_ID" \
     "direction":"downstream"
   }]}'
 ```
+
+**Platform operators:** configure catalog defaults via the admin dashboard or
+`PUT /api/v1/services/{service_id}`. A non-empty user-owned
+`UserService.ws_frame_injections` list overrides catalog rules; an empty user
+list falls back to catalog rules for catalog-backed services.
 
 **Other WS protocols.** The same pattern covers any challenge/response post-upgrade auth. Only Home Assistant has a built-in preset today; others need the rule hand-written.
 

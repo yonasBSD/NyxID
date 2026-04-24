@@ -2,7 +2,13 @@
 
 NyxID can inject a held downstream credential into a WebSocket frame after the HTTP upgrade. This is for protocols that do not authenticate the upgrade request itself and instead send a challenge frame that expects a credential-bearing response frame.
 
-Rules live on `DownstreamService.ws_frame_injections` and `UserService.ws_frame_injections`. `direction` is the trigger direction: `downstream` means the rule matches frames sent by the downstream service toward the client, and NyxID sends the injected frame back to the downstream service.
+Rules live on user-owned `UserService.ws_frame_injections` and, for platform
+catalog defaults, `DownstreamService.ws_frame_injections`. `direction` is the
+trigger direction: `downstream` means the rule matches frames sent by the
+downstream service toward the client, and NyxID sends the injected frame back
+to the downstream service. At proxy time, a non-empty user-owned rule list wins;
+catalog-backed services fall back to catalog rules only when the user list is
+empty.
 
 ## Home Assistant
 
@@ -38,6 +44,54 @@ Downstream -> Client: {"type":"auth_ok"}
 ```
 
 With `consume_trigger: true`, NyxID hides the challenge from the client. The client sees only the post-auth downstream frames.
+
+## User-Level Configuration
+
+For Home Assistant or any custom WebSocket-authenticated service, configure the
+rules on the user service itself:
+
+```bash
+nyxid service add --custom \
+  --slug my-ha \
+  --label "Home Assistant" \
+  --endpoint-url "https://ha.local:8123/api" \
+  --auth-method bearer \
+  --auth-key-name Authorization \
+  --credential-env HA_TOKEN \
+  --ws-frame-preset home-assistant
+```
+
+Existing user services can be updated or cleared:
+
+```bash
+nyxid service update "$USER_SERVICE_ID" --ws-frame-preset home-assistant
+nyxid service update "$USER_SERVICE_ID" --ws-frame-clear
+```
+
+The REST endpoint is the user-service update route:
+
+```bash
+curl -X PUT "$NYXID_BASE_URL/api/v1/user-services/$USER_SERVICE_ID" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"ws_frame_injections":[{
+    "trigger":{"json_field_equals":{"path":"$.type","value":"auth_required"}},
+    "template":"{\"type\":\"auth\",\"access_token\":\"${credential}\"}",
+    "frame_kind":"text",
+    "consume_trigger":true,
+    "direction":"downstream"
+  }]}'
+```
+
+The route is `PUT /api/v1/user-services/{service_id}`. Send
+`{"ws_frame_injections":[]}` to clear the user-owned rules.
+
+## Catalog Defaults
+
+Platform operators can set catalog-level defaults with the admin service editor
+or `PUT /api/v1/services/{service_id}`. These defaults apply to catalog-backed
+user services that have no user-owned rules. Custom endpoints do not have a
+catalog fallback, so configure them through the user-level path above.
 
 ## Limits And Security
 
