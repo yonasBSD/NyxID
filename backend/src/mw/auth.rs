@@ -76,6 +76,23 @@ impl AuthUser {
             .unwrap_or_else(|| self.user_id.to_string())
     }
 
+    /// User ID whose services should be considered for proxy resolution.
+    ///
+    /// Service-account tokens use the service account UUID as the authenticated
+    /// subject for audit/requester attribution, but proxy resources are owned
+    /// by the service account's effective owner. For all non-ServiceAccount auth
+    /// methods (Session, AccessToken, ApiKey) this returns `user_id.to_string()`,
+    /// identical to prior behavior.
+    pub fn proxy_resolution_user_id(&self) -> String {
+        if self.auth_method == AuthMethod::ServiceAccount
+            && let Some(owner) = &self.approval_owner_user_id
+        {
+            return owner.clone();
+        }
+
+        self.user_id.to_string()
+    }
+
     /// Canonical requester type used in approval request and grant records.
     /// Session callers never enter approval flow.
     pub fn approval_requester_type(&self) -> Option<&'static str> {
@@ -852,6 +869,32 @@ mod tests {
         let user = test_auth_user(AuthMethod::Session, "");
         assert!(user.api_key_id.is_none());
         assert!(user.api_key_name.is_none());
+    }
+
+    #[test]
+    fn proxy_resolution_user_id_uses_service_account_owner_when_present() {
+        let mut user = test_auth_user(AuthMethod::ServiceAccount, "proxy");
+        let service_account_id = user.user_id.to_string();
+        let owner_id = Uuid::new_v4().to_string();
+        user.approval_owner_user_id = Some(owner_id.clone());
+
+        assert_eq!(user.proxy_resolution_user_id(), owner_id);
+        assert_eq!(user.user_id.to_string(), service_account_id);
+    }
+
+    #[test]
+    fn proxy_resolution_user_id_uses_subject_for_service_account_without_owner() {
+        let user = test_auth_user(AuthMethod::ServiceAccount, "proxy");
+
+        assert_eq!(user.proxy_resolution_user_id(), user.user_id.to_string());
+    }
+
+    #[test]
+    fn proxy_resolution_user_id_uses_subject_for_non_service_account() {
+        let mut user = test_auth_user(AuthMethod::ApiKey, "proxy");
+        user.approval_owner_user_id = Some(Uuid::new_v4().to_string());
+
+        assert_eq!(user.proxy_resolution_user_id(), user.user_id.to_string());
     }
 
     #[test]

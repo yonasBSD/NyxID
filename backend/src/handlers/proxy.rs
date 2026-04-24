@@ -360,7 +360,7 @@ async fn proxy_request_inner(
 ) -> AppResult<Response> {
     auth_user.ensure_rest_proxy_access()?;
 
-    let user_id_str = auth_user.user_id.to_string();
+    let user_id_str = auth_user.proxy_resolution_user_id();
     let via_service = extract_via_service(&request);
 
     // Direct resolution by UserService ID if ?_nyxid_via= is present.
@@ -538,7 +538,7 @@ async fn proxy_request_by_slug_inner(
 ) -> AppResult<Response> {
     auth_user.ensure_rest_proxy_access()?;
 
-    let user_id_str = auth_user.user_id.to_string();
+    let user_id_str = auth_user.proxy_resolution_user_id();
     let via_service = extract_via_service(&request);
 
     // Direct resolution by UserService ID if ?_nyxid_via= is present.
@@ -4011,6 +4011,421 @@ mod tests {
                 .any(|(n, _)| n.eq_ignore_ascii_case("origin")),
             "origin should still be forwarded on WS",
         );
+    }
+}
+
+#[cfg(test)]
+mod proxy_resolution_integration_tests {
+    use super::{proxy_request_by_slug_inner, proxy_request_inner};
+    use crate::errors::AppError;
+    use crate::models::approval_request::{ApprovalRequest, COLLECTION_NAME as APPROVAL_REQUESTS};
+    use crate::models::notification_channel::{
+        COLLECTION_NAME as NOTIFICATION_CHANNELS, NotificationChannel,
+    };
+    use crate::models::org_membership::{
+        COLLECTION_NAME as ORG_MEMBERSHIPS, OrgMembership, OrgRole,
+    };
+    use crate::models::service_approval_config::{
+        ApprovalMode, COLLECTION_NAME as SERVICE_APPROVAL_CONFIGS, ServiceApprovalConfig,
+    };
+    use crate::models::user::{COLLECTION_NAME as USERS, UserType};
+    use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
+    use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+    use crate::mw::auth::{AuthMethod, AuthUser};
+    use crate::test_utils::{
+        connect_test_database, test_app_state, test_membership, test_user, test_user_endpoint,
+        test_user_service,
+    };
+    use axum::{
+        Router,
+        body::Body,
+        http::{Method, Request, StatusCode, Uri},
+        routing::get,
+    };
+    use chrono::Utc;
+    use mongodb::bson::doc;
+    use tokio::net::TcpListener;
+    use uuid::Uuid;
+
+    async fn downstream_ok(uri: Uri) -> (StatusCode, String) {
+        (StatusCode::OK, format!("ok:{}", uri.path()))
+    }
+
+    async fn start_downstream() -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().route("/{*path}", get(downstream_ok));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind downstream test listener");
+        let addr = listener.local_addr().expect("downstream listener addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve downstream test app");
+        });
+        (format!("http://{addr}"), server)
+    }
+
+    fn proxy_request(uri: &str) -> Request<Body> {
+        Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .body(Body::empty())
+            .expect("build proxy request")
+    }
+
+    fn service_account_auth(service_account_id: &str, owner_user_id: &str) -> AuthUser {
+        AuthUser {
+            user_id: Uuid::parse_str(service_account_id).expect("valid service account id"),
+            session_id: None,
+            scope: "proxy".to_string(),
+            acting_client_id: None,
+            approval_owner_user_id: Some(owner_user_id.to_string()),
+            auth_method: AuthMethod::ServiceAccount,
+            allow_all_services: true,
+            allow_all_nodes: true,
+            allowed_service_ids: vec![],
+            allowed_node_ids: vec![],
+            api_key_id: None,
+            api_key_name: None,
+            rate_limit_per_second: None,
+            rate_limit_burst: None,
+        }
+    }
+
+    fn access_token_auth(user_id: &str) -> AuthUser {
+        AuthUser {
+            user_id: Uuid::parse_str(user_id).expect("valid user id"),
+            session_id: None,
+            scope: "proxy".to_string(),
+            acting_client_id: None,
+            approval_owner_user_id: None,
+            auth_method: AuthMethod::AccessToken,
+            allow_all_services: true,
+            allow_all_nodes: true,
+            allowed_service_ids: vec![],
+            allowed_node_ids: vec![],
+            api_key_id: None,
+            api_key_name: None,
+            rate_limit_per_second: None,
+            rate_limit_burst: None,
+        }
+    }
+
+    fn notification_channel(user_id: &str, timeout_secs: u32) -> NotificationChannel {
+        let now = Utc::now();
+        NotificationChannel {
+            id: Uuid::new_v4().to_string(),
+            user_id: user_id.to_string(),
+            telegram_chat_id: None,
+            telegram_username: None,
+            telegram_enabled: false,
+            telegram_link_code: None,
+            telegram_link_code_expires_at: None,
+            approval_timeout_secs: timeout_secs,
+            grant_expiry_days: 30,
+            approval_required: false,
+            push_enabled: false,
+            push_devices: vec![],
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn approval_config(owner_user_id: &str, service_id: &str) -> ServiceApprovalConfig {
+        let now = Utc::now();
+        ServiceApprovalConfig {
+            id: Uuid::new_v4().to_string(),
+            user_id: owner_user_id.to_string(),
+            service_id: service_id.to_string(),
+            service_name: "Org Proxy Target".to_string(),
+            approval_required: true,
+            approval_mode: ApprovalMode::PerRequest,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    async fn insert_user_service(
+        db: &mongodb::Database,
+        owner_user_id: &str,
+        slug: &str,
+        base_url: &str,
+        catalog_service_id: Option<&str>,
+    ) -> UserService {
+        let endpoint = test_user_endpoint(
+            &Uuid::new_v4().to_string(),
+            owner_user_id,
+            slug,
+            base_url,
+            None,
+            catalog_service_id,
+        );
+        let service = test_user_service(
+            &Uuid::new_v4().to_string(),
+            owner_user_id,
+            slug,
+            &endpoint.id,
+            catalog_service_id,
+            None,
+        );
+
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(endpoint)
+            .await
+            .expect("insert user endpoint");
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(service.clone())
+            .await
+            .expect("insert user service");
+
+        service
+    }
+
+    async fn find_approval_request(
+        db: &mongodb::Database,
+        owner_user_id: &str,
+        service_id: &str,
+    ) -> ApprovalRequest {
+        db.collection::<ApprovalRequest>(APPROVAL_REQUESTS)
+            .find_one(doc! {
+                "user_id": owner_user_id,
+                "service_id": service_id,
+            })
+            .await
+            .expect("query approval request")
+            .expect("approval request should exist")
+    }
+
+    #[tokio::test]
+    async fn org_service_account_resolves_org_owned_slug_service() {
+        let Some(db) = connect_test_database("proxy_org_sa_slug").await else {
+            eprintln!("skipping proxy integration test: no local MongoDB available");
+            return;
+        };
+
+        let (base_url, server) = start_downstream().await;
+        let org_id = Uuid::new_v4().to_string();
+        let sa_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&org_id, UserType::Org))
+            .await
+            .unwrap();
+        let service = insert_user_service(&db, &org_id, "org-sa-target", &base_url, None).await;
+
+        let state = test_app_state(db.clone());
+        let mut resolved_slug = String::new();
+        let response = proxy_request_by_slug_inner(
+            &state,
+            &service_account_auth(&sa_id, &org_id),
+            &service.slug,
+            "status",
+            proxy_request("/proxy/s/org-sa-target/status"),
+            &mut resolved_slug,
+        )
+        .await
+        .expect("org service account should resolve owner-owned service");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(resolved_slug, service.slug);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn org_service_account_org_policy_creates_org_approval_request() {
+        let Some(db) = connect_test_database("proxy_org_sa_approval").await else {
+            eprintln!("skipping proxy integration test: no local MongoDB available");
+            return;
+        };
+
+        let (base_url, server) = start_downstream().await;
+        let org_id = Uuid::new_v4().to_string();
+        let admin_id = Uuid::new_v4().to_string();
+        let sa_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_many([
+                test_user(&org_id, UserType::Org),
+                test_user(&admin_id, UserType::Person),
+            ])
+            .await
+            .unwrap();
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org_id, &admin_id, OrgRole::Admin, None))
+            .await
+            .unwrap();
+        db.collection::<NotificationChannel>(NOTIFICATION_CHANNELS)
+            .insert_one(notification_channel(&admin_id, 0))
+            .await
+            .unwrap();
+        let service = insert_user_service(&db, &org_id, "org-sa-approval", &base_url, None).await;
+        db.collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
+            .insert_one(approval_config(&org_id, &service.id))
+            .await
+            .unwrap();
+
+        let state = test_app_state(db.clone());
+        let mut resolved_slug = String::new();
+        let err = proxy_request_by_slug_inner(
+            &state,
+            &service_account_auth(&sa_id, &org_id),
+            &service.slug,
+            "sensitive",
+            proxy_request("/proxy/s/org-sa-approval/sensitive"),
+            &mut resolved_slug,
+        )
+        .await
+        .expect_err("approval should block until timeout in test");
+
+        assert!(
+            matches!(err, AppError::ApprovalFailed { .. }),
+            "unexpected proxy error: {err}"
+        );
+        let approval = find_approval_request(&db, &org_id, &service.id).await;
+        assert!(approval.from_org_policy);
+        assert_eq!(approval.user_id, org_id);
+        assert_eq!(approval.requester_type, "service_account");
+        assert_eq!(approval.requester_id, sa_id);
+        assert_eq!(approval.notify_user_ids, vec![admin_id]);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn personal_service_account_resolves_owner_catalog_service_on_uuid_path() {
+        let Some(db) = connect_test_database("proxy_personal_sa_uuid").await else {
+            eprintln!("skipping proxy integration test: no local MongoDB available");
+            return;
+        };
+
+        let (base_url, server) = start_downstream().await;
+        let owner_id = Uuid::new_v4().to_string();
+        let sa_id = Uuid::new_v4().to_string();
+        let catalog_service_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&owner_id, UserType::Person))
+            .await
+            .unwrap();
+        let service = insert_user_service(
+            &db,
+            &owner_id,
+            "personal-sa-target",
+            &base_url,
+            Some(&catalog_service_id),
+        )
+        .await;
+
+        let state = test_app_state(db.clone());
+        let mut resolved_slug = String::new();
+        let response = proxy_request_inner(
+            &state,
+            &service_account_auth(&sa_id, &owner_id),
+            &catalog_service_id,
+            "status",
+            proxy_request("/proxy/catalog/status"),
+            &mut resolved_slug,
+        )
+        .await
+        .expect("personal service account should resolve owner-owned service");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(resolved_slug, service.slug);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn service_account_scope_denial_happens_after_owner_resolution() {
+        let Some(db) = connect_test_database("proxy_sa_scope_denied").await else {
+            eprintln!("skipping proxy integration test: no local MongoDB available");
+            return;
+        };
+
+        let (base_url, server) = start_downstream().await;
+        let org_id = Uuid::new_v4().to_string();
+        let sa_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&org_id, UserType::Org))
+            .await
+            .unwrap();
+        let service = insert_user_service(&db, &org_id, "org-sa-scoped", &base_url, None).await;
+
+        let state = test_app_state(db.clone());
+        let mut auth = service_account_auth(&sa_id, &org_id);
+        auth.allow_all_services = false;
+        auth.allowed_service_ids = vec![Uuid::new_v4().to_string()];
+        let mut resolved_slug = String::new();
+        let err = proxy_request_by_slug_inner(
+            &state,
+            &auth,
+            &service.slug,
+            "status",
+            proxy_request(&format!(
+                "/proxy/s/org-sa-scoped/status?_nyxid_via={}",
+                service.id
+            )),
+            &mut resolved_slug,
+        )
+        .await
+        .expect_err("scope check should deny the resolved service");
+
+        assert!(
+            matches!(err, AppError::ApiKeyScopeForbidden(_)),
+            "expected scope denial after resolution, got: {err}"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn regular_admin_user_still_resolves_org_service_via_membership_policy() {
+        let Some(db) = connect_test_database("proxy_admin_org_control").await else {
+            eprintln!("skipping proxy integration test: no local MongoDB available");
+            return;
+        };
+
+        let (base_url, server) = start_downstream().await;
+        let org_id = Uuid::new_v4().to_string();
+        let admin_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_many([
+                test_user(&org_id, UserType::Org),
+                test_user(&admin_id, UserType::Person),
+            ])
+            .await
+            .unwrap();
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org_id, &admin_id, OrgRole::Admin, None))
+            .await
+            .unwrap();
+        db.collection::<NotificationChannel>(NOTIFICATION_CHANNELS)
+            .insert_one(notification_channel(&admin_id, 0))
+            .await
+            .unwrap();
+        let service = insert_user_service(&db, &org_id, "admin-org-control", &base_url, None).await;
+        db.collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
+            .insert_one(approval_config(&org_id, &service.id))
+            .await
+            .unwrap();
+
+        let state = test_app_state(db.clone());
+        let mut resolved_slug = String::new();
+        let err = proxy_request_by_slug_inner(
+            &state,
+            &access_token_auth(&admin_id),
+            &service.slug,
+            "sensitive",
+            proxy_request("/proxy/s/admin-org-control/sensitive"),
+            &mut resolved_slug,
+        )
+        .await
+        .expect_err("org approval should block until timeout in test");
+
+        assert!(
+            matches!(err, AppError::ApprovalFailed { .. }),
+            "unexpected proxy error: {err}"
+        );
+        let approval = find_approval_request(&db, &org_id, &service.id).await;
+        assert!(approval.from_org_policy);
+        assert_eq!(approval.user_id, org_id);
+        assert_eq!(approval.requester_type, "access_token");
+        assert_eq!(approval.requester_id, admin_id);
+        server.abort();
     }
 }
 

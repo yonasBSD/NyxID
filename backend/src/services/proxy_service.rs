@@ -675,6 +675,13 @@ pub async fn resolve_proxy_target_from_user_service(
         {
             Ok(rows) => rows,
             Err(crate::errors::AppError::OrgQueryTimeout) => return Err(AppError::OrgQueryTimeout),
+            Err(crate::errors::AppError::NotFound(_)) => {
+                tracing::debug!(
+                    resolution_user_id = %user_id,
+                    "Proxy resolution id is not a user; treating org memberships as empty"
+                );
+                Vec::new()
+            }
             Err(e) => return Err(e),
         };
     if memberships.is_empty() {
@@ -885,6 +892,13 @@ pub async fn guard_slug_against_viewer_orgs(
         {
             Ok(rows) => rows,
             Err(crate::errors::AppError::OrgQueryTimeout) => return Ok(()),
+            Err(crate::errors::AppError::NotFound(_)) => {
+                tracing::debug!(
+                    actor_user_id = %actor_user_id,
+                    "Actor id is not a user; skipping viewer-org guard"
+                );
+                return Ok(());
+            }
             Err(e) => return Err(e),
         };
 
@@ -1129,6 +1143,13 @@ pub async fn find_effective_service_owner(
         {
             Ok(rows) => rows,
             Err(crate::errors::AppError::OrgQueryTimeout) => return Ok(None),
+            Err(crate::errors::AppError::NotFound(_)) => {
+                tracing::debug!(
+                    actor_user_id = %actor_user_id,
+                    "Actor id is not a user; treating approval-owner memberships as empty"
+                );
+                return Ok(None);
+            }
             Err(e) => return Err(e),
         };
     for membership in memberships {
