@@ -113,6 +113,7 @@ pub struct UserServiceResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_request_headers:
         Option<Vec<crate::models::default_request_header::DefaultRequestHeader>>,
+    pub ws_frame_injections: Vec<crate::models::ws_frame_injection::WsFrameInjection>,
     pub created_at: String,
     pub updated_at: String,
     /// Provenance: personal credentials, or inherited from an org membership.
@@ -439,6 +440,7 @@ fn user_service_with_source_response(item: UserServiceWithSource) -> UserService
         default_request_headers: crate::models::default_request_header::redact_list_for_response(
             svc.default_request_headers,
         ),
+        ws_frame_injections: svc.ws_frame_injections,
         created_at: svc.created_at.to_rfc3339(),
         updated_at: svc.updated_at.to_rfc3339(),
         credential_source: source.into(),

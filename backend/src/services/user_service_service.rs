@@ -539,6 +539,7 @@ pub async fn create_user_service(
         delegation_token_scope: identity.delegation_token_scope,
         custom_user_agent: None,
         default_request_headers: None,
+        ws_frame_injections: Vec::new(),
         is_active: true,
         source: source.map(str::to_string),
         source_id: source_id.map(str::to_string),

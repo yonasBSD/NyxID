@@ -8,6 +8,8 @@ import {
   updateServiceSchema,
   type UpdateServiceFormData,
   VISIBILITY_OPTIONS,
+  type WsFrameInjection,
+  type WsFrameTrigger,
 } from "@/schemas/services";
 import type { DefaultRequestHeader } from "@/schemas/default-request-headers";
 import { DefaultHeadersEditor } from "@/components/shared/default-headers-editor";
@@ -45,8 +47,79 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Skeleton } from "@/components/ui/skeleton";
-import { AlertCircle } from "lucide-react";
+import { AlertCircle, Plus, Trash2, Wand2 } from "lucide-react";
 import { toast } from "sonner";
+
+type WsFrameTriggerType =
+  | "first_frame_from_downstream"
+  | "json_field_equals"
+  | "frame_index_from_downstream";
+
+const emptyWsFrameRule: WsFrameInjection = {
+  trigger: "first_frame_from_downstream",
+  template: "",
+  frame_kind: "text",
+  consume_trigger: true,
+  direction: "downstream",
+};
+
+const homeAssistantWsFrameRule: WsFrameInjection = {
+  trigger: {
+    json_field_equals: {
+      path: "$.type",
+      value: "auth_required",
+    },
+  },
+  template: '{"type":"auth","access_token":"${credential}"}',
+  frame_kind: "text",
+  consume_trigger: true,
+  direction: "downstream",
+};
+
+function wsTriggerType(trigger: WsFrameTrigger): WsFrameTriggerType {
+  if (trigger === "first_frame_from_downstream") {
+    return "first_frame_from_downstream";
+  }
+  if ("json_field_equals" in trigger) {
+    return "json_field_equals";
+  }
+  return "frame_index_from_downstream";
+}
+
+function wsTriggerForType(type: WsFrameTriggerType): WsFrameTrigger {
+  if (type === "json_field_equals") {
+    return {
+      json_field_equals: {
+        path: "$.type",
+        value: "auth_required",
+      },
+    };
+  }
+  if (type === "frame_index_from_downstream") {
+    return { frame_index_from_downstream: { index: 0 } };
+  }
+  return "first_frame_from_downstream";
+}
+
+function formatTriggerValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value === undefined) return "";
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function parseTriggerValue(value: string): unknown {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return value;
+  }
+}
 
 export function ServiceEditPage() {
   const { serviceId } = useParams({ strict: false }) as { serviceId: string };
@@ -96,6 +169,7 @@ export function ServiceEditPage() {
       certificate_ttl_minutes: "30",
       allowed_principals: "",
       default_request_headers: [],
+      ws_frame_injections: [],
     },
   });
 
@@ -147,6 +221,9 @@ export function ServiceEditPage() {
           service.ssh_config?.allowed_principals.join(", ") ?? "",
         default_request_headers: service.default_request_headers
           ? service.default_request_headers.map((h) => ({ ...h }))
+          : [],
+        ws_frame_injections: service.ws_frame_injections
+          ? service.ws_frame_injections.map((rule) => ({ ...rule }))
           : [],
       });
     }
@@ -240,6 +317,7 @@ export function ServiceEditPage() {
                   supports_websocket: data.supports_websocket ?? false,
                   supports_streaming: data.supports_streaming ?? false,
                 },
+                ws_frame_injections: data.ws_frame_injections ?? [],
                 ...(defaultRequestHeadersPayload !== undefined
                   ? { default_request_headers: defaultRequestHeadersPayload }
                   : {}),
@@ -290,6 +368,22 @@ export function ServiceEditPage() {
   }
 
   const isSshService = service.service_type === "ssh";
+  const wsFrameRules = form.watch("ws_frame_injections") ?? [];
+  const setWsFrameRules = (next: WsFrameInjection[]) =>
+    form.setValue("ws_frame_injections", next, {
+      shouldDirty: true,
+      shouldValidate: true,
+    });
+  const updateWsFrameRule = (
+    index: number,
+    patch: Partial<WsFrameInjection>,
+  ) => {
+    setWsFrameRules(
+      wsFrameRules.map((rule, idx) =>
+        idx === index ? { ...rule, ...patch } : rule,
+      ),
+    );
+  };
 
   return (
     <div className="space-y-8">
@@ -584,6 +678,267 @@ export function ServiceEditPage() {
                     </FormItem>
                   )}
                 />
+
+                <details className="rounded-[10px] border border-border p-3">
+                  <summary className="cursor-pointer text-sm font-semibold">
+                    WebSocket auth frames
+                  </summary>
+                  <div className="mt-4 space-y-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={wsFrameRules.length >= 4}
+                        onClick={() =>
+                          setWsFrameRules([
+                            ...wsFrameRules,
+                            { ...emptyWsFrameRule },
+                          ])
+                        }
+                      >
+                        <Plus />
+                        Add rule
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="sm"
+                        onClick={() =>
+                          setWsFrameRules([{ ...homeAssistantWsFrameRule }])
+                        }
+                      >
+                        <Wand2 />
+                        Home Assistant preset
+                      </Button>
+                      <Badge variant="outline">{wsFrameRules.length}/4</Badge>
+                    </div>
+
+                    {typeof form.formState.errors.ws_frame_injections
+                      ?.message === "string" && (
+                      <p className="text-xs text-destructive">
+                        {form.formState.errors.ws_frame_injections.message}
+                      </p>
+                    )}
+
+                    {wsFrameRules.map((rule, index) => {
+                      const triggerType = wsTriggerType(rule.trigger);
+                      const trigger = rule.trigger;
+                      const jsonField =
+                        typeof trigger === "object" &&
+                        trigger !== null &&
+                        "json_field_equals" in trigger
+                          ? trigger.json_field_equals
+                          : { path: "$.type", value: "auth_required" };
+                      const frameIndex =
+                        typeof trigger === "object" &&
+                        trigger !== null &&
+                        "frame_index_from_downstream" in trigger
+                          ? trigger.frame_index_from_downstream.index
+                          : 0;
+
+                      return (
+                        <div
+                          key={index}
+                          className="space-y-3 rounded-[10px] border border-border p-3"
+                        >
+                          <div className="flex items-center justify-between gap-3">
+                            <p className="text-xs font-medium">
+                              Rule {index + 1}
+                            </p>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              aria-label={`Remove WebSocket auth frame rule ${index + 1}`}
+                              onClick={() =>
+                                setWsFrameRules(
+                                  wsFrameRules.filter((_, idx) => idx !== index),
+                                )
+                              }
+                            >
+                              <Trash2 />
+                            </Button>
+                          </div>
+
+                          <div className="grid gap-3 sm:grid-cols-3">
+                            <div className="space-y-1.5">
+                              <Label>Trigger</Label>
+                              <Select
+                                value={triggerType}
+                                onValueChange={(value) =>
+                                  updateWsFrameRule(index, {
+                                    trigger: wsTriggerForType(
+                                      value as WsFrameTriggerType,
+                                    ),
+                                  })
+                                }
+                              >
+                                <SelectTrigger>
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="first_frame_from_downstream">
+                                    First downstream frame
+                                  </SelectItem>
+                                  <SelectItem value="json_field_equals">
+                                    JSON field equals
+                                  </SelectItem>
+                                  <SelectItem value="frame_index_from_downstream">
+                                    Downstream frame index
+                                  </SelectItem>
+                                </SelectContent>
+                              </Select>
+                            </div>
+
+                            <div className="space-y-1.5">
+                              <Label>Trigger direction</Label>
+                              <Select
+                                value={rule.direction}
+                                onValueChange={(value) =>
+                                  updateWsFrameRule(index, {
+                                    direction:
+                                      value as WsFrameInjection["direction"],
+                                  })
+                                }
+                              >
+                                <SelectTrigger>
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="downstream">
+                                    From service
+                                  </SelectItem>
+                                  <SelectItem value="upstream">
+                                    From client
+                                  </SelectItem>
+                                </SelectContent>
+                              </Select>
+                            </div>
+
+                            <div className="space-y-1.5">
+                              <Label>Frame kind</Label>
+                              <Select
+                                value={rule.frame_kind}
+                                onValueChange={(value) =>
+                                  updateWsFrameRule(index, {
+                                    frame_kind:
+                                      value as WsFrameInjection["frame_kind"],
+                                  })
+                                }
+                              >
+                                <SelectTrigger>
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="text">Text</SelectItem>
+                                  <SelectItem value="binary">Binary</SelectItem>
+                                </SelectContent>
+                              </Select>
+                            </div>
+                          </div>
+
+                          {triggerType === "json_field_equals" && (
+                            <div className="grid gap-3 sm:grid-cols-2">
+                              <div className="space-y-1.5">
+                                <Label>JSON path</Label>
+                                <Input
+                                  value={jsonField.path}
+                                  placeholder="$.type"
+                                  onChange={(event) =>
+                                    updateWsFrameRule(index, {
+                                      trigger: {
+                                        json_field_equals: {
+                                          ...jsonField,
+                                          path: event.target.value,
+                                        },
+                                      },
+                                    })
+                                  }
+                                />
+                              </div>
+                              <div className="space-y-1.5">
+                                <Label>Expected value</Label>
+                                <Input
+                                  value={formatTriggerValue(jsonField.value)}
+                                  placeholder="auth_required"
+                                  onChange={(event) =>
+                                    updateWsFrameRule(index, {
+                                      trigger: {
+                                        json_field_equals: {
+                                          ...jsonField,
+                                          value: parseTriggerValue(
+                                            event.target.value,
+                                          ),
+                                        },
+                                      },
+                                    })
+                                  }
+                                />
+                              </div>
+                            </div>
+                          )}
+
+                          {triggerType === "frame_index_from_downstream" && (
+                            <div className="space-y-1.5">
+                              <Label>Downstream frame index</Label>
+                              <Input
+                                type="number"
+                                min={0}
+                                value={frameIndex}
+                                onChange={(event) =>
+                                  updateWsFrameRule(index, {
+                                    trigger: {
+                                      frame_index_from_downstream: {
+                                        index: Math.max(
+                                          0,
+                                          Number(event.target.value) || 0,
+                                        ),
+                                      },
+                                    },
+                                  })
+                                }
+                              />
+                            </div>
+                          )}
+
+                          <div className="flex items-center gap-2">
+                            <Checkbox
+                              id={`ws-consume-trigger-${index}`}
+                              checked={rule.consume_trigger}
+                              onCheckedChange={(checked) =>
+                                updateWsFrameRule(index, {
+                                  consume_trigger: checked === true,
+                                })
+                              }
+                            />
+                            <Label
+                              htmlFor={`ws-consume-trigger-${index}`}
+                              className="text-sm font-normal"
+                            >
+                              Consume trigger frame
+                            </Label>
+                          </div>
+
+                          <div className="space-y-1.5">
+                            <Label>Injected frame template</Label>
+                            <textarea
+                              className="flex min-h-[96px] w-full rounded-[10px] border border-input bg-transparent px-3 py-2 font-mono text-xs ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                              value={rule.template}
+                              maxLength={4096}
+                              placeholder='{"type":"auth","access_token":"${credential}"}'
+                              onChange={(event) =>
+                                updateWsFrameRule(index, {
+                                  template: event.target.value,
+                                })
+                              }
+                            />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </details>
 
                 <div>
                   <p className="mb-1 text-sm font-medium">Auth Type</p>
