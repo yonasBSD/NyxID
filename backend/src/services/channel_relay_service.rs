@@ -921,19 +921,6 @@ mod tests {
             .unwrap_or_else(|_| panic!("{name} header should be valid UTF-8"))
     }
 
-    fn decode_callback_claims_unverified(token: &str) -> crate::crypto::jwt::RelayCallbackClaims {
-        use base64::Engine as _;
-
-        let claims_segment = token
-            .split('.')
-            .nth(1)
-            .expect("JWT should have a claims segment");
-        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(claims_segment)
-            .expect("claims should be base64url");
-        serde_json::from_slice(&bytes).expect("claims should decode")
-    }
-
     #[tokio::test]
     async fn forward_to_agent_accepts_202() {
         let (url, server, _captured) = spawn_mock_callback(202, None).await;
@@ -1081,7 +1068,8 @@ mod tests {
         assert!(delivery.result.is_ok());
         let request = captured_request(&captured).await;
         let token = header_value(&request.headers, "X-NyxID-Callback-Token");
-        let claims = decode_callback_claims_unverified(token);
+        let claims = crate::crypto::jwt::validate_relay_callback_token(&keys, &config, token)
+            .expect("callback token should validate");
         let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
         assert_eq!(
             body["correlation_id"].as_str().expect("correlation_id"),

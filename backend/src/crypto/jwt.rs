@@ -91,7 +91,7 @@ pub const RELAY_REPLY_TOKEN_TYPE: &str = "relay_reply";
 const RELAY_REPLY_CLOCK_SKEW_SECS: i64 = 60;
 pub const RELAY_CALLBACK_AUDIENCE: &str = "channel-relay/callback";
 pub const RELAY_CALLBACK_TOKEN_TYPE: &str = "relay_callback";
-#[allow(dead_code)]
+#[cfg(test)]
 const RELAY_CALLBACK_CLOCK_SKEW_SECS: i64 = 60;
 
 /// Dedicated claims for `/api/v1/channel-relay/reply`.
@@ -788,7 +788,11 @@ pub fn validate_relay_reply_token(
 }
 
 /// Verify and decode a relay callback token.
-#[allow(dead_code)]
+///
+/// NyxID itself never validates these tokens in production — downstream
+/// consumers (e.g. Aevatar) do so via the public JWKS. This helper exists
+/// for round-trip tests, so it is compiled only under `cfg(test)`.
+#[cfg(test)]
 pub fn validate_relay_callback_token(
     keys: &JwtKeys,
     config: &AppConfig,
