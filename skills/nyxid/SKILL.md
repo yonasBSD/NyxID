@@ -486,6 +486,86 @@ nyxid proxy discover --output json
 
 NyxID injects the user's credentials automatically. Do not ask for or log raw downstream credentials.
 
+### WebSocket-authenticated services
+
+Some protocols (Home Assistant, Discord gateway, MQTT-over-WS, Slack RTM) do not accept the credential on the HTTP upgrade. They complete the upgrade unauthenticated, send a challenge frame, then expect a response frame carrying the credential. NyxID can inject a held credential into that response frame on the client's behalf -- the client never sees the challenge.
+
+From an agent's point of view, this is a normal WS proxy call with only the NyxID bearer:
+
+```python
+import asyncio, json, os, websockets
+
+async def main():
+    async with websockets.connect(
+        "wss://nyx-api.chrono-ai.fun/api/v1/proxy/s/home-assistant/websocket",
+        additional_headers={"Authorization": f"Bearer {os.environ['NYXID_ACCESS_TOKEN']}"},
+    ) as ws:
+        # First visible frame is auth_ok -- the auth_required challenge was
+        # consumed by NyxID and never reached this client.
+        print(await ws.recv())
+        await ws.send(json.dumps({"id": 1, "type": "get_states"}))
+        print(await ws.recv())
+
+asyncio.run(main())
+```
+
+Or with `websocat`:
+
+```bash
+websocat -H="Authorization: Bearer $NYXID_ACCESS_TOKEN" \
+  "wss://nyx-api.chrono-ai.fun/api/v1/proxy/s/home-assistant/websocket"
+```
+
+**Home Assistant preset.** The admin service-edit dashboard has a one-click Home Assistant preset in the "WebSocket auth frames" section. It installs this rule on the catalog entry so every user whose `UserService` is catalog-backed inherits it automatically:
+
+```json
+{
+  "trigger": {"json_field_equals": {"path": "$.type", "value": "auth_required"}},
+  "template": "{\"type\":\"auth\",\"access_token\":\"${credential}\"}",
+  "frame_kind": "text",
+  "consume_trigger": true,
+  "direction": "downstream"
+}
+```
+
+Expected on-wire behavior:
+
+```text
+Downstream -> NyxID:    {"type":"auth_required","ha_version":"..."}
+NyxID -> Downstream:    {"type":"auth","access_token":"<held credential>"}
+Downstream -> Client:   {"type":"auth_ok"}
+```
+
+With `consume_trigger: true` the client's first visible frame is `auth_ok`, not `auth_required`. The credential substitution for `${credential}` uses the service's held LLAT (or bearer); the client only ever sends its NyxID bearer.
+
+**Admins: configure via REST.** `ws_frame_injections` is an admin-only field today. `nyxid service update` does not yet expose it, and user-owned custom endpoints cannot set it through the user API. Admins configure catalog entries via the dashboard or directly:
+
+```bash
+# Requires admin role on the bearer
+curl -X PUT "https://nyx-api.chrono-ai.fun/api/v1/services/$SERVICE_ID" \
+  -H "Authorization: Bearer $ADMIN_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"ws_frame_injections":[{
+    "trigger":{"json_field_equals":{"path":"$.type","value":"auth_required"}},
+    "template":"{\"type\":\"auth\",\"access_token\":\"${credential}\"}",
+    "frame_kind":"text",
+    "consume_trigger":true,
+    "direction":"downstream"
+  }]}'
+```
+
+**Other WS protocols.** The same pattern covers any challenge/response post-upgrade auth. Only Home Assistant has a built-in preset today; others need the rule hand-written.
+
+| Protocol | Challenge shape | Response template |
+|----------|-----------------|-------------------|
+| Home Assistant | `{"type":"auth_required"}` text frame | `{"type":"auth","access_token":"${credential}"}` |
+| Discord gateway | op:10 Hello text frame | op:2 IDENTIFY with the bot token |
+| MQTT-over-WS CONNECT | binary CONNECT packet | binary CONNECT with username/password |
+
+Binary frame triggers are supported via `"frame_kind": "binary"`, but `json_field_equals` only evaluates text frames -- use `first_frame_from_downstream` or `frame_index_from_downstream` for binary protocols.
+
+**Limits.** Max 4 rules per service, 4 KB per template, 8 injections per WS connection. `${credential}` is the only supported template interpolation. Credentials never appear in logs, errors, or audit payloads -- the proxy only records a 12-hex-char SHA-256 prefix for correlation. Successful injection emits the metadata-only audit event `ws_frame_auth_injected`. See `docs/WS_FRAME_INJECTION.md` for the full schema.
+
 ## Managing Services
 
 ```bash
