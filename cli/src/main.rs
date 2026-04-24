@@ -37,8 +37,21 @@ async fn main() {
     let mut tele_client: Option<telemetry::TelemetryClient> = if telemetry_dsn_configured {
         // DSN is present. Resolve consent, prompt if first-run TTY,
         // then init. Prompt refusal never bails the command.
-        let mut consent = telemetry::consent::resolve_consent(profile.as_deref());
-        let _ = telemetry::consent::prompt_if_needed_interactive(profile.as_deref(), &mut consent);
+        //
+        // Consent resolution honors any explicit per-profile choice
+        // persisted by older releases (via `_preferring_profile`) but
+        // otherwise defaults to the user-global (default profile)
+        // config. That keeps migration safe: upgrading will not
+        // silently override a historical opt-out on a named profile.
+        // Going forward, only the default profile is written to — the
+        // prompt and the `nyxid telemetry` editor both use `None`.
+        //
+        // `TelemetryClient::init` receives `profile` so the anon
+        // distinct_id file is isolated per profile (identity, not
+        // consent — different concern).
+        let mut consent =
+            telemetry::consent::resolve_consent_preferring_profile(profile.as_deref());
+        let _ = telemetry::consent::prompt_if_needed_interactive(None, &mut consent);
         if consent.enabled {
             telemetry::TelemetryClient::init(profile.as_deref())
         } else {

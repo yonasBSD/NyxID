@@ -49,8 +49,44 @@ let inited = false;
  */
 let telemetryActive = false;
 
-/** Synchronous read of the runtime telemetry state. */
+/**
+ * Best-effort Do-Not-Track detection. We honor the browser's DNT
+ * signal across the whole surface — not just inside PostHog — because
+ * `lib/api-client.ts` also attaches `X-NyxID-Client: ui` headers based
+ * on `isTelemetryActive()`, and the backend tags its own telemetry
+ * events off those headers. Without this check, a user with DNT set
+ * who clicked Allow on the banner would still generate backend-side
+ * telemetry even though our privacy policy claims we honor DNT.
+ *
+ * Values that count as "please do not track me": navigator.doNotTrack
+ * === "1", window.doNotTrack === "1", or legacy `navigator.msDoNotTrack
+ * === "1"` on older IE/Edge. All other values (including "0" and
+ * "unspecified") fall through to normal consent resolution.
+ */
+function isDntActive(): boolean {
+  if (typeof navigator === "undefined") return false;
+  // Modern browsers: navigator.doNotTrack
+  const nav = (navigator as Navigator & { msDoNotTrack?: string }).doNotTrack;
+  if (nav === "1" || nav === "yes") return true;
+  // Legacy IE/old Edge: navigator.msDoNotTrack
+  const ms = (navigator as Navigator & { msDoNotTrack?: string }).msDoNotTrack;
+  if (ms === "1") return true;
+  // Non-standard Firefox-era fallback
+  const win = (
+    typeof window !== "undefined" ? (window as Window & { doNotTrack?: string }) : null
+  )?.doNotTrack;
+  if (win === "1" || win === "yes") return true;
+  return false;
+}
+
+/**
+ * Synchronous read of the runtime telemetry state. Returns false if
+ * the browser has DNT set, regardless of the module-level
+ * `telemetryActive` flag, so callers like `api-client.ts` suppress
+ * surface-identification headers on DNT browsers.
+ */
 export function isTelemetryActive(): boolean {
+  if (isDntActive()) return false;
   return telemetryActive;
 }
 
@@ -135,6 +171,17 @@ export function initTelemetry(args: InitTelemetryArgs): void {
   }
   if (!dsn) return;
   if (!host) host = 'https://us.i.posthog.com';
+
+  // Clear any persistent PostHog opt-out flag. `opt_out_capturing()`
+  // (called from `disableTelemetry()`) writes a flag to localStorage
+  // that survives re-init — so a user who toggles OFF in Settings and
+  // later toggles back ON would otherwise re-enter with the SDK still
+  // refusing to capture events, even though our own `telemetryActive`
+  // flag says yes. Guarded so we only call it when actually coming out
+  // of a prior opt-out (avoids firing an `$opt_in` event every boot).
+  if (posthog.has_opted_out_capturing?.()) {
+    posthog.opt_in_capturing();
+  }
 
   posthog.init(dsn, {
     api_host: host,
@@ -239,5 +286,36 @@ export function capture(event: UiEvent): void {
 export function captureException(err: unknown): void {
   if (!inited) return;
   posthog.captureException?.(err as Error);
+}
+
+/**
+ * Runtime teardown. Call when the user opts out of telemetry from the
+ * Settings page after a prior opt-in, to stop further event capture
+ * without requiring a page reload.
+ *
+ * Resets the PostHog client's anon distinct_id and flips the vendor
+ * into opt-out mode (double-safety: `before_send` already short-circuits
+ * via the `inited` guard on each emit helper, and PostHog's
+ * `opt_out_capturing` prevents any network call even for code that
+ * reaches past us into the vendor SDK directly).
+ *
+ * After this call, the module is back to its pre-init state — another
+ * call to `initTelemetry` (e.g. user toggles back on) will run cleanly.
+ *
+ * No-op when telemetry was never inited.
+ */
+export function disableTelemetry(): void {
+  if (!inited) return;
+  try {
+    posthog.opt_out_capturing();
+    posthog.reset();
+  } catch {
+    // Tolerate vendor errors during teardown. The state resets below
+    // are the source of truth for the rest of the app (api-client.ts
+    // etc. read `isTelemetryActive()`), so even a partial vendor
+    // failure leaves the app in the correct "off" posture.
+  }
+  inited = false;
+  telemetryActive = false;
 }
 
