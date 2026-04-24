@@ -107,7 +107,7 @@ sequenceDiagram
         W->>DB: Insert channel_message (direction: inbound)
 
         W->>RL: forward_to_agent(message, callback_url)
-        RL->>AG: POST callback_url<br/>X-NyxID-Signature: HMAC<br/>X-NyxID-Message-Id: uuid
+        RL->>AG: POST callback_url<br/>X-NyxID-Callback-Token: JWT<br/>X-NyxID-Signature: HMAC<br/>X-NyxID-Message-Id: uuid
 
         alt Sync Reply (200 + body)
             AG-->>RL: { reply: { text: "..." } }
@@ -433,6 +433,7 @@ NyxID sends a normalized message to the agent's callback URL.
 ```json
 {
   "message_id": "550e8400-e29b-41d4-a716-446655440000",
+  "correlation_id": "77a1b4f1-f7a4-421e-9f89-7d0b1de9e0c6",
   "platform": "telegram",
   "agent": {
     "api_key_id": "880e8400-e29b-41d4-a716-446655440000",
@@ -475,6 +476,7 @@ The payload normalizes messages into a common format so agents can handle all pl
 | Field | Type | Nullable | Description |
 |---|---|---|---|
 | `message_id` | UUID | No | NyxID's internal ID for this message record (stored in `channel_messages`). The agent uses this to send async replies via `POST /channel-relay/reply`. |
+| `correlation_id` | UUID | No | Per-delivery correlation ID. This equals the callback JWT `jti`; retries mint a new value. |
 | `platform` | string | No | Which messaging platform the message came from: `telegram`, `discord`, `lark`, or `feishu`. |
 | `agent.api_key_id` | UUID | No | The `ApiKey._id` assigned to this conversation route. This is the agent's identity from agent isolation. A shared callback endpoint dispatches based on this. |
 | `agent.name` | string | No | Human-readable name of the API key (e.g., `"claude-support-bot"`). For logging and display only. |
@@ -497,11 +499,37 @@ The payload normalizes messages into a common format so agents can handle all pl
 | Header | Description |
 |---|---|
 | `Content-Type` | `application/json` |
-| `X-NyxID-Signature` | HMAC-SHA256 of request body, signed with the API key's hash |
+| `X-NyxID-Callback-Token` | RS256 JWT proving the callback came from NyxID. Verify with the JWKS at `/.well-known/jwks.json`. |
+| `X-NyxID-Signature` | Transitional HMAC-SHA256 of request body, signed with the API key's hash. Dual-emitted during migration and will be removed later. |
 | `X-NyxID-Message-Id` | UUID of the `channel_message` record |
 | `X-NyxID-Timestamp` | ISO 8601 timestamp (for replay protection) |
 | `X-NyxID-Platform` | Platform identifier (`telegram`, `discord`, `lark`, `feishu`) |
 | `X-NyxID-User-Token` | Short-lived access token for the bot owner. The agent can use this as `Authorization: Bearer <token>` to call NyxID APIs (proxy, approvals, etc.) on behalf of the user. Scoped to `proxy read`. Absent if token generation fails. |
+
+#### Callback Authentication (JWT)
+
+NyxID signs every callback delivery with a dedicated RS256 JWT in `X-NyxID-Callback-Token`. The JWT header carries `kid`; fetch NyxID's public keys from `/.well-known/jwks.json` and select the matching key.
+
+Claims:
+
+| Claim | Value |
+|---|---|
+| `iss` | NyxID issuer (`JWT_ISSUER`) |
+| `aud` | `channel-relay/callback` |
+| `exp` | Expiration timestamp |
+| `iat` | Issued-at timestamp |
+| `jti` | Per-delivery callback token ID |
+| `token_type` | `relay_callback` |
+| `api_key_id` | Agent API key ID bound to the callback |
+| `message_id` | Callback payload `message_id` |
+| `platform` | Callback payload `platform` |
+| `body_sha256` | Lowercase hex SHA-256 of the exact request body bytes |
+
+Callback tokens have a 5-minute TTL (`JWT_RELAY_CALLBACK_TTL_SECS`, default `300`) and validation allows 60 seconds of clock skew. Compute `body_sha256` over the exact wire bytes received from the HTTP request; reformatting JSON, normalizing field order, changing whitespace, or adding a trailing newline changes the hash and must fail verification.
+
+`payload.correlation_id` always equals the token `jti`. Each retry mints a fresh `jti` and `correlation_id`; idempotency is by `message_id`, not by `jti`.
+
+During the transition, NyxID also dual-emits the legacy `X-NyxID-Signature` HMAC header over the same body bytes. That header remains for compatibility in this release and will be removed later.
 
 ### Identity Resolution (optional convenience API)
 
@@ -711,6 +739,10 @@ graph TD
 | **SSRF** | Callback URLs validated: HTTPS-only in production, block RFC 1918/loopback ranges, optional domain allowlist |
 | **Bot token storage** | AES-256 encrypted at rest (same pattern as `UserApiKey.credential_encrypted`). Never returned in API responses. Only `platform_bot_username` is exposed. |
 | **Webhook forgery** | Per-platform verification: Telegram secret header, Discord Ed25519, Lark / Feishu Verification Token checks plus optional Encrypt Key signature verification and AES decryption. All comparisons use constant-time equality where applicable. |
+| **Replay attacks** | Callbacks include `X-NyxID-Timestamp`; agents should reject messages older than 5 minutes. Callback JWTs also expire after 5 minutes with 60s skew tolerance. |
+| **Callback authentication** | `X-NyxID-Callback-Token` is an RS256 JWT verifiable through `/.well-known/jwks.json`; its `body_sha256` claim binds the exact request bytes. `X-NyxID-Signature` HMAC is dual-emitted during transition and will be removed later. |
+| **Agent impersonation** | Async reply endpoint accepts two auth paths: (a) the agent API key, which must match the conversation's `agent_api_key_id`; or (b) a per-callback reply token bound to a specific `inbound_message_id`, `conversation_id`, `api_key_id`, and `platform`, single-use, 30-min TTL, and revalidated against live `api_key.is_active` on every call. See [Reply Token](#reply-token). |
+| **Rate limiting** | Per-bot rate limiting on inbound webhooks. Per-agent rate limiting on callback dispatch (reuses `PerAgentRateLimiter` from agent isolation). |
 
 ### Migrating a stuck Lark / Feishu bot
 
@@ -726,10 +758,6 @@ You can update the bot either via the API or the CLI:
 
 - `PATCH /api/v1/channel-bots/{id}` with `{ "verification_token": "...", "encrypt_key": "..." }`
 - `nyxid channel-bot update <BOT_ID> --verification-token ... [--encrypt-key ...]`
-| **Replay attacks** | Callbacks include `X-NyxID-Timestamp`. Agents should reject messages older than 5 minutes. |
-| **Callback authentication** | `X-NyxID-Signature` is HMAC-SHA256 of the request body, keyed with the API key's hash. Agents verify this to confirm the request came from NyxID. |
-| **Agent impersonation** | Async reply endpoint accepts two auth paths: (a) the agent API key, which must match the conversation's `agent_api_key_id`; or (b) a per-callback reply token bound to a specific `inbound_message_id`, `conversation_id`, `api_key_id`, and `platform`, single-use, 30-min TTL, and revalidated against live `api_key.is_active` on every call. See [Reply Token](#reply-token). |
-| **Rate limiting** | Per-bot rate limiting on inbound webhooks. Per-agent rate limiting on callback dispatch (reuses `PerAgentRateLimiter` from agent isolation). |
 
 ---
 
@@ -1046,6 +1074,7 @@ graph LR
 
 | Variable | Default | Description |
 |---|---|---|
+| `JWT_RELAY_CALLBACK_TTL_SECS` | `300` | Lifetime for `X-NyxID-Callback-Token` JWTs |
 | `CHANNEL_RELAY_CALLBACK_TIMEOUT_SECS` | `30` | HTTP timeout for agent callback requests |
 | `CHANNEL_RELAY_MAX_BOTS_PER_USER` | `5` | Maximum bots a user can register |
 | `CHANNEL_RELAY_MESSAGE_TTL_DAYS` | `30` | TTL for `channel_messages` auto-cleanup |

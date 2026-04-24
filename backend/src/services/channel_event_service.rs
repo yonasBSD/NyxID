@@ -71,6 +71,7 @@ pub async fn forward_event(
     db: &mongodb::Database,
     http_client: &reqwest::Client,
     config: &AppConfig,
+    keys: &crate::crypto::jwt::JwtKeys,
     rate_limiter: &PerChannelEventLimiter,
     dedup_cache: &Arc<EventDedupCache>,
     telemetry: Option<&TelemetryClient>,
@@ -272,8 +273,10 @@ pub async fn forward_event(
     let delivery = channel_relay_service::forward_to_agent(
         http_client,
         config,
+        keys,
         callback_url,
-        &payload,
+        payload,
+        &api_key.id,
         &api_key.key_hash,
         None,
     )
@@ -513,6 +516,7 @@ fn build_device_callback_payload(
         // resolve to the persisted ChannelMessage. The client-supplied
         // `event_id` is preserved in `ChannelMessage.platform_message_id`.
         message_id: nyxid_message_id.to_string(),
+        correlation_id: String::new(),
         platform: "device".to_string(),
         reply_token: None,
         agent: CallbackAgent {
