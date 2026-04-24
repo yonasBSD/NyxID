@@ -5,7 +5,9 @@ use uuid::Uuid;
 
 use crate::crypto::token::{generate_random_token, hash_token};
 use crate::errors::{AppError, AppResult};
+use crate::models::consent::COLLECTION_NAME as CONSENTS;
 use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
+use crate::models::refresh_token::COLLECTION_NAME as REFRESH_TOKENS;
 
 /// Known OIDC scopes supported by NyxID. Used for validation of
 /// `allowed_scopes` on OAuth clients.
@@ -384,6 +386,8 @@ pub async fn delete_client(db: &mongodb::Database, client_id: &str) -> AppResult
         return Err(AppError::NotFound("OAuth client not found".to_string()));
     }
 
+    cascade_client_deactivation(db, client_id).await?;
+
     Ok(())
 }
 
@@ -409,6 +413,20 @@ pub async fn delete_client_for_creator(
         return Err(AppError::NotFound("OAuth client not found".to_string()));
     }
 
+    cascade_client_deactivation(db, client_id).await?;
+
+    Ok(())
+}
+
+// Mirrors org-delete cascade in org_service.rs so stale consents/refresh tokens
+// do not linger after a single client is deactivated (issue #498).
+async fn cascade_client_deactivation(db: &mongodb::Database, client_id: &str) -> AppResult<()> {
+    db.collection::<bson::Document>(CONSENTS)
+        .delete_many(doc! { "client_id": client_id })
+        .await?;
+    db.collection::<bson::Document>(REFRESH_TOKENS)
+        .delete_many(doc! { "client_id": client_id })
+        .await?;
     Ok(())
 }
 
@@ -573,6 +591,8 @@ mod tests {
 
     mod mongo {
         use super::*;
+        use crate::models::consent::Consent;
+        use crate::models::refresh_token::RefreshToken;
         use crate::test_utils::connect_test_database;
 
         async fn insert_dcr_client(
@@ -600,6 +620,139 @@ mod tests {
                 .await
                 .expect("insert dcr fixture");
             client
+        }
+
+        async fn insert_client_with_consent_and_refresh_token(
+            db: &mongodb::Database,
+            client_id: &str,
+            created_by: &str,
+        ) {
+            let now = Utc::now();
+            db.collection::<OauthClient>(OAUTH_CLIENTS)
+                .insert_one(&OauthClient {
+                    id: client_id.to_string(),
+                    client_name: "Cascade Test Client".to_string(),
+                    client_secret_hash: "NONE".to_string(),
+                    redirect_uris: vec!["http://localhost:3000/callback".to_string()],
+                    allowed_scopes: DEFAULT_ALLOWED_SCOPES.to_string(),
+                    grant_types: "authorization_code".to_string(),
+                    client_type: "public".to_string(),
+                    is_active: true,
+                    delegation_scopes: String::new(),
+                    created_by: Some(created_by.to_string()),
+                    created_at: now,
+                    updated_at: now,
+                })
+                .await
+                .expect("insert oauth client fixture");
+
+            db.collection::<Consent>(CONSENTS)
+                .insert_one(&Consent {
+                    id: format!("consent-{client_id}"),
+                    user_id: "user-with-consent".to_string(),
+                    client_id: client_id.to_string(),
+                    scopes: DEFAULT_ALLOWED_SCOPES.to_string(),
+                    granted_at: now,
+                    expires_at: None,
+                })
+                .await
+                .expect("insert consent fixture");
+
+            db.collection::<RefreshToken>(REFRESH_TOKENS)
+                .insert_one(&RefreshToken {
+                    id: format!("refresh-{client_id}"),
+                    jti: format!("jti-{client_id}"),
+                    client_id: client_id.to_string(),
+                    user_id: "user-with-refresh-token".to_string(),
+                    session_id: Some(format!("session-{client_id}")),
+                    expires_at: now + chrono::Duration::days(1),
+                    revoked: false,
+                    replaced_by: None,
+                    revoked_at: None,
+                    created_at: now,
+                })
+                .await
+                .expect("insert refresh token fixture");
+        }
+
+        async fn count_consents(db: &mongodb::Database, client_id: &str) -> u64 {
+            db.collection::<Consent>(CONSENTS)
+                .count_documents(doc! { "client_id": client_id })
+                .await
+                .expect("count consents")
+        }
+
+        async fn count_refresh_tokens(db: &mongodb::Database, client_id: &str) -> u64 {
+            db.collection::<RefreshToken>(REFRESH_TOKENS)
+                .count_documents(doc! { "client_id": client_id })
+                .await
+                .expect("count refresh tokens")
+        }
+
+        async fn assert_client_deactivated_and_cascaded(db: &mongodb::Database, client_id: &str) {
+            let client = get_client(db, client_id)
+                .await
+                .expect("client tombstone remains");
+            assert!(!client.is_active, "client should be soft-deleted");
+            assert_eq!(count_consents(db, client_id).await, 0);
+            assert_eq!(count_refresh_tokens(db, client_id).await, 0);
+        }
+
+        #[tokio::test]
+        async fn delete_client_for_creator_deactivates_and_cascades_grants() {
+            let Some(db) = connect_test_database("oc_del_creator").await else {
+                eprintln!("skipping oc_del_creator test: no local MongoDB available");
+                return;
+            };
+
+            let client_id = "owned-client";
+            insert_client_with_consent_and_refresh_token(&db, client_id, "owner").await;
+
+            delete_client_for_creator(&db, client_id, "owner")
+                .await
+                .expect("delete owned client");
+
+            assert_client_deactivated_and_cascaded(&db, client_id).await;
+        }
+
+        #[tokio::test]
+        async fn delete_client_for_creator_does_not_cascade_when_owner_mismatches() {
+            let Some(db) = connect_test_database("oc_del_wrong").await else {
+                eprintln!("skipping oc_del_wrong test: no local MongoDB available");
+                return;
+            };
+
+            let client_id = "cross-owned-client";
+            insert_client_with_consent_and_refresh_token(&db, client_id, "owner").await;
+
+            let err = delete_client_for_creator(&db, client_id, "other-owner")
+                .await
+                .expect_err("wrong owner must not delete");
+
+            assert!(matches!(err, AppError::NotFound(_)));
+            let client = get_client(&db, client_id)
+                .await
+                .expect("client should remain");
+            assert!(client.is_active, "client should remain active");
+            assert_eq!(count_consents(&db, client_id).await, 1);
+            assert_eq!(count_refresh_tokens(&db, client_id).await, 1);
+        }
+
+        #[tokio::test]
+        async fn delete_client_deactivates_and_cascades_grants() {
+            let Some(db) = connect_test_database("oc_del_admin").await else {
+                eprintln!("skipping oc_del_admin test: no local MongoDB available");
+                return;
+            };
+
+            let client_id = "admin-delete-client";
+            insert_client_with_consent_and_refresh_token(&db, client_id, "owner").await;
+
+            delete_client(&db, client_id)
+                .await
+                .expect("admin delete client");
+
+            assert_client_deactivated_and_cascaded(&db, client_id).await;
         }
 
         #[tokio::test]
