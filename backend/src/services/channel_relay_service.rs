@@ -2,15 +2,15 @@
 //! handling.
 //!
 //! Responsible for persisting inbound/outbound messages, forwarding inbound
-//! messages to agent callback URLs with HMAC signatures, and parsing
-//! synchronous reply payloads.
+//! messages to agent callback URLs with RS256 callback JWTs plus transitional
+//! HMAC signatures, and recording callback delivery status.
 
 use chrono::Utc;
 use futures::TryStreamExt;
 use hmac::{Hmac, Mac};
 use mongodb::bson::doc;
 use serde::Serialize;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 
 use crate::config::AppConfig;
 use crate::errors::{AppError, AppResult};
@@ -27,6 +27,7 @@ type HmacSha256 = Hmac<Sha256>;
 #[derive(Debug, Clone, Serialize)]
 pub struct CallbackPayload {
     pub message_id: String,
+    pub correlation_id: String,
     pub platform: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_token: Option<String>,
@@ -269,23 +270,31 @@ pub struct CallbackDelivery {
 
 /// Forward an inbound message to the agent's callback URL.
 ///
-/// Signs the request body with HMAC-SHA256 using the API key hash as the
-/// signing key. **Only HTTP 202 is a success.** HTTP 200 is tolerated for
-/// legacy clients but the response body is ignored (sync reply mode was
-/// deprecated per ADR-013 and NyxID#221 comment 2 — agent replies must flow
-/// through `POST /api/v1/channel-relay/reply`).
+/// Emits an RS256 callback JWT in `X-NyxID-Callback-Token` whose
+/// `body_sha256` claim covers the exact wire body bytes. It also keeps the
+/// legacy `X-NyxID-Signature` HMAC header during the dual-emit transition.
+/// **Only HTTP 202 is a success.** HTTP 200 is tolerated for legacy clients
+/// but the response body is ignored (sync reply mode was deprecated per
+/// ADR-013 and NyxID#221 comment 2 — agent replies must flow through
+/// `POST /api/v1/channel-relay/reply`).
 ///
 /// Returns a [`CallbackDelivery`] so callers can observe the actual upstream
 /// status code in addition to the success/error result.
+#[allow(clippy::too_many_arguments)]
 pub async fn forward_to_agent(
     http_client: &reqwest::Client,
     config: &AppConfig,
+    keys: &crate::crypto::jwt::JwtKeys,
     callback_url: &str,
-    payload: &CallbackPayload,
+    mut payload: CallbackPayload,
+    api_key_id: &str,
     api_key_hash: &str,
     user_access_token: Option<&str>,
 ) -> CallbackDelivery {
-    let body_bytes = match serde_json::to_vec(payload) {
+    let jti = uuid::Uuid::new_v4().to_string();
+    payload.correlation_id = jti.clone();
+
+    let body_bytes = match serde_json::to_vec(&payload) {
         Ok(b) => b,
         Err(e) => {
             return CallbackDelivery {
@@ -293,6 +302,25 @@ pub async fn forward_to_agent(
                 result: Err(AppError::Internal(format!(
                     "failed to serialize callback payload: {e}"
                 ))),
+            };
+        }
+    };
+
+    let body_sha256 = hex::encode(Sha256::digest(&body_bytes));
+    let callback_token = match crate::crypto::jwt::generate_relay_callback_token(
+        keys,
+        config,
+        &jti,
+        api_key_id,
+        &payload.message_id,
+        &payload.platform,
+        &body_sha256,
+    ) {
+        Ok(token) => token,
+        Err(e) => {
+            return CallbackDelivery {
+                http_status: None,
+                result: Err(e),
             };
         }
     };
@@ -314,6 +342,7 @@ pub async fn forward_to_agent(
     let mut request = http_client
         .post(callback_url)
         .header("Content-Type", "application/json")
+        .header("X-NyxID-Callback-Token", &callback_token)
         .header("X-NyxID-Signature", &signature)
         .header("X-NyxID-Message-Id", &payload.message_id)
         .header("X-NyxID-Timestamp", &timestamp)
@@ -504,6 +533,7 @@ pub fn build_callback_payload(
 
     CallbackPayload {
         message_id: message.id.clone(),
+        correlation_id: String::new(),
         platform: message.platform.clone(),
         reply_token,
         agent: CallbackAgent {
@@ -569,6 +599,7 @@ mod tests {
     fn callback_payload_serializes_to_json() {
         let payload = CallbackPayload {
             message_id: "msg-1".to_string(),
+            correlation_id: String::new(),
             platform: "telegram".to_string(),
             reply_token: None,
             agent: CallbackAgent {
@@ -598,6 +629,7 @@ mod tests {
 
         let json = serde_json::to_value(&payload).unwrap();
         assert_eq!(json["message_id"], "msg-1");
+        assert_eq!(json["correlation_id"], "");
         assert_eq!(json["agent"]["api_key_id"], "key-1");
         assert_eq!(json["conversation"]["type"], "private");
         assert_eq!(json["content"]["type"], "text");
@@ -611,6 +643,7 @@ mod tests {
     fn callback_payload_includes_reply_token_when_present() {
         let payload = CallbackPayload {
             message_id: "msg-1".to_string(),
+            correlation_id: String::new(),
             platform: "telegram".to_string(),
             reply_token: Some("reply-token".to_string()),
             agent: CallbackAgent {
@@ -681,6 +714,7 @@ mod tests {
     fn test_payload() -> CallbackPayload {
         CallbackPayload {
             message_id: "msg-test".to_string(),
+            correlation_id: String::new(),
             platform: "device".to_string(),
             reply_token: None,
             agent: CallbackAgent {
@@ -726,6 +760,7 @@ mod tests {
             jwt_issuer: "test".to_string(),
             jwt_access_ttl_secs: 900,
             jwt_relay_reply_ttl_secs: 1800,
+            jwt_relay_callback_ttl_secs: 300,
             jwt_refresh_ttl_secs: 604800,
             google_client_id: None,
             google_client_secret: None,
@@ -797,37 +832,108 @@ mod tests {
         }
     }
 
+    fn test_jwt_keys() -> crate::crypto::jwt::JwtKeys {
+        use jsonwebtoken::{DecodingKey, EncodingKey};
+        use rsa::pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey};
+        use rsa::traits::PublicKeyParts;
+
+        let mut rng = rand::thread_rng();
+        let private_key = rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let public_key = private_key.to_public_key();
+
+        let private_pem = private_key
+            .to_pkcs1_pem(rsa::pkcs1::LineEnding::LF)
+            .unwrap();
+        let public_pem = public_key.to_pkcs1_pem(rsa::pkcs1::LineEnding::LF).unwrap();
+
+        let n_bytes = public_key.n().to_bytes_be();
+        let kid = hex::encode(&Sha256::digest(&n_bytes)[..8]);
+
+        crate::crypto::jwt::JwtKeys {
+            encoding: EncodingKey::from_rsa_pem(private_pem.as_bytes()).unwrap(),
+            decoding: DecodingKey::from_rsa_pem(public_pem.as_bytes()).unwrap(),
+            kid,
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct CapturedCallbackRequest {
+        headers: axum::http::HeaderMap,
+        body: Vec<u8>,
+    }
+
     /// Spin up a minimal axum mock server that returns the given status code
-    /// and optional body. Returns the callback URL to POST to.
+    /// and optional body. Returns the callback URL to POST to and captured
+    /// callback requests.
     async fn spawn_mock_callback(
         status: u16,
         body: Option<&'static str>,
-    ) -> (String, tokio::task::JoinHandle<()>) {
-        use axum::{Router, http::StatusCode, routing::post};
+    ) -> (
+        String,
+        tokio::task::JoinHandle<()>,
+        std::sync::Arc<tokio::sync::Mutex<Vec<CapturedCallbackRequest>>>,
+    ) {
+        use axum::{Router, body::Bytes, http::HeaderMap, http::StatusCode, routing::post};
         use tokio::net::TcpListener;
 
         let code = StatusCode::from_u16(status).unwrap();
         let body = body.unwrap_or("");
+        let captured = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let captured_for_route = captured.clone();
 
-        let app = Router::new().route("/callback", post(move || async move { (code, body) }));
+        let app = Router::new().route(
+            "/callback",
+            post(move |headers: HeaderMap, request_body: Bytes| {
+                let captured = captured_for_route.clone();
+                async move {
+                    captured.lock().await.push(CapturedCallbackRequest {
+                        headers,
+                        body: request_body.to_vec(),
+                    });
+                    (code, body)
+                }
+            }),
+        );
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        (format!("http://{addr}/callback"), server)
+        (format!("http://{addr}/callback"), server, captured)
+    }
+
+    async fn captured_request(
+        captured: &std::sync::Arc<tokio::sync::Mutex<Vec<CapturedCallbackRequest>>>,
+    ) -> CapturedCallbackRequest {
+        captured
+            .lock()
+            .await
+            .first()
+            .expect("callback request captured")
+            .clone()
+    }
+
+    fn header_value<'a>(headers: &'a axum::http::HeaderMap, name: &str) -> &'a str {
+        headers
+            .get(name)
+            .unwrap_or_else(|| panic!("{name} header should be present"))
+            .to_str()
+            .unwrap_or_else(|_| panic!("{name} header should be valid UTF-8"))
     }
 
     #[tokio::test]
     async fn forward_to_agent_accepts_202() {
-        let (url, server) = spawn_mock_callback(202, None).await;
+        let (url, server, _captured) = spawn_mock_callback(202, None).await;
         let client = reqwest::Client::new();
         let config = test_app_config();
+        let keys = test_jwt_keys();
         let delivery = forward_to_agent(
             &client,
             &config,
+            &keys,
             &url,
-            &test_payload(),
+            test_payload(),
+            "key-1",
             "test_api_key_hash",
             None,
         )
@@ -838,17 +944,191 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn forward_to_agent_ignores_200_body() {
-        // Legacy 200+body replies must be tolerated but the body is dropped.
-        let (url, server) =
-            spawn_mock_callback(200, Some(r#"{"reply": {"text": "ignored"}}"#)).await;
+    async fn forward_to_agent_emits_dual_signatures() {
+        let (url, server, captured) = spawn_mock_callback(202, None).await;
         let client = reqwest::Client::new();
         let config = test_app_config();
+        let keys = test_jwt_keys();
+
         let delivery = forward_to_agent(
             &client,
             &config,
+            &keys,
             &url,
-            &test_payload(),
+            test_payload(),
+            "key-1",
+            "test_api_key_hash",
+            None,
+        )
+        .await;
+
+        assert!(delivery.result.is_ok());
+        let request = captured_request(&captured).await;
+        assert!(!header_value(&request.headers, "X-NyxID-Signature").is_empty());
+        assert!(!header_value(&request.headers, "X-NyxID-Callback-Token").is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn forward_to_agent_callback_token_validates_via_jwks() {
+        let (url, server, captured) = spawn_mock_callback(202, None).await;
+        let client = reqwest::Client::new();
+        let config = test_app_config();
+        let keys = test_jwt_keys();
+        let payload = test_payload();
+        let expected_message_id = payload.message_id.clone();
+        let expected_platform = payload.platform.clone();
+
+        let delivery = forward_to_agent(
+            &client,
+            &config,
+            &keys,
+            &url,
+            payload,
+            "key-1",
+            "test_api_key_hash",
+            None,
+        )
+        .await;
+
+        assert!(delivery.result.is_ok());
+        let request = captured_request(&captured).await;
+        let token = header_value(&request.headers, "X-NyxID-Callback-Token");
+        let claims = crate::crypto::jwt::validate_relay_callback_token(&keys, &config, token)
+            .expect("callback token should validate");
+        assert_eq!(claims.aud, crate::crypto::jwt::RELAY_CALLBACK_AUDIENCE);
+        assert_eq!(
+            claims.token_type,
+            crate::crypto::jwt::RELAY_CALLBACK_TOKEN_TYPE
+        );
+        assert_eq!(claims.api_key_id, "key-1");
+        assert_eq!(claims.message_id, expected_message_id);
+        assert_eq!(claims.platform, expected_platform);
+        assert_eq!(claims.exp - claims.iat, config.jwt_relay_callback_ttl_secs);
+        assert_eq!(claims.iss, config.jwt_issuer);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn forward_to_agent_body_sha256_matches_wire_bytes() {
+        let (url, server, captured) = spawn_mock_callback(202, None).await;
+        let client = reqwest::Client::new();
+        let config = test_app_config();
+        let keys = test_jwt_keys();
+        let api_key_hash = "test_api_key_hash";
+
+        let delivery = forward_to_agent(
+            &client,
+            &config,
+            &keys,
+            &url,
+            test_payload(),
+            "key-1",
+            api_key_hash,
+            None,
+        )
+        .await;
+
+        assert!(delivery.result.is_ok());
+        let request = captured_request(&captured).await;
+        let token = header_value(&request.headers, "X-NyxID-Callback-Token");
+        let signature = header_value(&request.headers, "X-NyxID-Signature");
+        let claims = crate::crypto::jwt::validate_relay_callback_token(&keys, &config, token)
+            .expect("callback token should validate");
+        assert_eq!(
+            claims.body_sha256,
+            hex::encode(Sha256::digest(&request.body))
+        );
+        assert_eq!(
+            signature,
+            compute_hmac_signature(api_key_hash.as_bytes(), &request.body).unwrap()
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn forward_to_agent_correlation_id_equals_jti() {
+        let (url, server, captured) = spawn_mock_callback(202, None).await;
+        let client = reqwest::Client::new();
+        let config = test_app_config();
+        let keys = test_jwt_keys();
+
+        let delivery = forward_to_agent(
+            &client,
+            &config,
+            &keys,
+            &url,
+            test_payload(),
+            "key-1",
+            "test_api_key_hash",
+            None,
+        )
+        .await;
+
+        assert!(delivery.result.is_ok());
+        let request = captured_request(&captured).await;
+        let token = header_value(&request.headers, "X-NyxID-Callback-Token");
+        let claims = crate::crypto::jwt::validate_relay_callback_token(&keys, &config, token)
+            .expect("callback token should validate");
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(
+            body["correlation_id"].as_str().expect("correlation_id"),
+            claims.jti
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn forward_to_agent_body_sha256_rejects_logically_equivalent_different_bytes() {
+        let (url, server, captured) = spawn_mock_callback(202, None).await;
+        let client = reqwest::Client::new();
+        let config = test_app_config();
+        let keys = test_jwt_keys();
+
+        let delivery = forward_to_agent(
+            &client,
+            &config,
+            &keys,
+            &url,
+            test_payload(),
+            "key-1",
+            "test_api_key_hash",
+            None,
+        )
+        .await;
+
+        assert!(delivery.result.is_ok());
+        let request = captured_request(&captured).await;
+        let token = header_value(&request.headers, "X-NyxID-Callback-Token");
+        let claims = crate::crypto::jwt::validate_relay_callback_token(&keys, &config, token)
+            .expect("callback token should validate");
+        let parsed_body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        let pretty_body = serde_json::to_vec_pretty(&parsed_body).unwrap();
+        let pretty_hash = hex::encode(Sha256::digest(&pretty_body));
+
+        assert_eq!(
+            claims.body_sha256,
+            hex::encode(Sha256::digest(&request.body))
+        );
+        assert_ne!(claims.body_sha256, pretty_hash);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn forward_to_agent_ignores_200_body() {
+        // Legacy 200+body replies must be tolerated but the body is dropped.
+        let (url, server, _captured) =
+            spawn_mock_callback(200, Some(r#"{"reply": {"text": "ignored"}}"#)).await;
+        let client = reqwest::Client::new();
+        let config = test_app_config();
+        let keys = test_jwt_keys();
+        let delivery = forward_to_agent(
+            &client,
+            &config,
+            &keys,
+            &url,
+            test_payload(),
+            "key-1",
             "test_api_key_hash",
             None,
         )
@@ -863,14 +1143,17 @@ mod tests {
 
     #[tokio::test]
     async fn forward_to_agent_returns_error_on_500() {
-        let (url, server) = spawn_mock_callback(500, None).await;
+        let (url, server, _captured) = spawn_mock_callback(500, None).await;
         let client = reqwest::Client::new();
         let config = test_app_config();
+        let keys = test_jwt_keys();
         let delivery = forward_to_agent(
             &client,
             &config,
+            &keys,
             &url,
-            &test_payload(),
+            test_payload(),
+            "key-1",
             "test_api_key_hash",
             None,
         )
@@ -885,14 +1168,17 @@ mod tests {
 
     #[tokio::test]
     async fn forward_to_agent_returns_error_on_404() {
-        let (url, server) = spawn_mock_callback(404, None).await;
+        let (url, server, _captured) = spawn_mock_callback(404, None).await;
         let client = reqwest::Client::new();
         let config = test_app_config();
+        let keys = test_jwt_keys();
         let delivery = forward_to_agent(
             &client,
             &config,
+            &keys,
             &url,
-            &test_payload(),
+            test_payload(),
+            "key-1",
             "test_api_key_hash",
             None,
         )
@@ -910,11 +1196,14 @@ mod tests {
         // Unreachable target: port 1 is reserved and should not be listening.
         let client = reqwest::Client::new();
         let config = test_app_config();
+        let keys = test_jwt_keys();
         let delivery = forward_to_agent(
             &client,
             &config,
+            &keys,
             "http://127.0.0.1:1/callback",
-            &test_payload(),
+            test_payload(),
+            "key-1",
             "test_api_key_hash",
             None,
         )

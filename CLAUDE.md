@@ -317,6 +317,7 @@ JWT_ISSUER=nyxid
 JWT_ACCESS_TTL_SECS=900             # 15 minutes
 JWT_REFRESH_TTL_SECS=604800         # 7 days
 JWT_RELAY_REPLY_TTL_SECS=1800       # 30 minutes (per-callback reply token TTL)
+JWT_RELAY_CALLBACK_TTL_SECS=300     # 5 minutes (callback authentication JWT TTL)
 SA_TOKEN_TTL_SECS=3600              # 1 hour (service account tokens)
 ENVIRONMENT=development
 RATE_LIMIT_PER_SECOND=10

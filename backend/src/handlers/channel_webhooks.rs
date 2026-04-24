@@ -529,8 +529,10 @@ async fn handle_webhook_inner_with_deps(
         let delivery = channel_relay_service::forward_to_agent(
             state.http_client,
             state.config,
+            state.jwt_keys,
             &route.callback_url,
-            &payload,
+            payload,
+            &api_key.id,
             &api_key.key_hash,
             user_access_token.as_deref(),
         )
@@ -663,6 +665,7 @@ mod tests {
             jwt_issuer: "http://localhost:3001".to_string(),
             jwt_access_ttl_secs: 900,
             jwt_relay_reply_ttl_secs: 1800,
+            jwt_relay_callback_ttl_secs: 300,
             jwt_refresh_ttl_secs: 604800,
             google_client_id: None,
             google_client_secret: None,

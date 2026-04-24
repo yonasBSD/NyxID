@@ -1252,14 +1252,14 @@ For Telegram, `conversation_id` is the `chat.id` (a number like `-1001234567890`
 1. User sends message on Telegram/Discord/Lark/Feishu/Slack
 2. Platform webhook delivers to NyxID
 3. NyxID verifies signature, resolves route, writes a metadata-only record (per ADR-013, no text or attachments are persisted)
-4. NyxID POSTs the normalized payload to the agent's `callback_url` with an HMAC signature
+4. NyxID POSTs the normalized payload to the agent's `callback_url` signed with a per-delivery RS256 JWT (`X-NyxID-Callback-Token`); a transitional `X-NyxID-Signature` HMAC header is dual-emitted and will be removed once downstreams flip over to JWT verification
 5. **Agent must return 202.** Sync replies (200 + body) are no longer supported — any body on a 200 is silently discarded
 6. Agent processes asynchronously, then POSTs the reply to `/channel-relay/reply`
 7. NyxID delivers the reply to the platform chat
 
 Slack specifics: inbound events land on `/api/v1/webhooks/channel/slack/{bot_id}` and are HMAC-verified against the app's signing secret (`v0:{ts}:{body}` with a 5-minute replay window). NyxID ACKs with HTTP 200 inside Slack's 3-second window and processes in a background task. Outbound replies go through `chat.postMessage`; threaded replies anchor on the thread root via `metadata.thread_ts`. Rate-limit signals (HTTP 429 with `Retry-After`, or `{"ok":false,"error":"ratelimited"}`) surface as a clearly-labeled error so the agent can decide when to retry.
 
-The callback payload includes normalized fields (`content.text`, `sender`, etc.), the full `raw_platform_data` (original Telegram/Discord/Lark/Slack JSON), and a per-callback `reply_token` (RS256 JWT) the agent can use to post its async reply without holding the agent API key. The callback is the **only** place the message body exists inside NyxID — it's built in-memory from the live webhook parse and once the callback returns, NyxID retains nothing but metadata.
+The callback payload includes normalized fields (`content.text`, `sender`, etc.), the full `raw_platform_data` (original Telegram/Discord/Lark/Slack JSON), a per-callback `reply_token` (RS256 JWT) the agent can use to post its async reply without holding the agent API key, and a top-level `correlation_id` that equals the callback JWT's `jti` (one-turn runtime key). The callback is the **only** place the message body exists inside NyxID — it's built in-memory from the live webhook parse and once the callback returns, NyxID retains nothing but metadata.
 
 ### Agent-facing endpoints
 
@@ -1296,6 +1296,17 @@ GET /api/v1/channel-relay/resolve-sender?platform=telegram&platform_id=12345
 - **Error classification:** Lark frequency-limit errors surface as `429`; "message not editable / wrong state" errors as `409`; malformed content as `400`. Anything else falls through to `502`.
 
 > **ADR-013 note:** `GET /channel-relay/messages/...` returns only routing metadata (direction, platform, sender ids, delivery status, timestamps). Agents that need conversation bodies must retain their own history.
+
+#### Callback token (inbound request authentication)
+
+Every callback delivery carries an RS256 JWT in `X-NyxID-Callback-Token` that downstreams verify via the public JWKS at `/.well-known/jwks.json` (no shared secret needed — the JWT header's `kid` selects the active key). This is the preferred production auth path and replaces the legacy HMAC signature.
+
+- **Shape:** RS256 JWT. `aud = "channel-relay/callback"`. `token_type = "relay_callback"`.
+- **Claim bindings:** `api_key_id`, `message_id`, `platform`, `jti`, and `body_sha256` (lowercase hex SHA-256 of the exact wire body bytes). Plus standard `iss`, `iat`, `exp`. `payload.correlation_id == jti`.
+- **Body hash is byte-exact.** Reformatting JSON, reordering fields, adding whitespace, or a trailing newline changes the hash and MUST fail verification. Compute SHA-256 over the raw request body you received — never over a re-serialized value.
+- **TTL:** `JWT_RELAY_CALLBACK_TTL_SECS` (default `300` = 5 min). 60s clock-skew tolerance on both `iat` and `exp`.
+- **Retries mint fresh tokens.** NyxID does not persist `jti` — idempotency is by `message_id`, not by `jti`. Each retry attempt carries a new `jti`, `correlation_id`, and `exp`.
+- **Transitional HMAC:** `X-NyxID-Signature` (HMAC-SHA256 of the same body using the API key's hash) is dual-emitted during migration. Downstreams should switch to JWT verification; HMAC will be removed in a future release.
 
 #### Reply token (dual-auth on `/channel-relay/reply` and `/channel-relay/reply/update`)
 

@@ -37,6 +37,8 @@ pub struct AppConfig {
     pub jwt_access_ttl_secs: i64,
     /// Relay reply token TTL in seconds (default: 1800 = 30 min)
     pub jwt_relay_reply_ttl_secs: i64,
+    /// Relay callback token TTL in seconds (default: 300 = 5 min)
+    pub jwt_relay_callback_ttl_secs: i64,
     /// Refresh token TTL in seconds (default: 604800 = 7 days)
     pub jwt_refresh_ttl_secs: i64,
 
@@ -261,6 +263,10 @@ impl std::fmt::Debug for AppConfig {
             .field("jwt_issuer", &self.jwt_issuer)
             .field("jwt_access_ttl_secs", &self.jwt_access_ttl_secs)
             .field("jwt_relay_reply_ttl_secs", &self.jwt_relay_reply_ttl_secs)
+            .field(
+                "jwt_relay_callback_ttl_secs",
+                &self.jwt_relay_callback_ttl_secs,
+            )
             .field("jwt_refresh_ttl_secs", &self.jwt_refresh_ttl_secs)
             .field("google_client_id", &self.google_client_id)
             .field("google_client_secret", &"[REDACTED]")
@@ -528,6 +534,10 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1800),
+            jwt_relay_callback_ttl_secs: env::var("JWT_RELAY_CALLBACK_TTL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(300),
             jwt_refresh_ttl_secs: env::var("JWT_REFRESH_TTL_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -972,6 +982,7 @@ mod tests {
             jwt_issuer: base_url.to_string(),
             jwt_access_ttl_secs: 900,
             jwt_relay_reply_ttl_secs: 1800,
+            jwt_relay_callback_ttl_secs: 300,
             jwt_refresh_ttl_secs: 604800,
             google_client_id: None,
             google_client_secret: None,
