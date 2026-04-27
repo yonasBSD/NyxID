@@ -844,16 +844,31 @@ Create a new API key. The full key is returned only in this response and cannot 
 | `scopes`     | string | No       | Space-separated scopes (default: `"read"`)   |
 | `expires_at` | string | No       | ISO 8601 expiration datetime                 |
 | `description` | string | No      | Optional description of key purpose          |
-| `allowed_service_ids` | string[] | No | UserService IDs this key can proxy (empty = use `allow_all_services`) |
-| `allowed_node_ids` | string[] | No | Node IDs this key can route through (empty = use `allow_all_nodes`) |
+| `allowed_service_ids` | string[] | No | UserService IDs this key can proxy. Only enforced when `allow_all_services: false`. Providing values without also setting `allow_all_services: false` will silently store the list but **not** scope the key. |
+| `allowed_node_ids` | string[] | No | Node IDs this key can route through. Only enforced when `allow_all_nodes: false`. Providing values without also setting `allow_all_nodes: false` will silently store the list but **not** scope the key. |
 | `allow_all_services` | boolean | No | If true, key can access all user's external services (default: true) |
 | `allow_all_nodes` | boolean | No | If true, key can route through all user's nodes (default: true) |
+
+> **Scoping API keys:** To create a scoped key you must set BOTH `allow_all_services: false` AND a non-empty `allowed_service_ids` (and likewise `allow_all_nodes: false` + `allowed_node_ids` for node scoping). Either alone is a no-op. The defaults exist for backward compatibility with pre-scope keys, so a naive payload yields a broad key.
+
+Broad key (default):
 
 ```json
 {
   "name": "Production API Key",
   "scopes": "read write",
   "expires_at": "2026-01-01T00:00:00Z"
+}
+```
+
+Scoped key:
+
+```json
+{
+  "name": "Scoped Key",
+  "scopes": "proxy",
+  "allow_all_services": false,
+  "allowed_service_ids": ["<UserService.id>", "..."]
 }
 ```
 

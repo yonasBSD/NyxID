@@ -98,12 +98,27 @@ pub struct CreateApiKeyRequest {
     /// Accepts RFC 3339 ("2026-04-01T00:00:00Z") or date-only ("2026-04-01").
     pub expires_at: Option<String>,
     pub description: Option<String>,
+    /// UserService IDs this key can access via proxy.
+    /// Only enforced when `allow_all_services` is `false`. Providing values
+    /// without also setting `allow_all_services: false` will silently store
+    /// the list but **not** scope the key.
     #[serde(default)]
     pub allowed_service_ids: Vec<String>,
+    /// Node IDs this key can route through.
+    /// Only enforced when `allow_all_nodes` is `false`. Providing values
+    /// without also setting `allow_all_nodes: false` will silently store
+    /// the list but **not** scope the key.
     #[serde(default)]
     pub allowed_node_ids: Vec<String>,
+    /// If true, key can access ALL of the user's external services.
+    /// Default: `true` (backward compatible -- existing keys have no
+    /// restrictions). Set to `false` together with a non-empty
+    /// `allowed_service_ids` to create a scoped key.
     #[serde(default = "default_true")]
     pub allow_all_services: bool,
+    /// If true, key can route through ALL of the user's nodes.
+    /// Default: `true` (backward compatible). Set to `false` together with a
+    /// non-empty `allowed_node_ids` to create a node-scoped key.
     #[serde(default = "default_true")]
     pub allow_all_nodes: bool,
     pub rate_limit_per_second: Option<u32>,
