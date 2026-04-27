@@ -28,6 +28,14 @@ use crate::services::{
     agent_binding_service, user_api_key_service, user_service_service, user_token_service,
 };
 
+/// Default User-Agent injected at the proxy boundary when neither the
+/// caller nor the resolved service supplies one. Resolved at compile
+/// time from the backend crate's `Cargo.toml` version (same source as
+/// `/health`'s `version` field) so the wire UA always tracks the
+/// running build. See NyxID#514.
+pub(crate) const DEFAULT_PROXY_USER_AGENT: &str =
+    concat!("NyxID-Proxy/", env!("CARGO_PKG_VERSION"));
+
 /// Request body for proxy forwarding.
 pub enum ProxyBody {
     /// Body has been buffered in memory (approval path, node proxy, Codex path).
@@ -1898,21 +1906,23 @@ pub async fn forward_request(
     // append-by-default `RequestBuilder::header()` doesn't produce
     // duplicate entries when defaults collide with caller headers.
     //
-    // Order of precedence (low → high, per NyxID#356):
-    //   1. Caller-supplied headers (filtered by the forward allowlist)
-    //   2. Service `custom_user_agent` override (User-Agent only)
-    //   3. Identity propagation headers
-    //   4. Delegated provider credential headers (`prepared.delegated_headers`)
-    //   5. `DownstreamService.default_request_headers` (admin catalog)
-    //   6. `UserService.default_request_headers`       (per-user override)
+    // Order of precedence (low → high, per NyxID#356, NyxID#514):
+    //   1. Default UA fallback (`NyxID-Proxy/{version}`) — only when no UA otherwise
+    //   2. Caller-supplied headers (filtered by the forward allowlist)
+    //   3. Service `custom_user_agent` override (User-Agent only)
+    //   4. Identity propagation headers
+    //   5. Delegated provider credential headers (`prepared.delegated_headers`)
+    //   6. `DownstreamService.default_request_headers` (admin catalog)
+    //   7. `UserService.default_request_headers`       (per-user override)
     //
-    // Layers 1–4 must all sit in `outbound_headers` BEFORE the merge so a
+    // Layers 2–5 must all sit in `outbound_headers` BEFORE the merge so a
     // non-overridable default collides with them inside
     // `merge_into_header_list` and wins. The node-routed path in
     // `handlers/proxy.rs` puts delegated headers in the same lower-precedence
     // bucket; the two paths must agree here.
     let has_custom_ua = target.service.custom_user_agent.is_some();
     let mut outbound_headers: Vec<(String, String)> = Vec::new();
+    let mut caller_supplied_ua = false;
     for (name, value) in headers.iter() {
         let name_lower = name.as_str().to_ascii_lowercase();
         if has_custom_ua && name_lower == "user-agent" {
@@ -1922,11 +1932,25 @@ pub async fn forward_request(
             continue;
         }
         if let Ok(v) = value.to_str() {
+            if name_lower == "user-agent" {
+                caller_supplied_ua = true;
+            }
             outbound_headers.push((name.as_str().to_string(), v.to_string()));
         }
     }
     if let Some(ref ua) = target.service.custom_user_agent {
         outbound_headers.push(("user-agent".to_string(), ua.clone()));
+    } else if !caller_supplied_ua {
+        // NyxID#514: inject a benign default UA when neither the caller
+        // nor the service supplies one. Prevents silent 403s from
+        // UA-required APIs (e.g. GitHub) when the client SDK omits UA
+        // by default (.NET HttpClient, Python urllib, Java
+        // HttpURLConnection, etc.). The service `custom_user_agent`
+        // and any caller-supplied UA still win.
+        outbound_headers.push((
+            "user-agent".to_string(),
+            DEFAULT_PROXY_USER_AGENT.to_string(),
+        ));
     }
     for (name, value) in &identity_headers {
         outbound_headers.push((name.clone(), value.clone()));
@@ -2722,6 +2746,61 @@ mod tests {
             captured.user_agent.as_deref(),
             Some("NyxID-Proxy/1.0"),
             "custom_user_agent should replace the client's User-Agent"
+        );
+
+        server.abort();
+    }
+
+    /// NyxID#514: when the caller sends no User-Agent and the service
+    /// has no `custom_user_agent`, the proxy must inject
+    /// `NyxID-Proxy/{CARGO_PKG_VERSION}` so UA-required APIs
+    /// (e.g. GitHub) don't 403 silently.
+    #[tokio::test]
+    async fn forward_request_injects_default_user_agent_when_client_omits_one_and_no_custom_set() {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let app = Router::new()
+            .route("/api/v1/test", post(capture_request))
+            .with_state(sender);
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test app");
+        });
+
+        // Caller supplies no User-Agent.
+        let headers = reqwest::header::HeaderMap::new();
+        let target = make_proxy_target(format!("http://{addr}"));
+        assert!(
+            target.service.custom_user_agent.is_none(),
+            "test fixture must not set custom_user_agent"
+        );
+
+        let response = forward_request(
+            &Client::new(),
+            &target,
+            reqwest::Method::POST,
+            "api/v1/test",
+            None,
+            headers,
+            ProxyBody::Buffered(Some(Bytes::from_static(b"{}"))),
+            vec![],
+            vec![],
+            None,
+            &empty_token_cache(),
+        )
+        .await
+        .expect("proxy request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let captured = receiver.recv().await.expect("captured request");
+        let expected = format!("NyxID-Proxy/{}", env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            captured.user_agent.as_deref(),
+            Some(expected.as_str()),
+            "default UA should be injected when neither caller nor service supplies one"
         );
 
         server.abort();
