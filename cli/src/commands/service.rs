@@ -699,7 +699,13 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
 
             let mut api = ApiClient::from_auth(&auth)?;
             api.delete_empty(&format!("/keys/{id}")).await?;
-            eprintln!("Service deleted.");
+            match auth.output {
+                OutputFormat::Json => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({ "ok": true }))?
+                ),
+                OutputFormat::Table => eprintln!("Service deleted."),
+            }
             Ok(())
         }
 

@@ -305,7 +305,13 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
 
             let mut api = ApiClient::from_auth(&auth)?;
             api.delete_empty(&format!("/channel-bots/{id}")).await?;
-            eprintln!("Bot deleted.");
+            match auth.output {
+                OutputFormat::Json => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({ "ok": true }))?
+                ),
+                OutputFormat::Table => eprintln!("Bot deleted."),
+            }
             Ok(())
         }
 
@@ -536,7 +542,13 @@ async fn run_route(command: ChannelRouteCommands) -> Result<()> {
             let mut api = ApiClient::from_auth(&auth)?;
             api.delete_empty(&format!("/channel-conversations/{id}"))
                 .await?;
-            eprintln!("Route deleted.");
+            match auth.output {
+                OutputFormat::Json => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({ "ok": true }))?
+                ),
+                OutputFormat::Table => eprintln!("Route deleted."),
+            }
             Ok(())
         }
     }

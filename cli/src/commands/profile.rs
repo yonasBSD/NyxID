@@ -52,7 +52,13 @@ pub async fn run(command: ProfileCommands) -> Result<()> {
 
             let mut api = ApiClient::from_auth(&auth)?;
             api.delete_empty("/users/me").await?;
-            eprintln!("Account deleted.");
+            match auth.output {
+                OutputFormat::Json => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({ "ok": true }))?
+                ),
+                OutputFormat::Table => eprintln!("Account deleted."),
+            }
             Ok(())
         }
 
@@ -112,7 +118,13 @@ pub async fn run(command: ProfileCommands) -> Result<()> {
             let mut api = ApiClient::from_auth(&auth)?;
             api.delete_empty(&format!("/users/me/consents/{client_id}"))
                 .await?;
-            eprintln!("Consent revoked for client {client_id}.");
+            match auth.output {
+                OutputFormat::Json => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({ "ok": true }))?
+                ),
+                OutputFormat::Table => eprintln!("Consent revoked for client {client_id}."),
+            }
             Ok(())
         }
     }
