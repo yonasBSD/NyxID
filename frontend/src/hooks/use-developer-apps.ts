@@ -12,14 +12,20 @@ export interface CreateDeveloperAppRequest {
   readonly client_type: "public" | "confidential";
   readonly delegation_scopes?: string;
   readonly allowed_scopes?: readonly string[];
+  readonly target_org_id?: string;
 }
 
-export function useDeveloperApps() {
+export function useDeveloperApps(orgId?: string) {
   return useQuery({
-    queryKey: ["developer", "oauth-clients"],
+    queryKey: ["developer", "oauth-clients", orgId],
     queryFn: async (): Promise<DeveloperOAuthClientListResponse> => {
+      const params = new URLSearchParams();
+      if (orgId) params.set("org_id", orgId);
+      const query = params.toString();
       return api.get<DeveloperOAuthClientListResponse>(
-        "/developer/oauth-clients",
+        query
+          ? `/developer/oauth-clients?${query}`
+          : "/developer/oauth-clients",
       );
     },
   });
