@@ -581,6 +581,9 @@ fn redirect_to_path(
 }
 
 /// DELETE /api/v1/providers/{provider_id}/disconnect
+///
+/// Audit primary `user_id` is the affected token owner (`effective_user_id`);
+/// org-targeted calls add `on_behalf_of` when the caller differs, matching OAuth callback events.
 pub async fn disconnect_provider(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -625,6 +628,9 @@ pub async fn disconnect_provider(
 }
 
 /// POST /api/v1/providers/{provider_id}/refresh
+///
+/// Audit primary `user_id` is the affected token owner (`effective_user_id`);
+/// org-targeted calls add `on_behalf_of` when the caller differs, matching OAuth callback events.
 pub async fn manual_refresh(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -723,6 +729,9 @@ pub async fn request_device_code(
 ///
 /// RFC 8628 Step 3: Poll for token completion after user authenticates.
 /// Returns status: "pending", "slow_down", "expired", "denied", or "complete".
+///
+/// Audit primary `user_id` is the affected token owner (`effective_user_id`);
+/// org-targeted completions add `on_behalf_of` when the caller differs, matching OAuth callback events.
 pub async fn poll_device_code(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -749,7 +758,7 @@ pub async fn poll_device_code(
             "token_type": "device_code",
         });
         if effective_user_id != user_id_str {
-            event_data["target_user_id"] = serde_json::Value::String(effective_user_id.to_string());
+            event_data["on_behalf_of"] = serde_json::Value::String(effective_user_id.to_string());
         }
         audit_service::log_async(
             state.db.clone(),
