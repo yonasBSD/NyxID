@@ -91,6 +91,13 @@ pub struct DeviceCodeInitiateQuery {
     pub target_org_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct ProviderTokenTargetQuery {
+    /// When set, operate on an org-owned provider token. The caller must be an
+    /// admin of the org.
+    pub target_org_id: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ConnectResponse {
     pub status: String,
@@ -255,7 +262,8 @@ async fn resolve_oauth_target_org(
     let access = org_service::resolve_owner_access(&state.db, actor, target).await?;
     if !access.can_write() {
         return Err(AppError::OrgRoleInsufficient(
-            "you must be an admin of the target org to initiate OAuth on its behalf".to_string(),
+            "you must be an admin of the target org to manage provider tokens on its behalf"
+                .to_string(),
         ));
     }
     Ok(Some(target.to_string()))
@@ -577,23 +585,33 @@ pub async fn disconnect_provider(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Path(provider_id): Path<String>,
+    Query(query): Query<ProviderTokenTargetQuery>,
 ) -> AppResult<Json<ConnectResponse>> {
     let user_id_str = auth_user.user_id.to_string();
+    let target_org_user_id =
+        resolve_oauth_target_org(&state, &user_id_str, query.target_org_id.as_deref()).await?;
+    let effective_user_id = target_org_user_id.as_deref().unwrap_or(&user_id_str);
 
     user_token_service::disconnect_provider(
         &state.db,
         &state.encryption_keys,
-        &user_id_str,
+        effective_user_id,
         &provider_id,
     )
     .await?;
-    sync_provider_credentials_to_unified_keys(&state, &user_id_str, &provider_id, false).await?;
+    sync_provider_credentials_to_unified_keys(&state, effective_user_id, &provider_id, false)
+        .await?;
+
+    let mut event_data = serde_json::json!({ "provider_id": &provider_id });
+    if effective_user_id != user_id_str {
+        event_data["on_behalf_of"] = serde_json::Value::String(effective_user_id.to_string());
+    }
 
     audit_service::log_async(
         state.db.clone(),
-        Some(user_id_str),
+        Some(effective_user_id.to_string()),
         "provider_token_disconnected".to_string(),
-        Some(serde_json::json!({ "provider_id": &provider_id })),
+        Some(event_data),
         None,
         None,
         None,
@@ -611,24 +629,34 @@ pub async fn manual_refresh(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Path(provider_id): Path<String>,
+    Query(query): Query<ProviderTokenTargetQuery>,
 ) -> AppResult<Json<ConnectResponse>> {
     let user_id_str = auth_user.user_id.to_string();
+    let target_org_user_id =
+        resolve_oauth_target_org(&state, &user_id_str, query.target_org_id.as_deref()).await?;
+    let effective_user_id = target_org_user_id.as_deref().unwrap_or(&user_id_str);
 
     // Attempt to get active token (which triggers lazy refresh for expired OAuth tokens)
     user_token_service::get_active_token(
         &state.db,
         &state.encryption_keys,
-        &user_id_str,
+        effective_user_id,
         &provider_id,
     )
     .await?;
-    sync_provider_credentials_to_unified_keys(&state, &user_id_str, &provider_id, true).await?;
+    sync_provider_credentials_to_unified_keys(&state, effective_user_id, &provider_id, true)
+        .await?;
+
+    let mut event_data = serde_json::json!({ "provider_id": &provider_id });
+    if effective_user_id != user_id_str {
+        event_data["on_behalf_of"] = serde_json::Value::String(effective_user_id.to_string());
+    }
 
     audit_service::log_async(
         state.db.clone(),
-        Some(user_id_str),
+        Some(effective_user_id.to_string()),
         "provider_token_refreshed".to_string(),
-        Some(serde_json::json!({ "provider_id": &provider_id })),
+        Some(event_data),
         None,
         None,
         None,
@@ -713,15 +741,21 @@ pub async fn poll_device_code(
     .await?;
 
     if result.status == "complete" {
-        sync_provider_credentials_to_unified_keys(&state, &user_id_str, &provider_id, true).await?;
+        let effective_user_id = result.effective_user_id.as_deref().unwrap_or(&user_id_str);
+        sync_provider_credentials_to_unified_keys(&state, effective_user_id, &provider_id, true)
+            .await?;
+        let mut event_data = serde_json::json!({
+            "provider_id": &provider_id,
+            "token_type": "device_code",
+        });
+        if effective_user_id != user_id_str {
+            event_data["target_user_id"] = serde_json::Value::String(effective_user_id.to_string());
+        }
         audit_service::log_async(
             state.db.clone(),
-            Some(user_id_str),
+            Some(effective_user_id.to_string()),
             "provider_token_connected".to_string(),
-            Some(serde_json::json!({
-                "provider_id": &provider_id,
-                "token_type": "device_code",
-            })),
+            Some(event_data),
             None,
             None,
             None,

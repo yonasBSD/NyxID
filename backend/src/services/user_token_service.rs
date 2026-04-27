@@ -677,6 +677,7 @@ pub struct DeviceCodeInitiateResult {
 pub struct DeviceCodePollResult {
     pub status: String,
     pub interval: Option<i32>,
+    pub effective_user_id: Option<String>,
 }
 
 /// Step 1: Request a device code from the provider.
@@ -899,6 +900,7 @@ pub async fn poll_device_code(
         return Ok(DeviceCodePollResult {
             status: "expired".to_string(),
             interval: None,
+            effective_user_id: None,
         });
     }
 
@@ -1001,6 +1003,7 @@ pub async fn poll_device_code(
         return Ok(DeviceCodePollResult {
             status: "pending".to_string(),
             interval: oauth_state.poll_interval,
+            effective_user_id: None,
         });
     }
 
@@ -1014,6 +1017,7 @@ pub async fn poll_device_code(
                     return Ok(DeviceCodePollResult {
                         status: "pending".to_string(),
                         interval: oauth_state.poll_interval,
+                        effective_user_id: None,
                     });
                 }
                 "slow_down" => {
@@ -1027,6 +1031,7 @@ pub async fn poll_device_code(
                     return Ok(DeviceCodePollResult {
                         status: "slow_down".to_string(),
                         interval: Some(new_interval),
+                        effective_user_id: None,
                     });
                 }
                 "expired_token" => {
@@ -1036,6 +1041,7 @@ pub async fn poll_device_code(
                     return Ok(DeviceCodePollResult {
                         status: "expired".to_string(),
                         interval: None,
+                        effective_user_id: None,
                     });
                 }
                 "access_denied" => {
@@ -1045,6 +1051,7 @@ pub async fn poll_device_code(
                     return Ok(DeviceCodePollResult {
                         status: "denied".to_string(),
                         interval: None,
+                        effective_user_id: None,
                     });
                 }
                 _ => {}
@@ -1216,6 +1223,7 @@ async fn store_device_code_tokens(
     Ok(DeviceCodePollResult {
         status: "complete".to_string(),
         interval: None,
+        effective_user_id: Some(user_id.to_string()),
     })
 }
 
