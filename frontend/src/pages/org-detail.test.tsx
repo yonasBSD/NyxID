@@ -11,6 +11,7 @@ const {
   mockToastSuccess,
 } = vi.hoisted(() => ({
   fixtures: {
+    orgRole: "admin" as "admin" | "member" | "viewer",
     org: {
       id: "org-1",
       display_name: "Testing Org",
@@ -87,7 +88,7 @@ vi.mock("@tanstack/react-router", () => ({
 
 vi.mock("@/hooks/use-orgs", () => ({
   useOrg: () => ({
-    data: fixtures.org,
+    data: { ...fixtures.org, your_role: fixtures.orgRole },
     isLoading: false,
     error: null,
   }),
@@ -157,9 +158,8 @@ vi.mock("sonner", () => ({
 }));
 
 vi.mock("@/lib/utils", async () => {
-  const actual = await vi.importActual<typeof import("@/lib/utils")>(
-    "@/lib/utils",
-  );
+  const actual =
+    await vi.importActual<typeof import("@/lib/utils")>("@/lib/utils");
   return {
     ...actual,
     copyToClipboard: mockCopyToClipboard,
@@ -175,7 +175,32 @@ describe("OrgDetailPage invites tab", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    fixtures.orgRole = "admin";
     mockCopyToClipboard.mockResolvedValue(undefined);
+  });
+
+  it("shows org-owned resource tabs to org admins", () => {
+    render(<OrgDetailPage />);
+
+    expect(
+      screen.getByRole("tab", { name: "Service Accounts" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("tab", { name: "Developer Apps" }),
+    ).toBeInTheDocument();
+  });
+
+  it("hides org-owned resource tabs from non-admin members", () => {
+    fixtures.orgRole = "member";
+
+    render(<OrgDetailPage />);
+
+    expect(
+      screen.queryByRole("tab", { name: "Service Accounts" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("tab", { name: "Developer Apps" }),
+    ).not.toBeInTheDocument();
   });
 
   it("copies the full invite join URL for pending invites", async () => {
