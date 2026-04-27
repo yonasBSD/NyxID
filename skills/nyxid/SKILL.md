@@ -780,7 +780,10 @@ nyxid org show <ORG_ID>
 nyxid org update <ORG_ID> --display-name "New Name"
 
 # Delete (admin only). Refuses if the org still owns any shared services,
-# endpoints, API keys, or NyxID API keys -- transfer or delete those first.
+# endpoints, API keys, NyxID API keys, or non-revoked provider tokens --
+# transfer or delete those first. Deleting an org service auto-cleans the
+# linked provider token when no other org service uses it; the orphan-token
+# escape hatch for older orgs is `nyxid provider disconnect --org` (below).
 nyxid org delete <ORG_ID> --yes
 ```
 
@@ -823,7 +826,21 @@ The backend enforces that the caller is an admin of the target org before writin
 
 > Viewer-role members still see org services in the list (tagged `credential_source.allowed = false`) but cannot click into their detail page or proxy through them. Scoped members only see services within their `allowed_service_ids` scope -- services outside the scope are hidden entirely, not just disabled.
 
-The frontend `/keys` page groups personal vs. each org section, with viewer-role and out-of-scope items rendered read-only.
+The frontend `/keys` page groups personal vs. each org section, with viewer-role and out-of-scope items rendered read-only. The frontend `/providers` page exposes the same org scope selector for org admins, so an admin can list and disconnect tokens owned by any org they administer.
+
+### Disconnecting a provider token
+
+Most users never need this directly: deleting the last `UserService` backed by a provider auto-soft-revokes the linked `UserProviderToken` (node-managed services do not count toward "in use"). The explicit command is the escape hatch for orphan tokens left behind by older releases or for unusual cleanup flows.
+
+```bash
+# Disconnect a personal provider token
+nyxid provider disconnect <PROVIDER_ID>
+
+# Disconnect an org-owned provider token (admin required)
+nyxid provider disconnect <PROVIDER_ID> --org <ORG_ID>
+```
+
+`<PROVIDER_ID>` is the provider config UUID, not the slug -- get it from `nyxid catalog list --output json` or from the token row in the `/providers` page. The command revokes the token (any value of `status != "revoked"` flips to `"revoked"`) and syncs the change into the matching `UserApiKey` rows so dependent services flip back to `pending_auth` until they are reconnected. Once the org's last non-revoked provider token is gone, `nyxid org delete` succeeds.
 
 ### Inviting members
 
