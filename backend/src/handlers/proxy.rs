@@ -1575,9 +1575,20 @@ async fn execute_proxy_inner(
 
         // Override User-Agent if the service specifies a custom one.
         // By default (None), the client's User-Agent is forwarded as-is.
+        // NyxID#514: when neither caller nor service supplies a UA,
+        // inject `NyxID-Proxy/{version}` as a benign fallback so
+        // UA-required APIs (GitHub etc.) don't 403 silently.
         if let Some(ref ua) = target.service.custom_user_agent {
             enriched_headers.retain(|(name, _)| !name.eq_ignore_ascii_case("user-agent"));
             enriched_headers.push(("user-agent".to_string(), ua.clone()));
+        } else if !enriched_headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("user-agent"))
+        {
+            enriched_headers.push((
+                "user-agent".to_string(),
+                proxy_service::DEFAULT_PROXY_USER_AGENT.to_string(),
+            ));
         }
 
         // Forward the caller's NyxID access token when the service is configured for it.
@@ -2533,7 +2544,8 @@ async fn connect_downstream_ws(
     //   1. Caller handshake metadata (`forward_headers`)
     //   2. Identity propagation headers
     //   3. Service default headers (catalog + user-service, NyxID#356)
-    //   4. Service `custom_user_agent` override
+    //   4. Service `custom_user_agent` override, OR `NyxID-Proxy/{version}`
+    //      fallback when neither caller nor service supplies a UA (NyxID#514)
     //   5. Delegated provider credential headers
     //   6. `forward_access_token` NyxID bearer
     //   7. Service auth credential (auth_method)
@@ -2590,8 +2602,16 @@ async fn connect_downstream_ws(
     }
 
     // [4] Override User-Agent if the service specifies a custom one.
-    if let Some(ref ua) = target.service.custom_user_agent
-        && let Ok(hv) = reqwest::header::HeaderValue::from_str(ua)
+    // NyxID#514: when neither caller nor service supplies a UA, inject
+    // `NyxID-Proxy/{version}` so UA-required APIs don't 403 silently.
+    // The service `custom_user_agent` and any caller-supplied UA still win.
+    if let Some(ref ua) = target.service.custom_user_agent {
+        if let Ok(hv) = reqwest::header::HeaderValue::from_str(ua) {
+            headers.insert(reqwest::header::USER_AGENT, hv);
+        }
+    } else if !headers.contains_key(reqwest::header::USER_AGENT)
+        && let Ok(hv) =
+            reqwest::header::HeaderValue::from_str(proxy_service::DEFAULT_PROXY_USER_AGENT)
     {
         headers.insert(reqwest::header::USER_AGENT, hv);
     }
@@ -3181,9 +3201,20 @@ async fn handle_ws_passthrough_via_node(
     enriched_headers.extend(identity_headers.iter().cloned());
 
     // Override User-Agent if the service specifies a custom one.
+    // NyxID#514: when neither caller nor service supplies a UA, inject
+    // `NyxID-Proxy/{version}` so UA-required APIs don't 403 silently.
+    // The service `custom_user_agent` and any caller-supplied UA still win.
     if let Some(ref ua) = target.service.custom_user_agent {
         enriched_headers.retain(|(name, _)| !name.eq_ignore_ascii_case("user-agent"));
         enriched_headers.push(("user-agent".to_string(), ua.clone()));
+    } else if !enriched_headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("user-agent"))
+    {
+        enriched_headers.push((
+            "user-agent".to_string(),
+            proxy_service::DEFAULT_PROXY_USER_AGENT.to_string(),
+        ));
     }
 
     // Merge service-level default headers (NyxID#356) — same semantics as
