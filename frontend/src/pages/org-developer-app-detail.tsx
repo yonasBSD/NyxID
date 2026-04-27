@@ -7,14 +7,18 @@ export function OrgDeveloperAppDetailPage() {
     from: "/dashboard/orgs/$orgId/developer-apps/$clientId",
   });
   const { data: org } = useOrg(orgId);
+  const orgLabel = org?.display_name ?? "Organization";
+  const orgPath = `/orgs/${orgId}`;
 
   return (
     <DeveloperAppDetail
       clientId={clientId}
-      backTo={{
-        to: `/orgs/${orgId}`,
-        label: org?.display_name ?? "Organization",
-      }}
+      backTo={{ to: orgPath, label: orgLabel }}
+      breadcrumbsPrefix={[
+        { label: "Organizations", to: "/orgs" },
+        { label: orgLabel, to: orgPath },
+        { label: "Developer Apps" },
+      ]}
     />
   );
 }

@@ -18,6 +18,7 @@ import { ApiError } from "@/lib/api-client";
 import { SaConnectedServices } from "@/components/dashboard/sa-connected-services";
 import type { RotateSecretResponse } from "@/types/service-accounts";
 import { PageHeader } from "@/components/shared/page-header";
+import type { BreadcrumbItem } from "@/components/shared/breadcrumb";
 import { DetailSection } from "@/components/shared/detail-section";
 import { DetailRow } from "@/components/shared/detail-row";
 import { Separator } from "@/components/ui/separator";
@@ -57,12 +58,19 @@ type ConfirmAction = "delete" | "revoke-tokens" | null;
 interface ServiceAccountDetailProps {
   readonly saId: string;
   readonly backTo: { readonly to: string; readonly label: string };
+  /**
+   * Breadcrumb chain leading up to (but not including) the service account
+   * itself. The current SA's name is appended as the final crumb. When
+   * omitted, defaults to a single crumb derived from `backTo`.
+   */
+  readonly breadcrumbsPrefix?: readonly BreadcrumbItem[];
   readonly showProviderSections?: boolean;
 }
 
 export function ServiceAccountDetail({
   saId,
   backTo,
+  breadcrumbsPrefix,
   showProviderSections = true,
 }: ServiceAccountDetailProps) {
   const navigate = useNavigate();
@@ -127,24 +135,6 @@ export function ServiceAccountDetail({
 
   async function handleEdit(formData: UpdateServiceAccountFormData) {
     if (!sa) return;
-    const payload: Partial<{
-      name: string;
-      description: string;
-      allowed_scopes: string;
-      role_ids: string[];
-      rate_limit_override: number | null;
-      is_active: boolean;
-    }> = {};
-
-    if (formData.name !== sa.name) {
-      payload.name = formData.name;
-    }
-    if ((formData.description ?? "") !== (sa.description ?? "")) {
-      payload.description = formData.description || undefined;
-    }
-    if (formData.allowed_scopes !== sa.allowed_scopes) {
-      payload.allowed_scopes = formData.allowed_scopes;
-    }
 
     const newRoleIds = formData.role_ids
       ? formData.role_ids
@@ -152,22 +142,30 @@ export function ServiceAccountDetail({
           .map((s) => s.trim())
           .filter(Boolean)
       : [];
-    const currentRoleIds = [...sa.role_ids].sort();
-    const sortedNewRoleIds = [...newRoleIds].sort();
-    if (JSON.stringify(currentRoleIds) !== JSON.stringify(sortedNewRoleIds)) {
-      payload.role_ids = newRoleIds;
-    }
+    const roleIdsChanged =
+      JSON.stringify([...sa.role_ids].sort()) !==
+      JSON.stringify([...newRoleIds].sort());
 
     const newRate = formData.rate_limit_override
       ? Number(formData.rate_limit_override)
       : null;
-    if (newRate !== sa.rate_limit_override) {
-      payload.rate_limit_override = newRate;
-    }
 
-    if (formData.is_active !== sa.is_active) {
-      payload.is_active = formData.is_active;
-    }
+    const payload = {
+      ...(formData.name !== sa.name ? { name: formData.name } : {}),
+      ...((formData.description ?? "") !== (sa.description ?? "")
+        ? { description: formData.description || undefined }
+        : {}),
+      ...(formData.allowed_scopes !== sa.allowed_scopes
+        ? { allowed_scopes: formData.allowed_scopes }
+        : {}),
+      ...(roleIdsChanged ? { role_ids: newRoleIds } : {}),
+      ...(newRate !== sa.rate_limit_override
+        ? { rate_limit_override: newRate }
+        : {}),
+      ...(formData.is_active !== sa.is_active
+        ? { is_active: formData.is_active }
+        : {}),
+    };
 
     if (Object.keys(payload).length === 0) {
       setEditOpen(false);
@@ -266,16 +264,10 @@ export function ServiceAccountDetail({
   return (
     <div className="space-y-8">
       <PageHeader
-        breadcrumbs={
-          showProviderSections
-            ? [{ label: backTo.label, to: backTo.to }, { label: sa.name }]
-            : [
-                { label: "Organizations", to: "/orgs" },
-                { label: backTo.label, to: backTo.to },
-                { label: "Service Accounts" },
-                { label: sa.name },
-              ]
-        }
+        breadcrumbs={[
+          ...(breadcrumbsPrefix ?? [{ label: backTo.label, to: backTo.to }]),
+          { label: sa.name },
+        ]}
         title={sa.name}
         description={sa.description ?? undefined}
         actions={

@@ -37,6 +37,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { OrgReadOnlyRow } from "@/components/orgs/org-readonly-row";
 
 const OIDC_SCOPES = [
   { id: "openid", label: "openid", required: true },
@@ -431,13 +432,3 @@ export function OrgDeveloperAppsTab({
   );
 }
 
-function OrgReadOnlyRow({ orgName }: { readonly orgName: string }) {
-  return (
-    <div className="rounded-md border border-border bg-muted px-3 py-2">
-      <p className="text-xs uppercase tracking-wide text-text-tertiary">
-        Organization
-      </p>
-      <p className="text-sm font-medium text-foreground">{orgName}</p>
-    </div>
-  );
-}

@@ -28,6 +28,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ClientSecretDialog } from "@/components/shared/client-secret-dialog";
 import { PageHeader } from "@/components/shared/page-header";
+import type { BreadcrumbItem } from "@/components/shared/breadcrumb";
 import { parseRedirectUris } from "@/lib/oauth";
 import { ApiError } from "@/lib/api-client";
 import { toast } from "sonner";
@@ -59,11 +60,18 @@ const OIDC_SCOPES = [
 interface DeveloperAppDetailProps {
   readonly clientId: string;
   readonly backTo: { readonly to: string; readonly label: string };
+  /**
+   * Breadcrumb chain leading up to (but not including) the developer app
+   * itself. The current app's name is appended as the final crumb. When
+   * omitted, defaults to a single crumb derived from `backTo`.
+   */
+  readonly breadcrumbsPrefix?: readonly BreadcrumbItem[];
 }
 
 export function DeveloperAppDetail({
   clientId,
   backTo,
+  breadcrumbsPrefix,
 }: DeveloperAppDetailProps) {
   const navigate = useNavigate();
   const { data: app, isLoading } = useDeveloperApp(clientId);
@@ -171,24 +179,13 @@ export function DeveloperAppDetail({
     );
   }
 
-  const isOrgScoped = backTo.to.startsWith("/orgs/");
-
   return (
     <div className="space-y-8">
       <PageHeader
-        breadcrumbs={
-          isOrgScoped
-            ? [
-                { label: "Organizations", to: "/orgs" },
-                { label: backTo.label, to: backTo.to },
-                { label: "Developer Apps" },
-                { label: app.client_name },
-              ]
-            : [
-                { label: backTo.label, to: backTo.to },
-                { label: app.client_name },
-              ]
-        }
+        breadcrumbs={[
+          ...(breadcrumbsPrefix ?? [{ label: backTo.label, to: backTo.to }]),
+          { label: app.client_name },
+        ]}
         title={app.client_name}
         description="Client details, redirect URIs, and OAuth metadata."
         actions={

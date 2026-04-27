@@ -50,6 +50,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { OrgReadOnlyRow } from "@/components/orgs/org-readonly-row";
 import type { CreateServiceAccountResponse } from "@/types/service-accounts";
 
 const PER_PAGE = 20;
@@ -449,17 +450,6 @@ export function OrgServiceAccountsTab({
           )}
         </DialogContent>
       </Dialog>
-    </div>
-  );
-}
-
-function OrgReadOnlyRow({ orgName }: { readonly orgName: string }) {
-  return (
-    <div className="rounded-md border border-border bg-muted px-3 py-2">
-      <p className="text-xs uppercase tracking-wide text-text-tertiary">
-        Organization
-      </p>
-      <p className="text-sm font-medium text-foreground">{orgName}</p>
     </div>
   );
 }

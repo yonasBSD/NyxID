@@ -7,14 +7,18 @@ export function OrgServiceAccountDetailPage() {
     from: "/dashboard/orgs/$orgId/service-accounts/$saId",
   });
   const { data: org } = useOrg(orgId);
+  const orgLabel = org?.display_name ?? "Organization";
+  const orgPath = `/orgs/${orgId}`;
 
   return (
     <ServiceAccountDetail
       saId={saId}
-      backTo={{
-        to: `/orgs/${orgId}`,
-        label: org?.display_name ?? "Organization",
-      }}
+      backTo={{ to: orgPath, label: orgLabel }}
+      breadcrumbsPrefix={[
+        { label: "Organizations", to: "/orgs" },
+        { label: orgLabel, to: orgPath },
+        { label: "Service Accounts" },
+      ]}
       showProviderSections={false}
     />
   );
