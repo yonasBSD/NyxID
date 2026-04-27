@@ -2573,7 +2573,7 @@ impl NodeWsManager {
         {
             match pending {
                 PendingWsProxy::Awaiting(sender) => {
-                    let _ = sender.send(Err(AppError::Internal(error.to_string())));
+                    let _ = sender.send(Err(AppError::WsProxyDownstream(error.to_string())));
                 }
                 PendingWsProxy::Active(tx) => {
                     let _ = tx.try_send(WsProxyFrame::Error(error.to_string()));
