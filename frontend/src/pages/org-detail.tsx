@@ -55,20 +55,13 @@ import {
   formatTimeDistance,
 } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth-store";
-import {
-  useOrg,
-  useUpdateOrg,
-  useDeleteOrg,
-} from "@/hooks/use-orgs";
+import { useOrg, useUpdateOrg, useDeleteOrg } from "@/hooks/use-orgs";
 import {
   useOrgMembers,
   useUpdateMember,
   useRemoveMember,
 } from "@/hooks/use-org-members";
-import {
-  useOrgInvites,
-  useCancelInvite,
-} from "@/hooks/use-org-invites";
+import { useOrgInvites, useCancelInvite } from "@/hooks/use-org-invites";
 import { useKeys } from "@/hooks/use-keys";
 import {
   useClearOrgRoleScope,
@@ -90,12 +83,16 @@ import { RoleBadge } from "@/components/orgs/role-badge";
 import { InviteDialog } from "@/components/orgs/invite-dialog";
 import { OrgApprovalConfigs } from "@/components/orgs/org-approval-configs";
 import { OrgAvatar } from "@/components/orgs/org-avatar";
+import { OrgDeveloperAppsTab } from "@/components/orgs/org-developer-apps-tab";
+import { OrgServiceAccountsTab } from "@/components/orgs/org-service-accounts-tab";
 
 type TabValue =
   | "members"
   | "role-permissions"
   | "invites"
   | "approvals"
+  | "service-accounts"
+  | "developer-apps"
   | "settings";
 
 export function OrgDetailPage() {
@@ -137,7 +134,10 @@ export function OrgDetailPage() {
             Failed to load organization. It may have been deleted or you no
             longer have access.
           </p>
-          <Button variant="outline" onClick={() => void navigate({ to: "/orgs" })}>
+          <Button
+            variant="outline"
+            onClick={() => void navigate({ to: "/orgs" })}
+          >
             Back to organizations
           </Button>
         </CardContent>
@@ -146,6 +146,7 @@ export function OrgDetailPage() {
   }
 
   const isAdmin = org.your_role === "admin";
+  const orgName = org.display_name ?? "Untitled org";
 
   async function handleChangeRole(memberUserId: string, nextRole: OrgRole) {
     try {
@@ -213,9 +214,7 @@ export function OrgDetailPage() {
       toast.success("Member reset to role defaults");
     } catch (err) {
       toast.error(
-        err instanceof ApiError
-          ? err.message
-          : "Failed to reset member scope",
+        err instanceof ApiError ? err.message : "Failed to reset member scope",
       );
     }
   }
@@ -261,6 +260,12 @@ export function OrgDetailPage() {
           <TabsTrigger value="role-permissions">Role permissions</TabsTrigger>
           <TabsTrigger value="invites">Invites</TabsTrigger>
           <TabsTrigger value="approvals">Approvals</TabsTrigger>
+          {isAdmin && (
+            <TabsTrigger value="service-accounts">Service Accounts</TabsTrigger>
+          )}
+          {isAdmin && (
+            <TabsTrigger value="developer-apps">Developer Apps</TabsTrigger>
+          )}
           <TabsTrigger value="settings">Settings</TabsTrigger>
         </TabsList>
 
@@ -307,7 +312,9 @@ export function OrgDetailPage() {
                         updateMemberMutation.isPending ||
                         removeMemberMutation.isPending
                       }
-                      onChangeRole={(id, role) => void handleChangeRole(id, role)}
+                      onChangeRole={(id, role) =>
+                        void handleChangeRole(id, role)
+                      }
                       onRevoke={(target) => setRevokeTarget(target)}
                       onEditScope={(target) => setScopeTarget(target)}
                       onResetScope={(target) =>
@@ -488,6 +495,18 @@ export function OrgDetailPage() {
             </Card>
           )}
         </TabsContent>
+
+        {isAdmin && (
+          <TabsContent value="service-accounts" className="mt-6">
+            <OrgServiceAccountsTab orgId={orgId} orgName={orgName} />
+          </TabsContent>
+        )}
+
+        {isAdmin && (
+          <TabsContent value="developer-apps" className="mt-6">
+            <OrgDeveloperAppsTab orgId={orgId} orgName={orgName} />
+          </TabsContent>
+        )}
 
         <TabsContent value="settings" className="mt-6">
           {isAdmin ? (
