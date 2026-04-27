@@ -2469,12 +2469,15 @@ async fn revoke_provider_token_if_unused(
         return Ok(());
     };
 
+    // Node-managed keys store credentials on the node agent and do not reference
+    // the central provider token; match `sync_provider_token_to_api_keys` skip logic.
     let remaining_key_count = db
         .collection::<UserApiKey>(USER_API_KEYS)
         .count_documents(doc! {
             "user_id": user_id,
             "provider_config_id": provider_config_id,
             "status": { "$ne": "revoked" },
+            "credential_type": { "$ne": "node_managed" },
         })
         .await?;
 
@@ -2699,6 +2702,79 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    async fn insert_provider_token(
+        db: &mongodb::Database,
+        user_id: &str,
+        provider_id: &str,
+    ) -> String {
+        let now = Utc::now();
+        let token_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+            .insert_one(UserProviderToken {
+                id: token_id.clone(),
+                user_id: user_id.to_string(),
+                provider_config_id: provider_id.to_string(),
+                credential_user_id: None,
+                token_type: "oauth2".to_string(),
+                access_token_encrypted: Some(vec![1, 2, 3]),
+                refresh_token_encrypted: Some(vec![4, 5, 6]),
+                token_scopes: None,
+                expires_at: None,
+                api_key_encrypted: None,
+                status: "active".to_string(),
+                last_refreshed_at: None,
+                last_used_at: None,
+                error_message: None,
+                label: None,
+                metadata: None,
+                gateway_url: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+        token_id
+    }
+
+    async fn insert_provider_backed_service(
+        db: &mongodb::Database,
+        user_id: &str,
+        provider_id: &str,
+        service_id: &str,
+        credential_type: &str,
+    ) {
+        let endpoint_id = format!("ep-{service_id}");
+        let api_key_id = format!("key-{service_id}");
+
+        let mut endpoint = sample_endpoint();
+        endpoint.id = endpoint_id.clone();
+        endpoint.user_id = user_id.to_string();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(endpoint)
+            .await
+            .unwrap();
+
+        let mut api_key = sample_api_key(credential_type);
+        api_key.id = api_key_id.clone();
+        api_key.user_id = user_id.to_string();
+        api_key.provider_config_id = Some(provider_id.to_string());
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(api_key)
+            .await
+            .unwrap();
+
+        let mut service = sample_service("bearer");
+        service.id = service_id.to_string();
+        service.user_id = user_id.to_string();
+        service.slug = service_id.to_string();
+        service.endpoint_id = endpoint_id;
+        service.api_key_id = Some(api_key_id);
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(service)
+            .await
+            .unwrap();
     }
 
     fn sample_catalog_service() -> DownstreamService {
@@ -3316,69 +3392,11 @@ mod tests {
             return;
         };
 
-        let now = Utc::now();
         let user_id = uuid::Uuid::new_v4().to_string();
         let provider_id = uuid::Uuid::new_v4().to_string();
-        let token_id = uuid::Uuid::new_v4().to_string();
-
-        db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
-            .insert_one(UserProviderToken {
-                id: token_id.clone(),
-                user_id: user_id.clone(),
-                provider_config_id: provider_id.clone(),
-                credential_user_id: None,
-                token_type: "oauth2".to_string(),
-                access_token_encrypted: Some(vec![1, 2, 3]),
-                refresh_token_encrypted: Some(vec![4, 5, 6]),
-                token_scopes: None,
-                expires_at: None,
-                api_key_encrypted: None,
-                status: "active".to_string(),
-                last_refreshed_at: None,
-                last_used_at: None,
-                error_message: None,
-                label: None,
-                metadata: None,
-                gateway_url: None,
-                created_at: now,
-                updated_at: now,
-            })
-            .await
-            .unwrap();
-
-        for idx in 1..=2 {
-            let service_id = format!("svc-{idx}");
-            let endpoint_id = format!("ep-{idx}");
-            let api_key_id = format!("key-{idx}");
-
-            let mut endpoint = sample_endpoint();
-            endpoint.id = endpoint_id.clone();
-            endpoint.user_id = user_id.clone();
-            db.collection::<UserEndpoint>(USER_ENDPOINTS)
-                .insert_one(endpoint)
-                .await
-                .unwrap();
-
-            let mut api_key = sample_api_key("oauth2");
-            api_key.id = api_key_id.clone();
-            api_key.user_id = user_id.clone();
-            api_key.provider_config_id = Some(provider_id.clone());
-            db.collection::<UserApiKey>(USER_API_KEYS)
-                .insert_one(api_key)
-                .await
-                .unwrap();
-
-            let mut service = sample_service("bearer");
-            service.id = service_id;
-            service.user_id = user_id.clone();
-            service.slug = format!("service-{idx}");
-            service.endpoint_id = endpoint_id;
-            service.api_key_id = Some(api_key_id);
-            db.collection::<UserService>(USER_SERVICES)
-                .insert_one(service)
-                .await
-                .unwrap();
-        }
+        let token_id = insert_provider_token(&db, &user_id, &provider_id).await;
+        insert_provider_backed_service(&db, &user_id, &provider_id, "svc-1", "oauth2").await;
+        insert_provider_backed_service(&db, &user_id, &provider_id, "svc-2", "oauth2").await;
 
         revoke_key(&db, &user_id, &user_id, "svc-1").await.unwrap();
         let token_after_first_delete = db
@@ -3397,6 +3415,39 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(token_after_second_delete.status, "revoked");
+    }
+
+    #[tokio::test]
+    async fn revoke_key_ignores_node_managed_keys_when_cascading_provider_token() {
+        let Some(db) = connect_test_database("unified_key_service_node_managed_revoke").await
+        else {
+            eprintln!("skipping unified_key_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        let token_id = insert_provider_token(&db, &user_id, &provider_id).await;
+        insert_provider_backed_service(&db, &user_id, &provider_id, "central-svc", "oauth2").await;
+        insert_provider_backed_service(
+            &db,
+            &user_id,
+            &provider_id,
+            "node-managed-svc",
+            "node_managed",
+        )
+        .await;
+
+        revoke_key(&db, &user_id, &user_id, "central-svc")
+            .await
+            .unwrap();
+        let token_after_delete = db
+            .collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+            .find_one(doc! { "_id": &token_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(token_after_delete.status, "revoked");
     }
 
     #[tokio::test]
