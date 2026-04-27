@@ -53,6 +53,7 @@ fn proxy_error_telemetry_fields(err: &AppError) -> (u16, u32) {
         AppError::NodeOffline(_) => (503, 8001),
         AppError::NodeProxyTimeout => (504, 8002),
         AppError::NodeCredentialMissing(_) => (502, 8004),
+        AppError::WsProxyDownstream(_) => (502, 8005),
         AppError::ApiKeyScopeForbidden(_) => (403, 9000),
         AppError::ApiKeyScopeInactive => (403, 9001),
         AppError::ApiKeyScopeNotFound(_) => (404, 9002),

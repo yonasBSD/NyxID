@@ -2588,6 +2588,7 @@ async fn handle_ws_proxy_open(
     // Forward headers from the proxy message.
     if let Some(headers) = parsed["headers"].as_object() {
         for (name, value) in headers {
+            // Values are already wire-safe (percent-encoded) per identity_service::sanitize_header_value.
             if let Some(v) = value.as_str()
                 && let (Ok(hn), Ok(hv)) = (
                     reqwest::header::HeaderName::from_bytes(name.as_bytes()),

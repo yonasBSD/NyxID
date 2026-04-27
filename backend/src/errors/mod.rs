@@ -160,6 +160,9 @@ pub enum AppError {
     #[error("Node credential missing: {0}")]
     NodeCredentialMissing(String),
 
+    #[error("WebSocket proxy downstream error: {0}")]
+    WsProxyDownstream(String),
+
     #[error("API key scope forbidden: {0}")]
     ApiKeyScopeForbidden(String),
 
@@ -268,6 +271,7 @@ impl AppError {
             Self::NodeProxyTimeout => StatusCode::GATEWAY_TIMEOUT,
             Self::NodeRegistrationFailed(_) => StatusCode::BAD_REQUEST,
             Self::NodeCredentialMissing(_) => StatusCode::BAD_GATEWAY,
+            Self::WsProxyDownstream(_) => StatusCode::BAD_GATEWAY,
             Self::ApiKeyScopeForbidden(_) => StatusCode::FORBIDDEN,
             Self::ApiKeyScopeInactive => StatusCode::FORBIDDEN,
             Self::ApiKeyScopeNotFound(_) => StatusCode::NOT_FOUND,
@@ -338,6 +342,7 @@ impl AppError {
             Self::NodeProxyTimeout => 8002,
             Self::NodeRegistrationFailed(_) => 8003,
             Self::NodeCredentialMissing(_) => 8004,
+            Self::WsProxyDownstream(_) => 8005,
             Self::ApiKeyScopeForbidden(_) => 9000,
             Self::ApiKeyScopeInactive => 9001,
             Self::ApiKeyScopeNotFound(_) => 9002,
@@ -438,6 +443,7 @@ impl AppError {
             Self::NodeProxyTimeout => "node_proxy_timeout",
             Self::NodeRegistrationFailed(_) => "node_registration_failed",
             Self::NodeCredentialMissing(_) => "node_credential_missing",
+            Self::WsProxyDownstream(_) => "ws_proxy_downstream",
             Self::ApiKeyScopeForbidden(_) => "api_key_scope_forbidden",
             Self::ApiKeyScopeInactive => "api_key_scope_inactive",
             Self::ApiKeyScopeNotFound(_) => "api_key_scope_not_found",
@@ -706,6 +712,10 @@ mod tests {
             StatusCode::BAD_GATEWAY
         );
         assert_eq!(
+            AppError::WsProxyDownstream("x".into()).status_code(),
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
             AppError::ApiKeyScopeForbidden("x".into()).status_code(),
             StatusCode::FORBIDDEN
         );
@@ -809,6 +819,7 @@ mod tests {
             AppError::NodeProxyTimeout.error_code(),
             AppError::NodeRegistrationFailed("".into()).error_code(),
             AppError::NodeCredentialMissing("".into()).error_code(),
+            AppError::WsProxyDownstream("".into()).error_code(),
             AppError::ApiKeyScopeForbidden("".into()).error_code(),
             AppError::ApiKeyScopeInactive.error_code(),
             AppError::ApiKeyScopeNotFound("".into()).error_code(),
@@ -983,6 +994,11 @@ mod tests {
             8004
         );
         assert_eq!(
+            AppError::WsProxyDownstream("".into()).error_key(),
+            "ws_proxy_downstream"
+        );
+        assert_eq!(AppError::WsProxyDownstream("".into()).error_code(), 8005);
+        assert_eq!(
             AppError::ApiKeyScopeForbidden("".into()).error_key(),
             "api_key_scope_forbidden"
         );
@@ -1044,6 +1060,25 @@ mod tests {
         assert_eq!(
             format!("{}", AppError::InviteCodeDeactivated),
             "Invite code has been deactivated"
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_proxy_downstream_response_includes_node_reason() {
+        let response = AppError::WsProxyDownstream("downstream rejected handshake".to_string())
+            .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+
+        assert_eq!(json["error"], "ws_proxy_downstream");
+        assert_eq!(json["error_code"], 8005);
+        assert_eq!(
+            json["message"],
+            "WebSocket proxy downstream error: downstream rejected handshake"
         );
     }
 

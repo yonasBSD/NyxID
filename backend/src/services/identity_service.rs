@@ -32,11 +32,32 @@ pub struct IdentityAssertionClaims {
 }
 
 /// SEC-M1: Sanitize a string for use as an HTTP header value.
-/// Removes CR, LF, and NUL characters that could enable CRLF injection.
+///
+/// Drops CR, LF, and NUL bytes to prevent CRLF injection. Printable ASCII
+/// bytes are passed through unchanged, except `%` is escaped as `%25` so
+/// percent-decoding round-trips unambiguously. All other bytes are encoded as
+/// uppercase `%XX`, including UTF-8 multibyte sequences byte by byte.
+///
+/// Downstream services should percent-decode `X-NyxID-User-Id`,
+/// `X-NyxID-User-Email`, and `X-NyxID-User-Name` to recover the original
+/// UTF-8 values.
 fn sanitize_header_value(val: &str) -> String {
-    val.chars()
-        .filter(|c| !matches!(c, '\r' | '\n' | '\0'))
-        .collect()
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+
+    let mut out = String::with_capacity(val.len());
+    for b in val.bytes() {
+        match b {
+            b'\r' | b'\n' | 0 => {}
+            b'%' => out.push_str("%25"),
+            0x20..=0x7E => out.push(b as char),
+            _ => {
+                out.push('%');
+                out.push(HEX[(b >> 4) as usize] as char);
+                out.push(HEX[(b & 0x0F) as usize] as char);
+            }
+        }
+    }
+    out
 }
 
 /// Build identity headers for a proxied request based on service configuration.
@@ -242,5 +263,97 @@ mod tests {
             .unwrap();
         assert!(!email_header.1.contains('\r'));
         assert!(!email_header.1.contains('\n'));
+    }
+
+    #[test]
+    fn sanitizes_non_ascii_display_name_to_percent_encoded() {
+        let mut user = make_user();
+        user.display_name = Some("赵奕旗".to_string());
+
+        let mut svc = dummy_service();
+        svc.identity_propagation_mode = "headers".to_string();
+        svc.identity_include_user_id = false;
+        svc.identity_include_email = false;
+        svc.identity_include_name = true;
+
+        let headers = build_identity_headers(&user, &svc);
+        let name_header = headers
+            .iter()
+            .find(|(n, _)| n == "X-NyxID-User-Name")
+            .unwrap();
+        assert_eq!(name_header.1, "%E8%B5%B5%E5%A5%95%E6%97%97");
+
+        let header_value = reqwest::header::HeaderValue::from_str(&name_header.1).unwrap();
+        assert_eq!(
+            header_value.to_str().unwrap(),
+            "%E8%B5%B5%E5%A5%95%E6%97%97"
+        );
+    }
+
+    #[test]
+    fn sanitizes_percent_self_escapes() {
+        let mut user = make_user();
+        user.display_name = Some("100% off".to_string());
+
+        let mut svc = dummy_service();
+        svc.identity_propagation_mode = "headers".to_string();
+        svc.identity_include_user_id = false;
+        svc.identity_include_email = false;
+        svc.identity_include_name = true;
+
+        let headers = build_identity_headers(&user, &svc);
+        let name_header = headers
+            .iter()
+            .find(|(n, _)| n == "X-NyxID-User-Name")
+            .unwrap();
+        assert_eq!(name_header.1, "100%25 off");
+    }
+
+    #[test]
+    fn sanitizes_drops_crlf_and_nul_keeps_other_controls_encoded() {
+        let mut user = make_user();
+        user.display_name = Some("alice\r\n\tbob\0\x01".to_string());
+
+        let mut svc = dummy_service();
+        svc.identity_propagation_mode = "headers".to_string();
+        svc.identity_include_user_id = false;
+        svc.identity_include_email = false;
+        svc.identity_include_name = true;
+
+        let headers = build_identity_headers(&user, &svc);
+        let name_header = headers
+            .iter()
+            .find(|(n, _)| n == "X-NyxID-User-Name")
+            .unwrap();
+        assert_eq!(name_header.1, "alice%09bob%01");
+    }
+
+    #[test]
+    fn sanitizes_ascii_values_byte_for_byte() {
+        let user = make_user();
+
+        let mut svc = dummy_service();
+        svc.identity_propagation_mode = "headers".to_string();
+        svc.identity_include_user_id = true;
+        svc.identity_include_email = true;
+        svc.identity_include_name = true;
+
+        let headers = build_identity_headers(&user, &svc);
+        let user_id_header = headers
+            .iter()
+            .find(|(n, _)| n == "X-NyxID-User-Id")
+            .unwrap();
+        let email_header = headers
+            .iter()
+            .find(|(n, _)| n == "X-NyxID-User-Email")
+            .unwrap();
+        let name_header = headers
+            .iter()
+            .find(|(n, _)| n == "X-NyxID-User-Name")
+            .unwrap();
+
+        assert_eq!(user_id_header.1, "user-123");
+        assert_eq!(email_header.1, "alice@example.com");
+        assert_eq!(name_header.1, "Alice");
     }
 }
