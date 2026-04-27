@@ -476,10 +476,15 @@ async fn add_member(
         body["allowed_service_ids"] = serde_json::json!(ids);
     }
 
-    let _: Value = api.post(&format!("/orgs/{org_id}/members"), &body).await?;
-    eprintln!("Member added: {user_id} ({role})");
-    eprintln!();
-    eprintln!("Tip: prefer `nyxid org invite create` so the recipient explicitly opts in.");
+    let resp: Value = api.post(&format!("/orgs/{org_id}/members"), &body).await?;
+    match auth.output {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&resp)?),
+        OutputFormat::Table => {
+            eprintln!("Member added: {user_id} ({role})");
+            eprintln!();
+            eprintln!("Tip: prefer `nyxid org invite create` so the recipient explicitly opts in.");
+        }
+    }
     Ok(())
 }
 
