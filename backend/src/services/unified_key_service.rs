@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use chrono::Utc;
 use futures::TryStreamExt;
-use mongodb::bson::doc;
+use mongodb::bson::{self, doc};
 use rand::Rng;
 use uuid::Uuid;
 
@@ -12,7 +12,7 @@ use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
-use crate::models::user_api_key::UserApiKey;
+use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
 use crate::models::user_endpoint::UserEndpoint;
 use crate::models::user_provider_token::{
     COLLECTION_NAME as USER_PROVIDER_TOKENS, UserProviderToken,
@@ -2373,9 +2373,18 @@ pub async fn revoke_key(
     service_id: &str,
 ) -> AppResult<()> {
     let svc = user_service_service::get_user_service(db, user_id, service_id).await?;
+    let api_key_provider_config_id = if let Some(ref ak_id) = svc.api_key_id {
+        user_api_key_service::get_api_key(db, user_id, ak_id)
+            .await?
+            .provider_config_id
+    } else {
+        None
+    };
+
     user_service_service::deactivate_user_service(db, user_id, actor_user_id, service_id).await?;
     if let Some(ref ak_id) = svc.api_key_id {
         user_api_key_service::delete_api_key(db, user_id, ak_id).await?;
+        revoke_provider_token_if_unused(db, user_id, api_key_provider_config_id.as_deref()).await?;
     }
     user_endpoint_service::delete_endpoint(db, user_id, &svc.endpoint_id).await?;
 
@@ -2421,6 +2430,9 @@ pub async fn revoke_key_if_pending(
     let Some(ak_id) = svc.api_key_id.as_deref() else {
         return Ok(false);
     };
+    let api_key_provider_config_id = user_api_key_service::get_api_key(db, user_id, ak_id)
+        .await?
+        .provider_config_id;
 
     // Atomic gate: flips pending_auth -> revoked in one write. If
     // the provider callback already flipped to `active`, the filter
@@ -2429,6 +2441,7 @@ pub async fn revoke_key_if_pending(
     if !flipped {
         return Ok(false);
     }
+    revoke_provider_token_if_unused(db, user_id, api_key_provider_config_id.as_deref()).await?;
 
     // API key was in pending_auth and is now revoked (by the atomic
     // status-filter update above). Tear down the owning UserService
@@ -2445,6 +2458,47 @@ pub async fn revoke_key_if_pending(
     .await?;
 
     Ok(true)
+}
+
+async fn revoke_provider_token_if_unused(
+    db: &mongodb::Database,
+    user_id: &str,
+    provider_config_id: Option<&str>,
+) -> AppResult<()> {
+    let Some(provider_config_id) = provider_config_id else {
+        return Ok(());
+    };
+
+    let remaining_key_count = db
+        .collection::<UserApiKey>(USER_API_KEYS)
+        .count_documents(doc! {
+            "user_id": user_id,
+            "provider_config_id": provider_config_id,
+            "status": { "$ne": "revoked" },
+        })
+        .await?;
+
+    if remaining_key_count > 0 {
+        return Ok(());
+    }
+
+    db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+        .update_many(
+            doc! {
+                "user_id": user_id,
+                "provider_config_id": provider_config_id,
+                "status": { "$ne": "revoked" },
+            },
+            doc! {
+                "$set": {
+                    "status": "revoked",
+                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                }
+            },
+        )
+        .await?;
+
+    Ok(())
 }
 
 fn build_key_view(
@@ -2569,6 +2623,9 @@ mod tests {
     use crate::models::user_api_key::UserApiKey;
     use crate::models::user_endpoint::COLLECTION_NAME as USER_ENDPOINTS;
     use crate::models::user_endpoint::UserEndpoint;
+    use crate::models::user_provider_token::{
+        COLLECTION_NAME as USER_PROVIDER_TOKENS, UserProviderToken,
+    };
     use crate::models::user_service::COLLECTION_NAME as USER_SERVICES;
     use crate::models::user_service::UserService;
     use crate::services::user_service_service::validate_slug;
@@ -3250,6 +3307,96 @@ mod tests {
         assert_eq!(api_key_count, 0);
         assert_eq!(endpoint_count, 0);
         assert!(!service.get_bool("is_active").unwrap());
+    }
+
+    #[tokio::test]
+    async fn revoke_key_soft_revokes_provider_token_after_last_provider_key() {
+        let Some(db) = connect_test_database("unified_key_service_provider_revoke").await else {
+            eprintln!("skipping unified_key_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let now = Utc::now();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        let token_id = uuid::Uuid::new_v4().to_string();
+
+        db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+            .insert_one(UserProviderToken {
+                id: token_id.clone(),
+                user_id: user_id.clone(),
+                provider_config_id: provider_id.clone(),
+                credential_user_id: None,
+                token_type: "oauth2".to_string(),
+                access_token_encrypted: Some(vec![1, 2, 3]),
+                refresh_token_encrypted: Some(vec![4, 5, 6]),
+                token_scopes: None,
+                expires_at: None,
+                api_key_encrypted: None,
+                status: "active".to_string(),
+                last_refreshed_at: None,
+                last_used_at: None,
+                error_message: None,
+                label: None,
+                metadata: None,
+                gateway_url: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        for idx in 1..=2 {
+            let service_id = format!("svc-{idx}");
+            let endpoint_id = format!("ep-{idx}");
+            let api_key_id = format!("key-{idx}");
+
+            let mut endpoint = sample_endpoint();
+            endpoint.id = endpoint_id.clone();
+            endpoint.user_id = user_id.clone();
+            db.collection::<UserEndpoint>(USER_ENDPOINTS)
+                .insert_one(endpoint)
+                .await
+                .unwrap();
+
+            let mut api_key = sample_api_key("oauth2");
+            api_key.id = api_key_id.clone();
+            api_key.user_id = user_id.clone();
+            api_key.provider_config_id = Some(provider_id.clone());
+            db.collection::<UserApiKey>(USER_API_KEYS)
+                .insert_one(api_key)
+                .await
+                .unwrap();
+
+            let mut service = sample_service("bearer");
+            service.id = service_id;
+            service.user_id = user_id.clone();
+            service.slug = format!("service-{idx}");
+            service.endpoint_id = endpoint_id;
+            service.api_key_id = Some(api_key_id);
+            db.collection::<UserService>(USER_SERVICES)
+                .insert_one(service)
+                .await
+                .unwrap();
+        }
+
+        revoke_key(&db, &user_id, &user_id, "svc-1").await.unwrap();
+        let token_after_first_delete = db
+            .collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+            .find_one(doc! { "_id": &token_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(token_after_first_delete.status, "active");
+
+        revoke_key(&db, &user_id, &user_id, "svc-2").await.unwrap();
+        let token_after_second_delete = db
+            .collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+            .find_one(doc! { "_id": &token_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(token_after_second_delete.status, "revoked");
     }
 
     #[tokio::test]
