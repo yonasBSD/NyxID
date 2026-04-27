@@ -38,6 +38,14 @@ pub struct IdentityAssertionClaims {
 /// percent-decoding round-trips unambiguously. All other bytes are encoded as
 /// uppercase `%XX`, including UTF-8 multibyte sequences byte by byte.
 ///
+/// The output is pure printable ASCII and is therefore safe to feed into
+/// `reqwest::header::HeaderValue::from_str` and any HTTP/2 HPACK or HTTP/3
+/// QPACK encoder, and round-trips through `HeaderValue::to_str` -- the
+/// stricter check that today fails the WS proxy path on non-ASCII bytes.
+///
+/// This is the contract for every value passed to it: any current or future
+/// caller emitting an HTTP header should funnel through here so wire-safety
+/// holds across all proxy paths (direct HTTP, direct WS, node HTTP, node WS).
 /// Downstream services should percent-decode `X-NyxID-User-Id`,
 /// `X-NyxID-User-Email`, and `X-NyxID-User-Name` to recover the original
 /// UTF-8 values.
@@ -326,6 +334,7 @@ mod tests {
             .find(|(n, _)| n == "X-NyxID-User-Name")
             .unwrap();
         assert_eq!(name_header.1, "alice%09bob%01");
+        assert!(reqwest::header::HeaderValue::from_str(&name_header.1).is_ok());
     }
 
     #[test]
