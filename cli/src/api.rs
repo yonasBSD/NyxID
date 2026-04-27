@@ -355,6 +355,30 @@ impl ApiClient {
         }
     }
 
+    pub async fn delete<T: DeserializeOwned>(&mut self, path: &str) -> Result<T> {
+        let url = format!("{}{path}", self.base_url);
+        let resp = self
+            .client
+            .delete(&url)
+            .bearer_auth(&self.access_token)
+            .send()
+            .await
+            .with_context(|| format!("DELETE {path} failed"))?;
+
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
+            let resp = self
+                .client
+                .delete(&url)
+                .bearer_auth(&self.access_token)
+                .send()
+                .await
+                .with_context(|| format!("DELETE {path} failed (retry)"))?;
+            return Self::handle_response(resp, path).await;
+        }
+
+        Self::handle_response(resp, path).await
+    }
+
     #[allow(dead_code)]
     pub async fn post_empty<B: Serialize>(&mut self, path: &str, body: &B) -> Result<()> {
         let url = format!("{}{path}", self.base_url);
