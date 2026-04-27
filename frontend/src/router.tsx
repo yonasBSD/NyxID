@@ -65,6 +65,8 @@ import {
   ChannelConversationDetailPage,
   OrgsPage,
   OrgDetailPage,
+  OrgServiceAccountDetailPage,
+  OrgDeveloperAppDetailPage,
   OrgJoinPage,
 } from "@/pages/lazy";
 
@@ -454,6 +456,18 @@ const orgDetailRoute = createRoute({
   component: OrgDetailPage,
 });
 
+const orgServiceAccountDetailRoute = createRoute({
+  path: "/orgs/$orgId/service-accounts/$saId",
+  getParentRoute: () => dashboardLayout,
+  component: OrgServiceAccountDetailPage,
+});
+
+const orgDeveloperAppDetailRoute = createRoute({
+  path: "/orgs/$orgId/developer-apps/$clientId",
+  getParentRoute: () => dashboardLayout,
+  component: OrgDeveloperAppDetailPage,
+});
+
 const orgJoinRoute = createRoute({
   path: "/orgs/join/$nonce",
   getParentRoute: () => dashboardLayout,
@@ -587,6 +601,8 @@ const routeTree = rootRoute.addChildren([
     orgsRoute,
     orgJoinRoute,
     orgDetailRoute,
+    orgServiceAccountDetailRoute,
+    orgDeveloperAppDetailRoute,
     adminLayout.addChildren([
       adminUsersRoute,
       adminUserDetailRoute,
@@ -594,12 +610,12 @@ const routeTree = rootRoute.addChildren([
       adminRoleDetailRoute,
       adminGroupsRoute,
       adminGroupDetailRoute,
-    adminServiceAccountsRoute,
-    adminServiceAccountDetailRoute,
-    adminNodesRoute,
-    adminAuditLogRoute,
-    adminInviteCodesRoute,
-  ]),
+      adminServiceAccountsRoute,
+      adminServiceAccountDetailRoute,
+      adminNodesRoute,
+      adminAuditLogRoute,
+      adminInviteCodesRoute,
+    ]),
   ]),
 ]);
 
