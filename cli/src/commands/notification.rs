@@ -111,7 +111,13 @@ pub async fn run(command: NotificationCommands) -> Result<()> {
         NotificationCommands::TelegramDisconnect { auth } => {
             let mut api = ApiClient::from_auth(&auth)?;
             api.delete_empty("/notifications/telegram").await?;
-            eprintln!("Telegram disconnected.");
+            match auth.output {
+                OutputFormat::Json => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({ "ok": true }))?
+                ),
+                OutputFormat::Table => eprintln!("Telegram disconnected."),
+            }
             Ok(())
         }
     }

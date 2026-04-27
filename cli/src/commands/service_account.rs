@@ -220,7 +220,18 @@ pub async fn run(command: ServiceAccountCommands) -> Result<()> {
             let mut api = ApiClient::from_auth(&auth)?;
             api.delete_empty(&format!("/admin/service-accounts/{id}"))
                 .await?;
-            eprintln!("Service account deactivated.");
+            match auth.output {
+                OutputFormat::Json => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": true,
+                        "id": id,
+                        "resource_type": "service_account",
+                        "status": "deactivated",
+                    }))?
+                ),
+                OutputFormat::Table => eprintln!("Service account deactivated."),
+            }
             Ok(())
         }
 

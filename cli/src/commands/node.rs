@@ -202,7 +202,13 @@ pub async fn run(command: NodeCommands) -> Result<()> {
             }
 
             api.delete_empty(&format!("/nodes/{resolved_id}")).await?;
-            eprintln!("Node deleted.");
+            match auth.output {
+                OutputFormat::Json => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({ "ok": true }))?
+                ),
+                OutputFormat::Table => eprintln!("Node deleted."),
+            }
             Ok(())
         }
 

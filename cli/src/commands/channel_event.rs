@@ -220,7 +220,13 @@ async fn run_channel(command: ChannelEventChannelCommands) -> Result<()> {
             let mut api = ApiClient::from_auth(&auth)?;
             api.delete_empty(&format!("/channel-conversations/{id}"))
                 .await?;
-            eprintln!("Device channel deleted.");
+            match auth.output {
+                OutputFormat::Json => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({ "ok": true }))?
+                ),
+                OutputFormat::Table => eprintln!("Device channel deleted."),
+            }
             Ok(())
         }
     }

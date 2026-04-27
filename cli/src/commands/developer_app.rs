@@ -224,7 +224,18 @@ pub async fn run(command: DeveloperAppCommands) -> Result<()> {
             let mut api = ApiClient::from_auth(&auth)?;
             api.delete_empty(&format!("/developer/oauth-clients/{id}"))
                 .await?;
-            eprintln!("Developer app deactivated.");
+            match auth.output {
+                OutputFormat::Json => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": true,
+                        "id": id,
+                        "resource_type": "developer_app",
+                        "status": "deactivated",
+                    }))?
+                ),
+                OutputFormat::Table => eprintln!("Developer app deactivated."),
+            }
             Ok(())
         }
 

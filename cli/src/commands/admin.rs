@@ -105,7 +105,13 @@ async fn run_invite_code(command: InviteCodeCommands) -> Result<()> {
             let mut api = ApiClient::from_auth(&auth)?;
             api.delete_empty(&format!("/admin/invite-codes/{id}"))
                 .await?;
-            eprintln!("Invite code {id} deactivated.");
+            match auth.output {
+                OutputFormat::Json => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({ "ok": true }))?
+                ),
+                OutputFormat::Table => eprintln!("Invite code {id} deactivated."),
+            }
             Ok(())
         }
     }

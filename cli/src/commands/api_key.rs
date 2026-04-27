@@ -331,7 +331,13 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
 
             let mut api = ApiClient::from_auth(&auth)?;
             api.delete_empty(&format!("/api-keys/{id}")).await?;
-            eprintln!("API key revoked.");
+            match auth.output {
+                OutputFormat::Json => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({ "ok": true }))?
+                ),
+                OutputFormat::Table => eprintln!("API key revoked."),
+            }
             Ok(())
         }
 

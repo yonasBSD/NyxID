@@ -219,7 +219,13 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
                 None => format!("/approvals/grants/{id}"),
             };
             api.delete_empty(&path).await?;
-            eprintln!("Grant {id} revoked.");
+            match auth.output {
+                OutputFormat::Json => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({ "ok": true }))?
+                ),
+                OutputFormat::Table => eprintln!("Grant {id} revoked."),
+            }
             Ok(())
         }
 
