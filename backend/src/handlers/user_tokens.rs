@@ -145,10 +145,14 @@ pub struct DeviceCodePollResponse {
 pub async fn list_my_tokens(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    Query(query): Query<ProviderTokenTargetQuery>,
 ) -> AppResult<Json<UserTokenListResponse>> {
     let user_id_str = auth_user.user_id.to_string();
+    let target_org_user_id =
+        resolve_oauth_target_org(&state, &user_id_str, query.target_org_id.as_deref()).await?;
+    let effective_user_id = target_org_user_id.as_deref().unwrap_or(&user_id_str);
 
-    let summaries = user_token_service::list_user_tokens(&state.db, &user_id_str).await?;
+    let summaries = user_token_service::list_user_tokens(&state.db, effective_user_id).await?;
 
     let tokens: Vec<UserTokenResponse> = summaries
         .into_iter()
@@ -909,7 +913,15 @@ fn ensure_callback_user_matches_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::org_membership::COLLECTION_NAME as ORG_MEMBERSHIPS;
+    use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
+    use crate::models::user::{COLLECTION_NAME as USERS, UserType};
+    use crate::models::user_provider_token::{
+        COLLECTION_NAME as USER_PROVIDER_TOKENS, UserProviderToken,
+    };
     use crate::mw::auth::AuthMethod;
+    use crate::test_utils::{connect_test_database, test_app_state, test_membership, test_user};
+    use chrono::Utc;
     use uuid::Uuid;
 
     fn test_auth_user() -> AuthUser {
@@ -928,6 +940,67 @@ mod tests {
             api_key_name: None,
             rate_limit_per_second: None,
             rate_limit_burst: None,
+        }
+    }
+
+    fn test_provider_config(provider_id: &str) -> ProviderConfig {
+        let now = Utc::now();
+        ProviderConfig {
+            id: provider_id.to_string(),
+            slug: "github".to_string(),
+            name: "GitHub".to_string(),
+            description: None,
+            provider_type: "oauth2".to_string(),
+            authorization_url: Some("https://github.com/login/oauth/authorize".to_string()),
+            token_url: Some("https://github.com/login/oauth/access_token".to_string()),
+            revocation_url: None,
+            default_scopes: Some(vec!["read:user".to_string()]),
+            client_id_encrypted: None,
+            client_secret_encrypted: Some(vec![1, 2, 3]),
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: None,
+            is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn test_provider_token(token_id: &str, user_id: &str, provider_id: &str) -> UserProviderToken {
+        let now = Utc::now();
+        UserProviderToken {
+            id: token_id.to_string(),
+            user_id: user_id.to_string(),
+            provider_config_id: provider_id.to_string(),
+            credential_user_id: None,
+            token_type: "oauth2".to_string(),
+            access_token_encrypted: Some(vec![1, 2, 3]),
+            refresh_token_encrypted: Some(vec![4, 5, 6]),
+            token_scopes: Some("read:user".to_string()),
+            expires_at: None,
+            api_key_encrypted: None,
+            status: "active".to_string(),
+            last_refreshed_at: None,
+            last_used_at: None,
+            error_message: None,
+            label: None,
+            metadata: None,
+            gateway_url: None,
+            created_at: now,
+            updated_at: now,
         }
     }
 
@@ -1010,5 +1083,56 @@ mod tests {
         let json = serde_json::to_value(&response).expect("serialization");
 
         assert!(json.get("metadata").is_none());
+    }
+
+    #[tokio::test]
+    async fn list_my_tokens_accepts_target_org_id_for_admins() {
+        let Some(db) = connect_test_database("provider_tokens_org_list").await else {
+            eprintln!(
+                "skipping provider token handler integration test: no local MongoDB available"
+            );
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let admin_id = Uuid::new_v4().to_string();
+        let org_user_id = Uuid::new_v4().to_string();
+        let provider_id = Uuid::new_v4().to_string();
+        let token_id = Uuid::new_v4().to_string();
+
+        db.collection(USERS)
+            .insert_one(test_user(&org_user_id, UserType::Org))
+            .await
+            .unwrap();
+        db.collection(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(
+                &org_user_id,
+                &admin_id,
+                crate::models::org_membership::OrgRole::Admin,
+                None,
+            ))
+            .await
+            .unwrap();
+        db.collection(PROVIDER_CONFIGS)
+            .insert_one(test_provider_config(&provider_id))
+            .await
+            .unwrap();
+        db.collection(USER_PROVIDER_TOKENS)
+            .insert_one(test_provider_token(&token_id, &org_user_id, &provider_id))
+            .await
+            .unwrap();
+
+        let Json(response) = list_my_tokens(
+            State(state),
+            crate::test_utils::test_auth_user(&admin_id),
+            Query(ProviderTokenTargetQuery {
+                target_org_id: Some(org_user_id),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.tokens.len(), 1);
+        assert_eq!(response.tokens[0].provider_id, provider_id);
+        assert_eq!(response.tokens[0].provider_name, "GitHub");
     }
 }
