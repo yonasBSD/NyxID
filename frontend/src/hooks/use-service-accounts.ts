@@ -26,15 +26,17 @@ export function useServiceAccounts(
   page: number,
   perPage: number,
   search?: string,
+  orgId?: string,
 ) {
   return useQuery({
-    queryKey: ["admin", "service-accounts", page, perPage, search],
+    queryKey: ["admin", "service-accounts", page, perPage, search, orgId],
     queryFn: async (): Promise<ServiceAccountListResponse> => {
       const params = new URLSearchParams({
         page: String(page),
         per_page: String(perPage),
       });
       if (search) params.set("search", search);
+      if (orgId) params.set("org_id", orgId);
       return api.get<ServiceAccountListResponse>(
         `/admin/service-accounts?${params.toString()}`,
       );

@@ -209,6 +209,16 @@ export const OrgsPage = lazy(() =>
 export const OrgDetailPage = lazy(() =>
   import("@/pages/org-detail").then((m) => ({ default: m.OrgDetailPage })),
 );
+export const OrgServiceAccountDetailPage = lazy(() =>
+  import("@/pages/org-service-account-detail").then((m) => ({
+    default: m.OrgServiceAccountDetailPage,
+  })),
+);
+export const OrgDeveloperAppDetailPage = lazy(() =>
+  import("@/pages/org-developer-app-detail").then((m) => ({
+    default: m.OrgDeveloperAppDetailPage,
+  })),
+);
 export const OrgJoinPage = lazy(() =>
   import("@/pages/org-join").then((m) => ({ default: m.OrgJoinPage })),
 );
