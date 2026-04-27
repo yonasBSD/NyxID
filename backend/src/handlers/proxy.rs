@@ -417,7 +417,7 @@ async fn proxy_request_inner(
             .await;
         }
         return Err(AppError::NotFound(format!(
-            "UserService '{us_id}' not found or not accessible"
+            "UserService '{us_id}' not found"
         )));
     }
 
@@ -595,7 +595,7 @@ async fn proxy_request_by_slug_inner(
             .await;
         }
         return Err(AppError::NotFound(format!(
-            "UserService '{us_id}' not found or not accessible"
+            "UserService '{us_id}' not found"
         )));
     }
 

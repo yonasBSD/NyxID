@@ -309,7 +309,15 @@ curl -H "Authorization: Bearer $TOKEN" \
   -d '...'
 ```
 
-Access check mirrors the auto-resolution: direct owners always pass, org admins must pass the **effective** scope (role default when `scope_source = Inherit`, membership override otherwise), org members must also have `role.can_proxy()`, and viewers are denied. If the specified `UserService.id` doesn't exist or the actor doesn't have proxy access, the endpoint returns `404`.
+Access check mirrors the auto-resolution: direct owners always pass, org admins must pass the **effective** scope (role default when `scope_source = Inherit`, membership override otherwise), org members must also have `role.can_proxy()`, and viewers are denied.
+
+Failure modes for `_nyxid_via` are split between not-found and forbidden so that callers can distinguish a typo from a permission gap:
+
+- `404 not_found` — no active `UserService` with that id exists.
+- `403 org_role_insufficient` (code `8103`) — the `UserService` exists but the actor cannot proxy through it. This covers all access-gate failures: the owner is a personal user the actor does not own, the owner is an org the actor is not a member of, the actor is a viewer, or the actor's effective scope (role default or membership override) excludes this service.
+- `400 bad_request` — the route constraint check below fails (slug or catalog id mismatch).
+
+The split deliberately lets an existing-but-inaccessible service identify itself as a real resource. `UserService.id` is UUID v4, so the surface area for enumeration is bounded by id-space randomness rather than by collapsing 403 into 404 on this explicit-selection path. The auto-resolution path (when `_nyxid_via` is absent) still returns 404 for "no service available to me," which is the unauthenticated-shape default.
 
 **Route constraint.** The selected UserService must match the service named in the URL path. The slug handler verifies `UserService.slug == {slug}` and the catalog-id handler verifies `UserService.catalog_service_id == {service_id}`. If they don't match the endpoint returns `400 BadRequest` with a clear error — this prevents a caller from using `_nyxid_via` on a `/proxy/s/llm-openai/...` URL to silently proxy through an `api-github` credential.
 

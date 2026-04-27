@@ -2086,10 +2086,7 @@ pub async fn execute_tool(
             )
             .await?
             .ok_or_else(|| {
-                AppError::NotFound(format!(
-                    "User service '{}' not found or not accessible",
-                    service.service_slug
-                ))
+                AppError::NotFound(format!("User service '{}' not found", service.service_slug))
             })?;
             let has_cred = resolution.has_server_credential;
 
