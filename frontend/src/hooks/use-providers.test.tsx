@@ -1,16 +1,24 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { renderHook } from "@testing-library/react";
+import { renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PropsWithChildren } from "react";
 import type { TelegramLoginData } from "@/types/api";
-import { useConnectTelegramWidget } from "./use-providers";
+import {
+  useConnectTelegramWidget,
+  useDisconnectProvider,
+  useMyProviderTokens,
+} from "./use-providers";
 
-const { mockPost } = vi.hoisted(() => ({
+const { mockDelete, mockGet, mockPost } = vi.hoisted(() => ({
+  mockDelete: vi.fn(),
+  mockGet: vi.fn(),
   mockPost: vi.fn(),
 }));
 
 vi.mock("@/lib/api-client", () => ({
   api: {
+    delete: mockDelete,
+    get: mockGet,
     post: mockPost,
   },
 }));
@@ -32,6 +40,8 @@ function createWrapper() {
 
 describe("useConnectTelegramWidget", () => {
   beforeEach(() => {
+    mockDelete.mockReset();
+    mockGet.mockReset();
     mockPost.mockReset();
   });
 
@@ -84,5 +94,49 @@ describe("useConnectTelegramWidget", () => {
     ).rejects.toThrow("Invalid Telegram login hash");
 
     expect(mockPost).not.toHaveBeenCalled();
+  });
+});
+
+describe("provider token scope hooks", () => {
+  beforeEach(() => {
+    mockDelete.mockReset();
+    mockGet.mockReset();
+    mockPost.mockReset();
+  });
+
+  it("appends target_org_id when listing provider tokens for an org", async () => {
+    mockGet.mockResolvedValue({ tokens: [] });
+
+    const { result } = renderHook(
+      () => useMyProviderTokens({ targetOrgId: "org-1" }),
+      { wrapper: createWrapper() },
+    );
+
+    await waitFor(() => {
+      expect(result.current.isSuccess).toBe(true);
+    });
+    expect(mockGet).toHaveBeenCalledWith(
+      "/providers/my-tokens?target_org_id=org-1",
+    );
+  });
+
+  it("appends target_org_id when disconnecting an org provider token", async () => {
+    mockDelete.mockResolvedValue({
+      status: "disconnected",
+      message: "Provider disconnected",
+    });
+
+    const { result } = renderHook(() => useDisconnectProvider(), {
+      wrapper: createWrapper(),
+    });
+
+    await result.current.mutateAsync({
+      providerId: "provider-1",
+      targetOrgId: "org-1",
+    });
+
+    expect(mockDelete).toHaveBeenCalledWith(
+      "/providers/provider-1/disconnect?target_org_id=org-1",
+    );
   });
 });

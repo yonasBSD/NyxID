@@ -696,9 +696,12 @@ pub async fn touch_last_used(db: &mongodb::Database, key_id: &str) {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
+    use mongodb::bson::doc;
 
-    use super::has_server_credential;
+    use super::{USER_PROVIDER_TOKENS, has_server_credential, sync_provider_token_to_api_keys};
     use crate::models::user_api_key::UserApiKey;
+    use crate::models::user_provider_token::UserProviderToken;
+    use crate::test_utils::connect_test_database;
 
     fn sample_key(credential_type: &str) -> UserApiKey {
         UserApiKey {
@@ -738,5 +741,100 @@ mod tests {
         key.credential_encrypted = Some(vec![1, 2, 3]);
         key.access_token_encrypted = Some(vec![4, 5, 6]);
         assert!(!has_server_credential(&key));
+    }
+
+    #[tokio::test]
+    async fn sync_provider_token_uses_effective_org_owner() {
+        let Some(db) = connect_test_database("user_api_key_sync_org").await else {
+            eprintln!("skipping user_api_key_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let now = Utc::now();
+        let admin_id = uuid::Uuid::new_v4().to_string();
+        let org_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        let api_key_id = uuid::Uuid::new_v4().to_string();
+
+        db.collection::<UserApiKey>(super::COLLECTION_NAME)
+            .insert_one(UserApiKey {
+                id: api_key_id.clone(),
+                user_id: org_id.clone(),
+                label: "Org Codex".to_string(),
+                credential_type: "oauth2".to_string(),
+                credential_encrypted: None,
+                access_token_encrypted: None,
+                refresh_token_encrypted: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: Some(provider_id.clone()),
+                user_oauth_client_id_encrypted: None,
+                user_oauth_client_secret_encrypted: None,
+                status: "pending_auth".to_string(),
+                last_used_at: None,
+                error_message: None,
+                source: Some("user_created".to_string()),
+                source_id: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+            .insert_one(UserProviderToken {
+                id: uuid::Uuid::new_v4().to_string(),
+                user_id: org_id.clone(),
+                provider_config_id: provider_id.clone(),
+                credential_user_id: None,
+                token_type: "oauth2".to_string(),
+                access_token_encrypted: Some(vec![1, 2, 3]),
+                refresh_token_encrypted: Some(vec![4, 5, 6]),
+                token_scopes: Some("openid profile".to_string()),
+                expires_at: None,
+                api_key_encrypted: None,
+                status: "active".to_string(),
+                last_refreshed_at: None,
+                last_used_at: None,
+                error_message: None,
+                label: None,
+                metadata: None,
+                gateway_url: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        sync_provider_token_to_api_keys(&db, &admin_id, &provider_id)
+            .await
+            .unwrap();
+        let key_after_admin_sync = db
+            .collection::<UserApiKey>(super::COLLECTION_NAME)
+            .find_one(doc! { "_id": &api_key_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(key_after_admin_sync.status, "pending_auth");
+        assert!(key_after_admin_sync.access_token_encrypted.is_none());
+
+        sync_provider_token_to_api_keys(&db, &org_id, &provider_id)
+            .await
+            .unwrap();
+        let key_after_org_sync = db
+            .collection::<UserApiKey>(super::COLLECTION_NAME)
+            .find_one(doc! { "_id": &api_key_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(key_after_org_sync.status, "active");
+        assert_eq!(
+            key_after_org_sync.access_token_encrypted,
+            Some(vec![1, 2, 3])
+        );
+        assert_eq!(
+            key_after_org_sync.refresh_token_encrypted,
+            Some(vec![4, 5, 6])
+        );
     }
 }

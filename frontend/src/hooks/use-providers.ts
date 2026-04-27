@@ -18,6 +18,24 @@ import type {
   TelegramLoginData,
 } from "@/types/api";
 
+interface ProviderTokenScopeOptions {
+  readonly targetOrgId?: string | null;
+}
+
+interface ScopedProviderMutationInput extends ProviderTokenScopeOptions {
+  readonly providerId: string;
+}
+
+function providerTokenQueryKey(targetOrgId: string | null | undefined) {
+  return ["provider-tokens", targetOrgId ?? "personal"] as const;
+}
+
+function targetOrgSuffix(targetOrgId: string | null | undefined): string {
+  if (!targetOrgId) return "";
+  const query = new URLSearchParams({ target_org_id: targetOrgId });
+  return `?${query.toString()}`;
+}
+
 export function useProviders() {
   return useQuery({
     queryKey: ["providers"],
@@ -38,11 +56,15 @@ export function useProvider(providerId: string) {
   });
 }
 
-export function useMyProviderTokens() {
+export function useMyProviderTokens(options: ProviderTokenScopeOptions = {}) {
+  const targetOrgId = options.targetOrgId ?? null;
+
   return useQuery({
-    queryKey: ["provider-tokens"],
+    queryKey: providerTokenQueryKey(targetOrgId),
     queryFn: async (): Promise<readonly UserProviderToken[]> => {
-      const res = await api.get<UserTokenListResponse>("/providers/my-tokens");
+      const res = await api.get<UserTokenListResponse>(
+        `/providers/my-tokens${targetOrgSuffix(targetOrgId)}`,
+      );
       return res.tokens;
     },
   });
@@ -183,13 +205,18 @@ export function useDisconnectProvider() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async (providerId: string): Promise<ProviderActionResponse> => {
+    mutationFn: async ({
+      providerId,
+      targetOrgId,
+    }: ScopedProviderMutationInput): Promise<ProviderActionResponse> => {
       return api.delete<ProviderActionResponse>(
-        `/providers/${providerId}/disconnect`,
+        `/providers/${providerId}/disconnect${targetOrgSuffix(targetOrgId)}`,
       );
     },
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["provider-tokens"] });
+    onSuccess: (_data, variables) => {
+      void queryClient.invalidateQueries({
+        queryKey: providerTokenQueryKey(variables.targetOrgId),
+      });
       void queryClient.invalidateQueries({ queryKey: ["providers"] });
       void queryClient.invalidateQueries({ queryKey: ["llm-status"] });
     },
@@ -200,13 +227,18 @@ export function useRefreshProviderToken() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async (providerId: string): Promise<ProviderActionResponse> => {
+    mutationFn: async ({
+      providerId,
+      targetOrgId,
+    }: ScopedProviderMutationInput): Promise<ProviderActionResponse> => {
       return api.post<ProviderActionResponse>(
-        `/providers/${providerId}/refresh`,
+        `/providers/${providerId}/refresh${targetOrgSuffix(targetOrgId)}`,
       );
     },
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["provider-tokens"] });
+    onSuccess: (_data, variables) => {
+      void queryClient.invalidateQueries({
+        queryKey: providerTokenQueryKey(variables.targetOrgId),
+      });
       void queryClient.invalidateQueries({ queryKey: ["llm-status"] });
     },
   });

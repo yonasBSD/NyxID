@@ -56,6 +56,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: ServiceCommands,
     },
+    /// Manage connected provider tokens
+    Provider {
+        #[command(subcommand)]
+        command: ProviderCommands,
+    },
     /// Manage NyxID API keys
     ApiKey {
         #[command(subcommand)]
@@ -156,6 +161,20 @@ pub enum Commands {
     },
     /// Show CLI version and project links
     Info,
+}
+
+#[derive(Subcommand)]
+pub enum ProviderCommands {
+    /// Disconnect a personal or org-owned provider token
+    Disconnect {
+        /// Provider ID
+        provider_id: String,
+        /// Disconnect the provider token owned by this org (admin required)
+        #[arg(long, value_name = "ORG_ID")]
+        org: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1442,6 +1461,32 @@ mod tests {
             } => {
                 assert_eq!(slug.as_deref(), Some("llm-openai"));
                 assert_eq!(custom_slug.as_deref(), Some("my-custom-service"));
+            }
+            _ => panic!("unexpected parse result"),
+        }
+    }
+
+    #[test]
+    fn provider_disconnect_accepts_org_flag() {
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "provider",
+            "disconnect",
+            "provider-1",
+            "--org",
+            "org-1",
+        ])
+        .expect("provider disconnect should accept --org");
+
+        match cli.command {
+            Commands::Provider {
+                command:
+                    ProviderCommands::Disconnect {
+                        provider_id, org, ..
+                    },
+            } => {
+                assert_eq!(provider_id, "provider-1");
+                assert_eq!(org.as_deref(), Some("org-1"));
             }
             _ => panic!("unexpected parse result"),
         }
