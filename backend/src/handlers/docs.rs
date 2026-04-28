@@ -253,7 +253,7 @@ mod tests {
     use crate::models::user::UserType;
     use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
     use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
-    use crate::services::api_docs_service::{cache_test_spec, clear_test_spec_cache};
+    use crate::services::api_docs_service::{SpecCacheTestGuard, cache_test_spec};
     use crate::test_utils::{
         connect_test_database, test_app_state, test_auth_user, test_user, test_user_endpoint,
         test_user_service,
@@ -288,7 +288,7 @@ mod tests {
             eprintln!("skipping docs integration test: no local MongoDB available");
             return;
         };
-        clear_test_spec_cache();
+        let _cache_guard = SpecCacheTestGuard::acquire();
 
         let caller_id = Uuid::new_v4().to_string();
         let endpoint = test_user_endpoint(
