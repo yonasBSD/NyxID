@@ -24,8 +24,11 @@ use crate::models::oauth_broker_binding::{
 use crate::models::refresh_token::{COLLECTION_NAME as REFRESH_TOKENS, RefreshToken};
 
 /// Subject-token-type URN identifying a broker binding handle in RFC 8693
-/// token exchange requests. NyxID-vendored under the `urn:nyxid:` namespace.
-pub const BROKER_SUBJECT_TOKEN_TYPE: &str = "urn:nyxid:token-type:binding_id";
+/// token exchange requests. The `params:oauth` infix mirrors the IETF URN
+/// style at `urn:ietf:params:oauth:*` so OAuth vendor-extension parsers
+/// recognize the suffix shape. Frozen as the contract aevatar's
+/// ADR-0017 / aevatarAI/aevatar#477 builds against.
+pub const BROKER_SUBJECT_TOKEN_TYPE: &str = "urn:nyxid:params:oauth:token-type:binding-id";
 
 /// Issued-token-type URN for the access tokens the broker hands back --
 /// the standard RFC 8693 access_token URN.

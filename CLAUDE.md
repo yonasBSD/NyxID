@@ -64,9 +64,9 @@ Error variants map to HTTP status codes and numeric error codes (1000-3002, 7000
 
 ### 5a. Vendor URN Namespace
 
-NyxID-vendored URN types live under `urn:nyxid:<category>:<name>`. Currently registered:
+NyxID-vendored URN types live under `urn:nyxid:params:oauth:<category>:<name>`. The `params:oauth` infix mirrors the IETF style at `urn:ietf:params:oauth:*` so generic OAuth vendor-extension parsers recognize the suffix shape. Currently registered:
 
-- `urn:nyxid:token-type:binding_id` — RFC 8693 subject_token_type identifying an `OauthBrokerBinding` handle. Used at `/oauth/token` with `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`.
+- `urn:nyxid:params:oauth:token-type:binding-id` — RFC 8693 subject_token_type identifying an `OauthBrokerBinding` handle. Used at `/oauth/token` with `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`.
 
 Add new entries here when introducing additional vendored URN types.
 
