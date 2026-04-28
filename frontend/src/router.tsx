@@ -40,6 +40,7 @@ import {
   AdminGroupDetailPage,
   AdminServiceAccountsPage,
   AdminServiceAccountDetailPage,
+  AuthorizationsPage,
   ConsentsPage,
   DeveloperAppsPage,
   DeveloperAppDetailPage,
@@ -340,6 +341,12 @@ const consentsRoute = createRoute({
   component: ConsentsPage,
 });
 
+const authorizationsRoute = createRoute({
+  path: "/settings/authorizations",
+  getParentRoute: () => dashboardLayout,
+  component: AuthorizationsPage,
+});
+
 const developerAppsRoute = createRoute({
   path: "/developer/apps",
   getParentRoute: () => dashboardLayout,
@@ -582,6 +589,7 @@ const routeTree = rootRoute.addChildren([
     ]),
     settingsRoute,
     consentsRoute,
+    authorizationsRoute,
     guideRoute,
     developerAppsRoute,
     developerAppDetailRoute,

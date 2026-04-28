@@ -11,6 +11,7 @@ import {
   ShieldCheck,
   UsersRound,
   KeyRound,
+  Link2,
   Bot,
   Bell,
   ClipboardList,
@@ -35,6 +36,7 @@ const NAV_ITEMS = [
   { to: "/channel-bots", icon: Radio, label: "Channel Bots" },
   { to: "/settings", icon: Settings, label: "Settings" },
   { to: "/settings/consents", icon: KeyRound, label: "Authorized Apps" },
+  { to: "/settings/authorizations", icon: Link2, label: "Authorizations" },
   { to: "/guide", icon: BookOpen, label: "Guide" },
 ] as const;
 
