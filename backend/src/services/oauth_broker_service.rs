@@ -63,6 +63,25 @@ pub struct BindingExchangeResult {
     pub expires_in: i64,
     pub granted_scope: String,
     pub issued_token_type: String,
+    pub via_chain_follow: bool,
+}
+
+const MAX_BROKER_ROTATION_RETRIES: usize = 3;
+
+struct BrokerExchangeContext<'a> {
+    db: &'a mongodb::Database,
+    encryption_keys: &'a EncryptionKeys,
+    jwt_keys: &'a JwtKeys,
+    config: &'a AppConfig,
+    client_id: &'a str,
+    binding_hash: &'a str,
+    requested_scope: Option<&'a str>,
+}
+
+enum ExchangeOutcome {
+    Success(BindingExchangeResult),
+    ChainFollow,
+    ReuseDetected,
 }
 
 /// Issue a new broker binding for the freshly-minted refresh_token.
@@ -188,12 +207,11 @@ pub async fn find_active_bindings_by_external_subject(
 /// binding row, and returns a 5-minute access_token. The refresh_token
 /// never leaves the server.
 ///
-/// Concurrent callers race on `rotation_version`. The losing caller gets
-/// `invalid_grant`; clients are expected to retry. Full chain-follow
-/// retry is a v2 hardening.
+/// Concurrent callers race on `rotation_version`. The losing caller follows
+/// the already-rotated binding state and mints an access_token without
+/// re-rotating.
 // Broker exchange spans binding lookup, refresh-token rotation, JWT issuance,
 // encryption, and optimistic binding update in one operation.
-#[allow(clippy::too_many_arguments)]
 pub async fn exchange_via_binding(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
@@ -204,13 +222,46 @@ pub async fn exchange_via_binding(
     requested_scope: Option<&str>,
 ) -> AppResult<BindingExchangeResult> {
     let binding_hash = hash_binding_id(raw_binding_id);
+    let ctx = BrokerExchangeContext {
+        db,
+        encryption_keys,
+        jwt_keys,
+        config,
+        client_id,
+        binding_hash: &binding_hash,
+        requested_scope,
+    };
+
+    for attempt in 0..MAX_BROKER_ROTATION_RETRIES {
+        match try_exchange_once(&ctx).await? {
+            ExchangeOutcome::Success(result) => return Ok(result),
+            ExchangeOutcome::ChainFollow => {
+                if let Some(result) = try_chain_follow(&ctx).await? {
+                    return Ok(result);
+                }
+                tracing::debug!(
+                    binding_hash = %binding_hash_prefix(&binding_hash),
+                    attempt,
+                    "broker exchange chain-follow returned None; retrying full rotation"
+                );
+            }
+            ExchangeOutcome::ReuseDetected => return Err(invalid_grant()),
+        }
+    }
+
+    Err(invalid_grant())
+}
+
+async fn try_exchange_once(ctx: &BrokerExchangeContext<'_>) -> AppResult<ExchangeOutcome> {
+    let db = ctx.db;
+    let binding_hash = ctx.binding_hash;
     let binding = db
         .collection::<OauthBrokerBinding>(OAUTH_BROKER_BINDINGS)
-        .find_one(doc! { "_id": &binding_hash })
+        .find_one(doc! { "_id": binding_hash })
         .await?
         .ok_or_else(invalid_grant)?;
 
-    if binding.client_id != client_id || binding.revoked {
+    if binding.client_id != ctx.client_id || binding.revoked {
         return Err(invalid_grant());
     }
 
@@ -218,7 +269,8 @@ pub async fn exchange_via_binding(
         .refresh_token_encrypted
         .as_ref()
         .ok_or_else(invalid_grant)?;
-    let refresh_token_bytes = encryption_keys
+    let refresh_token_bytes = ctx
+        .encryption_keys
         .decrypt_with_aad(encrypted_refresh, binding_hash.as_bytes())
         .await
         .map_err(|_| invalid_grant())?;
@@ -236,63 +288,25 @@ pub async fn exchange_via_binding(
     }
 
     if refresh_token_doc.revoked {
-        let cascade_count = revoke_bindings_for_user_client(
-            db,
-            &binding.client_id,
-            &binding.user_id,
-            "reuse_detected",
-        )
-        .await?;
-        crate::services::audit_service::log_async(
-            db.clone(),
-            Some(binding.user_id.clone()),
-            "oauth_broker_binding_reuse_detected".to_string(),
-            Some(serde_json::json!({
-                "client_id": binding.client_id,
-                "binding_hash": binding_hash_prefix(&binding_hash),
-                "cascade_revoke_count": cascade_count,
-            })),
-            None,
-            None,
-            None,
-            None,
-        );
-        tracing::warn!(
-            client_id = %binding.client_id,
-            binding_hash = %binding_hash_prefix(&binding_hash),
-            "broker binding refresh-token reuse detected; cascading revoke"
-        );
-        return Err(invalid_grant());
+        if refresh_token_doc.replaced_by.is_some() {
+            return Ok(ExchangeOutcome::ChainFollow);
+        }
+        cascade_revoke_reuse_detected(db, &binding, binding_hash).await?;
+        return Ok(ExchangeOutcome::ReuseDetected);
     }
 
-    let refresh_claims =
-        jwt::verify_token(jwt_keys, config, &refresh_token_str).map_err(|_| invalid_grant())?;
-    if refresh_claims.token_type != "refresh"
-        || refresh_claims.jti != binding.refresh_token_jti
-        || refresh_claims.sub != binding.user_id
-    {
-        return Err(invalid_grant());
-    }
+    verify_binding_refresh_jwt(ctx.jwt_keys, ctx.config, &refresh_token_str, &binding)?;
 
-    let granted_scope = resolve_binding_scope(requested_scope, &binding.scopes)?;
+    let granted_scope = resolve_binding_scope(ctx.requested_scope, &binding.scopes)?;
+    let access_token = mint_broker_access_token(ctx, &binding.user_id, &granted_scope).await?;
+
     let user_uuid = Uuid::parse_str(&binding.user_id)
         .map_err(|e| AppError::Internal(format!("Invalid user_id in broker binding: {e}")))?;
-    let rbac_data =
-        crate::services::rbac_helpers::build_rbac_claim_data(db, &binding.user_id, &granted_scope)
-            .await?;
-    let access_token = jwt::generate_access_token(
-        jwt_keys,
-        config,
-        &user_uuid,
-        &granted_scope,
-        Some(&rbac_data),
-        Some(BROKER_ACCESS_TTL_SECS),
-    )?;
-
-    let (new_refresh_jwt, new_jti) = jwt::generate_refresh_token(jwt_keys, config, &user_uuid)?;
+    let (new_refresh_jwt, new_jti) =
+        jwt::generate_refresh_token(ctx.jwt_keys, ctx.config, &user_uuid)?;
     let new_refresh_id = Uuid::new_v4().to_string();
     let now = Utc::now();
-    let refresh_expires = now + Duration::seconds(config.jwt_refresh_ttl_secs);
+    let refresh_expires = now + Duration::seconds(ctx.config.jwt_refresh_ttl_secs);
     let new_refresh = RefreshToken {
         id: new_refresh_id.clone(),
         jti: new_jti.clone(),
@@ -322,10 +336,18 @@ pub async fn exchange_via_binding(
         )
         .await?;
     if revoke_result.matched_count == 0 {
-        return Err(invalid_grant());
+        return handle_refresh_revoke_conflict(
+            db,
+            &binding,
+            binding_hash,
+            &refresh_token_doc.id,
+            &new_refresh_id,
+        )
+        .await;
     }
 
-    let new_blob = encryption_keys
+    let new_blob = ctx
+        .encryption_keys
         .encrypt_with_aad(new_refresh_jwt.as_bytes(), binding_hash.as_bytes())
         .await
         .map_err(|e| AppError::Internal(format!("broker binding encrypt failed: {e}")))?;
@@ -349,17 +371,182 @@ pub async fn exchange_via_binding(
         )
         .await?;
     if updated.is_none() {
-        // v2: chain-follow retry can recover the already-rotated replacement
-        // instead of making the client retry the binding exchange.
-        return Err(invalid_grant());
+        cleanup_refresh_token(db, &new_refresh_id).await?;
+        return Ok(ExchangeOutcome::ChainFollow);
     }
 
-    Ok(BindingExchangeResult {
+    Ok(ExchangeOutcome::Success(BindingExchangeResult {
         access_token,
         expires_in: BROKER_ACCESS_TTL_SECS,
         granted_scope,
         issued_token_type: ISSUED_TOKEN_TYPE_ACCESS_TOKEN.to_string(),
-    })
+        via_chain_follow: false,
+    }))
+}
+
+async fn try_chain_follow(
+    ctx: &BrokerExchangeContext<'_>,
+) -> AppResult<Option<BindingExchangeResult>> {
+    let now = Utc::now();
+    let binding = ctx
+        .db
+        .collection::<OauthBrokerBinding>(OAUTH_BROKER_BINDINGS)
+        .find_one(doc! { "_id": ctx.binding_hash })
+        .await?;
+    let Some(binding) = binding else {
+        return Ok(None);
+    };
+    if binding.client_id != ctx.client_id || binding.revoked {
+        return Ok(None);
+    }
+
+    let encrypted_refresh = binding
+        .refresh_token_encrypted
+        .as_ref()
+        .ok_or_else(invalid_grant)?;
+    let refresh_token_bytes = ctx
+        .encryption_keys
+        .decrypt_with_aad(encrypted_refresh, ctx.binding_hash.as_bytes())
+        .await
+        .map_err(|_| invalid_grant())?;
+    let refresh_token_str = String::from_utf8(refresh_token_bytes).map_err(|_| invalid_grant())?;
+    verify_binding_refresh_jwt(ctx.jwt_keys, ctx.config, &refresh_token_str, &binding)?;
+
+    let refresh_token_doc = ctx
+        .db
+        .collection::<RefreshToken>(REFRESH_TOKENS)
+        .find_one(doc! { "jti": &binding.refresh_token_jti })
+        .await?;
+    let Some(refresh_token_doc) = refresh_token_doc else {
+        return Ok(None);
+    };
+    if refresh_token_doc.client_id != binding.client_id
+        || refresh_token_doc.user_id != binding.user_id
+    {
+        return Err(invalid_grant());
+    }
+    if refresh_token_doc.revoked {
+        return Ok(None);
+    }
+
+    let granted_scope = resolve_binding_scope(ctx.requested_scope, &binding.scopes)?;
+    let access_token = mint_broker_access_token(ctx, &binding.user_id, &granted_scope).await?;
+
+    ctx.db
+        .collection::<OauthBrokerBinding>(OAUTH_BROKER_BINDINGS)
+        .update_one(
+            doc! { "_id": ctx.binding_hash, "revoked": false },
+            doc! { "$set": {
+                "last_used_at": bson::DateTime::from_chrono(now),
+            }},
+        )
+        .await?;
+
+    Ok(Some(BindingExchangeResult {
+        access_token,
+        expires_in: BROKER_ACCESS_TTL_SECS,
+        granted_scope,
+        issued_token_type: ISSUED_TOKEN_TYPE_ACCESS_TOKEN.to_string(),
+        via_chain_follow: true,
+    }))
+}
+
+async fn mint_broker_access_token(
+    ctx: &BrokerExchangeContext<'_>,
+    user_id: &str,
+    granted_scope: &str,
+) -> AppResult<String> {
+    let user_uuid = Uuid::parse_str(user_id)
+        .map_err(|e| AppError::Internal(format!("Invalid user_id in broker binding: {e}")))?;
+    let rbac_data =
+        crate::services::rbac_helpers::build_rbac_claim_data(ctx.db, user_id, granted_scope)
+            .await?;
+    jwt::generate_access_token(
+        ctx.jwt_keys,
+        ctx.config,
+        &user_uuid,
+        granted_scope,
+        Some(&rbac_data),
+        Some(BROKER_ACCESS_TTL_SECS),
+    )
+}
+
+fn verify_binding_refresh_jwt(
+    jwt_keys: &JwtKeys,
+    config: &AppConfig,
+    refresh_token_str: &str,
+    binding: &OauthBrokerBinding,
+) -> AppResult<()> {
+    let refresh_claims =
+        jwt::verify_token(jwt_keys, config, refresh_token_str).map_err(|_| invalid_grant())?;
+    if refresh_claims.token_type != "refresh"
+        || refresh_claims.jti != binding.refresh_token_jti
+        || refresh_claims.sub != binding.user_id
+    {
+        return Err(invalid_grant());
+    }
+    Ok(())
+}
+
+async fn cleanup_refresh_token(db: &mongodb::Database, refresh_token_id: &str) -> AppResult<()> {
+    db.collection::<RefreshToken>(REFRESH_TOKENS)
+        .delete_one(doc! { "_id": refresh_token_id })
+        .await?;
+    Ok(())
+}
+
+async fn handle_refresh_revoke_conflict(
+    db: &mongodb::Database,
+    binding: &OauthBrokerBinding,
+    binding_hash: &str,
+    refresh_token_id: &str,
+    new_refresh_id: &str,
+) -> AppResult<ExchangeOutcome> {
+    cleanup_refresh_token(db, new_refresh_id).await?;
+    let current = db
+        .collection::<RefreshToken>(REFRESH_TOKENS)
+        .find_one(doc! { "_id": refresh_token_id })
+        .await?;
+    if let Some(current) = current
+        && current.revoked
+    {
+        if current.replaced_by.is_some() {
+            return Ok(ExchangeOutcome::ChainFollow);
+        }
+        cascade_revoke_reuse_detected(db, binding, binding_hash).await?;
+        return Ok(ExchangeOutcome::ReuseDetected);
+    }
+    Ok(ExchangeOutcome::ChainFollow)
+}
+
+async fn cascade_revoke_reuse_detected(
+    db: &mongodb::Database,
+    binding: &OauthBrokerBinding,
+    binding_hash: &str,
+) -> AppResult<()> {
+    let cascade_count =
+        revoke_bindings_for_user_client(db, &binding.client_id, &binding.user_id, "reuse_detected")
+            .await?;
+    crate::services::audit_service::log_async(
+        db.clone(),
+        Some(binding.user_id.clone()),
+        "oauth_broker_binding_reuse_detected".to_string(),
+        Some(serde_json::json!({
+            "client_id": binding.client_id,
+            "binding_hash": binding_hash_prefix(binding_hash),
+            "cascade_revoke_count": cascade_count,
+        })),
+        None,
+        None,
+        None,
+        None,
+    );
+    tracing::warn!(
+        client_id = %binding.client_id,
+        binding_hash = %binding_hash_prefix(binding_hash),
+        "broker binding refresh-token reuse detected; cascading revoke"
+    );
+    Ok(())
 }
 
 /// Cascade-revoke all bindings owned by `(client_id, user_id)`. Used by
@@ -621,6 +808,15 @@ mod tests {
         }
     }
 
+    fn real_jwt_keys_and_config() -> (JwtKeys, AppConfig) {
+        let mut config = test_app_config();
+        let temp_dir = tempfile::tempdir().expect("create temp dir for jwt keys");
+        config.jwt_private_key_path = temp_dir.path().join("private.pem").display().to_string();
+        config.jwt_public_key_path = temp_dir.path().join("public.pem").display().to_string();
+        let keys = JwtKeys::from_config(&config).expect("build test jwt keys");
+        (keys, config)
+    }
+
     fn refresh_token_doc(jti: &str, client_id: &str, user_id: &str, revoked: bool) -> RefreshToken {
         let now = Utc::now();
         RefreshToken {
@@ -650,6 +846,34 @@ mod tests {
             .await
             .expect("insert refresh token");
         refresh
+    }
+
+    async fn insert_refresh_token_jwt(
+        db: &mongodb::Database,
+        jwt_keys: &JwtKeys,
+        config: &AppConfig,
+        client_id: &str,
+        user_id: &str,
+    ) -> (String, RefreshToken) {
+        let user_uuid = Uuid::parse_str(user_id).expect("valid user id");
+        let (refresh_jwt, refresh_jti) =
+            jwt::generate_refresh_token(jwt_keys, config, &user_uuid).expect("refresh jwt");
+        let refresh = insert_refresh_token(db, &refresh_jti, client_id, user_id, false).await;
+        (refresh_jwt, refresh)
+    }
+
+    async fn mark_refresh_replaced(db: &mongodb::Database, refresh_id: &str, replacement_id: &str) {
+        db.collection::<RefreshToken>(REFRESH_TOKENS)
+            .update_one(
+                doc! { "_id": refresh_id },
+                doc! { "$set": {
+                    "revoked": true,
+                    "replaced_by": replacement_id,
+                    "revoked_at": bson::DateTime::from_chrono(Utc::now()),
+                }},
+            )
+            .await
+            .expect("mark refresh replaced");
     }
 
     struct BindingSeed<'a> {
@@ -1346,6 +1570,196 @@ mod tests {
             result,
             Err(AppError::ExternalTokenInvalid(message)) if message == "invalid_grant"
         ));
+    }
+
+    #[tokio::test]
+    async fn exchange_via_binding_chain_follows_after_rotation() {
+        let Some(db) = connect_test_database("broker_chain_follow").await else {
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let (jwt_keys, config) = real_jwt_keys_and_config();
+        let user_id = Uuid::new_v4().to_string();
+        let raw_binding_id = generate_binding_id();
+        let binding_hash = hash_binding_id(&raw_binding_id);
+        let (old_refresh_jwt, old_refresh) =
+            insert_refresh_token_jwt(&db, &jwt_keys, &config, "client-x", &user_id).await;
+
+        insert_binding(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &raw_binding_id,
+                client_id: "client-x",
+                user_id: &user_id,
+                refresh_token_jti: &old_refresh.jti,
+                refresh_token: &old_refresh_jwt,
+                scopes: vec!["openid".to_string(), "profile".to_string()],
+                created_at: Utc::now(),
+                revoked: false,
+                revoke_reason: None,
+            },
+        )
+        .await;
+
+        let (new_refresh_jwt, new_refresh) =
+            insert_refresh_token_jwt(&db, &jwt_keys, &config, "client-x", &user_id).await;
+        mark_refresh_replaced(&db, &old_refresh.id, &new_refresh.id).await;
+        let new_blob = encryption_keys
+            .encrypt_with_aad(new_refresh_jwt.as_bytes(), binding_hash.as_bytes())
+            .await
+            .expect("encrypt replacement refresh token");
+        db.collection::<OauthBrokerBinding>(OAUTH_BROKER_BINDINGS)
+            .update_one(
+                doc! { "_id": &binding_hash },
+                doc! { "$set": {
+                    "refresh_token_encrypted": Binary {
+                        subtype: BinarySubtype::Generic,
+                        bytes: new_blob,
+                    },
+                    "refresh_token_jti": &new_refresh.jti,
+                    "rotation_version": 1_i64,
+                    "last_used_at": bson::DateTime::from_chrono(Utc::now()),
+                }},
+            )
+            .await
+            .expect("update binding to replacement");
+
+        let ctx = BrokerExchangeContext {
+            db: &db,
+            encryption_keys: &encryption_keys,
+            jwt_keys: &jwt_keys,
+            config: &config,
+            client_id: "client-x",
+            binding_hash: &binding_hash,
+            requested_scope: Some("openid"),
+        };
+        let result = try_chain_follow(&ctx)
+            .await
+            .expect("chain follow")
+            .expect("chain follow result");
+
+        assert!(result.via_chain_follow);
+        assert_eq!(result.expires_in, BROKER_ACCESS_TTL_SECS);
+        assert_eq!(result.granted_scope, "openid");
+        let claims = jwt::verify_token(&jwt_keys, &config, &result.access_token)
+            .expect("valid access token");
+        assert_eq!(claims.sub, user_id);
+        assert_eq!(claims.token_type, "access");
+        assert_eq!(claims.scope, "openid");
+
+        let binding = load_binding(&db, &binding_hash).await;
+        assert_eq!(binding.rotation_version, 1);
+        assert_eq!(binding.refresh_token_jti, new_refresh.jti);
+    }
+
+    #[tokio::test]
+    async fn exchange_via_binding_chain_follow_returns_invalid_grant_when_no_active_descendant() {
+        let Some(db) = connect_test_database("broker_chain_no_descendant").await else {
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let (jwt_keys, config) = real_jwt_keys_and_config();
+        let user_id = Uuid::new_v4().to_string();
+        let raw_binding_id = generate_binding_id();
+        let binding_hash = hash_binding_id(&raw_binding_id);
+        let (refresh_jwt, refresh) =
+            insert_refresh_token_jwt(&db, &jwt_keys, &config, "client-x", &user_id).await;
+
+        insert_binding(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &raw_binding_id,
+                client_id: "client-x",
+                user_id: &user_id,
+                refresh_token_jti: &refresh.jti,
+                refresh_token: &refresh_jwt,
+                scopes: vec!["openid".to_string()],
+                created_at: Utc::now(),
+                revoked: false,
+                revoke_reason: None,
+            },
+        )
+        .await;
+        db.collection::<RefreshToken>(REFRESH_TOKENS)
+            .update_one(
+                doc! { "_id": &refresh.id },
+                doc! { "$set": {
+                    "revoked": true,
+                    "revoked_at": bson::DateTime::from_chrono(Utc::now()),
+                }},
+            )
+            .await
+            .expect("revoke refresh without descendant");
+
+        let result = exchange_via_binding(
+            &db,
+            &encryption_keys,
+            &jwt_keys,
+            &config,
+            "client-x",
+            &raw_binding_id,
+            None,
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(AppError::ExternalTokenInvalid(message)) if message == "invalid_grant"
+        ));
+        let binding = load_binding(&db, &binding_hash).await;
+        assert!(binding.revoked);
+        assert_eq!(binding.revoke_reason.as_deref(), Some("reuse_detected"));
+    }
+
+    #[tokio::test]
+    async fn exchange_via_binding_orphan_cleanup_on_conflict() {
+        let Some(db) = connect_test_database("broker_orphan_cleanup").await else {
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let raw_binding_id = generate_binding_id();
+        let binding_hash = hash_binding_id(&raw_binding_id);
+        let binding = insert_binding(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &raw_binding_id,
+                client_id: "client-x",
+                user_id: "user-1",
+                refresh_token_jti: "jti-old",
+                refresh_token: "refresh-old",
+                scopes: vec!["openid".to_string()],
+                created_at: Utc::now(),
+                revoked: false,
+                revoke_reason: None,
+            },
+        )
+        .await;
+        let old_refresh = insert_refresh_token(&db, "jti-old", "client-x", "user-1", false).await;
+        let winner_refresh =
+            insert_refresh_token(&db, "jti-winner", "client-x", "user-1", false).await;
+        mark_refresh_replaced(&db, &old_refresh.id, &winner_refresh.id).await;
+        let orphan = insert_refresh_token(&db, "jti-orphan", "client-x", "user-1", false).await;
+
+        let outcome = handle_refresh_revoke_conflict(
+            &db,
+            &binding,
+            &binding_hash,
+            &old_refresh.id,
+            &orphan.id,
+        )
+        .await
+        .expect("handle conflict");
+
+        assert!(matches!(outcome, ExchangeOutcome::ChainFollow));
+        let orphan_after = db
+            .collection::<RefreshToken>(REFRESH_TOKENS)
+            .find_one(doc! { "_id": &orphan.id })
+            .await
+            .expect("query orphan");
+        assert!(orphan_after.is_none());
     }
 
     #[tokio::test]

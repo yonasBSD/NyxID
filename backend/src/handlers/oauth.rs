@@ -1287,6 +1287,7 @@ async fn token_inner(
                         "client_id": client_id,
                         "binding_hash": oauth_broker_service::binding_hash_prefix(&binding_hash),
                         "scope": &result.granted_scope,
+                        "via_chain_follow": result.via_chain_follow,
                     })),
                     None,
                     None,
