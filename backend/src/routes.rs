@@ -420,6 +420,7 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
             post(handlers::oauth::authorize_decision),
         )
         .route("/token", post(handlers::oauth::token))
+        .route("/bindings/{binding_id}", get(handlers::oauth::get_binding))
         .route(
             "/userinfo",
             get(handlers::oauth::userinfo).post(handlers::oauth::userinfo),

@@ -95,6 +95,27 @@ pub async fn create_binding(
     Ok((raw_binding_id, binding_hash))
 }
 
+/// Fetch a binding's metadata for the owning client. Returns NotFound on
+/// miss or ownership mismatch (never reveals which it was).
+pub async fn get_binding_for_client(
+    db: &mongodb::Database,
+    client_id: &str,
+    raw_binding_id: &str,
+) -> AppResult<OauthBrokerBinding> {
+    let binding_hash = hash_binding_id(raw_binding_id);
+    let binding = db
+        .collection::<OauthBrokerBinding>(OAUTH_BROKER_BINDINGS)
+        .find_one(doc! { "_id": &binding_hash })
+        .await?
+        .ok_or_else(|| AppError::NotFound("binding not found".to_string()))?;
+
+    if binding.client_id != client_id {
+        return Err(AppError::NotFound("binding not found".to_string()));
+    }
+
+    Ok(binding)
+}
+
 /// Exchange a binding_id for a fresh short-lived access_token.
 ///
 /// Validates client ownership of the binding, detects refresh-token reuse
@@ -620,6 +641,103 @@ mod tests {
             .await
             .expect("decrypt refresh token");
         assert_eq!(decrypted, b"test-refresh-token-123");
+    }
+
+    #[tokio::test]
+    async fn get_binding_for_client_returns_binding_for_owner() {
+        let Some(db) = connect_test_database("broker_get_owner").await else {
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let raw_binding_id = generate_binding_id();
+        let user_id = Uuid::new_v4().to_string();
+
+        insert_binding(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &raw_binding_id,
+                client_id: "client-a",
+                user_id: &user_id,
+                refresh_token_jti: "jti-get",
+                refresh_token: "refresh-get",
+                scopes: vec!["openid".to_string(), "profile".to_string()],
+                created_at: Utc::now(),
+                revoked: false,
+                revoke_reason: None,
+            },
+        )
+        .await;
+
+        let binding = get_binding_for_client(&db, "client-a", &raw_binding_id)
+            .await
+            .expect("get binding");
+        assert_eq!(binding.client_id, "client-a");
+        assert_eq!(binding.user_id, user_id);
+        assert_eq!(
+            binding.scopes,
+            vec!["openid".to_string(), "profile".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn get_binding_for_client_returns_not_found_for_other_client() {
+        let Some(db) = connect_test_database("broker_get_other").await else {
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let raw_binding_id = generate_binding_id();
+
+        insert_binding(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &raw_binding_id,
+                client_id: "client-a",
+                user_id: "user-1",
+                refresh_token_jti: "jti-other",
+                refresh_token: "refresh-other",
+                scopes: vec!["openid".to_string()],
+                created_at: Utc::now(),
+                revoked: false,
+                revoke_reason: None,
+            },
+        )
+        .await;
+
+        let result = get_binding_for_client(&db, "client-b", &raw_binding_id).await;
+        assert!(matches!(result, Err(AppError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn get_binding_for_client_returns_revoked_state_truthfully() {
+        let Some(db) = connect_test_database("broker_get_revoked").await else {
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let raw_binding_id = generate_binding_id();
+
+        insert_binding(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &raw_binding_id,
+                client_id: "client-a",
+                user_id: "user-1",
+                refresh_token_jti: "jti-revoked",
+                refresh_token: "refresh-revoked",
+                scopes: vec!["openid".to_string()],
+                created_at: Utc::now(),
+                revoked: true,
+                revoke_reason: Some("user_revoked".to_string()),
+            },
+        )
+        .await;
+
+        let binding = get_binding_for_client(&db, "client-a", &raw_binding_id)
+            .await
+            .expect("get binding");
+        assert!(binding.revoked);
     }
 
     #[tokio::test]

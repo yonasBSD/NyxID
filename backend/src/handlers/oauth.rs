@@ -163,6 +163,25 @@ pub struct RevokeRequest {
     pub client_secret: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct GetBindingQuery {
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GetBindingResponse {
+    pub binding_id: String,
+    pub client_id: String,
+    pub nyx_subject: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_subject_ref: Option<crate::models::authorization_code::ExternalSubjectRef>,
+    pub scopes: Vec<String>,
+    pub created_at: String,
+    pub last_used_at: Option<String>,
+    pub revoked: bool,
+}
+
 // --- RFC 6749 §5.2 OAuth Error Response ---
 
 /// RFC 6749 §5.2 compliant error body for the token endpoint.
@@ -1502,6 +1521,48 @@ pub async fn introspect(
         groups: Some(rbac.group_slugs),
         permissions: Some(rbac.permissions),
     })
+}
+
+/// GET /oauth/bindings/{binding_id}
+///
+/// Returns metadata for an OAuth broker binding to its owning client.
+/// Authenticated via client_credentials in either Authorization: Basic
+/// or query params (?client_id=&client_secret=).
+pub async fn get_binding(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(raw_binding_id): axum::extract::Path<String>,
+    axum::extract::Query(query): axum::extract::Query<GetBindingQuery>,
+) -> AppResult<Json<GetBindingResponse>> {
+    let not_found = || AppError::NotFound("binding not found".to_string());
+    let basic = parse_basic_client_credentials(&headers).map_err(|_| not_found())?;
+    let (client_id, client_secret) = match (basic, query.client_id, query.client_secret) {
+        (Some((id, secret)), _, _) => (id, secret),
+        (None, Some(id), Some(secret)) => (id, secret),
+        _ => return Err(not_found()),
+    };
+
+    if oauth_service::authenticate_client(&state.db, &client_id, Some(&client_secret))
+        .await
+        .is_err()
+    {
+        return Err(not_found());
+    }
+
+    let binding =
+        oauth_broker_service::get_binding_for_client(&state.db, &client_id, &raw_binding_id)
+            .await?;
+
+    Ok(Json(GetBindingResponse {
+        binding_id: raw_binding_id,
+        client_id: binding.client_id,
+        nyx_subject: binding.user_id,
+        external_subject_ref: binding.external_subject,
+        scopes: binding.scopes,
+        created_at: binding.created_at.to_rfc3339(),
+        last_used_at: binding.last_used_at.map(|t| t.to_rfc3339()),
+        revoked: binding.revoked,
+    }))
 }
 
 /// POST /oauth/revoke
