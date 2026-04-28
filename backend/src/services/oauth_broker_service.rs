@@ -87,7 +87,7 @@ pub async fn create_binding(
     let binding_hash = hash_binding_id(&raw_binding_id);
 
     let refresh_token_encrypted = encryption_keys
-        .encrypt(refresh_token.as_bytes())
+        .encrypt_with_aad(refresh_token.as_bytes(), binding_hash.as_bytes())
         .await
         .map_err(|e| AppError::Internal(format!("broker binding encrypt failed: {e}")))?;
 
@@ -219,7 +219,7 @@ pub async fn exchange_via_binding(
         .as_ref()
         .ok_or_else(invalid_grant)?;
     let refresh_token_bytes = encryption_keys
-        .decrypt(encrypted_refresh)
+        .decrypt_with_aad(encrypted_refresh, binding_hash.as_bytes())
         .await
         .map_err(|_| invalid_grant())?;
     let refresh_token_str = String::from_utf8(refresh_token_bytes).map_err(|_| invalid_grant())?;
@@ -326,7 +326,7 @@ pub async fn exchange_via_binding(
     }
 
     let new_blob = encryption_keys
-        .encrypt(new_refresh_jwt.as_bytes())
+        .encrypt_with_aad(new_refresh_jwt.as_bytes(), binding_hash.as_bytes())
         .await
         .map_err(|e| AppError::Internal(format!("broker binding encrypt failed: {e}")))?;
 
@@ -678,12 +678,13 @@ mod tests {
         seed: BindingSeed<'_>,
         external_subject: Option<ExternalSubjectRef>,
     ) -> OauthBrokerBinding {
+        let binding_hash = hash_binding_id(seed.raw_binding_id);
         let refresh_token_encrypted = encryption_keys
-            .encrypt(seed.refresh_token.as_bytes())
+            .encrypt_with_aad(seed.refresh_token.as_bytes(), binding_hash.as_bytes())
             .await
             .expect("encrypt refresh token");
         let binding = OauthBrokerBinding {
-            id: hash_binding_id(seed.raw_binding_id),
+            id: binding_hash,
             client_id: seed.client_id.to_string(),
             user_id: seed.user_id.to_string(),
             refresh_token_jti: seed.refresh_token_jti.to_string(),
@@ -754,11 +755,12 @@ mod tests {
         assert!(!restored.revoked);
         assert_eq!(restored.external_subject, Some(external_subject));
         let decrypted = encryption_keys
-            .decrypt(
+            .decrypt_with_aad(
                 restored
                     .refresh_token_encrypted
                     .as_ref()
                     .expect("encrypted refresh token"),
+                binding_hash.as_bytes(),
             )
             .await
             .expect("decrypt refresh token");
@@ -1263,6 +1265,87 @@ mod tests {
         assert_eq!(binding.rotation_version, 0);
         assert_eq!(binding.refresh_token_jti, "jti-xclient");
         assert!(!binding.revoked);
+    }
+
+    #[tokio::test]
+    async fn exchange_via_binding_rejects_blob_swap() {
+        let Some(db) = connect_test_database("broker_aad_swap").await else {
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let config = test_app_config();
+        let jwt_keys = unused_jwt_keys();
+        let user_id = Uuid::new_v4().to_string();
+        let raw_a = generate_binding_id();
+        let raw_b = generate_binding_id();
+        let hash_a = hash_binding_id(&raw_a);
+        let hash_b = hash_binding_id(&raw_b);
+
+        insert_binding(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &raw_a,
+                client_id: "client-x",
+                user_id: &user_id,
+                refresh_token_jti: "jti-swap-a",
+                refresh_token: "refresh-swap-a",
+                scopes: vec!["openid".to_string()],
+                created_at: Utc::now(),
+                revoked: false,
+                revoke_reason: None,
+            },
+        )
+        .await;
+        insert_binding(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &raw_b,
+                client_id: "client-x",
+                user_id: &user_id,
+                refresh_token_jti: "jti-swap-b",
+                refresh_token: "refresh-swap-b",
+                scopes: vec!["openid".to_string()],
+                created_at: Utc::now(),
+                revoked: false,
+                revoke_reason: None,
+            },
+        )
+        .await;
+
+        let binding_b = load_binding(&db, &hash_b).await;
+        let swapped_blob = binding_b
+            .refresh_token_encrypted
+            .expect("binding B encrypted refresh token");
+        db.collection::<OauthBrokerBinding>(OAUTH_BROKER_BINDINGS)
+            .update_one(
+                doc! { "_id": &hash_a },
+                doc! { "$set": {
+                    "refresh_token_encrypted": Binary {
+                        subtype: BinarySubtype::Generic,
+                        bytes: swapped_blob,
+                    },
+                }},
+            )
+            .await
+            .expect("swap encrypted refresh token");
+
+        let result = exchange_via_binding(
+            &db,
+            &encryption_keys,
+            &jwt_keys,
+            &config,
+            "client-x",
+            &raw_a,
+            None,
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(AppError::ExternalTokenInvalid(message)) if message == "invalid_grant"
+        ));
     }
 
     #[tokio::test]
