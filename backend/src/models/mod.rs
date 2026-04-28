@@ -23,6 +23,7 @@ pub mod node_registration_token;
 pub mod node_service_binding;
 pub mod notification_channel;
 pub mod nullable_field;
+pub mod oauth_broker_binding;
 pub mod oauth_client;
 pub mod oauth_state;
 pub mod org_invite;
