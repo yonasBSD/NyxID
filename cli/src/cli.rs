@@ -98,6 +98,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: NotificationCommands,
     },
+    /// Manage OAuth broker bindings (server-side credential handles)
+    Oauth {
+        #[command(subcommand)]
+        command: OauthCommands,
+    },
     /// Manage approval requests and grants
     Approval {
         #[command(subcommand)]
@@ -2298,6 +2303,41 @@ pub enum DeveloperAppCommands {
     RotateSecret {
         /// OAuth client ID
         id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum OauthCommands {
+    /// Manage broker bindings owned by the current user
+    Bindings {
+        #[command(subcommand)]
+        command: BindingCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum BindingCommands {
+    /// List all active broker bindings owned by the current user
+    List {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Show details for a specific binding by its hash (prefix match accepted)
+    Show {
+        /// Binding hash (full SHA-256 hex, or any unique prefix of 8+ chars)
+        id_or_hash: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Revoke a binding by its hash (prefix match accepted)
+    Revoke {
+        /// Binding hash (full SHA-256 hex, or any unique prefix of 8+ chars)
+        id_or_hash: String,
+        /// Skip confirmation prompt
+        #[arg(long, short = 'y')]
+        yes: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },

@@ -127,6 +127,7 @@ fn command_names(command: &Commands) -> (&'static str, &'static str) {
         Commands::Openclaw { .. } => ("openclaw", "subcommand"),
         Commands::Mcp { .. } => ("mcp", "subcommand"),
         Commands::Notification { .. } => ("notification", "subcommand"),
+        Commands::Oauth { .. } => ("oauth", "subcommand"),
         Commands::Approval { .. } => ("approval", "subcommand"),
         Commands::Endpoint { .. } => ("endpoint", "subcommand"),
         Commands::ExternalKey { .. } => ("external_key", "subcommand"),
@@ -191,6 +192,8 @@ async fn run(cli: Cli) -> Result<()> {
 
         // I11-I14: Notifications
         Commands::Notification { command } => commands::notification::run(command).await,
+
+        Commands::Oauth { command } => commands::oauth::run(command).await,
 
         // I15-I20: Approvals
         Commands::Approval { command } => commands::approval::run(command).await,
