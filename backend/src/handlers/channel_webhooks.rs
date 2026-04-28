@@ -840,7 +840,9 @@ mod tests {
             key_dir.path(),
             &"11".repeat(32),
         );
-        let jwt_keys = crate::crypto::jwt::JwtKeys::from_config(&config).unwrap();
+        // Use the process-wide cached test keypair instead of generating a
+        // fresh 4096-bit RSA key per test run.
+        let jwt_keys = crate::test_utils::cached_test_jwt_keys();
         let encryption_keys = crate::crypto::aes::EncryptionKeys::from_config(&config);
         let user_id = uuid::Uuid::new_v4().to_string();
         let bot_id = uuid::Uuid::new_v4().to_string();

@@ -935,9 +935,40 @@ pub(crate) fn cache_test_spec(url: &str, scope: Option<&str>, spec: serde_json::
     cache_spec(&cache_key, Arc::new(spec));
 }
 
+/// Serializes test access to the process-wide `SPEC_CACHE`. Tests that
+/// mutate the cache or assert on its contents must acquire this guard;
+/// without it, the global static races across `cargo test`'s parallel
+/// runner (e.g. one test counts entries while another clears them).
 #[cfg(test)]
-pub(crate) fn clear_test_spec_cache() {
-    SPEC_CACHE.clear();
+static SPEC_CACHE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// RAII guard giving a single test exclusive access to `SPEC_CACHE`.
+///
+/// The cache is cleared on acquire (so the test starts clean) and on drop
+/// (so the next test isn't poisoned by leftover entries). Hold the guard
+/// for the full duration of any cache interaction — including helpers like
+/// `cache_test_spec` and production code paths that touch the cache.
+#[cfg(test)]
+pub(crate) struct SpecCacheTestGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl SpecCacheTestGuard {
+    pub(crate) fn acquire() -> Self {
+        let lock = SPEC_CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        SPEC_CACHE.clear();
+        Self { _lock: lock }
+    }
+}
+
+#[cfg(test)]
+impl Drop for SpecCacheTestGuard {
+    fn drop(&mut self) {
+        SPEC_CACHE.clear();
+    }
 }
 
 fn prune_stale_cache_entries(now: Instant) {
@@ -1127,7 +1158,7 @@ mod tests {
 
     #[test]
     fn cached_specs_are_returned_while_fresh() {
-        super::SPEC_CACHE.clear();
+        let _cache_guard = super::SpecCacheTestGuard::acquire();
         let url = "https://example.com/openapi.json";
         let spec = serde_json::json!({ "openapi": "3.1.0" });
         cache_spec(url, Arc::new(spec.clone()));
@@ -1137,7 +1168,7 @@ mod tests {
 
     #[test]
     fn stale_cache_entries_are_evicted() {
-        super::SPEC_CACHE.clear();
+        let _cache_guard = super::SpecCacheTestGuard::acquire();
         let url = "https://example.com/stale-openapi.json";
         super::SPEC_CACHE.insert(
             url.to_string(),
@@ -1153,7 +1184,7 @@ mod tests {
 
     #[test]
     fn cache_spec_evicts_oldest_entry_when_capacity_is_reached() {
-        super::SPEC_CACHE.clear();
+        let _cache_guard = super::SpecCacheTestGuard::acquire();
 
         for idx in 0..MAX_SPEC_CACHE_ENTRIES {
             super::SPEC_CACHE.insert(

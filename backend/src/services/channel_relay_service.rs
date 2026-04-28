@@ -834,27 +834,9 @@ mod tests {
     }
 
     fn test_jwt_keys() -> crate::crypto::jwt::JwtKeys {
-        use jsonwebtoken::{DecodingKey, EncodingKey};
-        use rsa::pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey};
-        use rsa::traits::PublicKeyParts;
-
-        let mut rng = rand::thread_rng();
-        let private_key = rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap();
-        let public_key = private_key.to_public_key();
-
-        let private_pem = private_key
-            .to_pkcs1_pem(rsa::pkcs1::LineEnding::LF)
-            .unwrap();
-        let public_pem = public_key.to_pkcs1_pem(rsa::pkcs1::LineEnding::LF).unwrap();
-
-        let n_bytes = public_key.n().to_bytes_be();
-        let kid = hex::encode(&Sha256::digest(&n_bytes)[..8]);
-
-        crate::crypto::jwt::JwtKeys {
-            encoding: EncodingKey::from_rsa_pem(private_pem.as_bytes()).unwrap(),
-            decoding: DecodingKey::from_rsa_pem(public_pem.as_bytes()).unwrap(),
-            kid,
-        }
+        // Reuse the process-wide cached test keypair so this module's
+        // 11 callers don't each pay a fresh RSA keygen.
+        crate::test_utils::cached_test_jwt_keys()
     }
 
     #[derive(Clone, Debug)]
