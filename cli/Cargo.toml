@@ -33,7 +33,7 @@ comfy-table = "7"
 url = "2"
 
 # SSH subcommand + node agent WebSocket
-tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }
 
 # Node agent dependencies
 toml = "1.0"
@@ -50,7 +50,7 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "sync-s
 thiserror = "2"
 pty-process = { version = "0.5.3", features = ["async"] }
 libc = "0.2"
-nix = { version = "0.29", features = ["term", "process", "signal"] }
+nix = { version = "0.31.2", features = ["term", "process", "signal"] }
 tempfile = "3"
 
 # Wizard v2 (CLI-served local browser UI). See docs/CLI_WIZARD_V2.md
