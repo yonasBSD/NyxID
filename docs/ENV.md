@@ -80,6 +80,14 @@ openssl rsa -in keys/private.pem -pubout -out keys/public.pem
 chmod 600 keys/private.pem
 ```
 
+## OAuth Broker Bindings (Optional, V2 hardening)
+
+Header-forwarded mTLS for certificate-bound broker access tokens (RFC 8705 §3). All other V2 broker hardening (DPoP RFC 9449, PAR RFC 9126, AAD-bound encryption, chain-follow retry, RFC 7662 introspection, revocation webhooks) uses compile-time constants and needs no environment configuration — see `skills/nyxid/references/oauth-broker.md` for the integration-side surface.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MTLS_CLIENT_CERT_HEADER` | *(empty)* | HTTP header name carrying the URL-encoded client certificate PEM forwarded by an upstream mTLS-terminating reverse proxy. When set AND a broker token-exchange call (`POST /oauth/token` with `subject_token_type=urn:nyxid:params:oauth:token-type:binding-id`) carries that header, NyxID parses the cert, computes its SHA-256 thumbprint over the DER, and binds the issued access_token to it via the `cnf.x5t#S256` claim. The `mw/auth.rs` middleware then requires the same cert header on every API call using that token and rejects with 401 on mismatch. **OFF BY DEFAULT.** Operators MUST set this AND configure their proxy to strip the header from external requests before forwarding — otherwise an attacker can inject the header and forge a binding. Common values: `X-Client-Cert` (nginx with `proxy_set_header X-Client-Cert $ssl_client_escaped_cert;`), `x-amzn-mtls-clientcert` (AWS ALB), `x-forwarded-client-cert` (Envoy). DPoP (sent by the client itself, no proxy trust required) takes precedence when both headers are present. |
+
 ## Rate Limiting
 
 | Variable | Default | Description |
