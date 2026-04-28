@@ -119,7 +119,7 @@ function openclawConfig(params: AiToolConfigParams): string {
     ``,
     `## Setup`,
     ``,
-    `1. Install the CLI: \`bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/tools/install.sh)"\``,
+    `1. Install the CLI: \`bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/scripts/install.sh)"\``,
     `2. Log in: \`nyxid login --base-url ${params.baseUrl}\``,
     `3. Run: \`nyxid openclaw setup --url <OPENCLAW_GATEWAY_URL>\``,
     ``,
@@ -161,7 +161,7 @@ function toolSetupPrompt(
   tool: AiTool,
   p: SetupPromptParams,
 ): string {
-  const installSh = `bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/tools/install.sh)"`;
+  const installSh = `bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/scripts/install.sh)"`;
   const cliInstall = [
     `1. Install the NyxID CLI (handles Rust, build, and PATH automatically):`,
     `   ${installSh}`,
@@ -174,7 +174,7 @@ function toolSetupPrompt(
       `Read ${p.baseUrl}/llms.txt to understand what NyxID can do, then help me with whatever I need.`,
       `The NyxID server is at ${p.baseUrl} and the dashboard is at ${p.dashboardUrl}.`,
       `Use the nyxid CLI for all operations -- if it's not installed or needs updating, run:`,
-      `bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/tools/install.sh)"`,
+      `bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/scripts/install.sh)"`,
       `(installs Rust if missing, builds the CLI, and configures PATH).`,
       `For secrets, always use --credential-env to read from environment variables.`,
       `Use --output json for machine-readable output.`,
@@ -197,8 +197,9 @@ function toolSetupPrompt(
     "claude-code": [
       `This fetches the canonical NyxID skill from GitHub and the latest playbook`,
       `from ${p.baseUrl}/llms.txt, then installs:`,
-      `  ~/.claude/skills/nyxid/SKILL.md              (concise skill, loaded on demand)`,
-      `  ~/.claude/skills/nyxid/references/playbook.md (full reference, loaded when needed)`,
+      `  ~/.claude/skills/nyxid/SKILL.md                (concise skill, loaded on demand)`,
+      `  ~/.claude/skills/nyxid/references/             (per-topic references, loaded when needed)`,
+      `  ~/.claude/skills/nyxid/references/playbook.md  (full reference, loaded when needed)`,
       ``,
       `Claude loads the description at startup. Full content loads when you ask about NyxID.`,
       `Use /nyxid as a slash command, or just ask and it activates automatically.`,
@@ -211,14 +212,16 @@ function toolSetupPrompt(
     ],
     codex: [
       `This fetches the NyxID skill from GitHub and the latest playbook, then installs:`,
-      `  ~/.codex/skills/nyxid/SKILL.md              (concise skill, loaded on demand)`,
-      `  ~/.codex/skills/nyxid/references/playbook.md (full reference, loaded when needed)`,
+      `  ~/.codex/skills/nyxid/SKILL.md                (concise skill, loaded on demand)`,
+      `  ~/.codex/skills/nyxid/references/             (per-topic references, loaded when needed)`,
+      `  ~/.codex/skills/nyxid/references/playbook.md  (full reference, loaded when needed)`,
     ],
     openclaw: [
       `This fetches the NyxID skill from GitHub and installs into OpenClaw:`,
-      `  ~/.openclaw/skills/nyxid/SKILL.md              (concise skill)`,
-      `  ~/.openclaw/skills/nyxid/references/playbook.md (full reference)`,
-      `  ~/.openclaw/skills/nyxid/tools/                 (shell tool wrappers)`,
+      `  ~/.openclaw/skills/nyxid/SKILL.md                (concise skill)`,
+      `  ~/.openclaw/skills/nyxid/references/             (per-topic references)`,
+      `  ~/.openclaw/skills/nyxid/references/playbook.md  (full reference, populated from <BASE_URL>/llms.txt)`,
+      `  ~/.openclaw/skills/nyxid/scripts/                (CLI installer + helper wrappers)`,
       ``,
       `After install: start a new OpenClaw chat.`,
       `Optional: install the gateway as a background service with openclaw gateway install, then openclaw gateway start.`,

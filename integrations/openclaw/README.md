@@ -113,7 +113,7 @@ The agent only needs to know:
 
 ### CLI requirement
 
-The helper scripts (`tools/services.sh` and `tools/proxy.sh`) require the `nyxid` CLI on `PATH`. For non-CLI auth flows, use the plugin or environment-backed API key flow instead:
+The helper scripts (`scripts/services.sh` and `scripts/proxy.sh`) require the `nyxid` CLI on `PATH`. For non-CLI auth flows, use the plugin or environment-backed API key flow instead:
 
 ```bash
 export NYXID_API_KEY="nyxid_your_key_here"

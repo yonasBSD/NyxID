@@ -3338,7 +3338,7 @@ async fn handle_ws_passthrough_via_node(
             Err(AppError::BadRequest(
                 "WebSocket proxy timed out. The node agent may not support WebSocket \
                  passthrough. Update the node CLI: \
-                 bash -c \"$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/tools/install.sh)\" \
+                 bash -c \"$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/scripts/install.sh)\" \
                  then restart the node with: nyxid node daemon restart"
                     .to_string(),
             ))
