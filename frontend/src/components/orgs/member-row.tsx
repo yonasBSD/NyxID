@@ -9,6 +9,11 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { TableCell, TableRow } from "@/components/ui/table";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { formatRelativeTime } from "@/lib/utils";
 import type { MemberResponse, OrgRole } from "@/schemas/orgs";
 import { ORG_ROLES } from "@/schemas/orgs";
@@ -92,12 +97,24 @@ export function MemberRow({
             onValueChange={(next) => onChangeRole(member.user_id, next as OrgRole)}
             disabled={isUpdating || isLastAdmin}
           >
-            <SelectTrigger
-              className="h-8 w-[120px]"
-              title={isLastAdmin ? LAST_ACTIVE_ADMIN_TOOLTIP : undefined}
-            >
-              <SelectValue />
-            </SelectTrigger>
+            {isLastAdmin ? (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span tabIndex={0} className="inline-flex">
+                    <SelectTrigger className="h-8 w-[120px]">
+                      <SelectValue />
+                    </SelectTrigger>
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent className="max-w-[260px] text-xs">
+                  {LAST_ACTIVE_ADMIN_TOOLTIP}
+                </TooltipContent>
+              </Tooltip>
+            ) : (
+              <SelectTrigger className="h-8 w-[120px]">
+                <SelectValue />
+              </SelectTrigger>
+            )}
             <SelectContent>
               {ORG_ROLES.map((role) => (
                 <SelectItem key={role} value={role}>
@@ -149,19 +166,39 @@ export function MemberRow({
               <RotateCcw className="h-4 w-4" />
             </Button>
           )}
-          {canManage && (
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-8 w-8 text-muted-foreground hover:text-destructive"
-              onClick={() => onRevoke(member)}
-              disabled={isUpdating || isLastAdmin}
-              aria-label={`Remove ${displayName}`}
-              title={isLastAdmin ? LAST_ACTIVE_ADMIN_TOOLTIP : undefined}
-            >
-              <Trash2 className="h-4 w-4" />
-            </Button>
-          )}
+          {canManage &&
+            (isLastAdmin ? (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span tabIndex={0} className="inline-flex">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                      onClick={() => onRevoke(member)}
+                      disabled={isUpdating || isLastAdmin}
+                      aria-label={`Remove ${displayName}`}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent className="max-w-[260px] text-xs">
+                  {LAST_ACTIVE_ADMIN_TOOLTIP}
+                </TooltipContent>
+              </Tooltip>
+            ) : (
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                onClick={() => onRevoke(member)}
+                disabled={isUpdating}
+                aria-label={`Remove ${displayName}`}
+              >
+                <Trash2 className="h-4 w-4" />
+              </Button>
+            ))}
         </div>
       </TableCell>
     </TableRow>
