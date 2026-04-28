@@ -116,6 +116,50 @@ pub async fn get_binding_for_client(
     Ok(binding)
 }
 
+/// Find active (non-revoked) bindings owned by `client_id` matching the
+/// given external_subject criteria. Used by /oauth/bindings reverse-lookup
+/// for dedup. Empty Vec when nothing matches -- never returns NotFound.
+///
+/// Tenant is optional in the criteria; when None, only matches bindings
+/// whose stored tenant is also absent. We're matching the exact triple,
+/// not partial overlap -- that would surprise callers.
+pub async fn find_active_bindings_by_external_subject(
+    db: &mongodb::Database,
+    client_id: &str,
+    platform: &str,
+    tenant: Option<&str>,
+    external_user_id: &str,
+) -> AppResult<Vec<OauthBrokerBinding>> {
+    let mut filter = doc! {
+        "client_id": client_id,
+        "revoked": false,
+        "external_subject.platform": platform,
+        "external_subject.external_user_id": external_user_id,
+    };
+
+    match tenant {
+        Some(tenant) => {
+            filter.insert("external_subject.tenant", tenant);
+        }
+        None => {
+            // MongoDB equality to null matches both explicit null and absent
+            // fields; this covers tenant=None, which is omitted by serde.
+            filter.insert(
+                "external_subject.tenant",
+                doc! { "$in": [bson::Bson::Null] },
+            );
+        }
+    }
+
+    let cursor = db
+        .collection::<OauthBrokerBinding>(OAUTH_BROKER_BINDINGS)
+        .find(filter)
+        .sort(doc! { "created_at": -1 })
+        .await?;
+
+    Ok(cursor.try_collect().await?)
+}
+
 /// Exchange a binding_id for a fresh short-lived access_token.
 ///
 /// Validates client ownership of the binding, detects refresh-token reuse
@@ -556,6 +600,15 @@ mod tests {
         encryption_keys: &EncryptionKeys,
         seed: BindingSeed<'_>,
     ) -> OauthBrokerBinding {
+        insert_binding_with_external_subject(db, encryption_keys, seed, None).await
+    }
+
+    async fn insert_binding_with_external_subject(
+        db: &mongodb::Database,
+        encryption_keys: &EncryptionKeys,
+        seed: BindingSeed<'_>,
+        external_subject: Option<ExternalSubjectRef>,
+    ) -> OauthBrokerBinding {
         let refresh_token_encrypted = encryption_keys
             .encrypt(seed.refresh_token.as_bytes())
             .await
@@ -567,7 +620,7 @@ mod tests {
             refresh_token_jti: seed.refresh_token_jti.to_string(),
             refresh_token_encrypted: Some(refresh_token_encrypted),
             scopes: seed.scopes,
-            external_subject: None,
+            external_subject,
             rotation_version: 0,
             revoked: seed.revoked,
             last_used_at: None,
@@ -738,6 +791,182 @@ mod tests {
             .await
             .expect("get binding");
         assert!(binding.revoked);
+    }
+
+    #[tokio::test]
+    async fn find_active_bindings_filters_by_external_subject() {
+        let Some(db) = connect_test_database("broker_reverse").await else {
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let now = Utc::now();
+        let raw_match = generate_binding_id();
+        let raw_revoked = generate_binding_id();
+        let raw_wrong_client = generate_binding_id();
+        let raw_wrong_platform = generate_binding_id();
+        let raw_wrong_user = generate_binding_id();
+        let matching_subject = ExternalSubjectRef {
+            platform: "lark".to_string(),
+            tenant: Some("tenant-1".to_string()),
+            external_user_id: "user-x".to_string(),
+        };
+
+        insert_binding_with_external_subject(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &raw_match,
+                client_id: "client-a",
+                user_id: "user-1",
+                refresh_token_jti: "jti-match",
+                refresh_token: "refresh-match",
+                scopes: vec!["openid".to_string()],
+                created_at: now,
+                revoked: false,
+                revoke_reason: None,
+            },
+            Some(matching_subject.clone()),
+        )
+        .await;
+        insert_binding_with_external_subject(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &raw_revoked,
+                client_id: "client-a",
+                user_id: "user-2",
+                refresh_token_jti: "jti-revoked-match",
+                refresh_token: "refresh-revoked-match",
+                scopes: vec!["openid".to_string()],
+                created_at: now + Duration::seconds(1),
+                revoked: true,
+                revoke_reason: Some("user_revoked".to_string()),
+            },
+            Some(matching_subject.clone()),
+        )
+        .await;
+        insert_binding_with_external_subject(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &raw_wrong_client,
+                client_id: "client-b",
+                user_id: "user-3",
+                refresh_token_jti: "jti-wrong-client",
+                refresh_token: "refresh-wrong-client",
+                scopes: vec!["openid".to_string()],
+                created_at: now + Duration::seconds(2),
+                revoked: false,
+                revoke_reason: None,
+            },
+            Some(matching_subject.clone()),
+        )
+        .await;
+        insert_binding_with_external_subject(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &raw_wrong_platform,
+                client_id: "client-a",
+                user_id: "user-4",
+                refresh_token_jti: "jti-wrong-platform",
+                refresh_token: "refresh-wrong-platform",
+                scopes: vec!["openid".to_string()],
+                created_at: now + Duration::seconds(3),
+                revoked: false,
+                revoke_reason: None,
+            },
+            Some(ExternalSubjectRef {
+                platform: "github".to_string(),
+                tenant: Some("tenant-1".to_string()),
+                external_user_id: "user-x".to_string(),
+            }),
+        )
+        .await;
+        insert_binding_with_external_subject(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &raw_wrong_user,
+                client_id: "client-a",
+                user_id: "user-5",
+                refresh_token_jti: "jti-wrong-user",
+                refresh_token: "refresh-wrong-user",
+                scopes: vec!["openid".to_string()],
+                created_at: now + Duration::seconds(4),
+                revoked: false,
+                revoke_reason: None,
+            },
+            Some(ExternalSubjectRef {
+                platform: "lark".to_string(),
+                tenant: Some("tenant-1".to_string()),
+                external_user_id: "user-y".to_string(),
+            }),
+        )
+        .await;
+
+        let matches = find_active_bindings_by_external_subject(
+            &db,
+            "client-a",
+            "lark",
+            Some("tenant-1"),
+            "user-x",
+        )
+        .await
+        .expect("reverse lookup");
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].id, hash_binding_id(&raw_match));
+        assert_eq!(matches[0].external_subject, Some(matching_subject));
+    }
+
+    #[tokio::test]
+    async fn find_active_bindings_handles_absent_tenant() {
+        let Some(db) = connect_test_database("broker_reverse_no_tenant").await else {
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let raw_binding_id = generate_binding_id();
+
+        insert_binding_with_external_subject(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &raw_binding_id,
+                client_id: "client-a",
+                user_id: "user-1",
+                refresh_token_jti: "jti-no-tenant",
+                refresh_token: "refresh-no-tenant",
+                scopes: vec!["openid".to_string()],
+                created_at: Utc::now(),
+                revoked: false,
+                revoke_reason: None,
+            },
+            Some(ExternalSubjectRef {
+                platform: "lark".to_string(),
+                tenant: None,
+                external_user_id: "user-x".to_string(),
+            }),
+        )
+        .await;
+
+        let absent_tenant =
+            find_active_bindings_by_external_subject(&db, "client-a", "lark", None, "user-x")
+                .await
+                .expect("reverse lookup without tenant");
+        assert_eq!(absent_tenant.len(), 1);
+        assert_eq!(absent_tenant[0].id, hash_binding_id(&raw_binding_id));
+
+        let explicit_tenant = find_active_bindings_by_external_subject(
+            &db,
+            "client-a",
+            "lark",
+            Some("tenant-1"),
+            "user-x",
+        )
+        .await
+        .expect("reverse lookup with tenant");
+        assert!(explicit_tenant.is_empty());
     }
 
     #[tokio::test]

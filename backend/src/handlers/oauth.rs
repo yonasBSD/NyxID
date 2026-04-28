@@ -182,6 +182,32 @@ pub struct GetBindingResponse {
     pub revoked: bool,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ListBindingsByExternalSubjectQuery {
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    pub external_subject_platform: Option<String>,
+    pub external_subject_tenant: Option<String>,
+    pub external_subject_external_user_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BindingSummary {
+    pub binding_hash: String,
+    pub client_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_subject_ref: Option<crate::models::authorization_code::ExternalSubjectRef>,
+    pub scopes: Vec<String>,
+    pub created_at: String,
+    pub last_used_at: Option<String>,
+    pub revoked: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ListBindingsResponse {
+    pub bindings: Vec<BindingSummary>,
+}
+
 // --- RFC 6749 §5.2 OAuth Error Response ---
 
 /// RFC 6749 §5.2 compliant error body for the token endpoint.
@@ -1521,6 +1547,76 @@ pub async fn introspect(
         groups: Some(rbac.group_slugs),
         permissions: Some(rbac.permissions),
     })
+}
+
+/// GET /oauth/bindings?external_subject_*=...
+///
+/// Reverse lookup of bindings by external_subject for a client. Auth via
+/// client_credentials in Authorization: Basic or query params. Returns
+/// only the caller's own active bindings.
+pub async fn list_bindings_by_external_subject(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<ListBindingsByExternalSubjectQuery>,
+) -> AppResult<Json<ListBindingsResponse>> {
+    let empty = || {
+        Json(ListBindingsResponse {
+            bindings: Vec::new(),
+        })
+    };
+    let basic = parse_basic_client_credentials(&headers).ok().flatten();
+    let (client_id, client_secret) =
+        match (basic, query.client_id.clone(), query.client_secret.clone()) {
+            (Some((id, secret)), Some(query_id), _) if query_id != id => return Ok(empty()),
+            (Some((id, secret)), _, _) => (id, secret),
+            (None, Some(id), Some(secret)) => (id, secret),
+            _ => return Ok(empty()),
+        };
+
+    if oauth_service::authenticate_client(&state.db, &client_id, Some(&client_secret))
+        .await
+        .is_err()
+    {
+        return Ok(empty());
+    }
+
+    let external_subject = validate_external_subject_params(
+        query.external_subject_platform.as_deref(),
+        query.external_subject_tenant.as_deref(),
+        query.external_subject_external_user_id.as_deref(),
+    )?;
+    let Some(external_subject) = external_subject else {
+        return Err(AppError::BadRequest(
+            "external_subject_platform and external_subject_external_user_id are required"
+                .to_string(),
+        ));
+    };
+
+    let bindings = oauth_broker_service::find_active_bindings_by_external_subject(
+        &state.db,
+        &client_id,
+        &external_subject.platform,
+        external_subject.tenant.as_deref(),
+        &external_subject.external_user_id,
+    )
+    .await?;
+
+    let summaries = bindings
+        .into_iter()
+        .map(|binding| BindingSummary {
+            binding_hash: binding.id,
+            client_id: binding.client_id,
+            external_subject_ref: binding.external_subject,
+            scopes: binding.scopes,
+            created_at: binding.created_at.to_rfc3339(),
+            last_used_at: binding.last_used_at.map(|t| t.to_rfc3339()),
+            revoked: binding.revoked,
+        })
+        .collect();
+
+    Ok(Json(ListBindingsResponse {
+        bindings: summaries,
+    }))
 }
 
 /// GET /oauth/bindings/{binding_id}
