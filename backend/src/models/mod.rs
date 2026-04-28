@@ -30,6 +30,7 @@ pub mod org_invite;
 pub mod org_membership;
 pub mod org_role_scope;
 pub mod provider_config;
+pub mod pushed_authorization_request;
 pub mod refresh_token;
 pub mod reply_token_use;
 pub mod role;

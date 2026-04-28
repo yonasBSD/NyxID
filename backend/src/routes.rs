@@ -419,6 +419,7 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
             "/authorize/decision",
             post(handlers::oauth::authorize_decision),
         )
+        .route("/par", post(handlers::oauth::pushed_authorization_request))
         .route("/token", post(handlers::oauth::token))
         .route(
             "/bindings",

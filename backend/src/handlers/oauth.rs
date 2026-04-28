@@ -17,7 +17,7 @@ use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{AuthUser, OptionalAuthUser};
 use crate::services::{
     audit_service, consent_service, oauth_broker_service, oauth_client_service, oauth_service,
-    service_account_service, social_token_exchange_service, token_exchange_service,
+    par_service, service_account_service, social_token_exchange_service, token_exchange_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event, hash_short_id};
 
@@ -25,8 +25,10 @@ use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event, hash_short_
 
 #[derive(Debug, Deserialize)]
 pub struct AuthorizeQuery {
+    #[serde(default)]
     pub response_type: String,
     pub client_id: String,
+    #[serde(default)]
     pub redirect_uri: String,
     pub scope: Option<String>,
     pub state: Option<String>,
@@ -38,6 +40,7 @@ pub struct AuthorizeQuery {
     pub external_subject_external_user_id: Option<String>,
     /// OIDC prompt parameter: "none", "login", "consent", or space-separated combo.
     pub prompt: Option<String>,
+    pub request_uri: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -207,6 +210,29 @@ pub struct ListBindingsResponse {
     pub bindings: Vec<BindingSummary>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct PushedAuthorizationRequestForm {
+    pub response_type: String,
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    pub redirect_uri: String,
+    pub scope: Option<String>,
+    pub state: Option<String>,
+    pub code_challenge: Option<String>,
+    pub code_challenge_method: Option<String>,
+    pub nonce: Option<String>,
+    pub prompt: Option<String>,
+    pub external_subject_platform: Option<String>,
+    pub external_subject_tenant: Option<String>,
+    pub external_subject_external_user_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PushedAuthorizationRequestResponse {
+    pub request_uri: String,
+    pub expires_in: i64,
+}
+
 // --- RFC 6749 §5.2 OAuth Error Response ---
 
 /// RFC 6749 §5.2 compliant error body for the token endpoint.
@@ -314,6 +340,35 @@ pub async fn authorize(
         }
     };
 
+    if params.request_uri.is_some() && opt_auth.0.is_none() {
+        if is_browser_mode {
+            let return_to = build_authorize_url(&state.config.frontend_url, &params);
+            let login_url = format!(
+                "{}/login?return_to={}",
+                state.config.frontend_url,
+                urlencoding::encode(&return_to),
+            );
+            return Ok(redirect_302(&login_url));
+        }
+        return Err(AppError::Unauthorized(
+            "Authentication required".to_string(),
+        ));
+    }
+
+    let params = match resolve_pushed_authorize_params(&state, params).await {
+        Ok(params) => params,
+        Err(err) if is_browser_mode => {
+            let error_url = format!(
+                "{}/error?code={}&message={}",
+                state.config.frontend_url,
+                urlencoding::encode(err.error_key()),
+                urlencoding::encode(&err.to_string()),
+            );
+            return Ok(redirect_302(&error_url));
+        }
+        Err(err) => return Err(err),
+    };
+
     let external_subject = validate_external_subject_params(
         params.external_subject_platform.as_deref(),
         params.external_subject_tenant.as_deref(),
@@ -386,6 +441,7 @@ pub async fn authorize_decision(
         external_subject_tenant: form.external_subject_tenant,
         external_subject_external_user_id: form.external_subject_external_user_id,
         prompt: form.prompt,
+        request_uri: None,
     };
 
     let external_subject = validate_external_subject_params(
@@ -782,9 +838,78 @@ fn accepts_json(headers: &HeaderMap) -> bool {
         .unwrap_or(false)
 }
 
+fn has_non_par_authorize_params(params: &AuthorizeQuery) -> bool {
+    !params.response_type.is_empty()
+        || !params.redirect_uri.is_empty()
+        || params.scope.is_some()
+        || params.state.is_some()
+        || params.code_challenge.is_some()
+        || params.code_challenge_method.is_some()
+        || params.nonce.is_some()
+        || params.external_subject_platform.is_some()
+        || params.external_subject_tenant.is_some()
+        || params.external_subject_external_user_id.is_some()
+        || params.prompt.is_some()
+}
+
+async fn resolve_pushed_authorize_params(
+    state: &AppState,
+    params: AuthorizeQuery,
+) -> AppResult<AuthorizeQuery> {
+    let Some(request_uri) = params.request_uri.as_deref() else {
+        return Ok(params);
+    };
+
+    if has_non_par_authorize_params(&params) {
+        tracing::warn!(
+            client_id = %params.client_id,
+            "Ignoring authorize query parameters supplied alongside request_uri"
+        );
+    }
+
+    let record = par_service::consume_request(&state.db, request_uri, &params.client_id).await?;
+    let external_subject_platform = record
+        .external_subject
+        .as_ref()
+        .map(|subject| subject.platform.clone());
+    let external_subject_tenant = record
+        .external_subject
+        .as_ref()
+        .and_then(|subject| subject.tenant.clone());
+    let external_subject_external_user_id = record
+        .external_subject
+        .as_ref()
+        .map(|subject| subject.external_user_id.clone());
+
+    Ok(AuthorizeQuery {
+        response_type: record.response_type,
+        client_id: record.client_id,
+        redirect_uri: record.redirect_uri,
+        scope: record.scope,
+        state: record.state,
+        code_challenge: record.code_challenge,
+        code_challenge_method: record.code_challenge_method,
+        nonce: record.nonce,
+        external_subject_platform,
+        external_subject_tenant,
+        external_subject_external_user_id,
+        prompt: record.prompt,
+        request_uri: None,
+    })
+}
+
 /// Reconstruct the full authorize URL so it can be used as a `return_to` target
 /// after the user logs in on the frontend.
 fn build_authorize_url(base_url: &str, params: &AuthorizeQuery) -> String {
+    if let Some(request_uri) = params.request_uri.as_deref() {
+        return format!(
+            "{}/oauth/authorize?client_id={}&request_uri={}",
+            base_url,
+            urlencoding::encode(&params.client_id),
+            urlencoding::encode(request_uri),
+        );
+    }
+
     let mut url = format!(
         "{}/oauth/authorize?response_type={}&client_id={}&redirect_uri={}",
         base_url,
@@ -975,6 +1100,76 @@ async fn issue_authorization_code(
     );
 
     Ok(code)
+}
+
+/// POST /oauth/par
+pub async fn pushed_authorization_request(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(body): Form<PushedAuthorizationRequestForm>,
+) -> AppResult<(StatusCode, Json<PushedAuthorizationRequestResponse>)> {
+    let basic = parse_basic_client_credentials(&headers)?;
+    let (client_id, client_secret) =
+        match (basic, body.client_id.clone(), body.client_secret.clone()) {
+            (Some((id, secret)), Some(form_id), _) if form_id != id => {
+                return Err(AppError::BadRequest(
+                    "client_id does not match authenticated client".to_string(),
+                ));
+            }
+            (Some((id, secret)), _, _) => (id, secret),
+            (None, Some(id), Some(secret)) => (id, secret),
+            _ => {
+                return Err(AppError::Unauthorized(
+                    "Missing client credentials".to_string(),
+                ));
+            }
+        };
+
+    oauth_service::authenticate_client(&state.db, &client_id, Some(&client_secret)).await?;
+    oauth_service::validate_client(&state.db, &client_id, &body.redirect_uri).await?;
+
+    if body.response_type != "code" {
+        return Err(AppError::BadRequest(
+            "Unsupported response_type".to_string(),
+        ));
+    }
+
+    if let Some(method) = body.code_challenge_method.as_deref()
+        && method != "S256"
+    {
+        return Err(AppError::BadRequest(
+            "Only S256 code_challenge_method is supported".to_string(),
+        ));
+    }
+
+    let external_subject = validate_external_subject_params(
+        body.external_subject_platform.as_deref(),
+        body.external_subject_tenant.as_deref(),
+        body.external_subject_external_user_id.as_deref(),
+    )?;
+
+    let (request_uri, expires_in) = par_service::create_request(
+        &state.db,
+        &client_id,
+        &body.response_type,
+        &body.redirect_uri,
+        body.scope.as_deref(),
+        body.state.as_deref(),
+        body.code_challenge.as_deref(),
+        body.code_challenge_method.as_deref(),
+        body.nonce.as_deref(),
+        body.prompt.as_deref(),
+        external_subject,
+    )
+    .await?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(PushedAuthorizationRequestResponse {
+            request_uri,
+            expires_in,
+        }),
+    ))
 }
 
 /// POST /oauth/token

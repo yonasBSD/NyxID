@@ -18,6 +18,7 @@ use crate::models::oauth_broker_binding::{
     COLLECTION_NAME as OAUTH_BROKER_BINDINGS, OauthBrokerBinding,
 };
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
+use crate::models::pushed_authorization_request::COLLECTION_NAME as PAR_COLLECTION;
 use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
 use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
 use crate::models::user_provider_credentials::{
@@ -342,6 +343,22 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .keys(doc! { "refresh_token_jti": 1 })
                 .build(),
         )
+        .await?;
+
+    // ── pushed_authorization_requests ──
+    let par = db.collection::<mongodb::bson::Document>(PAR_COLLECTION);
+    par.create_index(
+        IndexModel::builder()
+            .keys(doc! { "expires_at": 1 })
+            .options(
+                IndexOptions::builder()
+                    .expire_after(Duration::from_secs(0))
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
+    par.create_index(IndexModel::builder().keys(doc! { "client_id": 1 }).build())
         .await?;
 
     // ── service_endpoints ──
