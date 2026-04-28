@@ -1,7 +1,9 @@
 import type { ReactNode } from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import type { MemberResponse, OrgRole } from "@/schemas/orgs";
 
 const {
   fixtures,
@@ -21,6 +23,7 @@ const {
       your_role: "admin" as const,
       member_count: 1,
     },
+    members: [] as MemberResponse[],
     invites: [
       {
         id: "invite-pending",
@@ -104,7 +107,7 @@ vi.mock("@/hooks/use-orgs", () => ({
 
 vi.mock("@/hooks/use-org-members", () => ({
   useOrgMembers: () => ({
-    data: [],
+    data: fixtures.members,
     isLoading: false,
   }),
   useUpdateMember: () => ({
@@ -168,7 +171,61 @@ vi.mock("@/lib/utils", async () => {
 
 import { OrgDetailPage } from "./org-detail";
 
-describe("OrgDetailPage invites tab", () => {
+const LAST_ADMIN_TOOLTIP =
+  "Cannot remove the last active admin. Promote another member to admin first, or delete the organization.";
+
+function renderOrgDetailPage() {
+  // The app router mounts this provider globally. These tests render the route
+  // page directly, so mirror that root setup here. Zero delay keeps focus-driven
+  // tooltip assertions deterministic without changing production defaults.
+  return render(
+    <TooltipProvider delayDuration={0}>
+      <OrgDetailPage />
+    </TooltipProvider>,
+  );
+}
+
+function makeMember(
+  userId: string,
+  role: OrgRole,
+  displayName: string,
+): MemberResponse {
+  return {
+    membership_id: `membership-${userId}`,
+    user_id: userId,
+    display_name: displayName,
+    email: `${userId}@example.com`,
+    role,
+    scope_source: "inherit",
+    allowed_service_ids: null,
+    effective_allowed_service_ids: null,
+    created_at: "2026-04-20T00:00:00Z",
+    revoked_at: null,
+  };
+}
+
+async function expectLastAdminTooltip(control: HTMLElement) {
+  const wrapper = control.closest('span[tabindex="0"]');
+  expect(wrapper).not.toBeNull();
+  expect(control).not.toHaveAttribute("title");
+  act(() => {
+    (wrapper as HTMLElement).focus();
+  });
+  expect(
+    await screen.findByRole("tooltip", {
+      name: LAST_ADMIN_TOOLTIP,
+    }),
+  ).toBeInTheDocument();
+  act(() => {
+    (wrapper as HTMLElement).blur();
+  });
+}
+
+function expectNoTooltipWrapper(control: HTMLElement) {
+  expect(control.closest('span[tabindex="0"]')).toBeNull();
+}
+
+describe("OrgDetailPage", () => {
   const pendingInvite = fixtures.invites[0]!;
   const redeemedInvite = fixtures.invites[1]!;
   const expiredInvite = fixtures.invites[2]!;
@@ -176,11 +233,12 @@ describe("OrgDetailPage invites tab", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     fixtures.orgRole = "admin";
+    fixtures.members = [];
     mockCopyToClipboard.mockResolvedValue(undefined);
   });
 
   it("shows org-owned resource tabs to org admins", () => {
-    render(<OrgDetailPage />);
+    renderOrgDetailPage();
 
     expect(
       screen.getByRole("tab", { name: "Service Accounts" }),
@@ -193,7 +251,7 @@ describe("OrgDetailPage invites tab", () => {
   it("hides org-owned resource tabs from non-admin members", () => {
     fixtures.orgRole = "member";
 
-    render(<OrgDetailPage />);
+    renderOrgDetailPage();
 
     expect(
       screen.queryByRole("tab", { name: "Service Accounts" }),
@@ -206,7 +264,7 @@ describe("OrgDetailPage invites tab", () => {
   it("copies the full invite join URL for pending invites", async () => {
     const user = userEvent.setup();
 
-    render(<OrgDetailPage />);
+    renderOrgDetailPage();
 
     await user.click(screen.getByRole("tab", { name: "Invites" }));
     await user.click(screen.getByRole("button", { name: /copy invite link/i }));
@@ -222,7 +280,7 @@ describe("OrgDetailPage invites tab", () => {
   it("shows the copy action only for pending invites", async () => {
     const user = userEvent.setup();
 
-    render(<OrgDetailPage />);
+    renderOrgDetailPage();
 
     await user.click(screen.getByRole("tab", { name: "Invites" }));
 
@@ -239,5 +297,71 @@ describe("OrgDetailPage invites tab", () => {
         name: new RegExp(expiredInvite.nonce, "i"),
       }),
     ).not.toBeInTheDocument();
+  });
+
+  it("disables remove and role controls for a single active admin", async () => {
+    fixtures.members = [makeMember("admin-1", "admin", "Solo Admin")];
+
+    renderOrgDetailPage();
+
+    const removeButton = screen.getByRole("button", {
+      name: "Remove Solo Admin",
+    });
+    expect(removeButton).toBeDisabled();
+    await expectLastAdminTooltip(removeButton);
+
+    const roleSelect = screen.getByRole("combobox");
+    expect(roleSelect).toBeDisabled();
+    await expectLastAdminTooltip(roleSelect);
+  });
+
+  it("keeps remove and role controls enabled when there are two active admins", () => {
+    fixtures.members = [
+      makeMember("admin-1", "admin", "First Admin"),
+      makeMember("admin-2", "admin", "Second Admin"),
+    ];
+
+    renderOrgDetailPage();
+
+    const firstRemove = screen.getByRole("button", {
+      name: "Remove First Admin",
+    });
+    const secondRemove = screen.getByRole("button", {
+      name: "Remove Second Admin",
+    });
+    expect(firstRemove).toBeEnabled();
+    expect(secondRemove).toBeEnabled();
+    expectNoTooltipWrapper(firstRemove);
+    expectNoTooltipWrapper(secondRemove);
+    for (const roleSelect of screen.getAllByRole("combobox")) {
+      expect(roleSelect).toBeEnabled();
+      expectNoTooltipWrapper(roleSelect);
+    }
+  });
+
+  it("locks only the admin row when a single active admin has non-admin peers", async () => {
+    fixtures.members = [
+      makeMember("admin-1", "admin", "Solo Admin"),
+      makeMember("member-1", "member", "Member User"),
+    ];
+
+    renderOrgDetailPage();
+
+    const adminRemove = screen.getByRole("button", {
+      name: "Remove Solo Admin",
+    });
+    const memberRemove = screen.getByRole("button", {
+      name: "Remove Member User",
+    });
+    expect(adminRemove).toBeDisabled();
+    expect(memberRemove).toBeEnabled();
+    await expectLastAdminTooltip(adminRemove);
+    expectNoTooltipWrapper(memberRemove);
+
+    const roleSelects = screen.getAllByRole("combobox");
+    expect(roleSelects[0]).toBeDisabled();
+    expect(roleSelects[1]).toBeEnabled();
+    await expectLastAdminTooltip(roleSelects[0]!);
+    expectNoTooltipWrapper(roleSelects[1]!);
   });
 });

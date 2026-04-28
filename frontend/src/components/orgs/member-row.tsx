@@ -9,6 +9,11 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { TableCell, TableRow } from "@/components/ui/table";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { formatRelativeTime } from "@/lib/utils";
 import type { MemberResponse, OrgRole } from "@/schemas/orgs";
 import { ORG_ROLES } from "@/schemas/orgs";
@@ -18,12 +23,16 @@ interface MemberRowProps {
   readonly member: MemberResponse;
   readonly canManage: boolean;
   readonly isSelf: boolean;
+  readonly isLastAdmin: boolean;
   readonly isUpdating: boolean;
   readonly onChangeRole: (memberId: string, nextRole: OrgRole) => void;
   readonly onRevoke: (member: MemberResponse) => void;
   readonly onEditScope: (member: MemberResponse) => void;
   readonly onResetScope: (member: MemberResponse) => void;
 }
+
+const LAST_ACTIVE_ADMIN_TOOLTIP =
+  "Cannot remove the last active admin. Promote another member to admin first, or delete the organization.";
 
 /**
  * Describe the member's current effective service scope in a short label.
@@ -46,6 +55,7 @@ export function MemberRow({
   member,
   canManage,
   isSelf,
+  isLastAdmin,
   isUpdating,
   onChangeRole,
   onRevoke,
@@ -81,7 +91,33 @@ export function MemberRow({
         </div>
       </TableCell>
       <TableCell>
-        {canManage ? (
+        {canManage && isLastAdmin ? (
+          <Select
+            value={member.role}
+            onValueChange={(next) => onChangeRole(member.user_id, next as OrgRole)}
+            disabled
+          >
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span tabIndex={0} className="inline-flex">
+                  <SelectTrigger className="h-8 w-[120px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                </span>
+              </TooltipTrigger>
+              <TooltipContent className="max-w-[260px] text-xs">
+                {LAST_ACTIVE_ADMIN_TOOLTIP}
+              </TooltipContent>
+            </Tooltip>
+            <SelectContent>
+              {ORG_ROLES.map((role) => (
+                <SelectItem key={role} value={role}>
+                  {role.charAt(0).toUpperCase() + role.slice(1)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        ) : canManage ? (
           <Select
             value={member.role}
             onValueChange={(next) => onChangeRole(member.user_id, next as OrgRole)}
@@ -141,18 +177,39 @@ export function MemberRow({
               <RotateCcw className="h-4 w-4" />
             </Button>
           )}
-          {canManage && (
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-8 w-8 text-muted-foreground hover:text-destructive"
-              onClick={() => onRevoke(member)}
-              disabled={isUpdating}
-              aria-label={`Remove ${displayName}`}
-            >
-              <Trash2 className="h-4 w-4" />
-            </Button>
-          )}
+          {canManage &&
+            (isLastAdmin ? (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span tabIndex={0} className="inline-flex">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                      onClick={() => onRevoke(member)}
+                      disabled
+                      aria-label={`Remove ${displayName}`}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent className="max-w-[260px] text-xs">
+                  {LAST_ACTIVE_ADMIN_TOOLTIP}
+                </TooltipContent>
+              </Tooltip>
+            ) : (
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                onClick={() => onRevoke(member)}
+                disabled={isUpdating}
+                aria-label={`Remove ${displayName}`}
+              >
+                <Trash2 className="h-4 w-4" />
+              </Button>
+            ))}
         </div>
       </TableCell>
     </TableRow>
