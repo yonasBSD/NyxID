@@ -40,6 +40,11 @@ export function OAuthConsentPage() {
   const codeChallengeMethod = readParam(search, "code_challenge_method");
   const nonce = search.get("nonce") ?? "";
   const prompt = search.get("prompt") ?? "";
+  const externalSubjectPlatform =
+    search.get("external_subject_platform") ?? "";
+  const externalSubjectTenant = search.get("external_subject_tenant") ?? "";
+  const externalSubjectExternalUserId =
+    search.get("external_subject_external_user_id") ?? "";
 
   const missing =
     !responseType ||
@@ -214,6 +219,27 @@ export function OAuthConsentPage() {
             />
             <input type="hidden" name="nonce" value={nonce} />
             {prompt && <input type="hidden" name="prompt" value={prompt} />}
+            {externalSubjectPlatform && (
+              <input
+                type="hidden"
+                name="external_subject_platform"
+                value={externalSubjectPlatform}
+              />
+            )}
+            {externalSubjectTenant && (
+              <input
+                type="hidden"
+                name="external_subject_tenant"
+                value={externalSubjectTenant}
+              />
+            )}
+            {externalSubjectExternalUserId && (
+              <input
+                type="hidden"
+                name="external_subject_external_user_id"
+                value={externalSubjectExternalUserId}
+              />
+            )}
 
             <Button
               type="submit"

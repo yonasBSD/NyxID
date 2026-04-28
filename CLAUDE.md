@@ -62,6 +62,14 @@ Error variants map to HTTP status codes and numeric error codes (1000-3002, 7000
 - PKCE for OAuth flows
 - Input validation on all endpoints
 
+### 5a. Vendor URN Namespace
+
+NyxID-vendored URN types live under `urn:nyxid:params:oauth:<category>:<name>`. The `params:oauth` infix mirrors the IETF style at `urn:ietf:params:oauth:*` so generic OAuth vendor-extension parsers recognize the suffix shape. Currently registered:
+
+- `urn:nyxid:params:oauth:token-type:binding-id` — RFC 8693 subject_token_type identifying an `OauthBrokerBinding` handle. Used at `/oauth/token` with `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`.
+
+Add new entries here when introducing additional vendored URN types.
+
 ### 6. Node Proxy Conventions
 
 - `NodeWsManager` is an in-memory connection pool shared via `Arc` in `AppState`; uses `DashMap` for lock-free concurrent access
@@ -335,6 +343,13 @@ TRUSTED_PROXY_IPS=                     # Comma-separated list of reverse-proxy I
                                         # ONLY list proxies you've configured to
                                         # overwrite client-supplied forwarded
                                         # headers. See docs/ENV.md.
+
+MTLS_CLIENT_CERT_HEADER=                # Optional header name carrying a URL-encoded PEM
+                                        # client certificate from a trusted mTLS-terminating
+                                        # reverse proxy. Leave unset/empty to disable
+                                        # RFC 8705 certificate-bound broker access tokens.
+                                        # When set, configure the proxy to strip this
+                                        # header from external requests before forwarding.
 
 # CLI remote pairing (optional)
 CLI_PAIRING_HMAC_KEY=                   # 64 hex chars; keys `CliPairing.code_hash`

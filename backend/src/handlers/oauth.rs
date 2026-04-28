@@ -4,18 +4,20 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
+use base64::Engine as _;
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::handlers::admin_helpers::{extract_ip, extract_user_agent};
+use crate::models::authorization_code::{ExternalSubjectRef, validate_external_subject_params};
 use crate::models::service_account_token::{COLLECTION_NAME as SA_TOKENS, ServiceAccountToken};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{AuthUser, OptionalAuthUser};
 use crate::services::{
-    audit_service, consent_service, oauth_client_service, oauth_service, service_account_service,
-    social_token_exchange_service, token_exchange_service,
+    audit_service, consent_service, oauth_broker_service, oauth_client_service, oauth_service,
+    par_service, service_account_service, social_token_exchange_service, token_exchange_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event, hash_short_id};
 
@@ -23,16 +25,22 @@ use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event, hash_short_
 
 #[derive(Debug, Deserialize)]
 pub struct AuthorizeQuery {
+    #[serde(default)]
     pub response_type: String,
     pub client_id: String,
+    #[serde(default)]
     pub redirect_uri: String,
     pub scope: Option<String>,
     pub state: Option<String>,
     pub code_challenge: Option<String>,
     pub code_challenge_method: Option<String>,
     pub nonce: Option<String>,
+    pub external_subject_platform: Option<String>,
+    pub external_subject_tenant: Option<String>,
+    pub external_subject_external_user_id: Option<String>,
     /// OIDC prompt parameter: "none", "login", "consent", or space-separated combo.
     pub prompt: Option<String>,
+    pub request_uri: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -45,6 +53,9 @@ pub struct ConsentDecisionForm {
     pub code_challenge: Option<String>,
     pub code_challenge_method: Option<String>,
     pub nonce: Option<String>,
+    pub external_subject_platform: Option<String>,
+    pub external_subject_tenant: Option<String>,
+    pub external_subject_external_user_id: Option<String>,
     pub prompt: Option<String>,
     pub decision: String,
 }
@@ -81,6 +92,8 @@ pub struct TokenResponse {
     pub refresh_token: Option<String>,
     pub id_token: Option<String>,
     pub scope: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binding_id: Option<String>,
     /// RFC 8693: Indicates the type of the issued token (only for token exchange grant).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub issued_token_type: Option<String>,
@@ -110,7 +123,6 @@ pub struct UserinfoResponse {
 #[derive(Debug, Deserialize)]
 pub struct IntrospectRequest {
     pub token: String,
-    #[allow(dead_code)]
     pub token_type_hint: Option<String>,
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
@@ -148,10 +160,77 @@ pub struct IntrospectResponse {
 #[derive(Debug, Deserialize)]
 pub struct RevokeRequest {
     pub token: String,
-    #[allow(dead_code)]
     pub token_type_hint: Option<String>,
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GetBindingQuery {
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GetBindingResponse {
+    pub binding_id: String,
+    pub client_id: String,
+    pub nyx_subject: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_subject_ref: Option<crate::models::authorization_code::ExternalSubjectRef>,
+    pub scopes: Vec<String>,
+    pub created_at: String,
+    pub last_used_at: Option<String>,
+    pub revoked: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListBindingsByExternalSubjectQuery {
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    pub external_subject_platform: Option<String>,
+    pub external_subject_tenant: Option<String>,
+    pub external_subject_external_user_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BindingSummary {
+    pub binding_hash: String,
+    pub client_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_subject_ref: Option<crate::models::authorization_code::ExternalSubjectRef>,
+    pub scopes: Vec<String>,
+    pub created_at: String,
+    pub last_used_at: Option<String>,
+    pub revoked: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ListBindingsResponse {
+    pub bindings: Vec<BindingSummary>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PushedAuthorizationRequestForm {
+    pub response_type: String,
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    pub redirect_uri: String,
+    pub scope: Option<String>,
+    pub state: Option<String>,
+    pub code_challenge: Option<String>,
+    pub code_challenge_method: Option<String>,
+    pub nonce: Option<String>,
+    pub prompt: Option<String>,
+    pub external_subject_platform: Option<String>,
+    pub external_subject_tenant: Option<String>,
+    pub external_subject_external_user_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PushedAuthorizationRequestResponse {
+    pub request_uri: String,
+    pub expires_in: i64,
 }
 
 // --- RFC 6749 §5.2 OAuth Error Response ---
@@ -187,6 +266,39 @@ fn oauth_error_response(err: AppError) -> Response {
         }),
     )
         .into_response()
+}
+
+fn parse_basic_client_credentials(headers: &HeaderMap) -> AppResult<Option<(String, String)>> {
+    let Some(value) = headers.get(header::AUTHORIZATION) else {
+        return Ok(None);
+    };
+    let raw = value
+        .to_str()
+        .map_err(|_| AppError::Unauthorized("Invalid client credentials".to_string()))?;
+    let Some(encoded) = raw
+        .strip_prefix("Basic ")
+        .or_else(|| raw.strip_prefix("basic "))
+    else {
+        return Ok(None);
+    };
+
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded.trim())
+        .map_err(|_| AppError::Unauthorized("Invalid client credentials".to_string()))?;
+    let decoded = String::from_utf8(decoded)
+        .map_err(|_| AppError::Unauthorized("Invalid client credentials".to_string()))?;
+    let (client_id, client_secret) = decoded
+        .split_once(':')
+        .ok_or_else(|| AppError::Unauthorized("Invalid client credentials".to_string()))?;
+
+    let client_id = urlencoding::decode(client_id)
+        .map_err(|_| AppError::Unauthorized("Invalid client credentials".to_string()))?
+        .into_owned();
+    let client_secret = urlencoding::decode(client_secret)
+        .map_err(|_| AppError::Unauthorized("Invalid client credentials".to_string()))?
+        .into_owned();
+
+    Ok(Some((client_id, client_secret)))
 }
 
 // --- Handlers ---
@@ -228,6 +340,41 @@ pub async fn authorize(
         }
     };
 
+    if params.request_uri.is_some() && opt_auth.0.is_none() {
+        if is_browser_mode {
+            let return_to = build_authorize_url(&state.config.frontend_url, &params);
+            let login_url = format!(
+                "{}/login?return_to={}",
+                state.config.frontend_url,
+                urlencoding::encode(&return_to),
+            );
+            return Ok(redirect_302(&login_url));
+        }
+        return Err(AppError::Unauthorized(
+            "Authentication required".to_string(),
+        ));
+    }
+
+    let params = match resolve_pushed_authorize_params(&state, params).await {
+        Ok(params) => params,
+        Err(err) if is_browser_mode => {
+            let error_url = format!(
+                "{}/error?code={}&message={}",
+                state.config.frontend_url,
+                urlencoding::encode(err.error_key()),
+                urlencoding::encode(&err.to_string()),
+            );
+            return Ok(redirect_302(&error_url));
+        }
+        Err(err) => return Err(err),
+    };
+
+    let external_subject = validate_external_subject_params(
+        params.external_subject_platform.as_deref(),
+        params.external_subject_tenant.as_deref(),
+        params.external_subject_external_user_id.as_deref(),
+    );
+
     let is_authenticated = opt_auth.0.is_some();
     tracing::info!(
         client_id = %params.client_id,
@@ -237,7 +384,19 @@ pub async fn authorize(
         "OAuth authorize endpoint hit"
     );
 
-    let result = authorize_inner(&state, opt_auth, &params, is_browser_mode).await;
+    let result = match external_subject {
+        Ok(external_subject) => {
+            authorize_inner(
+                &state,
+                opt_auth,
+                &params,
+                is_browser_mode,
+                external_subject.as_ref(),
+            )
+            .await
+        }
+        Err(err) => Err(err),
+    };
 
     match result {
         Ok(response) => Ok(response),
@@ -278,8 +437,18 @@ pub async fn authorize_decision(
         code_challenge: form.code_challenge,
         code_challenge_method: form.code_challenge_method,
         nonce: form.nonce,
+        external_subject_platform: form.external_subject_platform,
+        external_subject_tenant: form.external_subject_tenant,
+        external_subject_external_user_id: form.external_subject_external_user_id,
         prompt: form.prompt,
+        request_uri: None,
     };
+
+    let external_subject = validate_external_subject_params(
+        params.external_subject_platform.as_deref(),
+        params.external_subject_tenant.as_deref(),
+        params.external_subject_external_user_id.as_deref(),
+    )?;
 
     let auth_user = match opt_auth.0 {
         Some(user) => user,
@@ -313,7 +482,14 @@ pub async fn authorize_decision(
     consent_service::grant_consent(&state.db, &user_id_str, &params.client_id, &validated_scope)
         .await?;
 
-    let code = issue_authorization_code(&state, &auth_user, &params, &validated_scope).await?;
+    let code = issue_authorization_code(
+        &state,
+        &auth_user,
+        &params,
+        &validated_scope,
+        external_subject.as_ref(),
+    )
+    .await?;
     let redirect_url = build_callback_url(&params, &code);
 
     // OAuth consent submits from multiple client types (web consent form,
@@ -375,6 +551,7 @@ async fn authorize_inner(
     opt_auth: OptionalAuthUser,
     params: &AuthorizeQuery,
     is_browser_mode: bool,
+    external_subject: Option<&ExternalSubjectRef>,
 ) -> Result<Response, AppError> {
     let (client, validated_scope) = validate_authorize_request(state, params).await?;
     let prompts = parse_prompt(params.prompt.as_deref());
@@ -451,8 +628,14 @@ async fn authorize_inner(
                     return Ok(redirect_302(&consent_url));
                 }
 
-                let code =
-                    issue_authorization_code(state, &auth_user, params, &validated_scope).await?;
+                let code = issue_authorization_code(
+                    state,
+                    &auth_user,
+                    params,
+                    &validated_scope,
+                    external_subject,
+                )
+                .await?;
                 let redirect_url = build_callback_url(params, &code);
 
                 if needs_success_page(&params.redirect_uri) {
@@ -488,7 +671,14 @@ async fn authorize_inner(
             return Err(AppError::ConsentRequired { consent_url });
         }
 
-        let code = issue_authorization_code(state, &auth_user, params, &validated_scope).await?;
+        let code = issue_authorization_code(
+            state,
+            &auth_user,
+            params,
+            &validated_scope,
+            external_subject,
+        )
+        .await?;
         let redirect_url = build_callback_url(params, &code);
         Ok(Json(AuthorizeResponse { redirect_url }).into_response())
     }
@@ -648,9 +838,78 @@ fn accepts_json(headers: &HeaderMap) -> bool {
         .unwrap_or(false)
 }
 
+fn has_non_par_authorize_params(params: &AuthorizeQuery) -> bool {
+    !params.response_type.is_empty()
+        || !params.redirect_uri.is_empty()
+        || params.scope.is_some()
+        || params.state.is_some()
+        || params.code_challenge.is_some()
+        || params.code_challenge_method.is_some()
+        || params.nonce.is_some()
+        || params.external_subject_platform.is_some()
+        || params.external_subject_tenant.is_some()
+        || params.external_subject_external_user_id.is_some()
+        || params.prompt.is_some()
+}
+
+async fn resolve_pushed_authorize_params(
+    state: &AppState,
+    params: AuthorizeQuery,
+) -> AppResult<AuthorizeQuery> {
+    let Some(request_uri) = params.request_uri.as_deref() else {
+        return Ok(params);
+    };
+
+    if has_non_par_authorize_params(&params) {
+        tracing::warn!(
+            client_id = %params.client_id,
+            "Ignoring authorize query parameters supplied alongside request_uri"
+        );
+    }
+
+    let record = par_service::consume_request(&state.db, request_uri, &params.client_id).await?;
+    let external_subject_platform = record
+        .external_subject
+        .as_ref()
+        .map(|subject| subject.platform.clone());
+    let external_subject_tenant = record
+        .external_subject
+        .as_ref()
+        .and_then(|subject| subject.tenant.clone());
+    let external_subject_external_user_id = record
+        .external_subject
+        .as_ref()
+        .map(|subject| subject.external_user_id.clone());
+
+    Ok(AuthorizeQuery {
+        response_type: record.response_type,
+        client_id: record.client_id,
+        redirect_uri: record.redirect_uri,
+        scope: record.scope,
+        state: record.state,
+        code_challenge: record.code_challenge,
+        code_challenge_method: record.code_challenge_method,
+        nonce: record.nonce,
+        external_subject_platform,
+        external_subject_tenant,
+        external_subject_external_user_id,
+        prompt: record.prompt,
+        request_uri: None,
+    })
+}
+
 /// Reconstruct the full authorize URL so it can be used as a `return_to` target
 /// after the user logs in on the frontend.
 fn build_authorize_url(base_url: &str, params: &AuthorizeQuery) -> String {
+    if let Some(request_uri) = params.request_uri.as_deref() {
+        return format!(
+            "{}/oauth/authorize?client_id={}&request_uri={}",
+            base_url,
+            urlencoding::encode(&params.client_id),
+            urlencoding::encode(request_uri),
+        );
+    }
+
     let mut url = format!(
         "{}/oauth/authorize?response_type={}&client_id={}&redirect_uri={}",
         base_url,
@@ -676,6 +935,30 @@ fn build_authorize_url(base_url: &str, params: &AuthorizeQuery) -> String {
     }
     if let Some(ref nonce) = params.nonce {
         url.push_str(&format!("&nonce={}", urlencoding::encode(nonce)));
+    }
+    if let Some(ref platform) = params.external_subject_platform
+        && !platform.is_empty()
+    {
+        url.push_str(&format!(
+            "&external_subject_platform={}",
+            urlencoding::encode(platform)
+        ));
+    }
+    if let Some(ref tenant) = params.external_subject_tenant
+        && !tenant.is_empty()
+    {
+        url.push_str(&format!(
+            "&external_subject_tenant={}",
+            urlencoding::encode(tenant)
+        ));
+    }
+    if let Some(ref external_user_id) = params.external_subject_external_user_id
+        && !external_user_id.is_empty()
+    {
+        url.push_str(&format!(
+            "&external_subject_external_user_id={}",
+            urlencoding::encode(external_user_id)
+        ));
     }
     if let Some(ref prompt) = params.prompt {
         url.push_str(&format!("&prompt={}", urlencoding::encode(prompt)));
@@ -738,6 +1021,30 @@ fn build_consent_url(
     if let Some(ref nonce) = params.nonce {
         url.push_str(&format!("&nonce={}", urlencoding::encode(nonce)));
     }
+    if let Some(ref platform) = params.external_subject_platform
+        && !platform.is_empty()
+    {
+        url.push_str(&format!(
+            "&external_subject_platform={}",
+            urlencoding::encode(platform)
+        ));
+    }
+    if let Some(ref tenant) = params.external_subject_tenant
+        && !tenant.is_empty()
+    {
+        url.push_str(&format!(
+            "&external_subject_tenant={}",
+            urlencoding::encode(tenant)
+        ));
+    }
+    if let Some(ref external_user_id) = params.external_subject_external_user_id
+        && !external_user_id.is_empty()
+    {
+        url.push_str(&format!(
+            "&external_subject_external_user_id={}",
+            urlencoding::encode(external_user_id)
+        ));
+    }
     if let Some(ref prompt) = params.prompt {
         url.push_str(&format!("&prompt={}", urlencoding::encode(prompt)));
     }
@@ -751,6 +1058,7 @@ async fn issue_authorization_code(
     auth_user: &crate::mw::auth::AuthUser,
     params: &AuthorizeQuery,
     validated_scope: &str,
+    external_subject: Option<&ExternalSubjectRef>,
 ) -> AppResult<String> {
     let user_id_str = auth_user.user_id.to_string();
     let code = oauth_service::create_authorization_code(
@@ -762,18 +1070,29 @@ async fn issue_authorization_code(
         params.code_challenge.as_deref(),
         params.code_challenge_method.as_deref(),
         params.nonce.as_deref(),
+        external_subject,
     )
     .await?;
+
+    let mut event_data = serde_json::json!({
+        "client_id": params.client_id,
+        "scope": validated_scope,
+    });
+    if let Some(external_subject) = external_subject
+        && let Some(obj) = event_data.as_object_mut()
+    {
+        obj.insert(
+            "external_subject_platform".to_string(),
+            serde_json::Value::String(external_subject.platform.clone()),
+        );
+    }
 
     // Audit log the authorization code issuance
     audit_service::log_async(
         state.db.clone(),
         Some(user_id_str),
         "oauth_code_issued".to_string(),
-        Some(serde_json::json!({
-            "client_id": params.client_id,
-            "scope": validated_scope,
-        })),
+        Some(event_data),
         None,
         None,
         None,
@@ -781,6 +1100,76 @@ async fn issue_authorization_code(
     );
 
     Ok(code)
+}
+
+/// POST /oauth/par
+pub async fn pushed_authorization_request(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(body): Form<PushedAuthorizationRequestForm>,
+) -> AppResult<(StatusCode, Json<PushedAuthorizationRequestResponse>)> {
+    let basic = parse_basic_client_credentials(&headers)?;
+    let (client_id, client_secret) =
+        match (basic, body.client_id.clone(), body.client_secret.clone()) {
+            (Some((id, _)), Some(form_id), _) if form_id != id => {
+                return Err(AppError::BadRequest(
+                    "client_id does not match authenticated client".to_string(),
+                ));
+            }
+            (Some((id, secret)), _, _) => (id, secret),
+            (None, Some(id), Some(secret)) => (id, secret),
+            _ => {
+                return Err(AppError::Unauthorized(
+                    "Missing client credentials".to_string(),
+                ));
+            }
+        };
+
+    oauth_service::authenticate_client(&state.db, &client_id, Some(&client_secret)).await?;
+    oauth_service::validate_client(&state.db, &client_id, &body.redirect_uri).await?;
+
+    if body.response_type != "code" {
+        return Err(AppError::BadRequest(
+            "Unsupported response_type".to_string(),
+        ));
+    }
+
+    if let Some(method) = body.code_challenge_method.as_deref()
+        && method != "S256"
+    {
+        return Err(AppError::BadRequest(
+            "Only S256 code_challenge_method is supported".to_string(),
+        ));
+    }
+
+    let external_subject = validate_external_subject_params(
+        body.external_subject_platform.as_deref(),
+        body.external_subject_tenant.as_deref(),
+        body.external_subject_external_user_id.as_deref(),
+    )?;
+
+    let (request_uri, expires_in) = par_service::create_request(
+        &state.db,
+        &client_id,
+        &body.response_type,
+        &body.redirect_uri,
+        body.scope.as_deref(),
+        body.state.as_deref(),
+        body.code_challenge.as_deref(),
+        body.code_challenge_method.as_deref(),
+        body.nonce.as_deref(),
+        body.prompt.as_deref(),
+        external_subject,
+    )
+    .await?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(PushedAuthorizationRequestResponse {
+            request_uri,
+            expires_in,
+        }),
+    ))
 }
 
 /// POST /oauth/token
@@ -829,26 +1218,78 @@ async fn token_inner(
                 .as_deref()
                 .ok_or_else(|| AppError::BadRequest("Missing client_id parameter".to_string()))?;
 
-            let (access_token, refresh_token, id_token, granted_scope) =
-                oauth_service::exchange_authorization_code(
+            let exchanged = oauth_service::exchange_authorization_code(
+                &state.db,
+                &state.config,
+                &state.jwt_keys,
+                code,
+                client_id_str,
+                redirect_uri,
+                body.code_verifier.as_deref(),
+                body.client_secret.as_deref(),
+                Some(oauth_broker_service::BROKER_ACCESS_TTL_SECS),
+            )
+            .await?;
+
+            if exchanged.broker_capability_enabled {
+                let granted_scopes: Vec<String> = exchanged
+                    .granted_scope
+                    .split_whitespace()
+                    .map(str::to_string)
+                    .collect();
+                let (binding_id, _binding_hash) = oauth_broker_service::create_binding(
                     &state.db,
-                    &state.config,
-                    &state.jwt_keys,
-                    code,
+                    &state.encryption_keys,
                     client_id_str,
-                    redirect_uri,
-                    body.code_verifier.as_deref(),
-                    body.client_secret.as_deref(),
+                    &exchanged.user_id,
+                    &exchanged.refresh_token,
+                    &exchanged.refresh_token_jti,
+                    &granted_scopes,
+                    exchanged.external_subject.as_ref(),
                 )
                 .await?;
 
+                let binding_hash =
+                    crate::models::oauth_broker_binding::hash_binding_id(&binding_id);
+                audit_service::log_async(
+                    state.db.clone(),
+                    Some(exchanged.user_id.clone()),
+                    "oauth_broker_binding_issued".to_string(),
+                    Some(serde_json::json!({
+                        "client_id": client_id_str,
+                        "binding_hash": oauth_broker_service::binding_hash_prefix(&binding_hash),
+                        "scope": &exchanged.granted_scope,
+                        "external_subject_platform": exchanged
+                            .external_subject
+                            .as_ref()
+                            .map(|external_subject| external_subject.platform.clone()),
+                    })),
+                    None,
+                    None,
+                    None,
+                    None,
+                );
+
+                return Ok(Json(TokenResponse {
+                    access_token: exchanged.access_token,
+                    token_type: "Bearer".to_string(),
+                    expires_in: oauth_broker_service::BROKER_ACCESS_TTL_SECS,
+                    refresh_token: None,
+                    id_token: exchanged.id_token,
+                    scope: Some(exchanged.granted_scope),
+                    binding_id: Some(binding_id),
+                    issued_token_type: None,
+                }));
+            }
+
             Ok(Json(TokenResponse {
-                access_token,
+                access_token: exchanged.access_token,
                 token_type: "Bearer".to_string(),
                 expires_in: state.config.jwt_access_ttl_secs,
-                refresh_token: Some(refresh_token),
-                id_token,
-                scope: Some(granted_scope),
+                refresh_token: Some(exchanged.refresh_token),
+                id_token: exchanged.id_token,
+                scope: Some(exchanged.granted_scope),
+                binding_id: None,
                 issued_token_type: None,
             }))
         }
@@ -873,15 +1314,35 @@ async fn token_inner(
                 refresh_token: Some(tokens.refresh_token),
                 id_token: None,
                 scope: None,
+                binding_id: None,
                 issued_token_type: None,
             }))
         }
         // RFC 8693 Token Exchange
         "urn:ietf:params:oauth:grant-type:token-exchange" => {
+            let basic_client_credentials = parse_basic_client_credentials(headers)?;
+            if let (Some(form_client_id), Some((basic_client_id, _))) =
+                (body.client_id.as_deref(), basic_client_credentials.as_ref())
+                && form_client_id != basic_client_id
+            {
+                return Err(AppError::Unauthorized(
+                    "Invalid client credentials".to_string(),
+                ));
+            }
             let client_id = body
                 .client_id
                 .as_deref()
+                .or_else(|| {
+                    basic_client_credentials
+                        .as_ref()
+                        .map(|(client_id, _)| client_id.as_str())
+                })
                 .ok_or_else(|| AppError::BadRequest("Missing client_id".to_string()))?;
+            let client_secret_for_auth = body.client_secret.as_deref().or_else(|| {
+                basic_client_credentials
+                    .as_ref()
+                    .map(|(_, client_secret)| client_secret.as_str())
+            });
             let subject_token = body
                 .subject_token
                 .as_deref()
@@ -906,7 +1367,7 @@ async fn token_inner(
                     &state.jwks_cache,
                     &state.http_client,
                     client_id,
-                    body.client_secret.as_deref(),
+                    client_secret_for_auth,
                     subject_token,
                     subject_token_type,
                     provider,
@@ -920,6 +1381,7 @@ async fn token_inner(
                     refresh_token: Some(result.refresh_token),
                     id_token: result.id_token,
                     scope: Some(result.scope),
+                    binding_id: None,
                     issued_token_type: Some(
                         "urn:ietf:params:oauth:token-type:access_token".to_string(),
                     ),
@@ -929,6 +1391,7 @@ async fn token_inner(
                 let client_secret = body
                     .client_secret
                     .as_deref()
+                    .or(client_secret_for_auth)
                     .ok_or_else(|| AppError::BadRequest("Missing client_secret".to_string()))?;
 
                 let result = token_exchange_service::exchange_token(
@@ -975,6 +1438,121 @@ async fn token_inner(
                     refresh_token: None,
                     id_token: None,
                     scope: Some(result.scope),
+                    binding_id: None,
+                    issued_token_type: Some(result.issued_token_type),
+                }))
+            } else if subject_token_type == oauth_broker_service::BROKER_SUBJECT_TOKEN_TYPE {
+                // RFC 8693 token exchange against an OauthBrokerBinding.
+                let client_secret = body
+                    .client_secret
+                    .as_deref()
+                    .or(client_secret_for_auth)
+                    .ok_or_else(|| AppError::BadRequest("Missing client_secret".to_string()))?;
+
+                let client =
+                    oauth_service::authenticate_client(&state.db, client_id, Some(client_secret))
+                        .await?;
+                // Honor BOTH broker-mode triggers: the per-client admin flag
+                // and the urn:nyxid:scope:broker_binding scope. Otherwise a
+                // scope-opted-in client could issue bindings (commit #4 path
+                // uses is_broker_client) but not exchange them.
+                if !oauth_broker_service::is_broker_client(&client) {
+                    return Err(AppError::ExternalTokenInvalid("invalid_grant".to_string()));
+                }
+
+                let dpop_jkt = match headers.get("dpop") {
+                    Some(value) => {
+                        let proof = value.to_str().map_err(|_| {
+                            AppError::Unauthorized("invalid DPoP proof".to_string())
+                        })?;
+                        let htu = crate::crypto::dpop::htu_from_base_and_path(
+                            &state.config.base_url,
+                            "/oauth/token",
+                        )?;
+                        Some(crate::crypto::dpop::validate_proof(
+                            proof,
+                            "POST",
+                            &htu,
+                            &state.dpop_jti_cache,
+                        )?)
+                    }
+                    None => None,
+                };
+                let mtls_header_name = state
+                    .config
+                    .mtls_client_cert_header
+                    .as_deref()
+                    .filter(|header| !header.trim().is_empty());
+                let mtls_x5t_s256 = match (dpop_jkt.as_ref(), mtls_header_name) {
+                    (Some(_), Some(header_name)) => {
+                        if headers.get(header_name).is_some() {
+                            tracing::debug!(
+                                "DPoP and mTLS client certificate headers both present; using DPoP binding"
+                            );
+                        }
+                        None
+                    }
+                    (None, Some(header_name)) => match headers.get(header_name) {
+                        Some(value) => {
+                            let cert = value.to_str().map_err(|_| {
+                                AppError::Unauthorized(
+                                    "invalid mTLS client certificate header".to_string(),
+                                )
+                            })?;
+                            if cert.trim().is_empty() {
+                                None
+                            } else {
+                                Some(crate::crypto::mtls::cert_thumbprint_from_header(cert)?)
+                            }
+                        }
+                        None => None,
+                    },
+                    (_, None) => None,
+                };
+
+                let result = oauth_broker_service::exchange_via_binding(
+                    &state.db,
+                    state.encryption_keys.clone(),
+                    &state.http_client,
+                    &state.jwt_keys,
+                    &state.config,
+                    client_id,
+                    subject_token,
+                    body.scope.as_deref(),
+                    dpop_jkt.as_deref(),
+                    mtls_x5t_s256.as_deref(),
+                )
+                .await?;
+
+                let binding_hash =
+                    crate::models::oauth_broker_binding::hash_binding_id(subject_token);
+                audit_service::log_async(
+                    state.db.clone(),
+                    None,
+                    "oauth_broker_binding_token_refreshed".to_string(),
+                    Some(serde_json::json!({
+                        "client_id": client_id,
+                        "binding_hash": oauth_broker_service::binding_hash_prefix(&binding_hash),
+                        "scope": &result.granted_scope,
+                        "via_chain_follow": result.via_chain_follow,
+                        "dpop_jkt": dpop_jkt
+                            .as_deref()
+                            .map(|jkt| jkt.chars().take(16).collect::<String>()),
+                    })),
+                    None,
+                    None,
+                    None,
+                    None,
+                );
+
+                Ok(Json(TokenResponse {
+                    access_token: result.access_token,
+                    token_type: result.token_type,
+                    expires_in: result.expires_in,
+                    refresh_token: None,
+                    id_token: None,
+                    scope: Some(result.granted_scope),
+                    binding_id: None,
                     issued_token_type: Some(result.issued_token_type),
                 }))
             } else {
@@ -1028,6 +1606,7 @@ async fn token_inner(
                         refresh_token: None,
                         id_token: None,
                         scope: Some(response.scope),
+                        binding_id: None,
                         issued_token_type: None,
                     }))
                 }
@@ -1150,6 +1729,47 @@ pub async fn introspect(
         return Json(inactive);
     }
 
+    // Broker-binding introspection: detect via the explicit token_type_hint
+    // or the `bnd_` prefix as a defensive fallback. Same routing precedence
+    // as /oauth/revoke's binding-revoke branch.
+    let is_broker_binding = body
+        .token_type_hint
+        .as_deref()
+        .map(|hint| hint == oauth_broker_service::BROKER_SUBJECT_TOKEN_TYPE)
+        .unwrap_or(false)
+        || body
+            .token
+            .starts_with(crate::models::oauth_broker_binding::BINDING_ID_PREFIX);
+
+    if is_broker_binding {
+        let binding = match oauth_broker_service::get_binding_for_client(
+            &state.db,
+            caller_client_id,
+            &body.token,
+        )
+        .await
+        {
+            Ok(binding) if !binding.revoked => binding,
+            _ => return Json(inactive),
+        };
+
+        return Json(IntrospectResponse {
+            active: true,
+            scope: Some(binding.scopes.join(" ")),
+            client_id: Some(binding.client_id),
+            username: None,
+            token_type: Some("broker_binding".to_string()),
+            exp: None,
+            iat: Some(binding.created_at.timestamp()),
+            sub: Some(binding.user_id),
+            iss: None,
+            jti: None,
+            roles: None,
+            groups: None,
+            permissions: None,
+        });
+    }
+
     // Try to verify the token
     let claims = match crate::crypto::jwt::verify_token(&state.jwt_keys, &state.config, &body.token)
     {
@@ -1225,6 +1845,181 @@ pub async fn introspect(
     })
 }
 
+/// GET /oauth/bindings?external_subject_*=...
+///
+/// Reverse lookup of bindings by external_subject for a client. Auth via
+/// client_credentials in Authorization: Basic or query params. Returns
+/// only the caller's own active bindings.
+pub async fn list_bindings_by_external_subject(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<ListBindingsByExternalSubjectQuery>,
+) -> AppResult<Json<ListBindingsResponse>> {
+    let empty = || {
+        Json(ListBindingsResponse {
+            bindings: Vec::new(),
+        })
+    };
+    let basic = parse_basic_client_credentials(&headers).ok().flatten();
+    let (client_id, client_secret) =
+        match (basic, query.client_id.clone(), query.client_secret.clone()) {
+            (Some((id, _)), Some(query_id), _) if query_id != id => return Ok(empty()),
+            (Some((id, secret)), _, _) => (id, secret),
+            (None, Some(id), Some(secret)) => (id, secret),
+            _ => return Ok(empty()),
+        };
+
+    if oauth_service::authenticate_client(&state.db, &client_id, Some(&client_secret))
+        .await
+        .is_err()
+    {
+        return Ok(empty());
+    }
+
+    let external_subject = validate_external_subject_params(
+        query.external_subject_platform.as_deref(),
+        query.external_subject_tenant.as_deref(),
+        query.external_subject_external_user_id.as_deref(),
+    )?;
+    let Some(external_subject) = external_subject else {
+        return Err(AppError::BadRequest(
+            "external_subject_platform and external_subject_external_user_id are required"
+                .to_string(),
+        ));
+    };
+
+    let bindings = oauth_broker_service::find_active_bindings_by_external_subject(
+        &state.db,
+        &client_id,
+        &external_subject.platform,
+        external_subject.tenant.as_deref(),
+        &external_subject.external_user_id,
+    )
+    .await?;
+
+    let summaries = bindings
+        .into_iter()
+        .map(|binding| BindingSummary {
+            binding_hash: binding.id,
+            client_id: binding.client_id,
+            external_subject_ref: binding.external_subject,
+            scopes: binding.scopes,
+            created_at: binding.created_at.to_rfc3339(),
+            last_used_at: binding.last_used_at.map(|t| t.to_rfc3339()),
+            revoked: binding.revoked,
+        })
+        .collect();
+
+    Ok(Json(ListBindingsResponse {
+        bindings: summaries,
+    }))
+}
+
+/// GET /oauth/bindings/{binding_id}
+///
+/// Returns metadata for an OAuth broker binding to its owning client.
+/// Authenticated via client_credentials in either Authorization: Basic
+/// or query params (?client_id=&client_secret=).
+pub async fn get_binding(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(raw_binding_id): axum::extract::Path<String>,
+    axum::extract::Query(query): axum::extract::Query<GetBindingQuery>,
+) -> AppResult<Json<GetBindingResponse>> {
+    let not_found = || AppError::NotFound("binding not found".to_string());
+    let basic = parse_basic_client_credentials(&headers).map_err(|_| not_found())?;
+    let (client_id, client_secret) = match (basic, query.client_id, query.client_secret) {
+        (Some((id, secret)), _, _) => (id, secret),
+        (None, Some(id), Some(secret)) => (id, secret),
+        _ => return Err(not_found()),
+    };
+
+    if oauth_service::authenticate_client(&state.db, &client_id, Some(&client_secret))
+        .await
+        .is_err()
+    {
+        return Err(not_found());
+    }
+
+    let binding =
+        oauth_broker_service::get_binding_for_client(&state.db, &client_id, &raw_binding_id)
+            .await?;
+
+    Ok(Json(GetBindingResponse {
+        binding_id: raw_binding_id,
+        client_id: binding.client_id,
+        nyx_subject: binding.user_id,
+        external_subject_ref: binding.external_subject,
+        scopes: binding.scopes,
+        created_at: binding.created_at.to_rfc3339(),
+        last_used_at: binding.last_used_at.map(|t| t.to_rfc3339()),
+        revoked: binding.revoked,
+    }))
+}
+
+/// DELETE /oauth/bindings/{binding_id}
+///
+/// Client-initiated binding revocation aligned with the contract
+/// proposed on issue #549. Authenticated via client_credentials in
+/// Authorization: Basic or query params. Always returns 204 — missing,
+/// already-revoked, and ownership-mismatched bindings are
+/// indistinguishable from a successful revoke (no enumeration leak).
+/// `/oauth/revoke` (RFC 7009) remains supported as the standards-track
+/// alternative; this endpoint is the REST-style alias the issue spec
+/// calls for.
+pub async fn delete_binding(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(raw_binding_id): axum::extract::Path<String>,
+    axum::extract::Query(query): axum::extract::Query<GetBindingQuery>,
+) -> StatusCode {
+    let basic = parse_basic_client_credentials(&headers).ok().flatten();
+    let (client_id, client_secret) = match (basic, query.client_id, query.client_secret) {
+        (Some((id, secret)), _, _) => (id, secret),
+        (None, Some(id), Some(secret)) => (id, secret),
+        _ => return StatusCode::NO_CONTENT,
+    };
+
+    if oauth_service::authenticate_client(&state.db, &client_id, Some(&client_secret))
+        .await
+        .is_err()
+    {
+        return StatusCode::NO_CONTENT;
+    }
+
+    let revoked = oauth_broker_service::revoke_binding_by_client(
+        &state.db,
+        state.encryption_keys.clone(),
+        &state.http_client,
+        &client_id,
+        &raw_binding_id,
+        "client_revoked",
+    )
+    .await
+    .unwrap_or(false);
+
+    if revoked {
+        let binding_hash = crate::models::oauth_broker_binding::hash_binding_id(&raw_binding_id);
+        audit_service::log_async(
+            state.db.clone(),
+            None,
+            "oauth_broker_binding_revoked".to_string(),
+            Some(serde_json::json!({
+                "revoke_source": "client",
+                "client_id": client_id,
+                "binding_hash": oauth_broker_service::binding_hash_prefix(&binding_hash),
+                "reason": "client_revoked",
+            })),
+            None,
+            None,
+            None,
+            None,
+        );
+    }
+
+    StatusCode::NO_CONTENT
+}
+
 /// POST /oauth/revoke
 ///
 /// RFC 7009 Token Revocation. Authenticates the calling client before
@@ -1245,6 +2040,55 @@ pub async fn revoke(State(state): State<AppState>, Form(body): Form<RevokeReques
     .await
     .is_err()
     {
+        return StatusCode::OK;
+    }
+
+    // Broker-binding revocation: detect via the explicit token_type_hint or
+    // the `bnd_` prefix as a defensive fallback. RFC 7009 §2.1 makes the
+    // hint optional, but standardising on the URN keeps the wire shape
+    // aligned with the issued token type.
+    let is_broker_binding = body
+        .token_type_hint
+        .as_deref()
+        .map(|hint| hint == oauth_broker_service::BROKER_SUBJECT_TOKEN_TYPE)
+        .unwrap_or(false)
+        || body
+            .token
+            .starts_with(crate::models::oauth_broker_binding::BINDING_ID_PREFIX);
+
+    if is_broker_binding {
+        let revoked = oauth_broker_service::revoke_binding_by_client(
+            &state.db,
+            state.encryption_keys.clone(),
+            &state.http_client,
+            caller_client_id,
+            &body.token,
+            "client_revoked",
+        )
+        .await
+        .unwrap_or(false);
+
+        if revoked {
+            let binding_hash = crate::models::oauth_broker_binding::hash_binding_id(&body.token);
+            audit_service::log_async(
+                state.db.clone(),
+                None,
+                "oauth_broker_binding_revoked".to_string(),
+                Some(serde_json::json!({
+                    "revoke_source": "client",
+                    "client_id": caller_client_id,
+                    "binding_hash": oauth_broker_service::binding_hash_prefix(&binding_hash),
+                    "reason": "client_revoked",
+                })),
+                None,
+                None,
+                None,
+                None,
+            );
+        }
+
+        // RFC 7009: always return 200 regardless of whether the token was
+        // valid, owned by this client, or already revoked.
         return StatusCode::OK;
     }
 
@@ -1358,6 +2202,9 @@ pub async fn register_client(
         "dynamic_registration",
         "",
         oauth_client_service::DEFAULT_MCP_ALLOWED_SCOPES,
+        false,
+        None,
+        None,
     )
     .await?;
 

@@ -14,6 +14,7 @@ pub mod mcp;
 pub mod mfa;
 pub mod node;
 pub mod notification;
+pub mod oauth;
 pub mod openclaw;
 pub mod org;
 pub mod pairing;

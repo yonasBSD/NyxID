@@ -23,6 +23,7 @@ pub async fn run(command: DeveloperAppCommands) -> Result<()> {
             client_type,
             allowed_scopes,
             delegation_scopes,
+            broker_capability,
             org,
             auth,
         } => {
@@ -51,6 +52,12 @@ pub async fn run(command: DeveloperAppCommands) -> Result<()> {
             if let Some(ds) = delegation_scopes {
                 body.insert("delegation_scopes".to_string(), Value::String(ds));
             }
+            if let Some(enabled) = broker_capability {
+                body.insert(
+                    "broker_capability_enabled".to_string(),
+                    Value::Bool(enabled),
+                );
+            }
             if let Some(org_id) = org {
                 body.insert("target_org_id".to_string(), Value::String(org_id));
             }
@@ -69,6 +76,14 @@ pub async fn run(command: DeveloperAppCommands) -> Result<()> {
                     let ctype = result["client_type"].as_str().unwrap_or("-");
                     let scopes = result["allowed_scopes"].as_str().unwrap_or("-");
                     let dscopes = result["delegation_scopes"].as_str().unwrap_or("-");
+                    let broker_capability = if result["broker_capability_enabled"]
+                        .as_bool()
+                        .unwrap_or(false)
+                    {
+                        "yes"
+                    } else {
+                        "no"
+                    };
                     let secret = result["client_secret"].as_str();
 
                     eprintln!("Developer app created!");
@@ -78,6 +93,7 @@ pub async fn run(command: DeveloperAppCommands) -> Result<()> {
                     eprintln!("Type:              {ctype}");
                     eprintln!("Allowed scopes:    {scopes}");
                     eprintln!("Delegation scopes: {dscopes}");
+                    eprintln!("Broker capability: {broker_capability}");
                     if let Some(s) = secret {
                         eprintln!(
                             "Client secret:     {s}  (save this -- confidential clients only, shown once)"
@@ -174,6 +190,7 @@ pub async fn run(command: DeveloperAppCommands) -> Result<()> {
             redirect_uris,
             allowed_scopes,
             delegation_scopes,
+            broker_capability,
             auth,
         } => {
             let mut api = ApiClient::from_auth(&auth)?;
@@ -197,6 +214,12 @@ pub async fn run(command: DeveloperAppCommands) -> Result<()> {
             }
             if let Some(ds) = delegation_scopes {
                 body.insert("delegation_scopes".to_string(), Value::String(ds));
+            }
+            if let Some(enabled) = broker_capability {
+                body.insert(
+                    "broker_capability_enabled".to_string(),
+                    Value::Bool(enabled),
+                );
             }
 
             let result: Value = api
@@ -270,6 +293,11 @@ fn print_app_detail(c: &Value) {
     let ctype = c["client_type"].as_str().unwrap_or("-");
     let scopes = c["allowed_scopes"].as_str().unwrap_or("-");
     let dscopes = c["delegation_scopes"].as_str().unwrap_or("-");
+    let broker_capability = if c["broker_capability_enabled"].as_bool().unwrap_or(false) {
+        "yes"
+    } else {
+        "no"
+    };
     let active = if c["is_active"].as_bool().unwrap_or(false) {
         "yes"
     } else {
@@ -292,6 +320,7 @@ fn print_app_detail(c: &Value) {
     eprintln!("Active:            {active}");
     eprintln!("Allowed scopes:    {scopes}");
     eprintln!("Delegation scopes: {dscopes}");
+    eprintln!("Broker capability: {broker_capability}");
     eprintln!("Redirect URIs:     {uris}");
     eprintln!("Created:           {created}");
 }

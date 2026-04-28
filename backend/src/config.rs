@@ -86,6 +86,11 @@ pub struct AppConfig {
     /// Empty (the default) is the strict mode: nothing trusted.
     pub trusted_proxy_ips: Vec<std::net::IpAddr>,
 
+    /// Optional reverse-proxy-forwarded client certificate header used for
+    /// RFC 8705 certificate-bound broker access tokens. Unset/empty disables
+    /// mTLS binding even if a client sends `X-Client-Cert` directly.
+    pub mtls_client_cert_header: Option<String>,
+
     /// Explicit HMAC key (64 hex chars = 32 bytes) used to derive
     /// `CliPairing.code_hash`. When unset, the backend derives the
     /// key from `ENCRYPTION_KEY` (if configured) or from the JWT
@@ -300,6 +305,7 @@ impl std::fmt::Debug for AppConfig {
             .field("rate_limit_per_second", &self.rate_limit_per_second)
             .field("rate_limit_burst", &self.rate_limit_burst)
             .field("trusted_proxy_ips", &self.trusted_proxy_ips)
+            .field("mtls_client_cert_header", &self.mtls_client_cert_header)
             .field(
                 "cli_pairing_hmac_key",
                 if self.cli_pairing_hmac_key.is_some() {
@@ -575,6 +581,10 @@ impl AppConfig {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(30),
             trusted_proxy_ips: parse_trusted_proxy_ips(env::var("TRUSTED_PROXY_IPS").ok()),
+            mtls_client_cert_header: env::var("MTLS_CLIENT_CERT_HEADER")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
             cli_pairing_hmac_key: env::var("CLI_PAIRING_HMAC_KEY")
                 .ok()
                 .filter(|s| !s.trim().is_empty()),
@@ -1002,6 +1012,7 @@ mod tests {
             rate_limit_per_second: 10,
             rate_limit_burst: 30,
             trusted_proxy_ips: vec![],
+            mtls_client_cert_header: None,
             cli_pairing_hmac_key: None,
             sa_token_ttl_secs: 3600,
             telemetry_dsn: None,

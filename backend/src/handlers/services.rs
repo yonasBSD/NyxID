@@ -286,6 +286,7 @@ pub struct OidcCredentialsResponse {
     pub redirect_uris: Vec<String>,
     pub allowed_scopes: String,
     pub delegation_scopes: String,
+    pub broker_capability_enabled: bool,
     pub issuer: String,
     pub authorization_endpoint: String,
     pub token_endpoint: String,
@@ -821,6 +822,9 @@ pub async fn create_service(
                 &user_id_str,
                 "",
                 oauth_client_service::DEFAULT_ALLOWED_SCOPES,
+                false,
+                None,
+                None,
             )
             .await?;
 
@@ -1961,6 +1965,7 @@ pub async fn get_oidc_credentials(
         redirect_uris,
         allowed_scopes: oauth_client.allowed_scopes,
         delegation_scopes: oauth_client.delegation_scopes,
+        broker_capability_enabled: oauth_client.broker_capability_enabled,
         issuer: state.config.jwt_issuer.clone(),
         authorization_endpoint: format!("{base}/oauth/authorize"),
         token_endpoint: format!("{base}/oauth/token"),

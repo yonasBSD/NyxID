@@ -66,6 +66,14 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
         .route("/me", get(handlers::users::get_me))
         .route("/me", put(handlers::users::update_me))
         .route("/me", delete(handlers::users::delete_me))
+        .route(
+            "/me/broker-bindings",
+            get(handlers::broker_bindings::list_my_broker_bindings),
+        )
+        .route(
+            "/me/broker-bindings/{binding_hash}",
+            delete(handlers::broker_bindings::revoke_my_broker_binding),
+        )
         .route("/me/consents", get(handlers::consent::list_my_consents))
         .route(
             "/me/consents/{client_id}",
@@ -411,7 +419,16 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
             "/authorize/decision",
             post(handlers::oauth::authorize_decision),
         )
+        .route("/par", post(handlers::oauth::pushed_authorization_request))
         .route("/token", post(handlers::oauth::token))
+        .route(
+            "/bindings",
+            get(handlers::oauth::list_bindings_by_external_subject),
+        )
+        .route(
+            "/bindings/{binding_id}",
+            get(handlers::oauth::get_binding).delete(handlers::oauth::delete_binding),
+        )
         .route(
             "/userinfo",
             get(handlers::oauth::userinfo).post(handlers::oauth::userinfo),

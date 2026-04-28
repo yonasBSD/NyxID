@@ -768,6 +768,7 @@ mod tests {
             rate_limit_per_second: 10,
             rate_limit_burst: 30,
             trusted_proxy_ips: vec![],
+            mtls_client_cert_header: None,
             cli_pairing_hmac_key: None,
             sa_token_ttl_secs: 3600,
             telemetry_dsn: None,

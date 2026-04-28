@@ -39,6 +39,7 @@ const oauthClient: OAuthClient = {
   redirect_uris: ["https://app.example.com/callback"],
   allowed_scopes: "openid profile email",
   delegation_scopes: "",
+  broker_capability_enabled: false,
   is_active: true,
   client_secret: null,
   created_at: "2026-04-20T00:00:00Z",

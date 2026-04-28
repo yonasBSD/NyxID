@@ -63,6 +63,9 @@ pub struct Claims {
     /// True if this token was issued to a service account.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sa: Option<bool>,
+    /// RFC 7800 confirmation claim for sender-constrained access tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cnf: Option<Cnf>,
     /// True if this token was issued for channel relay callbacks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay: Option<bool>,
@@ -84,6 +87,16 @@ pub struct Claims {
     /// Inherited scope: allow all nodes flag from the agent key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_allow_all_nodes: Option<bool>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Cnf {
+    /// SHA-256 thumbprint of the DPoP proof JWK (RFC 7638).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jkt: Option<String>,
+    /// SHA-256 thumbprint of the client certificate DER (RFC 8705).
+    #[serde(default, rename = "x5t#S256", skip_serializing_if = "Option::is_none")]
+    pub x5t_s256: Option<String>,
 }
 
 pub const RELAY_REPLY_AUDIENCE: &str = "channel-relay/reply";
@@ -276,20 +289,34 @@ pub struct RbacClaimData {
 }
 
 /// Generate an access token for the given user.
+// Access token issuance carries optional TTL, RBAC, DPoP, and mTLS knobs.
+// Keeping these explicit avoids hiding security-sensitive claim inputs.
+#[allow(clippy::too_many_arguments)]
 pub fn generate_access_token(
     keys: &JwtKeys,
     config: &AppConfig,
     user_id: &Uuid,
     scope: &str,
     rbac: Option<&RbacClaimData>,
+    ttl_override_secs: Option<i64>,
+    dpop_jkt: Option<&str>,
+    mtls_x5t_s256: Option<&str>,
 ) -> Result<String, AppError> {
     let now = Utc::now().timestamp();
+    let cnf = if dpop_jkt.is_some() || mtls_x5t_s256.is_some() {
+        Some(Cnf {
+            jkt: dpop_jkt.map(String::from),
+            x5t_s256: mtls_x5t_s256.map(String::from),
+        })
+    } else {
+        None
+    };
 
     let claims = Claims {
         sub: user_id.to_string(),
         iss: config.jwt_issuer.clone(),
         aud: config.base_url.clone(),
-        exp: now + config.jwt_access_ttl_secs,
+        exp: now + ttl_override_secs.unwrap_or(config.jwt_access_ttl_secs),
         iat: now,
         jti: Uuid::new_v4().to_string(),
         scope: scope.to_string(),
@@ -301,6 +328,7 @@ pub fn generate_access_token(
         act: None,
         delegated: None,
         sa: None,
+        cnf,
         relay: None,
         relay_api_key_id: None,
         relay_api_key_name: None,
@@ -359,6 +387,7 @@ pub fn generate_relay_access_token(
         act: None,
         delegated: None,
         sa: None,
+        cnf: None,
         relay: Some(true),
         relay_api_key_id: Some(agent_scope.api_key_id.clone()),
         relay_api_key_name: Some(agent_scope.api_key_name.clone()),
@@ -463,6 +492,7 @@ pub fn generate_refresh_token(
         act: None,
         delegated: None,
         sa: None,
+        cnf: None,
         relay: None,
         relay_api_key_id: None,
         relay_api_key_name: None,
@@ -509,6 +539,7 @@ pub fn reissue_refresh_token(
         act: None,
         delegated: None,
         sa: None,
+        cnf: None,
         relay: None,
         relay_api_key_id: None,
         relay_api_key_name: None,
@@ -568,6 +599,7 @@ pub fn generate_delegated_access_token(
         }),
         delegated: Some(true),
         sa: None,
+        cnf: None,
         relay: None,
         relay_api_key_id: None,
         relay_api_key_name: None,
@@ -705,6 +737,7 @@ pub fn generate_service_account_token(
         act: None,
         delegated: None,
         sa: Some(true),
+        cnf: None,
         relay: None,
         relay_api_key_id: None,
         relay_api_key_name: None,
@@ -948,6 +981,7 @@ mod tests {
             rate_limit_per_second: 10,
             rate_limit_burst: 30,
             trusted_proxy_ips: vec![],
+            mtls_client_cert_header: None,
             cli_pairing_hmac_key: None,
             sa_token_ttl_secs: 3600,
             telemetry_dsn: None,
@@ -1008,14 +1042,43 @@ mod tests {
     fn generate_and_verify_access_token() {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
-        let token =
-            generate_access_token(&keys, &config, &user_id, "openid profile", None).unwrap();
+        let token = generate_access_token(
+            &keys,
+            &config,
+            &user_id,
+            "openid profile",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
         let claims = verify_token(&keys, &config, &token).unwrap();
         assert_eq!(claims.sub, user_id.to_string());
         assert_eq!(claims.token_type, "access");
         assert_eq!(claims.scope, "openid profile");
         assert_eq!(claims.iss, "http://localhost:3001");
+    }
+
+    #[test]
+    fn access_token_respects_ttl_override() {
+        let (keys, config) = test_keys_and_config();
+        let user_id = Uuid::new_v4();
+        let token = generate_access_token(
+            &keys,
+            &config,
+            &user_id,
+            "openid",
+            None,
+            Some(300),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let claims = verify_token(&keys, &config, &token).unwrap();
+        assert_eq!(claims.exp - claims.iat, 300);
     }
 
     #[test]
@@ -1073,6 +1136,7 @@ mod tests {
             act: None,
             delegated: None,
             sa: None,
+            cnf: None,
             relay: None,
             relay_api_key_id: None,
             relay_api_key_name: None,
@@ -1094,7 +1158,9 @@ mod tests {
     fn access_token_has_kid_header() {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
-        let token = generate_access_token(&keys, &config, &user_id, "openid", None).unwrap();
+        let token =
+            generate_access_token(&keys, &config, &user_id, "openid", None, None, None, None)
+                .unwrap();
 
         // Decode header without validation to check kid
         let header = jsonwebtoken::decode_header(&token).unwrap();
@@ -1135,7 +1201,9 @@ mod tests {
     fn generate_id_token_with_at_hash() {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
-        let access_token = generate_access_token(&keys, &config, &user_id, "openid", None).unwrap();
+        let access_token =
+            generate_access_token(&keys, &config, &user_id, "openid", None, None, None, None)
+                .unwrap();
 
         let id_token = generate_id_token(
             &keys,
@@ -1177,6 +1245,7 @@ mod tests {
             act: None,
             delegated: None,
             sa: None,
+            cnf: None,
             relay: None,
             relay_api_key_id: None,
             relay_api_key_name: None,
@@ -1233,7 +1302,9 @@ mod tests {
         // Verify that tokens without act/delegated fields still deserialize
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
-        let token = generate_access_token(&keys, &config, &user_id, "openid", None).unwrap();
+        let token =
+            generate_access_token(&keys, &config, &user_id, "openid", None, None, None, None)
+                .unwrap();
 
         let claims = verify_token(&keys, &config, &token).unwrap();
         assert!(claims.act.is_none());
@@ -1310,7 +1381,9 @@ mod tests {
     fn sa_claim_skipped_when_none() {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
-        let token = generate_access_token(&keys, &config, &user_id, "openid", None).unwrap();
+        let token =
+            generate_access_token(&keys, &config, &user_id, "openid", None, None, None, None)
+                .unwrap();
 
         let claims = verify_token(&keys, &config, &token).unwrap();
         assert!(claims.sa.is_none());

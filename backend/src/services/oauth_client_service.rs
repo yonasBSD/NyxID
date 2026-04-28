@@ -1,6 +1,6 @@
 use chrono::Utc;
 use futures::TryStreamExt;
-use mongodb::bson::{self, doc};
+use mongodb::bson::{self, Binary, doc, spec::BinarySubtype};
 use uuid::Uuid;
 
 use crate::crypto::token::{generate_random_token, hash_token};
@@ -9,9 +9,22 @@ use crate::models::consent::COLLECTION_NAME as CONSENTS;
 use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
 use crate::models::refresh_token::COLLECTION_NAME as REFRESH_TOKENS;
 
-/// Known OIDC scopes supported by NyxID. Used for validation of
+/// Known scopes supported by NyxID. Used for validation of
 /// `allowed_scopes` on OAuth clients.
-pub const KNOWN_OIDC_SCOPES: &[&str] = &["openid", "profile", "email", "roles", "groups", "proxy"];
+///
+/// The list mixes OIDC-standard scopes (openid, profile, email, roles,
+/// groups) with NyxID-specific extensions (proxy, urn:nyxid:scope:*).
+/// `urn:nyxid:scope:broker_binding` opts a client into the OAuth broker
+/// pattern when present in their allowed_scopes.
+pub const KNOWN_OIDC_SCOPES: &[&str] = &[
+    "openid",
+    "profile",
+    "email",
+    "roles",
+    "groups",
+    "proxy",
+    "urn:nyxid:scope:broker_binding",
+];
 
 /// Default allowed scopes for new OAuth clients.
 pub const DEFAULT_ALLOWED_SCOPES: &str = "openid profile email";
@@ -106,6 +119,9 @@ pub async fn seed_default_clients(db: &mongodb::Database) -> AppResult<()> {
         client_type: "public".to_string(),
         is_active: true,
         delegation_scopes: String::new(),
+        broker_capability_enabled: false,
+        revocation_webhook_url: None,
+        revocation_webhook_secret_encrypted: None,
         created_by: Some("system".to_string()),
         created_at: now,
         updated_at: now,
@@ -199,6 +215,7 @@ pub async fn migrate_dynamic_clients_grant_default_mcp_scopes(
 ///
 /// `allowed_scopes` must contain only known OIDC scopes (validated by the
 /// caller). Pass [`DEFAULT_ALLOWED_SCOPES`] for the standard set.
+#[allow(clippy::too_many_arguments)]
 pub async fn create_client(
     db: &mongodb::Database,
     name: &str,
@@ -207,6 +224,9 @@ pub async fn create_client(
     created_by: &str,
     delegation_scopes: &str,
     allowed_scopes: &str,
+    broker_capability_enabled: bool,
+    revocation_webhook_url: Option<&str>,
+    revocation_webhook_secret_encrypted: Option<Vec<u8>>,
 ) -> AppResult<(OauthClient, Option<String>)> {
     let client_id = Uuid::new_v4().to_string();
     let now = Utc::now();
@@ -229,6 +249,9 @@ pub async fn create_client(
         client_type: client_type.to_string(),
         is_active: true,
         delegation_scopes: delegation_scopes.to_string(),
+        broker_capability_enabled,
+        revocation_webhook_url: revocation_webhook_url.map(str::to_string),
+        revocation_webhook_secret_encrypted,
         created_by: Some(created_by.to_string()),
         created_at: now,
         updated_at: now,
@@ -318,6 +341,7 @@ pub async fn update_redirect_uris(
 }
 
 /// Update mutable fields on an OAuth client owned by a specific user.
+#[allow(clippy::too_many_arguments)]
 pub async fn update_client_for_creator(
     db: &mongodb::Database,
     client_id: &str,
@@ -326,6 +350,9 @@ pub async fn update_client_for_creator(
     redirect_uris: Option<&[String]>,
     delegation_scopes: Option<&str>,
     allowed_scopes: Option<&str>,
+    broker_capability_enabled: Option<bool>,
+    revocation_webhook_url: Option<&str>,
+    revocation_webhook_secret_encrypted: Option<Vec<u8>>,
 ) -> AppResult<OauthClient> {
     let mut set_doc = doc! {
         "updated_at": bson::DateTime::from_chrono(Utc::now()),
@@ -350,6 +377,24 @@ pub async fn update_client_for_creator(
 
     if let Some(scopes) = allowed_scopes {
         set_doc.insert("allowed_scopes", scopes);
+    }
+
+    if let Some(enabled) = broker_capability_enabled {
+        set_doc.insert("broker_capability_enabled", enabled);
+    }
+
+    if let Some(url) = revocation_webhook_url {
+        set_doc.insert("revocation_webhook_url", url);
+    }
+
+    if let Some(secret) = revocation_webhook_secret_encrypted {
+        set_doc.insert(
+            "revocation_webhook_secret_encrypted",
+            Binary {
+                subtype: BinarySubtype::Generic,
+                bytes: secret,
+            },
+        );
     }
 
     let result = db
@@ -611,6 +656,9 @@ mod tests {
                 client_type: "public".to_string(),
                 is_active: true,
                 delegation_scopes: String::new(),
+                broker_capability_enabled: false,
+                revocation_webhook_url: None,
+                revocation_webhook_secret_encrypted: None,
                 created_by: Some("dynamic_registration".to_string()),
                 created_at: now,
                 updated_at: now,
@@ -639,6 +687,9 @@ mod tests {
                     client_type: "public".to_string(),
                     is_active: true,
                     delegation_scopes: String::new(),
+                    broker_capability_enabled: false,
+                    revocation_webhook_url: None,
+                    revocation_webhook_secret_encrypted: None,
                     created_by: Some(created_by.to_string()),
                     created_at: now,
                     updated_at: now,
@@ -807,6 +858,9 @@ mod tests {
                     client_type: "public".to_string(),
                     is_active: true,
                     delegation_scopes: String::new(),
+                    broker_capability_enabled: false,
+                    revocation_webhook_url: None,
+                    revocation_webhook_secret_encrypted: None,
                     created_by: Some("system".to_string()),
                     created_at: now,
                     updated_at: now,
