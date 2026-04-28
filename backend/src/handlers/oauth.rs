@@ -1010,6 +1010,27 @@ async fn token_inner(
                 )
                 .await?;
 
+                let binding_hash =
+                    crate::models::oauth_broker_binding::hash_binding_id(&binding_id);
+                audit_service::log_async(
+                    state.db.clone(),
+                    Some(exchanged.user_id.clone()),
+                    "oauth_broker_binding_issued".to_string(),
+                    Some(serde_json::json!({
+                        "client_id": client_id_str,
+                        "binding_hash": oauth_broker_service::binding_hash_prefix(&binding_hash),
+                        "scope": &exchanged.granted_scope,
+                        "external_subject_platform": exchanged
+                            .external_subject
+                            .as_ref()
+                            .map(|external_subject| external_subject.platform.clone()),
+                    })),
+                    None,
+                    None,
+                    None,
+                    None,
+                );
+
                 return Ok(Json(TokenResponse {
                     access_token: exchanged.access_token,
                     token_type: "Bearer".to_string(),

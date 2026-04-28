@@ -1,6 +1,7 @@
 use axum::{Json, extract::State};
 
 use crate::AppState;
+use crate::services::oauth_broker_service;
 
 /// GET /.well-known/openid-configuration
 ///
@@ -16,7 +17,17 @@ pub async fn openid_configuration(State(state): State<AppState>) -> Json<serde_j
         "userinfo_endpoint": format!("{base}/oauth/userinfo"),
         "jwks_uri": format!("{base}/.well-known/jwks.json"),
         "response_types_supported": ["code"],
-        "grant_types_supported": ["authorization_code", "refresh_token"],
+        "grant_types_supported": [
+            "authorization_code",
+            "refresh_token",
+            "client_credentials",
+            "urn:ietf:params:oauth:grant-type:token-exchange",
+        ],
+        "subject_token_types_supported": [
+            "urn:ietf:params:oauth:token-type:access_token",
+            oauth_broker_service::BROKER_SUBJECT_TOKEN_TYPE,
+        ],
+        "nyxid_broker_binding_supported": true,
         "subject_types_supported": ["public"],
         "id_token_signing_alg_values_supported": ["RS256"],
         "introspection_endpoint": format!("{base}/oauth/introspect"),
@@ -24,7 +35,7 @@ pub async fn openid_configuration(State(state): State<AppState>) -> Json<serde_j
         "scopes_supported": ["openid", "profile", "email", "roles", "groups"],
         "claims_supported": ["sub", "iss", "aud", "exp", "iat", "email", "email_verified", "name", "picture", "nonce", "at_hash", "roles", "groups", "permissions", "acr", "amr", "auth_time", "sid"],
         "code_challenge_methods_supported": ["S256"],
-        "token_endpoint_auth_methods_supported": ["client_secret_post", "none"],
+        "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post", "none"],
         "userinfo_signing_alg_values_supported": ["none"],
     }))
 }
@@ -43,7 +54,7 @@ pub async fn oauth_authorization_server_metadata(
         "authorization_endpoint": format!("{base}/oauth/authorize"),
         "token_endpoint": format!("{base}/oauth/token"),
         "registration_endpoint": format!("{base}/oauth/register"),
-        "token_endpoint_auth_methods_supported": ["client_secret_post", "none"],
+        "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post", "none"],
         "userinfo_endpoint": format!("{base}/oauth/userinfo"),
         "jwks_uri": format!("{base}/.well-known/jwks.json"),
         "introspection_endpoint": format!("{base}/oauth/introspect"),
@@ -51,7 +62,17 @@ pub async fn oauth_authorization_server_metadata(
         "scopes_supported": ["openid", "profile", "email", "roles", "groups", "proxy"],
         "response_types_supported": ["code"],
         "response_modes_supported": ["query"],
-        "grant_types_supported": ["authorization_code", "refresh_token"],
+        "grant_types_supported": [
+            "authorization_code",
+            "refresh_token",
+            "client_credentials",
+            "urn:ietf:params:oauth:grant-type:token-exchange",
+        ],
+        "subject_token_types_supported": [
+            "urn:ietf:params:oauth:token-type:access_token",
+            oauth_broker_service::BROKER_SUBJECT_TOKEN_TYPE,
+        ],
+        "nyxid_broker_binding_supported": true,
         "code_challenge_methods_supported": ["S256"],
         "id_token_signing_alg_values_supported": ["RS256"],
         "claims_supported": ["sub", "iss", "aud", "exp", "iat", "email", "email_verified", "name", "picture", "nonce", "at_hash", "roles", "groups", "permissions", "acr", "amr", "auth_time", "sid"],

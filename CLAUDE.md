@@ -62,6 +62,14 @@ Error variants map to HTTP status codes and numeric error codes (1000-3002, 7000
 - PKCE for OAuth flows
 - Input validation on all endpoints
 
+### 5a. Vendor URN Namespace
+
+NyxID-vendored URN types live under `urn:nyxid:<category>:<name>`. Currently registered:
+
+- `urn:nyxid:token-type:binding_id` — RFC 8693 subject_token_type identifying an `OauthBrokerBinding` handle. Used at `/oauth/token` with `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`.
+
+Add new entries here when introducing additional vendored URN types.
+
 ### 6. Node Proxy Conventions
 
 - `NodeWsManager` is an in-memory connection pool shared via `Arc` in `AppState`; uses `DashMap` for lock-free concurrent access

@@ -151,8 +151,27 @@ pub async fn exchange_via_binding(
     }
 
     if refresh_token_doc.revoked {
-        revoke_bindings_for_user_client(db, &binding.client_id, &binding.user_id, "reuse_detected")
-            .await?;
+        let cascade_count = revoke_bindings_for_user_client(
+            db,
+            &binding.client_id,
+            &binding.user_id,
+            "reuse_detected",
+        )
+        .await?;
+        crate::services::audit_service::log_async(
+            db.clone(),
+            Some(binding.user_id.clone()),
+            "oauth_broker_binding_reuse_detected".to_string(),
+            Some(serde_json::json!({
+                "client_id": binding.client_id,
+                "binding_hash": binding_hash_prefix(&binding_hash),
+                "cascade_revoke_count": cascade_count,
+            })),
+            None,
+            None,
+            None,
+            None,
+        );
         tracing::warn!(
             client_id = %binding.client_id,
             binding_hash = %binding_hash_prefix(&binding_hash),
@@ -454,7 +473,451 @@ fn invalid_grant() -> AppError {
 
 #[cfg(test)]
 mod tests {
-    // Encryption round-trip is covered by `EncryptionKeys` tests; this module
-    // mostly exercises field plumbing. Real Mongo integration is verified by
-    // the handler-level test in commit #5/#6 once the exchange path lands.
+    use super::*;
+    use crate::crypto::aes::EncryptionKeys;
+    use crate::crypto::jwt::JwtKeys;
+    use crate::models::oauth_broker_binding::BINDING_ID_PREFIX;
+    use crate::test_utils::{connect_test_database, test_app_config, test_encryption_keys};
+
+    fn unused_jwt_keys() -> JwtKeys {
+        JwtKeys {
+            encoding: jsonwebtoken::EncodingKey::from_secret(b"unused"),
+            decoding: jsonwebtoken::DecodingKey::from_secret(b"unused"),
+            kid: "unused".to_string(),
+        }
+    }
+
+    fn refresh_token_doc(jti: &str, client_id: &str, user_id: &str, revoked: bool) -> RefreshToken {
+        let now = Utc::now();
+        RefreshToken {
+            id: Uuid::new_v4().to_string(),
+            jti: jti.to_string(),
+            client_id: client_id.to_string(),
+            user_id: user_id.to_string(),
+            session_id: None,
+            expires_at: now + Duration::days(7),
+            revoked,
+            replaced_by: None,
+            revoked_at: revoked.then_some(now),
+            created_at: now,
+        }
+    }
+
+    async fn insert_refresh_token(
+        db: &mongodb::Database,
+        jti: &str,
+        client_id: &str,
+        user_id: &str,
+        revoked: bool,
+    ) -> RefreshToken {
+        let refresh = refresh_token_doc(jti, client_id, user_id, revoked);
+        db.collection::<RefreshToken>(REFRESH_TOKENS)
+            .insert_one(&refresh)
+            .await
+            .expect("insert refresh token");
+        refresh
+    }
+
+    struct BindingSeed<'a> {
+        raw_binding_id: &'a str,
+        client_id: &'a str,
+        user_id: &'a str,
+        refresh_token_jti: &'a str,
+        refresh_token: &'a str,
+        scopes: Vec<String>,
+        created_at: chrono::DateTime<Utc>,
+        revoked: bool,
+        revoke_reason: Option<String>,
+    }
+
+    async fn insert_binding(
+        db: &mongodb::Database,
+        encryption_keys: &EncryptionKeys,
+        seed: BindingSeed<'_>,
+    ) -> OauthBrokerBinding {
+        let refresh_token_encrypted = encryption_keys
+            .encrypt(seed.refresh_token.as_bytes())
+            .await
+            .expect("encrypt refresh token");
+        let binding = OauthBrokerBinding {
+            id: hash_binding_id(seed.raw_binding_id),
+            client_id: seed.client_id.to_string(),
+            user_id: seed.user_id.to_string(),
+            refresh_token_jti: seed.refresh_token_jti.to_string(),
+            refresh_token_encrypted: Some(refresh_token_encrypted),
+            scopes: seed.scopes,
+            external_subject: None,
+            rotation_version: 0,
+            revoked: seed.revoked,
+            last_used_at: None,
+            revoked_at: seed.revoked.then_some(seed.created_at),
+            revoke_reason: seed.revoke_reason,
+            created_at: seed.created_at,
+        };
+        db.collection::<OauthBrokerBinding>(OAUTH_BROKER_BINDINGS)
+            .insert_one(&binding)
+            .await
+            .expect("insert binding");
+        binding
+    }
+
+    async fn load_binding(db: &mongodb::Database, binding_hash: &str) -> OauthBrokerBinding {
+        db.collection::<OauthBrokerBinding>(OAUTH_BROKER_BINDINGS)
+            .find_one(doc! { "_id": binding_hash })
+            .await
+            .expect("query binding")
+            .expect("binding exists")
+    }
+
+    async fn load_refresh_by_jti(db: &mongodb::Database, jti: &str) -> RefreshToken {
+        db.collection::<RefreshToken>(REFRESH_TOKENS)
+            .find_one(doc! { "jti": jti })
+            .await
+            .expect("query refresh token")
+            .expect("refresh token exists")
+    }
+
+    #[tokio::test]
+    async fn create_binding_persists_and_decrypts() {
+        let Some(db) = connect_test_database("broker_create").await else {
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let external_subject = ExternalSubjectRef {
+            platform: "lark".to_string(),
+            tenant: Some("tenant-1".to_string()),
+            external_user_id: "external-user-1".to_string(),
+        };
+
+        let (raw_binding_id, binding_hash) = create_binding(
+            &db,
+            &encryption_keys,
+            "client-1",
+            "user-1",
+            "test-refresh-token-123",
+            "refresh-jti-1",
+            &["openid".to_string(), "profile".to_string()],
+            Some(&external_subject),
+        )
+        .await
+        .expect("create binding");
+
+        assert!(raw_binding_id.starts_with(BINDING_ID_PREFIX));
+        let restored = load_binding(&db, &binding_hash).await;
+        assert_eq!(restored.client_id, "client-1");
+        assert_eq!(restored.user_id, "user-1");
+        assert_eq!(restored.refresh_token_jti, "refresh-jti-1");
+        assert_eq!(restored.rotation_version, 0);
+        assert!(!restored.revoked);
+        assert_eq!(restored.external_subject, Some(external_subject));
+        let decrypted = encryption_keys
+            .decrypt(
+                restored
+                    .refresh_token_encrypted
+                    .as_ref()
+                    .expect("encrypted refresh token"),
+            )
+            .await
+            .expect("decrypt refresh token");
+        assert_eq!(decrypted, b"test-refresh-token-123");
+    }
+
+    #[tokio::test]
+    async fn revoke_binding_by_client_marks_revoked_and_revokes_refresh_token() {
+        let Some(db) = connect_test_database("broker_revoke_client").await else {
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let raw_binding_id = generate_binding_id();
+        let binding_hash = hash_binding_id(&raw_binding_id);
+
+        insert_refresh_token(&db, "jti-client-revoke", "client-1", "user-1", false).await;
+        insert_binding(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &raw_binding_id,
+                client_id: "client-1",
+                user_id: "user-1",
+                refresh_token_jti: "jti-client-revoke",
+                refresh_token: "refresh-client-revoke",
+                scopes: vec!["openid".to_string()],
+                created_at: Utc::now(),
+                revoked: false,
+                revoke_reason: None,
+            },
+        )
+        .await;
+
+        let revoked = revoke_binding_by_client(&db, "client-1", &raw_binding_id, "client_revoked")
+            .await
+            .expect("revoke binding");
+        assert!(revoked);
+
+        let binding = load_binding(&db, &binding_hash).await;
+        assert!(binding.revoked);
+        assert_eq!(binding.revoke_reason.as_deref(), Some("client_revoked"));
+        let refresh = load_refresh_by_jti(&db, "jti-client-revoke").await;
+        assert!(refresh.revoked);
+
+        let second = revoke_binding_by_client(&db, "client-1", &raw_binding_id, "client_revoked")
+            .await
+            .expect("idempotent revoke");
+        assert!(!second);
+        let wrong_client =
+            revoke_binding_by_client(&db, "client-2", &raw_binding_id, "client_revoked")
+                .await
+                .expect("wrong client revoke");
+        assert!(!wrong_client);
+    }
+
+    #[tokio::test]
+    async fn revoke_binding_by_user_returns_not_found_for_other_user() {
+        let Some(db) = connect_test_database("broker_revoke_user").await else {
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let raw_binding_id = generate_binding_id();
+        let binding_hash = hash_binding_id(&raw_binding_id);
+
+        insert_refresh_token(&db, "jti-user-revoke", "client-1", "user-a", false).await;
+        insert_binding(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &raw_binding_id,
+                client_id: "client-1",
+                user_id: "user-a",
+                refresh_token_jti: "jti-user-revoke",
+                refresh_token: "refresh-user-revoke",
+                scopes: vec!["openid".to_string()],
+                created_at: Utc::now(),
+                revoked: false,
+                revoke_reason: None,
+            },
+        )
+        .await;
+
+        let wrong_user = revoke_binding_by_user(&db, "user-b", &binding_hash, "user_revoked").await;
+        assert!(matches!(wrong_user, Err(AppError::NotFound(_))));
+        assert!(!load_binding(&db, &binding_hash).await.revoked);
+
+        revoke_binding_by_user(&db, "user-a", &binding_hash, "user_revoked")
+            .await
+            .expect("owner revoke");
+        let binding = load_binding(&db, &binding_hash).await;
+        assert!(binding.revoked);
+        assert_eq!(binding.revoke_reason.as_deref(), Some("user_revoked"));
+        assert!(load_refresh_by_jti(&db, "jti-user-revoke").await.revoked);
+    }
+
+    #[tokio::test]
+    async fn list_user_bindings_filters_revoked_and_sorts_newest_first() {
+        let Some(db) = connect_test_database("broker_list").await else {
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let now = Utc::now();
+        let old_raw = generate_binding_id();
+        let revoked_raw = generate_binding_id();
+        let new_raw = generate_binding_id();
+        let other_raw = generate_binding_id();
+
+        insert_binding(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &old_raw,
+                client_id: "client-1",
+                user_id: "user-x",
+                refresh_token_jti: "jti-old",
+                refresh_token: "refresh-old",
+                scopes: vec!["openid".to_string()],
+                created_at: now,
+                revoked: false,
+                revoke_reason: None,
+            },
+        )
+        .await;
+        insert_binding(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &revoked_raw,
+                client_id: "client-1",
+                user_id: "user-x",
+                refresh_token_jti: "jti-revoked",
+                refresh_token: "refresh-revoked",
+                scopes: vec!["openid".to_string()],
+                created_at: now + Duration::seconds(1),
+                revoked: true,
+                revoke_reason: Some("user_revoked".to_string()),
+            },
+        )
+        .await;
+        insert_binding(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &new_raw,
+                client_id: "client-2",
+                user_id: "user-x",
+                refresh_token_jti: "jti-new",
+                refresh_token: "refresh-new",
+                scopes: vec!["openid".to_string(), "email".to_string()],
+                created_at: now + Duration::seconds(2),
+                revoked: false,
+                revoke_reason: None,
+            },
+        )
+        .await;
+        insert_binding(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &other_raw,
+                client_id: "client-3",
+                user_id: "user-y",
+                refresh_token_jti: "jti-other",
+                refresh_token: "refresh-other",
+                scopes: vec!["openid".to_string()],
+                created_at: now + Duration::seconds(3),
+                revoked: false,
+                revoke_reason: None,
+            },
+        )
+        .await;
+
+        let listed = list_user_bindings(&db, "user-x")
+            .await
+            .expect("list user bindings");
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].binding_hash, hash_binding_id(&new_raw));
+        assert_eq!(listed[1].binding_hash, hash_binding_id(&old_raw));
+        assert_eq!(
+            listed[0].scopes,
+            vec!["openid".to_string(), "email".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn exchange_via_binding_rejects_wrong_client() {
+        let Some(db) = connect_test_database("broker_xclient").await else {
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let config = test_app_config();
+        let jwt_keys = unused_jwt_keys();
+        let raw_binding_id = generate_binding_id();
+        let binding_hash = hash_binding_id(&raw_binding_id);
+        let user_id = Uuid::new_v4().to_string();
+
+        insert_binding(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &raw_binding_id,
+                client_id: "client-a",
+                user_id: &user_id,
+                refresh_token_jti: "jti-xclient",
+                refresh_token: "refresh-xclient",
+                scopes: vec!["openid".to_string()],
+                created_at: Utc::now(),
+                revoked: false,
+                revoke_reason: None,
+            },
+        )
+        .await;
+
+        let result = exchange_via_binding(
+            &db,
+            &encryption_keys,
+            &jwt_keys,
+            &config,
+            "client-b",
+            &raw_binding_id,
+            None,
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(AppError::ExternalTokenInvalid(message)) if message == "invalid_grant"
+        ));
+        let binding = load_binding(&db, &binding_hash).await;
+        assert_eq!(binding.rotation_version, 0);
+        assert_eq!(binding.refresh_token_jti, "jti-xclient");
+        assert!(!binding.revoked);
+    }
+
+    #[tokio::test]
+    async fn exchange_via_binding_cascades_on_reuse() {
+        let Some(db) = connect_test_database("broker_reuse").await else {
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let config = test_app_config();
+        let jwt_keys = unused_jwt_keys();
+        let user_id = Uuid::new_v4().to_string();
+        let raw_one = generate_binding_id();
+        let raw_two = generate_binding_id();
+        let hash_one = hash_binding_id(&raw_one);
+        let hash_two = hash_binding_id(&raw_two);
+
+        insert_refresh_token(&db, "jti-reuse-1", "client-x", &user_id, true).await;
+        insert_refresh_token(&db, "jti-reuse-2", "client-x", &user_id, false).await;
+        insert_binding(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &raw_one,
+                client_id: "client-x",
+                user_id: &user_id,
+                refresh_token_jti: "jti-reuse-1",
+                refresh_token: "refresh-reuse-1",
+                scopes: vec!["openid".to_string()],
+                created_at: Utc::now(),
+                revoked: false,
+                revoke_reason: None,
+            },
+        )
+        .await;
+        insert_binding(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &raw_two,
+                client_id: "client-x",
+                user_id: &user_id,
+                refresh_token_jti: "jti-reuse-2",
+                refresh_token: "refresh-reuse-2",
+                scopes: vec!["openid".to_string()],
+                created_at: Utc::now(),
+                revoked: false,
+                revoke_reason: None,
+            },
+        )
+        .await;
+
+        let result = exchange_via_binding(
+            &db,
+            &encryption_keys,
+            &jwt_keys,
+            &config,
+            "client-x",
+            &raw_one,
+            None,
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(AppError::ExternalTokenInvalid(message)) if message == "invalid_grant"
+        ));
+
+        let binding_one = load_binding(&db, &hash_one).await;
+        let binding_two = load_binding(&db, &hash_two).await;
+        assert!(binding_one.revoked);
+        assert!(binding_two.revoked);
+        assert_eq!(binding_one.revoke_reason.as_deref(), Some("reuse_detected"));
+        assert_eq!(binding_two.revoke_reason.as_deref(), Some("reuse_detected"));
+    }
 }
