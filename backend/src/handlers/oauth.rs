@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::handlers::admin_helpers::{extract_ip, extract_user_agent};
+use crate::models::authorization_code::{ExternalSubjectRef, validate_external_subject_params};
 use crate::models::service_account_token::{COLLECTION_NAME as SA_TOKENS, ServiceAccountToken};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{AuthUser, OptionalAuthUser};
@@ -31,6 +32,9 @@ pub struct AuthorizeQuery {
     pub code_challenge: Option<String>,
     pub code_challenge_method: Option<String>,
     pub nonce: Option<String>,
+    pub external_subject_platform: Option<String>,
+    pub external_subject_tenant: Option<String>,
+    pub external_subject_external_user_id: Option<String>,
     /// OIDC prompt parameter: "none", "login", "consent", or space-separated combo.
     pub prompt: Option<String>,
 }
@@ -45,6 +49,9 @@ pub struct ConsentDecisionForm {
     pub code_challenge: Option<String>,
     pub code_challenge_method: Option<String>,
     pub nonce: Option<String>,
+    pub external_subject_platform: Option<String>,
+    pub external_subject_tenant: Option<String>,
+    pub external_subject_external_user_id: Option<String>,
     pub prompt: Option<String>,
     pub decision: String,
 }
@@ -228,6 +235,12 @@ pub async fn authorize(
         }
     };
 
+    let external_subject = validate_external_subject_params(
+        params.external_subject_platform.as_deref(),
+        params.external_subject_tenant.as_deref(),
+        params.external_subject_external_user_id.as_deref(),
+    );
+
     let is_authenticated = opt_auth.0.is_some();
     tracing::info!(
         client_id = %params.client_id,
@@ -237,7 +250,19 @@ pub async fn authorize(
         "OAuth authorize endpoint hit"
     );
 
-    let result = authorize_inner(&state, opt_auth, &params, is_browser_mode).await;
+    let result = match external_subject {
+        Ok(external_subject) => {
+            authorize_inner(
+                &state,
+                opt_auth,
+                &params,
+                is_browser_mode,
+                external_subject.as_ref(),
+            )
+            .await
+        }
+        Err(err) => Err(err),
+    };
 
     match result {
         Ok(response) => Ok(response),
@@ -278,8 +303,17 @@ pub async fn authorize_decision(
         code_challenge: form.code_challenge,
         code_challenge_method: form.code_challenge_method,
         nonce: form.nonce,
+        external_subject_platform: form.external_subject_platform,
+        external_subject_tenant: form.external_subject_tenant,
+        external_subject_external_user_id: form.external_subject_external_user_id,
         prompt: form.prompt,
     };
+
+    let external_subject = validate_external_subject_params(
+        params.external_subject_platform.as_deref(),
+        params.external_subject_tenant.as_deref(),
+        params.external_subject_external_user_id.as_deref(),
+    )?;
 
     let auth_user = match opt_auth.0 {
         Some(user) => user,
@@ -313,7 +347,14 @@ pub async fn authorize_decision(
     consent_service::grant_consent(&state.db, &user_id_str, &params.client_id, &validated_scope)
         .await?;
 
-    let code = issue_authorization_code(&state, &auth_user, &params, &validated_scope).await?;
+    let code = issue_authorization_code(
+        &state,
+        &auth_user,
+        &params,
+        &validated_scope,
+        external_subject.as_ref(),
+    )
+    .await?;
     let redirect_url = build_callback_url(&params, &code);
 
     // OAuth consent submits from multiple client types (web consent form,
@@ -375,6 +416,7 @@ async fn authorize_inner(
     opt_auth: OptionalAuthUser,
     params: &AuthorizeQuery,
     is_browser_mode: bool,
+    external_subject: Option<&ExternalSubjectRef>,
 ) -> Result<Response, AppError> {
     let (client, validated_scope) = validate_authorize_request(state, params).await?;
     let prompts = parse_prompt(params.prompt.as_deref());
@@ -451,8 +493,14 @@ async fn authorize_inner(
                     return Ok(redirect_302(&consent_url));
                 }
 
-                let code =
-                    issue_authorization_code(state, &auth_user, params, &validated_scope).await?;
+                let code = issue_authorization_code(
+                    state,
+                    &auth_user,
+                    params,
+                    &validated_scope,
+                    external_subject,
+                )
+                .await?;
                 let redirect_url = build_callback_url(params, &code);
 
                 if needs_success_page(&params.redirect_uri) {
@@ -488,7 +536,14 @@ async fn authorize_inner(
             return Err(AppError::ConsentRequired { consent_url });
         }
 
-        let code = issue_authorization_code(state, &auth_user, params, &validated_scope).await?;
+        let code = issue_authorization_code(
+            state,
+            &auth_user,
+            params,
+            &validated_scope,
+            external_subject,
+        )
+        .await?;
         let redirect_url = build_callback_url(params, &code);
         Ok(Json(AuthorizeResponse { redirect_url }).into_response())
     }
@@ -677,6 +732,30 @@ fn build_authorize_url(base_url: &str, params: &AuthorizeQuery) -> String {
     if let Some(ref nonce) = params.nonce {
         url.push_str(&format!("&nonce={}", urlencoding::encode(nonce)));
     }
+    if let Some(ref platform) = params.external_subject_platform
+        && !platform.is_empty()
+    {
+        url.push_str(&format!(
+            "&external_subject_platform={}",
+            urlencoding::encode(platform)
+        ));
+    }
+    if let Some(ref tenant) = params.external_subject_tenant
+        && !tenant.is_empty()
+    {
+        url.push_str(&format!(
+            "&external_subject_tenant={}",
+            urlencoding::encode(tenant)
+        ));
+    }
+    if let Some(ref external_user_id) = params.external_subject_external_user_id
+        && !external_user_id.is_empty()
+    {
+        url.push_str(&format!(
+            "&external_subject_external_user_id={}",
+            urlencoding::encode(external_user_id)
+        ));
+    }
     if let Some(ref prompt) = params.prompt {
         url.push_str(&format!("&prompt={}", urlencoding::encode(prompt)));
     }
@@ -738,6 +817,30 @@ fn build_consent_url(
     if let Some(ref nonce) = params.nonce {
         url.push_str(&format!("&nonce={}", urlencoding::encode(nonce)));
     }
+    if let Some(ref platform) = params.external_subject_platform
+        && !platform.is_empty()
+    {
+        url.push_str(&format!(
+            "&external_subject_platform={}",
+            urlencoding::encode(platform)
+        ));
+    }
+    if let Some(ref tenant) = params.external_subject_tenant
+        && !tenant.is_empty()
+    {
+        url.push_str(&format!(
+            "&external_subject_tenant={}",
+            urlencoding::encode(tenant)
+        ));
+    }
+    if let Some(ref external_user_id) = params.external_subject_external_user_id
+        && !external_user_id.is_empty()
+    {
+        url.push_str(&format!(
+            "&external_subject_external_user_id={}",
+            urlencoding::encode(external_user_id)
+        ));
+    }
     if let Some(ref prompt) = params.prompt {
         url.push_str(&format!("&prompt={}", urlencoding::encode(prompt)));
     }
@@ -751,6 +854,7 @@ async fn issue_authorization_code(
     auth_user: &crate::mw::auth::AuthUser,
     params: &AuthorizeQuery,
     validated_scope: &str,
+    external_subject: Option<&ExternalSubjectRef>,
 ) -> AppResult<String> {
     let user_id_str = auth_user.user_id.to_string();
     let code = oauth_service::create_authorization_code(
@@ -762,18 +866,29 @@ async fn issue_authorization_code(
         params.code_challenge.as_deref(),
         params.code_challenge_method.as_deref(),
         params.nonce.as_deref(),
+        external_subject,
     )
     .await?;
+
+    let mut event_data = serde_json::json!({
+        "client_id": params.client_id,
+        "scope": validated_scope,
+    });
+    if let Some(external_subject) = external_subject
+        && let Some(obj) = event_data.as_object_mut()
+    {
+        obj.insert(
+            "external_subject_platform".to_string(),
+            serde_json::Value::String(external_subject.platform.clone()),
+        );
+    }
 
     // Audit log the authorization code issuance
     audit_service::log_async(
         state.db.clone(),
         Some(user_id_str),
         "oauth_code_issued".to_string(),
-        Some(serde_json::json!({
-            "client_id": params.client_id,
-            "scope": validated_scope,
-        })),
+        Some(event_data),
         None,
         None,
         None,

@@ -9,7 +9,9 @@ use crate::config::AppConfig;
 use crate::crypto::jwt::JwtKeys;
 use crate::crypto::token::{generate_random_token, hash_token};
 use crate::errors::{AppError, AppResult};
-use crate::models::authorization_code::{AuthorizationCode, COLLECTION_NAME as AUTH_CODES};
+use crate::models::authorization_code::{
+    AuthorizationCode, COLLECTION_NAME as AUTH_CODES, ExternalSubjectRef,
+};
 use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
 use crate::models::refresh_token::{COLLECTION_NAME as REFRESH_TOKENS, RefreshToken};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
@@ -88,6 +90,7 @@ pub async fn create_authorization_code(
     code_challenge: Option<&str>,
     code_challenge_method: Option<&str>,
     nonce: Option<&str>,
+    external_subject: Option<&ExternalSubjectRef>,
 ) -> AppResult<String> {
     let code = generate_random_token();
     let code_hash = hash_token(&code);
@@ -103,6 +106,7 @@ pub async fn create_authorization_code(
         code_challenge: code_challenge.map(String::from),
         code_challenge_method: code_challenge_method.map(String::from),
         nonce: nonce.map(String::from),
+        external_subject: external_subject.cloned(),
         expires_at: now + Duration::minutes(5),
         used: false,
         created_at: now,
