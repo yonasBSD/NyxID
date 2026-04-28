@@ -91,30 +91,41 @@ export function MemberRow({
         </div>
       </TableCell>
       <TableCell>
-        {canManage ? (
+        {canManage && isLastAdmin ? (
           <Select
             value={member.role}
             onValueChange={(next) => onChangeRole(member.user_id, next as OrgRole)}
-            disabled={isUpdating || isLastAdmin}
+            disabled
           >
-            {isLastAdmin ? (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <span tabIndex={0} className="inline-flex">
-                    <SelectTrigger className="h-8 w-[120px]">
-                      <SelectValue />
-                    </SelectTrigger>
-                  </span>
-                </TooltipTrigger>
-                <TooltipContent className="max-w-[260px] text-xs">
-                  {LAST_ACTIVE_ADMIN_TOOLTIP}
-                </TooltipContent>
-              </Tooltip>
-            ) : (
-              <SelectTrigger className="h-8 w-[120px]">
-                <SelectValue />
-              </SelectTrigger>
-            )}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span tabIndex={0} className="inline-flex">
+                  <SelectTrigger className="h-8 w-[120px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                </span>
+              </TooltipTrigger>
+              <TooltipContent className="max-w-[260px] text-xs">
+                {LAST_ACTIVE_ADMIN_TOOLTIP}
+              </TooltipContent>
+            </Tooltip>
+            <SelectContent>
+              {ORG_ROLES.map((role) => (
+                <SelectItem key={role} value={role}>
+                  {role.charAt(0).toUpperCase() + role.slice(1)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        ) : canManage ? (
+          <Select
+            value={member.role}
+            onValueChange={(next) => onChangeRole(member.user_id, next as OrgRole)}
+            disabled={isUpdating}
+          >
+            <SelectTrigger className="h-8 w-[120px]">
+              <SelectValue />
+            </SelectTrigger>
             <SelectContent>
               {ORG_ROLES.map((role) => (
                 <SelectItem key={role} value={role}>
@@ -176,7 +187,7 @@ export function MemberRow({
                       size="icon"
                       className="h-8 w-8 text-muted-foreground hover:text-destructive"
                       onClick={() => onRevoke(member)}
-                      disabled={isUpdating || isLastAdmin}
+                      disabled
                       aria-label={`Remove ${displayName}`}
                     >
                       <Trash2 className="h-4 w-4" />

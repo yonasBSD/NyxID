@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -171,11 +171,15 @@ vi.mock("@/lib/utils", async () => {
 
 import { OrgDetailPage } from "./org-detail";
 
+const LAST_ADMIN_TOOLTIP =
+  "Cannot remove the last active admin. Promote another member to admin first, or delete the organization.";
+
 function renderOrgDetailPage() {
   // The app router mounts this provider globally. These tests render the route
-  // page directly, so mirror that root setup here.
+  // page directly, so mirror that root setup here. Zero delay keeps focus-driven
+  // tooltip assertions deterministic without changing production defaults.
   return render(
-    <TooltipProvider>
+    <TooltipProvider delayDuration={0}>
       <OrgDetailPage />
     </TooltipProvider>,
   );
@@ -200,11 +204,21 @@ function makeMember(
   };
 }
 
-function expectDisabledTooltipWrapper(control: HTMLElement) {
-  // Radix TooltipContent is portal-mounted after interaction. For disabled
-  // controls, the stable contract is the focusable wrapper Radix can bind to.
-  expect(control.closest('span[tabindex="0"]')).not.toBeNull();
+async function expectLastAdminTooltip(control: HTMLElement) {
+  const wrapper = control.closest('span[tabindex="0"]');
+  expect(wrapper).not.toBeNull();
   expect(control).not.toHaveAttribute("title");
+  act(() => {
+    (wrapper as HTMLElement).focus();
+  });
+  expect(
+    await screen.findByRole("tooltip", {
+      name: LAST_ADMIN_TOOLTIP,
+    }),
+  ).toBeInTheDocument();
+  act(() => {
+    (wrapper as HTMLElement).blur();
+  });
 }
 
 function expectNoTooltipWrapper(control: HTMLElement) {
@@ -285,7 +299,7 @@ describe("OrgDetailPage", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("disables remove and role controls for a single active admin", () => {
+  it("disables remove and role controls for a single active admin", async () => {
     fixtures.members = [makeMember("admin-1", "admin", "Solo Admin")];
 
     renderOrgDetailPage();
@@ -294,11 +308,11 @@ describe("OrgDetailPage", () => {
       name: "Remove Solo Admin",
     });
     expect(removeButton).toBeDisabled();
-    expectDisabledTooltipWrapper(removeButton);
+    await expectLastAdminTooltip(removeButton);
 
     const roleSelect = screen.getByRole("combobox");
     expect(roleSelect).toBeDisabled();
-    expectDisabledTooltipWrapper(roleSelect);
+    await expectLastAdminTooltip(roleSelect);
   });
 
   it("keeps remove and role controls enabled when there are two active admins", () => {
@@ -325,7 +339,7 @@ describe("OrgDetailPage", () => {
     }
   });
 
-  it("locks only the admin row when a single active admin has non-admin peers", () => {
+  it("locks only the admin row when a single active admin has non-admin peers", async () => {
     fixtures.members = [
       makeMember("admin-1", "admin", "Solo Admin"),
       makeMember("member-1", "member", "Member User"),
@@ -341,13 +355,13 @@ describe("OrgDetailPage", () => {
     });
     expect(adminRemove).toBeDisabled();
     expect(memberRemove).toBeEnabled();
-    expectDisabledTooltipWrapper(adminRemove);
+    await expectLastAdminTooltip(adminRemove);
     expectNoTooltipWrapper(memberRemove);
 
     const roleSelects = screen.getAllByRole("combobox");
     expect(roleSelects[0]).toBeDisabled();
     expect(roleSelects[1]).toBeEnabled();
-    expectDisabledTooltipWrapper(roleSelects[0]!);
+    await expectLastAdminTooltip(roleSelects[0]!);
     expectNoTooltipWrapper(roleSelects[1]!);
   });
 });
