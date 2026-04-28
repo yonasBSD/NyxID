@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { MemberResponse, OrgRole } from "@/schemas/orgs";
 
 const {
   fixtures,
@@ -21,6 +22,7 @@ const {
       your_role: "admin" as const,
       member_count: 1,
     },
+    members: [] as MemberResponse[],
     invites: [
       {
         id: "invite-pending",
@@ -104,7 +106,7 @@ vi.mock("@/hooks/use-orgs", () => ({
 
 vi.mock("@/hooks/use-org-members", () => ({
   useOrgMembers: () => ({
-    data: [],
+    data: fixtures.members,
     isLoading: false,
   }),
   useUpdateMember: () => ({
@@ -168,7 +170,29 @@ vi.mock("@/lib/utils", async () => {
 
 import { OrgDetailPage } from "./org-detail";
 
-describe("OrgDetailPage invites tab", () => {
+const lastAdminTooltip =
+  "Cannot remove the last active admin. Promote another member to admin first, or delete the organization.";
+
+function makeMember(
+  userId: string,
+  role: OrgRole,
+  displayName: string,
+): MemberResponse {
+  return {
+    membership_id: `membership-${userId}`,
+    user_id: userId,
+    display_name: displayName,
+    email: `${userId}@example.com`,
+    role,
+    scope_source: "inherit",
+    allowed_service_ids: null,
+    effective_allowed_service_ids: null,
+    created_at: "2026-04-20T00:00:00Z",
+    revoked_at: null,
+  };
+}
+
+describe("OrgDetailPage", () => {
   const pendingInvite = fixtures.invites[0]!;
   const redeemedInvite = fixtures.invites[1]!;
   const expiredInvite = fixtures.invites[2]!;
@@ -176,6 +200,7 @@ describe("OrgDetailPage invites tab", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     fixtures.orgRole = "admin";
+    fixtures.members = [];
     mockCopyToClipboard.mockResolvedValue(undefined);
   });
 
@@ -239,5 +264,60 @@ describe("OrgDetailPage invites tab", () => {
         name: new RegExp(expiredInvite.nonce, "i"),
       }),
     ).not.toBeInTheDocument();
+  });
+
+  it("disables remove and role controls for a single active admin", () => {
+    fixtures.members = [makeMember("admin-1", "admin", "Solo Admin")];
+
+    render(<OrgDetailPage />);
+
+    const removeButton = screen.getByRole("button", {
+      name: "Remove Solo Admin",
+    });
+    expect(removeButton).toBeDisabled();
+    expect(removeButton).toHaveAttribute("title", lastAdminTooltip);
+
+    const roleSelect = screen.getByRole("combobox");
+    expect(roleSelect).toBeDisabled();
+    expect(roleSelect).toHaveAttribute("title", lastAdminTooltip);
+  });
+
+  it("keeps remove and role controls enabled when there are two active admins", () => {
+    fixtures.members = [
+      makeMember("admin-1", "admin", "First Admin"),
+      makeMember("admin-2", "admin", "Second Admin"),
+    ];
+
+    render(<OrgDetailPage />);
+
+    expect(
+      screen.getByRole("button", { name: "Remove First Admin" }),
+    ).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "Remove Second Admin" }),
+    ).toBeEnabled();
+    for (const roleSelect of screen.getAllByRole("combobox")) {
+      expect(roleSelect).toBeEnabled();
+    }
+  });
+
+  it("locks only the admin row when a single active admin has non-admin peers", () => {
+    fixtures.members = [
+      makeMember("admin-1", "admin", "Solo Admin"),
+      makeMember("member-1", "member", "Member User"),
+    ];
+
+    render(<OrgDetailPage />);
+
+    expect(
+      screen.getByRole("button", { name: "Remove Solo Admin" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Remove Member User" }),
+    ).toBeEnabled();
+
+    const roleSelects = screen.getAllByRole("combobox");
+    expect(roleSelects[0]).toBeDisabled();
+    expect(roleSelects[1]).toBeEnabled();
   });
 });

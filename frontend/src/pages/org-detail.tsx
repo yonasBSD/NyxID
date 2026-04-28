@@ -147,6 +147,9 @@ export function OrgDetailPage() {
 
   const isAdmin = org.your_role === "admin";
   const orgName = org.display_name ?? "Untitled org";
+  const activeAdminCount = (members ?? []).filter(
+    (member) => member.role === "admin" && member.revoked_at === null,
+  ).length;
 
   async function handleChangeRole(memberUserId: string, nextRole: OrgRole) {
     try {
@@ -308,6 +311,11 @@ export function OrgDetailPage() {
                       member={member}
                       canManage={isAdmin}
                       isSelf={member.user_id === currentUser?.id}
+                      isLastAdmin={
+                        member.role === "admin" &&
+                        member.revoked_at === null &&
+                        activeAdminCount <= 1
+                      }
                       isUpdating={
                         updateMemberMutation.isPending ||
                         removeMemberMutation.isPending

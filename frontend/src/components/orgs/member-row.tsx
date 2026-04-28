@@ -18,12 +18,16 @@ interface MemberRowProps {
   readonly member: MemberResponse;
   readonly canManage: boolean;
   readonly isSelf: boolean;
+  readonly isLastAdmin: boolean;
   readonly isUpdating: boolean;
   readonly onChangeRole: (memberId: string, nextRole: OrgRole) => void;
   readonly onRevoke: (member: MemberResponse) => void;
   readonly onEditScope: (member: MemberResponse) => void;
   readonly onResetScope: (member: MemberResponse) => void;
 }
+
+const LAST_ACTIVE_ADMIN_TOOLTIP =
+  "Cannot remove the last active admin. Promote another member to admin first, or delete the organization.";
 
 /**
  * Describe the member's current effective service scope in a short label.
@@ -46,6 +50,7 @@ export function MemberRow({
   member,
   canManage,
   isSelf,
+  isLastAdmin,
   isUpdating,
   onChangeRole,
   onRevoke,
@@ -85,9 +90,12 @@ export function MemberRow({
           <Select
             value={member.role}
             onValueChange={(next) => onChangeRole(member.user_id, next as OrgRole)}
-            disabled={isUpdating}
+            disabled={isUpdating || isLastAdmin}
           >
-            <SelectTrigger className="h-8 w-[120px]">
+            <SelectTrigger
+              className="h-8 w-[120px]"
+              title={isLastAdmin ? LAST_ACTIVE_ADMIN_TOOLTIP : undefined}
+            >
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -147,8 +155,9 @@ export function MemberRow({
               size="icon"
               className="h-8 w-8 text-muted-foreground hover:text-destructive"
               onClick={() => onRevoke(member)}
-              disabled={isUpdating}
+              disabled={isUpdating || isLastAdmin}
               aria-label={`Remove ${displayName}`}
+              title={isLastAdmin ? LAST_ACTIVE_ADMIN_TOOLTIP : undefined}
             >
               <Trash2 className="h-4 w-4" />
             </Button>
