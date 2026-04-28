@@ -196,6 +196,11 @@ pub enum CredentialSource {
     Org {
         org_user_id: String,
         org_name: String,
+        /// Org avatar (`User.avatar_url` on the org's user record). Surfaced
+        /// to the frontend so shared org sources on `/keys` can render the
+        /// same avatar as the Organizations page (#545); `None` when the org
+        /// has no avatar configured.
+        org_avatar_url: Option<String>,
         role: OrgRole,
         allowed: bool,
     },
@@ -234,23 +239,26 @@ pub async fn list_user_services_with_sources(
     // Cache org user lookups so we don't re-query the same org twice when
     // the user belongs to multiple memberships pointing at the same org
     // (shouldn't happen due to the unique index, but cheap to be safe).
-    let mut org_name_cache: std::collections::HashMap<String, String> = Default::default();
+    let mut org_meta_cache: std::collections::HashMap<String, (String, Option<String>)> =
+        Default::default();
 
     for m in memberships {
         let effective_scope =
             crate::services::org_role_scope_service::effective_scope_for_membership(db, &m).await?;
-        let org_name = if let Some(name) = org_name_cache.get(&m.org_user_id) {
-            name.clone()
+        let (org_name, org_avatar_url) = if let Some(meta) = org_meta_cache.get(&m.org_user_id) {
+            meta.clone()
         } else {
             let org = db
                 .collection::<User>(USERS)
                 .find_one(doc! { "_id": &m.org_user_id })
                 .await?;
-            let name = org
-                .and_then(|u| u.display_name)
-                .unwrap_or_else(|| "Unnamed Org".to_string());
-            org_name_cache.insert(m.org_user_id.clone(), name.clone());
-            name
+            let (name, avatar) = org
+                .map(|u| (u.display_name, u.avatar_url))
+                .unwrap_or((None, None));
+            let name = name.unwrap_or_else(|| "Unnamed Org".to_string());
+            let meta = (name, avatar);
+            org_meta_cache.insert(m.org_user_id.clone(), meta.clone());
+            meta
         };
 
         let org_services = list_user_services(db, &m.org_user_id).await?;
@@ -275,6 +283,7 @@ pub async fn list_user_services_with_sources(
                 source: CredentialSource::Org {
                     org_user_id: m.org_user_id.clone(),
                     org_name: org_name.clone(),
+                    org_avatar_url: org_avatar_url.clone(),
                     role: m.role,
                     allowed,
                 },

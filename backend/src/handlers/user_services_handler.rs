@@ -139,6 +139,11 @@ pub enum CredentialSourceResponse {
     Org {
         org_id: String,
         org_name: String,
+        /// Org avatar URL (when configured on the org user record). Lets the
+        /// AI Services page render the same avatar as the Organizations page
+        /// for shared org sources (#545). `None` is serialized as JSON null
+        /// rather than omitted so the field is structurally stable.
+        avatar_url: Option<String>,
         role: OrgRoleResponse,
         allowed: bool,
     },
@@ -169,11 +174,13 @@ impl From<CredentialSource> for CredentialSourceResponse {
             CredentialSource::Org {
                 org_user_id,
                 org_name,
+                org_avatar_url,
                 role,
                 allowed,
             } => Self::Org {
                 org_id: org_user_id,
                 org_name,
+                avatar_url: org_avatar_url,
                 role: role.into(),
                 allowed,
             },

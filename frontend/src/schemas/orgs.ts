@@ -228,6 +228,12 @@ export const credentialSourceOrgSchema = z.object({
   type: z.literal("org"),
   org_id: z.string(),
   org_name: z.string(),
+  /**
+   * Org avatar URL (when configured). The AI Services page uses this so
+   * shared org sources render the same avatar shown on the Organizations
+   * page (#545). May be omitted by older backends; treat as null.
+   */
+  avatar_url: z.string().nullish(),
   role: orgRoleSchema,
   allowed: z.boolean(),
 });

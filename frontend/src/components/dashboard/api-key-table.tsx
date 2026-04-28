@@ -1,11 +1,11 @@
 import { useState, useEffect, useCallback } from "react";
 import { Link } from "@tanstack/react-router";
-import { Building2 } from "lucide-react";
 import {
   useAllAdminedApiKeys,
   useDeleteApiKey,
   useRotateApiKey,
 } from "@/hooks/use-api-keys";
+import { OrgAvatar } from "@/components/orgs/org-avatar";
 import type { ApiKey } from "@/types/api";
 import {
   maskApiKey,
@@ -156,13 +156,16 @@ export function ApiKeyTable() {
                 </TableCell>
                 <TableCell>
                   {isOrg ? (
-                    <Badge variant="info" className="gap-1 text-xs">
-                      <Building2
-                        className="h-3 w-3"
-                        aria-hidden="true"
+                    <span className="inline-flex items-center gap-2 text-xs">
+                      <OrgAvatar
+                        avatarUrl={source.avatar_url ?? null}
+                        displayName={source.org_name}
+                        className="h-5 w-5 text-[0.625rem]"
                       />
-                      {ownerLabel}
-                    </Badge>
+                      <span className="font-medium text-foreground">
+                        {ownerLabel}
+                      </span>
+                    </span>
                   ) : (
                     <span className="text-xs text-muted-foreground">
                       Personal
