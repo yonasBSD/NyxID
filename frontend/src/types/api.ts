@@ -107,6 +107,7 @@ export interface OAuthClient {
   readonly redirect_uris: readonly string[];
   readonly allowed_scopes: string;
   readonly delegation_scopes: string;
+  readonly broker_capability_enabled: boolean;
   readonly is_active: boolean;
   readonly client_secret: string | null;
   readonly created_at: string;
@@ -312,6 +313,7 @@ export interface OidcCredentials {
   readonly redirect_uris: readonly string[];
   readonly allowed_scopes: string;
   readonly delegation_scopes: string;
+  readonly broker_capability_enabled: boolean;
   readonly issuer: string;
   readonly authorization_endpoint: string;
   readonly token_endpoint: string;

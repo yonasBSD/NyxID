@@ -2240,6 +2240,8 @@ pub enum DeveloperAppCommands {
         /// Space-separated delegation scopes (empty string disables token exchange)
         #[arg(long)]
         delegation_scopes: Option<String>,
+        #[arg(long = "broker-capability")]
+        broker_capability: Option<bool>,
         /// Create under the given org (you must be an admin of that org).
         /// Omit to create a personal developer app.
         #[arg(long, value_name = "ORG_ID")]
@@ -2278,6 +2280,8 @@ pub enum DeveloperAppCommands {
         /// Space-separated delegation scopes (empty string disables token exchange)
         #[arg(long)]
         delegation_scopes: Option<String>,
+        #[arg(long = "broker-capability")]
+        broker_capability: Option<bool>,
         #[command(flatten)]
         auth: AuthArgs,
     },

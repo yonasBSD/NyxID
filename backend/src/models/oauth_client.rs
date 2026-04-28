@@ -23,6 +23,8 @@ pub struct OauthClient {
     /// Empty string means token exchange is not allowed.
     #[serde(default)]
     pub delegation_scopes: String,
+    #[serde(default)]
+    pub broker_capability_enabled: bool,
     pub created_by: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
@@ -51,6 +53,7 @@ mod tests {
             client_type: "confidential".to_string(),
             is_active: true,
             delegation_scopes: String::new(),
+            broker_capability_enabled: true,
             created_by: Some("admin".to_string()),
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -60,5 +63,31 @@ mod tests {
         assert_eq!(client.id, restored.id);
         assert_eq!(client.redirect_uris.len(), restored.redirect_uris.len());
         assert_eq!(client.client_type, restored.client_type);
+        assert_eq!(
+            client.broker_capability_enabled,
+            restored.broker_capability_enabled
+        );
+    }
+
+    #[test]
+    fn bson_default_for_legacy_doc() {
+        let now = Utc::now();
+        let doc = bson::doc! {
+            "_id": "legacy-client",
+            "client_name": "Legacy Client",
+            "client_secret_hash": "abc123",
+            "redirect_uris": ["http://localhost:3000/callback"],
+            "allowed_scopes": "openid profile email",
+            "grant_types": "authorization_code",
+            "client_type": "confidential",
+            "is_active": true,
+            "delegation_scopes": "",
+            "created_by": "admin",
+            "created_at": bson::DateTime::from_chrono(now),
+            "updated_at": bson::DateTime::from_chrono(now),
+        };
+
+        let restored: OauthClient = bson::from_document(doc).expect("deserialize legacy doc");
+        assert!(!restored.broker_capability_enabled);
     }
 }

@@ -1358,6 +1358,7 @@ pub async fn register_client(
         "dynamic_registration",
         "",
         oauth_client_service::DEFAULT_MCP_ALLOWED_SCOPES,
+        false,
     )
     .await?;
 

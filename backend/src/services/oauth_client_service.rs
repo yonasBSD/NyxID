@@ -106,6 +106,7 @@ pub async fn seed_default_clients(db: &mongodb::Database) -> AppResult<()> {
         client_type: "public".to_string(),
         is_active: true,
         delegation_scopes: String::new(),
+        broker_capability_enabled: false,
         created_by: Some("system".to_string()),
         created_at: now,
         updated_at: now,
@@ -199,6 +200,7 @@ pub async fn migrate_dynamic_clients_grant_default_mcp_scopes(
 ///
 /// `allowed_scopes` must contain only known OIDC scopes (validated by the
 /// caller). Pass [`DEFAULT_ALLOWED_SCOPES`] for the standard set.
+#[allow(clippy::too_many_arguments)]
 pub async fn create_client(
     db: &mongodb::Database,
     name: &str,
@@ -207,6 +209,7 @@ pub async fn create_client(
     created_by: &str,
     delegation_scopes: &str,
     allowed_scopes: &str,
+    broker_capability_enabled: bool,
 ) -> AppResult<(OauthClient, Option<String>)> {
     let client_id = Uuid::new_v4().to_string();
     let now = Utc::now();
@@ -229,6 +232,7 @@ pub async fn create_client(
         client_type: client_type.to_string(),
         is_active: true,
         delegation_scopes: delegation_scopes.to_string(),
+        broker_capability_enabled,
         created_by: Some(created_by.to_string()),
         created_at: now,
         updated_at: now,
@@ -318,6 +322,7 @@ pub async fn update_redirect_uris(
 }
 
 /// Update mutable fields on an OAuth client owned by a specific user.
+#[allow(clippy::too_many_arguments)]
 pub async fn update_client_for_creator(
     db: &mongodb::Database,
     client_id: &str,
@@ -326,6 +331,7 @@ pub async fn update_client_for_creator(
     redirect_uris: Option<&[String]>,
     delegation_scopes: Option<&str>,
     allowed_scopes: Option<&str>,
+    broker_capability_enabled: Option<bool>,
 ) -> AppResult<OauthClient> {
     let mut set_doc = doc! {
         "updated_at": bson::DateTime::from_chrono(Utc::now()),
@@ -350,6 +356,10 @@ pub async fn update_client_for_creator(
 
     if let Some(scopes) = allowed_scopes {
         set_doc.insert("allowed_scopes", scopes);
+    }
+
+    if let Some(enabled) = broker_capability_enabled {
+        set_doc.insert("broker_capability_enabled", enabled);
     }
 
     let result = db
@@ -611,6 +621,7 @@ mod tests {
                 client_type: "public".to_string(),
                 is_active: true,
                 delegation_scopes: String::new(),
+                broker_capability_enabled: false,
                 created_by: Some("dynamic_registration".to_string()),
                 created_at: now,
                 updated_at: now,
@@ -639,6 +650,7 @@ mod tests {
                     client_type: "public".to_string(),
                     is_active: true,
                     delegation_scopes: String::new(),
+                    broker_capability_enabled: false,
                     created_by: Some(created_by.to_string()),
                     created_at: now,
                     updated_at: now,
@@ -807,6 +819,7 @@ mod tests {
                     client_type: "public".to_string(),
                     is_active: true,
                     delegation_scopes: String::new(),
+                    broker_capability_enabled: false,
                     created_by: Some("system".to_string()),
                     created_at: now,
                     updated_at: now,

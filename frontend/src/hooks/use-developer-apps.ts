@@ -11,6 +11,7 @@ export interface CreateDeveloperAppRequest {
   readonly redirect_uris: readonly string[];
   readonly client_type: "public" | "confidential";
   readonly delegation_scopes?: string;
+  readonly broker_capability_enabled?: boolean;
   readonly allowed_scopes?: readonly string[];
   readonly target_org_id?: string;
 }
@@ -66,6 +67,7 @@ export interface UpdateDeveloperAppRequest {
   readonly name?: string;
   readonly redirect_uris?: readonly string[];
   readonly delegation_scopes?: string;
+  readonly broker_capability_enabled?: boolean;
   readonly allowed_scopes?: readonly string[];
 }
 

@@ -769,6 +769,7 @@ pub struct CreateOAuthClientRequest {
     pub client_type: Option<String>,
     /// Space-separated delegation scopes (empty = token exchange disabled).
     pub delegation_scopes: Option<String>,
+    pub broker_capability_enabled: Option<bool>,
     /// OIDC scopes this client is allowed to request.
     /// Defaults to `["openid", "profile", "email"]` when omitted; `[]` canonicalizes to `["openid"]`.
     pub allowed_scopes: Option<Vec<String>>,
@@ -782,6 +783,7 @@ pub struct OAuthClientResponse {
     pub redirect_uris: Vec<String>,
     pub allowed_scopes: String,
     pub delegation_scopes: String,
+    pub broker_capability_enabled: bool,
     pub is_active: bool,
     /// Raw client secret -- only returned at creation time.
     pub client_secret: Option<String>,
@@ -855,6 +857,7 @@ pub async fn create_oauth_client(
         &user_id,
         delegation_scopes,
         &allowed_scopes,
+        body.broker_capability_enabled.unwrap_or(false),
     )
     .await?;
 
@@ -880,6 +883,7 @@ pub async fn create_oauth_client(
         redirect_uris: client.redirect_uris,
         allowed_scopes: client.allowed_scopes,
         delegation_scopes: client.delegation_scopes,
+        broker_capability_enabled: client.broker_capability_enabled,
         is_active: client.is_active,
         client_secret: raw_secret,
         created_at: client.created_at.to_rfc3339(),
@@ -907,6 +911,7 @@ pub async fn list_oauth_clients(
                 redirect_uris: c.redirect_uris,
                 allowed_scopes: c.allowed_scopes,
                 delegation_scopes: c.delegation_scopes,
+                broker_capability_enabled: c.broker_capability_enabled,
                 is_active: c.is_active,
                 client_secret: None, // never expose secret in list
                 created_at: c.created_at.to_rfc3339(),

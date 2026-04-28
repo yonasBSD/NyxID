@@ -89,6 +89,7 @@ pub struct CreateDeveloperOAuthClientRequest {
     pub client_type: Option<String>,
     /// Space-separated delegation scopes (empty = token exchange disabled).
     pub delegation_scopes: Option<String>,
+    pub broker_capability_enabled: Option<bool>,
     /// OIDC scopes this client is allowed to request (e.g. `["openid", "profile", "email", "roles"]`).
     /// Defaults to `["openid", "profile", "email"]` when omitted; `[]` canonicalizes to `["openid"]`.
     pub allowed_scopes: Option<Vec<String>>,
@@ -105,6 +106,7 @@ pub struct UpdateDeveloperOAuthClientRequest {
     pub redirect_uris: Option<Vec<String>>,
     /// Space-separated delegation scopes (empty = token exchange disabled).
     pub delegation_scopes: Option<String>,
+    pub broker_capability_enabled: Option<bool>,
     /// OIDC scopes this client is allowed to request. `[]` canonicalizes to `["openid"]`.
     pub allowed_scopes: Option<Vec<String>>,
 }
@@ -117,6 +119,7 @@ pub struct DeveloperOAuthClientResponse {
     pub redirect_uris: Vec<String>,
     pub allowed_scopes: String,
     pub delegation_scopes: String,
+    pub broker_capability_enabled: bool,
     pub is_active: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_secret: Option<String>,
@@ -144,6 +147,7 @@ fn to_response(c: OauthClient, secret: Option<String>) -> DeveloperOAuthClientRe
         redirect_uris: c.redirect_uris,
         allowed_scopes: c.allowed_scopes,
         delegation_scopes: c.delegation_scopes,
+        broker_capability_enabled: c.broker_capability_enabled,
         is_active: c.is_active,
         client_secret: secret,
         created_at: c.created_at.to_rfc3339(),
@@ -247,6 +251,7 @@ pub async fn create_my_oauth_client(
         &user_id,
         delegation_scopes,
         &allowed_scopes,
+        body.broker_capability_enabled.unwrap_or(false),
     )
     .await?;
 
@@ -343,6 +348,7 @@ pub async fn update_my_oauth_client(
         validated_uris.as_deref(),
         body.delegation_scopes.as_deref(),
         validated_allowed_scopes.as_deref(),
+        body.broker_capability_enabled,
     )
     .await?;
 
