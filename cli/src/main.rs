@@ -3,6 +3,7 @@ mod auth;
 mod cli;
 mod commands;
 pub mod node;
+mod skill_self_heal;
 mod telemetry;
 #[cfg(test)]
 mod test_support;
@@ -62,6 +63,12 @@ async fn main() {
     };
 
     let (group, sub) = command_names(&cli.command);
+
+    // Best-effort: detect partially-installed skills (caused by older CLI
+    // binaries that predate per-topic references) and refresh them before the
+    // user's command runs. Failures here never block the command.
+    skill_self_heal::maybe_self_heal(&cli.command).await;
+
     let result = run(cli).await;
 
     if let Some(client) = tele_client.as_mut() {

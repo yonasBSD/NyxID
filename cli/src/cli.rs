@@ -2301,7 +2301,7 @@ pub enum DeveloperAppCommands {
 
 // ---- AI Setup ----
 
-#[derive(Clone, Copy, Debug, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum AiToolTarget {
     /// Claude Code (Anthropic CLI)
     ClaudeCode,
