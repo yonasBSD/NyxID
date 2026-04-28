@@ -8,8 +8,10 @@ use crate::models::pushed_authorization_request::{
     hash_request_uri,
 };
 
-/// PAR record TTL in seconds. Per RFC 9126 §2.2 this should be short.
-pub const PAR_TTL_SECS: i64 = 90;
+/// PAR record TTL in seconds. RFC 9126 §2.2 says the lifetime "MUST be short
+/// and SHOULD NOT exceed sixty seconds" — we hold the ceiling to give MFA-
+/// inclusive logins room without violating the spec.
+pub const PAR_TTL_SECS: i64 = 60;
 
 #[allow(clippy::too_many_arguments)]
 pub async fn create_request(

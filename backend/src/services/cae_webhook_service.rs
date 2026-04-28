@@ -12,6 +12,7 @@ use sha2::Sha256;
 use std::time::Duration;
 use tokio::time::sleep;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use crate::models::oauth_client::OauthClient;
 
@@ -67,6 +68,10 @@ pub fn dispatch_revocation_event(
     if raw_hmac_secret.is_empty() {
         return;
     }
+    // Wrap the raw HMAC key so the String buffer is zeroed when the spawned
+    // task drops it. Best-effort -- the String allocation may be reused by
+    // the allocator before the Drop runs, but this closes the obvious window.
+    let raw_hmac_secret = Zeroizing::new(raw_hmac_secret);
     let delivery_id = Uuid::new_v4().to_string();
 
     tokio::spawn(async move {

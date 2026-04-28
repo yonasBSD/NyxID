@@ -1111,7 +1111,7 @@ pub async fn pushed_authorization_request(
     let basic = parse_basic_client_credentials(&headers)?;
     let (client_id, client_secret) =
         match (basic, body.client_id.clone(), body.client_secret.clone()) {
-            (Some((id, secret)), Some(form_id), _) if form_id != id => {
+            (Some((id, _)), Some(form_id), _) if form_id != id => {
                 return Err(AppError::BadRequest(
                     "client_id does not match authenticated client".to_string(),
                 ));
