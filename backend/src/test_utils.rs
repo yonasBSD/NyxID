@@ -45,8 +45,8 @@ pub(crate) async fn connect_test_database(prefix: &str) -> Option<mongodb::Datab
         let Ok(mut options) = mongodb::options::ClientOptions::parse(&uri).await else {
             continue;
         };
-        options.server_selection_timeout = Some(Duration::from_secs(1));
-        options.connect_timeout = Some(Duration::from_secs(1));
+        options.server_selection_timeout = Some(Duration::from_secs(5));
+        options.connect_timeout = Some(Duration::from_secs(2));
         let Ok(client) = mongodb::Client::with_options(options) else {
             continue;
         };
@@ -57,13 +57,13 @@ pub(crate) async fn connect_test_database(prefix: &str) -> Option<mongodb::Datab
 
         let probe = db.collection::<mongodb::bson::Document>("__probe");
         let write_ready = tokio::time::timeout(
-            Duration::from_secs(2),
+            Duration::from_secs(5),
             probe.insert_one(doc! { "_id": "probe" }),
         )
         .await;
         if matches!(write_ready, Ok(Ok(_))) {
             let _ = tokio::time::timeout(
-                Duration::from_secs(2),
+                Duration::from_secs(5),
                 probe.delete_one(doc! { "_id": "probe" }),
             )
             .await;
@@ -111,6 +111,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         rate_limit_per_second: 10,
         rate_limit_burst: 30,
         trusted_proxy_ips: vec![],
+        mtls_client_cert_header: None,
         cli_pairing_hmac_key: None,
         sa_token_ttl_secs: 3600,
         cookie_domain: None,

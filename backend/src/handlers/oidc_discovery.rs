@@ -34,6 +34,7 @@ pub async fn openid_configuration(State(state): State<AppState>) -> Json<serde_j
         "subject_types_supported": ["public"],
         "id_token_signing_alg_values_supported": ["RS256"],
         "dpop_signing_alg_values_supported": ["ES256"],
+        "tls_client_certificate_bound_access_tokens": true,
         "introspection_endpoint": format!("{base}/oauth/introspect"),
         "revocation_endpoint": format!("{base}/oauth/revoke"),
         "scopes_supported": [
@@ -98,6 +99,7 @@ pub async fn oauth_authorization_server_metadata(
         "code_challenge_methods_supported": ["S256"],
         "id_token_signing_alg_values_supported": ["RS256"],
         "dpop_signing_alg_values_supported": ["ES256"],
+        "tls_client_certificate_bound_access_tokens": true,
         "claims_supported": ["sub", "iss", "aud", "exp", "iat", "email", "email_verified", "name", "picture", "nonce", "at_hash", "roles", "groups", "permissions", "acr", "amr", "auth_time", "sid"],
     }))
 }

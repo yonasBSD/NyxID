@@ -5,6 +5,7 @@ pub mod jwks;
 pub mod jwt;
 pub mod key_provider;
 pub mod local_key_provider;
+pub mod mtls;
 pub mod password;
 pub mod telegram;
 pub mod token;

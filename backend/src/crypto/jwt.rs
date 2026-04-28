@@ -63,8 +63,7 @@ pub struct Claims {
     /// True if this token was issued to a service account.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sa: Option<bool>,
-    /// RFC 7800 confirmation claim. Broker-issued DPoP access tokens carry
-    /// `cnf.jkt`, the RFC 7638 thumbprint of the client's DPoP public JWK.
+    /// RFC 7800 confirmation claim for sender-constrained access tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cnf: Option<Cnf>,
     /// True if this token was issued for channel relay callbacks.
@@ -93,7 +92,11 @@ pub struct Claims {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Cnf {
     /// SHA-256 thumbprint of the DPoP proof JWK (RFC 7638).
-    pub jkt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jkt: Option<String>,
+    /// SHA-256 thumbprint of the client certificate DER (RFC 8705).
+    #[serde(default, rename = "x5t#S256", skip_serializing_if = "Option::is_none")]
+    pub x5t_s256: Option<String>,
 }
 
 pub const RELAY_REPLY_AUDIENCE: &str = "channel-relay/reply";
@@ -286,6 +289,9 @@ pub struct RbacClaimData {
 }
 
 /// Generate an access token for the given user.
+// Access token issuance carries optional TTL, RBAC, DPoP, and mTLS knobs.
+// Keeping these explicit avoids hiding security-sensitive claim inputs.
+#[allow(clippy::too_many_arguments)]
 pub fn generate_access_token(
     keys: &JwtKeys,
     config: &AppConfig,
@@ -294,8 +300,17 @@ pub fn generate_access_token(
     rbac: Option<&RbacClaimData>,
     ttl_override_secs: Option<i64>,
     dpop_jkt: Option<&str>,
+    mtls_x5t_s256: Option<&str>,
 ) -> Result<String, AppError> {
     let now = Utc::now().timestamp();
+    let cnf = if dpop_jkt.is_some() || mtls_x5t_s256.is_some() {
+        Some(Cnf {
+            jkt: dpop_jkt.map(String::from),
+            x5t_s256: mtls_x5t_s256.map(String::from),
+        })
+    } else {
+        None
+    };
 
     let claims = Claims {
         sub: user_id.to_string(),
@@ -313,9 +328,7 @@ pub fn generate_access_token(
         act: None,
         delegated: None,
         sa: None,
-        cnf: dpop_jkt.map(|jkt| Cnf {
-            jkt: jkt.to_string(),
-        }),
+        cnf,
         relay: None,
         relay_api_key_id: None,
         relay_api_key_name: None,
@@ -968,6 +981,7 @@ mod tests {
             rate_limit_per_second: 10,
             rate_limit_burst: 30,
             trusted_proxy_ips: vec![],
+            mtls_client_cert_header: None,
             cli_pairing_hmac_key: None,
             sa_token_ttl_secs: 3600,
             telemetry_dsn: None,
@@ -1028,9 +1042,17 @@ mod tests {
     fn generate_and_verify_access_token() {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
-        let token =
-            generate_access_token(&keys, &config, &user_id, "openid profile", None, None, None)
-                .unwrap();
+        let token = generate_access_token(
+            &keys,
+            &config,
+            &user_id,
+            "openid profile",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
         let claims = verify_token(&keys, &config, &token).unwrap();
         assert_eq!(claims.sub, user_id.to_string());
@@ -1043,9 +1065,17 @@ mod tests {
     fn access_token_respects_ttl_override() {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
-        let token =
-            generate_access_token(&keys, &config, &user_id, "openid", None, Some(300), None)
-                .unwrap();
+        let token = generate_access_token(
+            &keys,
+            &config,
+            &user_id,
+            "openid",
+            None,
+            Some(300),
+            None,
+            None,
+        )
+        .unwrap();
 
         let claims = verify_token(&keys, &config, &token).unwrap();
         assert_eq!(claims.exp - claims.iat, 300);
@@ -1129,7 +1159,8 @@ mod tests {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
         let token =
-            generate_access_token(&keys, &config, &user_id, "openid", None, None, None).unwrap();
+            generate_access_token(&keys, &config, &user_id, "openid", None, None, None, None)
+                .unwrap();
 
         // Decode header without validation to check kid
         let header = jsonwebtoken::decode_header(&token).unwrap();
@@ -1171,7 +1202,8 @@ mod tests {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
         let access_token =
-            generate_access_token(&keys, &config, &user_id, "openid", None, None, None).unwrap();
+            generate_access_token(&keys, &config, &user_id, "openid", None, None, None, None)
+                .unwrap();
 
         let id_token = generate_id_token(
             &keys,
@@ -1271,7 +1303,8 @@ mod tests {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
         let token =
-            generate_access_token(&keys, &config, &user_id, "openid", None, None, None).unwrap();
+            generate_access_token(&keys, &config, &user_id, "openid", None, None, None, None)
+                .unwrap();
 
         let claims = verify_token(&keys, &config, &token).unwrap();
         assert!(claims.act.is_none());
@@ -1349,7 +1382,8 @@ mod tests {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
         let token =
-            generate_access_token(&keys, &config, &user_id, "openid", None, None, None).unwrap();
+            generate_access_token(&keys, &config, &user_id, "openid", None, None, None, None)
+                .unwrap();
 
         let claims = verify_token(&keys, &config, &token).unwrap();
         assert!(claims.sa.is_none());

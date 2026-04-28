@@ -330,6 +330,7 @@ pub async fn exchange_authorization_code(
             .then_some(access_token_ttl_override_secs)
             .flatten(),
         None,
+        None,
     )?;
 
     let (refresh_token_jwt, refresh_jti) =

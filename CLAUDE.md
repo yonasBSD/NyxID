@@ -344,6 +344,13 @@ TRUSTED_PROXY_IPS=                     # Comma-separated list of reverse-proxy I
                                         # overwrite client-supplied forwarded
                                         # headers. See docs/ENV.md.
 
+MTLS_CLIENT_CERT_HEADER=                # Optional header name carrying a URL-encoded PEM
+                                        # client certificate from a trusted mTLS-terminating
+                                        # reverse proxy. Leave unset/empty to disable
+                                        # RFC 8705 certificate-bound broker access tokens.
+                                        # When set, configure the proxy to strip this
+                                        # header from external requests before forwarding.
+
 # CLI remote pairing (optional)
 CLI_PAIRING_HMAC_KEY=                   # 64 hex chars; keys `CliPairing.code_hash`
                                         # so a DB snapshot cannot brute-force the

@@ -78,6 +78,7 @@ struct BrokerExchangeContext<'a> {
     binding_hash: &'a str,
     requested_scope: Option<&'a str>,
     dpop_jkt: Option<&'a str>,
+    mtls_x5t_s256: Option<&'a str>,
 }
 
 enum ExchangeOutcome {
@@ -226,6 +227,7 @@ pub async fn exchange_via_binding(
     raw_binding_id: &str,
     requested_scope: Option<&str>,
     dpop_jkt: Option<&str>,
+    mtls_x5t_s256: Option<&str>,
 ) -> AppResult<BindingExchangeResult> {
     let binding_hash = hash_binding_id(raw_binding_id);
     let ctx = BrokerExchangeContext {
@@ -237,6 +239,7 @@ pub async fn exchange_via_binding(
         binding_hash: &binding_hash,
         requested_scope,
         dpop_jkt,
+        mtls_x5t_s256,
     };
 
     for attempt in 0..MAX_BROKER_ROTATION_RETRIES {
@@ -478,6 +481,7 @@ async fn mint_broker_access_token(
         Some(&rbac_data),
         Some(BROKER_ACCESS_TTL_SECS),
         ctx.dpop_jkt,
+        ctx.mtls_x5t_s256,
     )
 }
 
@@ -1562,6 +1566,7 @@ mod tests {
             &raw_binding_id,
             None,
             None,
+            None,
         )
         .await;
         assert!(matches!(
@@ -1647,6 +1652,7 @@ mod tests {
             &raw_a,
             None,
             None,
+            None,
         )
         .await;
 
@@ -1658,11 +1664,11 @@ mod tests {
 
     #[tokio::test]
     async fn exchange_via_binding_sets_cnf_for_dpop_access_token() {
+        let encryption_keys = test_encryption_keys();
+        let (jwt_keys, config) = real_jwt_keys_and_config();
         let Some(db) = connect_test_database("broker_dpop_cnf").await else {
             return;
         };
-        let encryption_keys = test_encryption_keys();
-        let (jwt_keys, config) = real_jwt_keys_and_config();
         let user_id = Uuid::new_v4().to_string();
         let raw_binding_id = generate_binding_id();
         let (refresh_jwt, refresh) =
@@ -1713,6 +1719,7 @@ mod tests {
             &raw_binding_id,
             Some("openid"),
             Some(&jkt),
+            None,
         )
         .await
         .expect("exchange via DPoP-bound binding");
@@ -1722,7 +1729,66 @@ mod tests {
             .expect("valid access token");
         assert_eq!(claims.token_type, "access");
         assert_eq!(claims.scope, "openid");
-        assert_eq!(claims.cnf.expect("cnf claim").jkt, jkt);
+        let cnf = claims.cnf.expect("cnf claim");
+        assert_eq!(cnf.jkt.as_deref(), Some(jkt.as_str()));
+        assert!(cnf.x5t_s256.is_none());
+    }
+
+    #[tokio::test]
+    async fn exchange_via_binding_sets_cnf_for_mtls_access_token() {
+        let encryption_keys = test_encryption_keys();
+        let (jwt_keys, config) = real_jwt_keys_and_config();
+        let Some(db) = connect_test_database("broker_mtls_cnf").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let raw_binding_id = generate_binding_id();
+        let (refresh_jwt, refresh) =
+            insert_refresh_token_jwt(&db, &jwt_keys, &config, "client-mtls", &user_id).await;
+
+        insert_binding(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &raw_binding_id,
+                client_id: "client-mtls",
+                user_id: &user_id,
+                refresh_token_jti: &refresh.jti,
+                refresh_token: &refresh_jwt,
+                scopes: vec!["openid".to_string(), "profile".to_string()],
+                created_at: Utc::now(),
+                revoked: false,
+                revoke_reason: None,
+            },
+        )
+        .await;
+
+        let cert_pem = "-----BEGIN CERTIFICATE-----\nAQIDBA==\n-----END CERTIFICATE-----\n";
+        let x5t = crate::crypto::mtls::cert_thumbprint_from_header(cert_pem)
+            .expect("mTLS cert thumbprint");
+
+        let result = exchange_via_binding(
+            &db,
+            &encryption_keys,
+            &jwt_keys,
+            &config,
+            "client-mtls",
+            &raw_binding_id,
+            Some("openid"),
+            None,
+            Some(&x5t),
+        )
+        .await
+        .expect("exchange via mTLS-bound binding");
+
+        assert_eq!(result.token_type, "Bearer");
+        let claims = jwt::verify_token(&jwt_keys, &config, &result.access_token)
+            .expect("valid access token");
+        assert_eq!(claims.token_type, "access");
+        assert_eq!(claims.scope, "openid");
+        let cnf = claims.cnf.expect("cnf claim");
+        assert!(cnf.jkt.is_none());
+        assert_eq!(cnf.x5t_s256.as_deref(), Some(x5t.as_str()));
     }
 
     #[tokio::test]
@@ -1787,6 +1853,7 @@ mod tests {
             binding_hash: &binding_hash,
             requested_scope: Some("openid"),
             dpop_jkt: None,
+            mtls_x5t_s256: None,
         };
         let result = try_chain_follow(&ctx)
             .await
@@ -1854,6 +1921,7 @@ mod tests {
             &config,
             "client-x",
             &raw_binding_id,
+            None,
             None,
             None,
         )
@@ -1973,6 +2041,7 @@ mod tests {
             &config,
             "client-x",
             &raw_one,
+            None,
             None,
             None,
         )

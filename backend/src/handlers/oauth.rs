@@ -1478,6 +1478,37 @@ async fn token_inner(
                     }
                     None => None,
                 };
+                let mtls_header_name = state
+                    .config
+                    .mtls_client_cert_header
+                    .as_deref()
+                    .filter(|header| !header.trim().is_empty());
+                let mtls_x5t_s256 = match (dpop_jkt.as_ref(), mtls_header_name) {
+                    (Some(_), Some(header_name)) => {
+                        if headers.get(header_name).is_some() {
+                            tracing::debug!(
+                                "DPoP and mTLS client certificate headers both present; using DPoP binding"
+                            );
+                        }
+                        None
+                    }
+                    (None, Some(header_name)) => match headers.get(header_name) {
+                        Some(value) => {
+                            let cert = value.to_str().map_err(|_| {
+                                AppError::Unauthorized(
+                                    "invalid mTLS client certificate header".to_string(),
+                                )
+                            })?;
+                            if cert.trim().is_empty() {
+                                None
+                            } else {
+                                Some(crate::crypto::mtls::cert_thumbprint_from_header(cert)?)
+                            }
+                        }
+                        None => None,
+                    },
+                    (_, None) => None,
+                };
 
                 let result = oauth_broker_service::exchange_via_binding(
                     &state.db,
@@ -1488,6 +1519,7 @@ async fn token_inner(
                     subject_token,
                     body.scope.as_deref(),
                     dpop_jkt.as_deref(),
+                    mtls_x5t_s256.as_deref(),
                 )
                 .await?;
 

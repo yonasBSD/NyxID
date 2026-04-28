@@ -214,6 +214,7 @@ pub async fn create_session_and_issue_tokens(
         Some(&rbac_data),
         None,
         None,
+        None,
     )?;
 
     // Generate refresh token
@@ -455,6 +456,7 @@ pub async fn refresh_tokens(
         &user_id,
         scope,
         Some(&rbac_data),
+        None,
         None,
         None,
     )?;

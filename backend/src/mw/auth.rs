@@ -263,6 +263,38 @@ fn validate_dpop_bound_access(
     Ok(())
 }
 
+fn validate_mtls_bound_access(
+    parts: &Parts,
+    state: &AppState,
+    expected_x5t: &str,
+) -> Result<(), AppError> {
+    let header_name = state
+        .config
+        .mtls_client_cert_header
+        .as_deref()
+        .filter(|header| !header.trim().is_empty())
+        .ok_or_else(|| {
+            AppError::Unauthorized(
+                "mTLS binding required but server has no cert header configured".to_string(),
+            )
+        })?;
+    let cert_header = parts
+        .headers
+        .get(header_name)
+        .ok_or_else(|| {
+            AppError::Unauthorized("mTLS binding required: missing cert header".to_string())
+        })?
+        .to_str()
+        .map_err(|_| AppError::Unauthorized("invalid mTLS client certificate".to_string()))?;
+    let presented = crate::crypto::mtls::cert_thumbprint_from_header(cert_header)?;
+    if presented != expected_x5t {
+        return Err(AppError::Unauthorized(
+            "mTLS cert thumbprint mismatch".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 impl FromRequestParts<AppState> for AuthUser {
     type Rejection = AppError;
 
@@ -359,8 +391,13 @@ impl FromRequestParts<AppState> for AuthUser {
                         return Err(AppError::Unauthorized("Expected access token".to_string()));
                     }
 
-                    if let Some(cnf) = claims.cnf.as_ref() {
-                        validate_dpop_bound_access(parts, state, &cnf.jkt)?;
+                    if let Some(claims_jkt) = claims.cnf.as_ref().and_then(|c| c.jkt.as_deref()) {
+                        validate_dpop_bound_access(parts, state, claims_jkt)?;
+                    }
+                    if let Some(claims_x5t) =
+                        claims.cnf.as_ref().and_then(|c| c.x5t_s256.as_deref())
+                    {
+                        validate_mtls_bound_access(parts, state, claims_x5t)?;
                     }
 
                     // Check if this is a service account token
