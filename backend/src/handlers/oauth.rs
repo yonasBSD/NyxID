@@ -1258,7 +1258,11 @@ async fn token_inner(
                 let client =
                     oauth_service::authenticate_client(&state.db, client_id, Some(client_secret))
                         .await?;
-                if !client.broker_capability_enabled {
+                // Honor BOTH broker-mode triggers: the per-client admin flag
+                // and the urn:nyxid:scope:broker_binding scope. Otherwise a
+                // scope-opted-in client could issue bindings (commit #4 path
+                // uses is_broker_client) but not exchange them.
+                if !oauth_broker_service::is_broker_client(&client) {
                     return Err(AppError::ExternalTokenInvalid("invalid_grant".to_string()));
                 }
 
