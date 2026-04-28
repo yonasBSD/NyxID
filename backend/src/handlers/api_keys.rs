@@ -353,12 +353,14 @@ async fn enrich_api_keys_batch(
                     .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
                     .find_one(doc! { "_id": &org_user_id })
                     .await?;
-                let org_name = org
-                    .and_then(|u| u.display_name)
-                    .unwrap_or_else(|| "Unnamed Org".to_string());
+                let (org_name, org_avatar_url) = org
+                    .map(|u| (u.display_name, u.avatar_url))
+                    .unwrap_or((None, None));
+                let org_name = org_name.unwrap_or_else(|| "Unnamed Org".to_string());
                 CredentialSource::Org {
                     org_user_id,
                     org_name,
+                    org_avatar_url,
                     role: crate::models::org_membership::OrgRole::Admin,
                     allowed: true,
                 }
@@ -371,13 +373,15 @@ async fn enrich_api_keys_batch(
                     .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
                     .find_one(doc! { "_id": &org_user_id })
                     .await?;
-                let org_name = org
-                    .and_then(|u| u.display_name)
-                    .unwrap_or_else(|| "Unnamed Org".to_string());
+                let (org_name, org_avatar_url) = org
+                    .map(|u| (u.display_name, u.avatar_url))
+                    .unwrap_or((None, None));
+                let org_name = org_name.unwrap_or_else(|| "Unnamed Org".to_string());
                 let allowed = role.can_proxy();
                 CredentialSource::Org {
                     org_user_id,
                     org_name,
+                    org_avatar_url,
                     role,
                     allowed,
                 }

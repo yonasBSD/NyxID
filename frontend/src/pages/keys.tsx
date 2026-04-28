@@ -26,6 +26,7 @@ import { ApiKeyTable } from "@/components/dashboard/api-key-table";
 import { ApiKeyCreateDialog } from "@/components/dashboard/api-key-create-dialog";
 import { ApiKeyUsageDashboard } from "@/components/dashboard/api-key-usage-dashboard";
 import { RoleBadge } from "@/components/orgs/role-badge";
+import { OrgAvatar } from "@/components/orgs/org-avatar";
 import type { KeyInfo } from "@/types/keys";
 import type { CredentialSource } from "@/schemas/orgs";
 
@@ -192,6 +193,13 @@ interface ServiceGroup {
   readonly subtitle: string | null;
   readonly role: "admin" | "member" | "viewer" | null;
   readonly icon: "personal" | "org";
+  /**
+   * Org avatar URL when `icon === "org"`. Surfaced via `credential_source`
+   * on the API response so we can render the same avatar as the
+   * Organizations page (#545). `null` when the org has no avatar configured
+   * — falls back to initials / building icon inside `OrgAvatar`.
+   */
+  readonly avatarUrl: string | null;
   readonly keys: readonly {
     readonly keyInfo: KeyInfo;
     readonly source: CredentialSource;
@@ -215,6 +223,7 @@ function groupKeysBySource(
     subtitle: null,
     role: null,
     icon: "personal",
+    avatarUrl: null,
     keys: [],
   };
 
@@ -234,6 +243,12 @@ function groupKeysBySource(
     if (existing) {
       orgGroups.set(source.org_id, {
         ...existing,
+        // Prefer the first non-null avatar we see for this org. The backend
+        // returns the same avatar on every row, but when `/keys` loads
+        // before /user-services has finished hydrating the source map, the
+        // earliest entry may lack it — keep whichever value we've already
+        // captured.
+        avatarUrl: existing.avatarUrl ?? source.avatar_url ?? null,
         keys: [...existing.keys, { keyInfo, source }],
       });
     } else {
@@ -243,6 +258,7 @@ function groupKeysBySource(
         subtitle: "Shared from organization",
         role: source.role,
         icon: "org",
+        avatarUrl: source.avatar_url ?? null,
         keys: [{ keyInfo, source }],
       });
     }
@@ -367,7 +383,11 @@ function ExternalServicesTab({
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-2">
               {group.icon === "org" ? (
-                <Building2 className="h-4 w-4 text-muted-foreground" />
+                <OrgAvatar
+                  avatarUrl={group.avatarUrl}
+                  displayName={group.title}
+                  className="h-6 w-6 text-[0.625rem]"
+                />
               ) : (
                 <KeyRound className="h-4 w-4 text-muted-foreground" />
               )}

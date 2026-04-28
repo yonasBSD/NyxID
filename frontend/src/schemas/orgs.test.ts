@@ -299,10 +299,42 @@ describe("credentialSourceSchema", () => {
       type: "org",
       org_id: "org-1",
       org_name: "Chrono AI",
+      avatar_url: null,
       role: "member",
       allowed: true,
     });
     expect(result.success).toBe(true);
+  });
+
+  it("accepts org source with an avatar url so /keys can render it", () => {
+    const result = credentialSourceSchema.safeParse({
+      type: "org",
+      org_id: "org-1",
+      org_name: "Chrono AI",
+      avatar_url: "https://example.com/orgs/chrono.png",
+      role: "admin",
+      allowed: true,
+    });
+    expect(result.success).toBe(true);
+    if (result.success && result.data.type === "org") {
+      expect(result.data.avatar_url).toBe(
+        "https://example.com/orgs/chrono.png",
+      );
+    }
+  });
+
+  it("treats omitted avatar_url as undefined for backwards compat", () => {
+    const result = credentialSourceSchema.safeParse({
+      type: "org",
+      org_id: "org-1",
+      org_name: "Chrono AI",
+      role: "member",
+      allowed: true,
+    });
+    expect(result.success).toBe(true);
+    if (result.success && result.data.type === "org") {
+      expect(result.data.avatar_url ?? null).toBeNull();
+    }
   });
 
   it("rejects org source missing required fields", () => {

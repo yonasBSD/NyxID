@@ -83,17 +83,22 @@ async fn resolve_key_read_owner(
     let source = match &access {
         org_service::OwnerAccess::Direct => CredentialSource::Personal,
         org_service::OwnerAccess::AsOrgAdmin { org_user_id, .. } => {
-            // Look up the org's display_name for the response payload.
-            let org_name = state
+            // Look up the org's display_name + avatar_url for the response
+            // payload. Avatar lets the frontend render the same org avatar
+            // here as on the Organizations page (#545).
+            let org = state
                 .db
                 .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
                 .find_one(doc! { "_id": org_user_id })
-                .await?
-                .and_then(|u| u.display_name)
-                .unwrap_or_else(|| "Unnamed Org".to_string());
+                .await?;
+            let (org_name, org_avatar_url) = org
+                .map(|u| (u.display_name, u.avatar_url))
+                .unwrap_or((None, None));
+            let org_name = org_name.unwrap_or_else(|| "Unnamed Org".to_string());
             CredentialSource::Org {
                 org_user_id: org_user_id.clone(),
                 org_name,
+                org_avatar_url,
                 role: crate::models::org_membership::OrgRole::Admin,
                 allowed: true,
             }
@@ -101,13 +106,15 @@ async fn resolve_key_read_owner(
         org_service::OwnerAccess::AsOrgMember {
             org_user_id, role, ..
         } => {
-            let org_name = state
+            let org = state
                 .db
                 .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
                 .find_one(doc! { "_id": org_user_id })
-                .await?
-                .and_then(|u| u.display_name)
-                .unwrap_or_else(|| "Unnamed Org".to_string());
+                .await?;
+            let (org_name, org_avatar_url) = org
+                .map(|u| (u.display_name, u.avatar_url))
+                .unwrap_or((None, None));
+            let org_name = org_name.unwrap_or_else(|| "Unnamed Org".to_string());
             // Members can proxy/use; viewers cannot. (Scope has already been
             // enforced above via allows_resource; if we got here, this
             // particular key is within the member's scope.)
@@ -115,6 +122,7 @@ async fn resolve_key_read_owner(
             CredentialSource::Org {
                 org_user_id: org_user_id.clone(),
                 org_name,
+                org_avatar_url,
                 role: *role,
                 allowed,
             }
@@ -643,12 +651,14 @@ pub async fn create_key(
             .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
             .find_one(doc! { "_id": target_org_id })
             .await?;
-        let org_name = org
-            .and_then(|u| u.display_name)
-            .unwrap_or_else(|| "Unnamed Org".to_string());
+        let (org_name, avatar_url) = org
+            .map(|u| (u.display_name, u.avatar_url))
+            .unwrap_or((None, None));
+        let org_name = org_name.unwrap_or_else(|| "Unnamed Org".to_string());
         response.credential_source = CredentialSourceResponse::Org {
             org_id: target_org_id.to_string(),
             org_name,
+            avatar_url,
             role: OrgRoleResponse::Admin,
             allowed: true,
         };
