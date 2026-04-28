@@ -120,7 +120,6 @@ pub struct UserinfoResponse {
 #[derive(Debug, Deserialize)]
 pub struct IntrospectRequest {
     pub token: String,
-    #[allow(dead_code)]
     pub token_type_hint: Option<String>,
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
@@ -1477,6 +1476,47 @@ pub async fn introspect(
     .is_err()
     {
         return Json(inactive);
+    }
+
+    // Broker-binding introspection: detect via the explicit token_type_hint
+    // or the `bnd_` prefix as a defensive fallback. Same routing precedence
+    // as /oauth/revoke's binding-revoke branch.
+    let is_broker_binding = body
+        .token_type_hint
+        .as_deref()
+        .map(|hint| hint == oauth_broker_service::BROKER_SUBJECT_TOKEN_TYPE)
+        .unwrap_or(false)
+        || body
+            .token
+            .starts_with(crate::models::oauth_broker_binding::BINDING_ID_PREFIX);
+
+    if is_broker_binding {
+        let binding = match oauth_broker_service::get_binding_for_client(
+            &state.db,
+            caller_client_id,
+            &body.token,
+        )
+        .await
+        {
+            Ok(binding) if !binding.revoked => binding,
+            _ => return Json(inactive),
+        };
+
+        return Json(IntrospectResponse {
+            active: true,
+            scope: Some(binding.scopes.join(" ")),
+            client_id: Some(binding.client_id),
+            username: None,
+            token_type: Some("broker_binding".to_string()),
+            exp: None,
+            iat: Some(binding.created_at.timestamp()),
+            sub: Some(binding.user_id),
+            iss: None,
+            jti: None,
+            roles: None,
+            groups: None,
+            permissions: None,
+        });
     }
 
     // Try to verify the token

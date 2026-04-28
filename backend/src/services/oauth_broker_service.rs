@@ -1089,6 +1089,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn introspect_via_get_binding_returns_owner_metadata() {
+        let Some(db) = connect_test_database("broker_introspect_owner").await else {
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let raw_binding_id = generate_binding_id();
+        let user_id = Uuid::new_v4().to_string();
+        let scopes = vec!["openid".to_string(), "profile".to_string()];
+
+        insert_binding(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &raw_binding_id,
+                client_id: "client-introspect",
+                user_id: &user_id,
+                refresh_token_jti: "jti-introspect",
+                refresh_token: "refresh-introspect",
+                scopes: scopes.clone(),
+                created_at: Utc::now(),
+                revoked: false,
+                revoke_reason: None,
+            },
+        )
+        .await;
+
+        let binding = get_binding_for_client(&db, "client-introspect", &raw_binding_id)
+            .await
+            .expect("get binding");
+        assert!(!binding.revoked);
+        assert_eq!(binding.client_id, "client-introspect");
+        assert_eq!(binding.user_id, user_id);
+        assert_eq!(binding.scopes, scopes);
+        assert!(binding.created_at.timestamp() > 0);
+    }
+
+    #[tokio::test]
+    async fn introspect_via_get_binding_returns_not_found_for_revoked() {
+        let Some(db) = connect_test_database("broker_introspect_revoked").await else {
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let raw_binding_id = generate_binding_id();
+
+        insert_binding(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &raw_binding_id,
+                client_id: "client-introspect-revoked",
+                user_id: "user-1",
+                refresh_token_jti: "jti-revoked",
+                refresh_token: "refresh-revoked",
+                scopes: vec!["openid".to_string()],
+                created_at: Utc::now(),
+                revoked: true,
+                revoke_reason: Some("user_revoked".to_string()),
+            },
+        )
+        .await;
+
+        let binding = get_binding_for_client(&db, "client-introspect-revoked", &raw_binding_id)
+            .await
+            .expect("get binding");
+        assert!(binding.revoked);
+    }
+
+    #[tokio::test]
     async fn find_active_bindings_filters_by_external_subject() {
         let Some(db) = connect_test_database("broker_reverse").await else {
             return;
