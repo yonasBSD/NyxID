@@ -424,7 +424,10 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
             "/bindings",
             get(handlers::oauth::list_bindings_by_external_subject),
         )
-        .route("/bindings/{binding_id}", get(handlers::oauth::get_binding))
+        .route(
+            "/bindings/{binding_id}",
+            get(handlers::oauth::get_binding).delete(handlers::oauth::delete_binding),
+        )
         .route(
             "/userinfo",
             get(handlers::oauth::userinfo).post(handlers::oauth::userinfo),

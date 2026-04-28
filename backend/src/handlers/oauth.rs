@@ -1661,6 +1661,67 @@ pub async fn get_binding(
     }))
 }
 
+/// DELETE /oauth/bindings/{binding_id}
+///
+/// Client-initiated binding revocation aligned with the contract
+/// proposed on issue #549. Authenticated via client_credentials in
+/// Authorization: Basic or query params. Always returns 204 — missing,
+/// already-revoked, and ownership-mismatched bindings are
+/// indistinguishable from a successful revoke (no enumeration leak).
+/// `/oauth/revoke` (RFC 7009) remains supported as the standards-track
+/// alternative; this endpoint is the REST-style alias the issue spec
+/// calls for.
+pub async fn delete_binding(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(raw_binding_id): axum::extract::Path<String>,
+    axum::extract::Query(query): axum::extract::Query<GetBindingQuery>,
+) -> StatusCode {
+    let basic = parse_basic_client_credentials(&headers).ok().flatten();
+    let (client_id, client_secret) = match (basic, query.client_id, query.client_secret) {
+        (Some((id, secret)), _, _) => (id, secret),
+        (None, Some(id), Some(secret)) => (id, secret),
+        _ => return StatusCode::NO_CONTENT,
+    };
+
+    if oauth_service::authenticate_client(&state.db, &client_id, Some(&client_secret))
+        .await
+        .is_err()
+    {
+        return StatusCode::NO_CONTENT;
+    }
+
+    let revoked = oauth_broker_service::revoke_binding_by_client(
+        &state.db,
+        &client_id,
+        &raw_binding_id,
+        "client_revoked",
+    )
+    .await
+    .unwrap_or(false);
+
+    if revoked {
+        let binding_hash = crate::models::oauth_broker_binding::hash_binding_id(&raw_binding_id);
+        audit_service::log_async(
+            state.db.clone(),
+            None,
+            "oauth_broker_binding_revoked".to_string(),
+            Some(serde_json::json!({
+                "revoke_source": "client",
+                "client_id": client_id,
+                "binding_hash": oauth_broker_service::binding_hash_prefix(&binding_hash),
+                "reason": "client_revoked",
+            })),
+            None,
+            None,
+            None,
+            None,
+        );
+    }
+
+    StatusCode::NO_CONTENT
+}
+
 /// POST /oauth/revoke
 ///
 /// RFC 7009 Token Revocation. Authenticates the calling client before
