@@ -1571,7 +1571,7 @@ pub async fn list_bindings_by_external_subject(
     let basic = parse_basic_client_credentials(&headers).ok().flatten();
     let (client_id, client_secret) =
         match (basic, query.client_id.clone(), query.client_secret.clone()) {
-            (Some((id, secret)), Some(query_id), _) if query_id != id => return Ok(empty()),
+            (Some((id, _)), Some(query_id), _) if query_id != id => return Ok(empty()),
             (Some((id, secret)), _, _) => (id, secret),
             (None, Some(id), Some(secret)) => (id, secret),
             _ => return Ok(empty()),
