@@ -113,7 +113,7 @@ The agent only needs to know:
 
 ### CLI requirement
 
-The helper scripts (`scripts/services.sh` and `scripts/proxy.sh`) require the `nyxid` CLI on `PATH`. For non-CLI auth flows, use the plugin or environment-backed API key flow instead:
+The skill drives all of NyxID through the `nyxid` CLI, which must be on `PATH` for the OpenClaw process. For non-CLI auth flows, use the plugin or environment-backed API key flow instead:
 
 ```bash
 export NYXID_API_KEY="nyxid_your_key_here"

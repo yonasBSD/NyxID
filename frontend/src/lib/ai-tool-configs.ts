@@ -221,7 +221,7 @@ function toolSetupPrompt(
       `  ~/.openclaw/skills/nyxid/SKILL.md                (concise skill)`,
       `  ~/.openclaw/skills/nyxid/references/             (per-topic references)`,
       `  ~/.openclaw/skills/nyxid/references/playbook.md  (full reference, populated from <BASE_URL>/llms.txt)`,
-      `  ~/.openclaw/skills/nyxid/scripts/                (CLI installer + helper wrappers)`,
+      `  ~/.openclaw/skills/nyxid/scripts/install.sh      (CLI bootstrap installer)`,
       ``,
       `After install: start a new OpenClaw chat.`,
       `Optional: install the gateway as a background service with openclaw gateway install, then openclaw gateway start.`,

@@ -318,8 +318,6 @@ struct SkillContent {
     /// `post-install.md` (printed inline, not written to the references dir).
     references: Vec<(String, String)>,
     install_sh: String,
-    services_sh: String,
-    proxy_sh: String,
 }
 
 async fn fetch_skill_content(base_url: &str) -> Result<SkillContent> {
@@ -343,8 +341,6 @@ async fn fetch_skill_content(base_url: &str) -> Result<SkillContent> {
     let playbook = fetch_playbook(base_url).await?;
 
     let install_sh = fetch_github(&format!("{SKILL_DIR}/scripts/install.sh")).await?;
-    let services_sh = fetch_github(&format!("{SKILL_DIR}/scripts/services.sh")).await?;
-    let proxy_sh = fetch_github(&format!("{SKILL_DIR}/scripts/proxy.sh")).await?;
 
     Ok(SkillContent {
         skill_md,
@@ -352,8 +348,6 @@ async fn fetch_skill_content(base_url: &str) -> Result<SkillContent> {
         post_install,
         references,
         install_sh,
-        services_sh,
-        proxy_sh,
     })
 }
 
@@ -561,14 +555,10 @@ fn install_openclaw(content: &SkillContent) -> Result<()> {
     write_file(&dir.join("references/playbook.md"), &content.playbook)?;
     write_references(&dir, content)?;
     write_file(&dir.join("scripts/install.sh"), &content.install_sh)?;
-    write_file(&dir.join("scripts/services.sh"), &content.services_sh)?;
-    write_file(&dir.join("scripts/proxy.sh"), &content.proxy_sh)?;
 
     #[cfg(unix)]
     {
         make_executable(&dir.join("scripts/install.sh"))?;
-        make_executable(&dir.join("scripts/services.sh"))?;
-        make_executable(&dir.join("scripts/proxy.sh"))?;
     }
 
     cleanup_legacy_layout(&dir);
