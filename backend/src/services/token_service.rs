@@ -207,7 +207,7 @@ pub async fn create_session_and_issue_tokens(
     let rbac_data =
         crate::services::rbac_helpers::build_rbac_claim_data(db, user_id, scope).await?;
     let access_token =
-        jwt::generate_access_token(jwt_keys, config, &user_uuid, scope, Some(&rbac_data))?;
+        jwt::generate_access_token(jwt_keys, config, &user_uuid, scope, Some(&rbac_data), None)?;
 
     // Generate refresh token
     let (refresh_token_jwt, refresh_jti) =
@@ -443,7 +443,7 @@ pub async fn refresh_tokens(
     let rbac_data =
         crate::services::rbac_helpers::build_rbac_claim_data(db, &user_id_str, scope).await?;
     let new_access =
-        jwt::generate_access_token(jwt_keys, config, &user_id, scope, Some(&rbac_data))?;
+        jwt::generate_access_token(jwt_keys, config, &user_id, scope, Some(&rbac_data), None)?;
 
     if reuse_existing_refresh_token {
         touch_session_last_active(db, session_id.as_deref(), now).await?;

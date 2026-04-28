@@ -282,6 +282,7 @@ pub fn generate_access_token(
     user_id: &Uuid,
     scope: &str,
     rbac: Option<&RbacClaimData>,
+    ttl_override_secs: Option<i64>,
 ) -> Result<String, AppError> {
     let now = Utc::now().timestamp();
 
@@ -289,7 +290,7 @@ pub fn generate_access_token(
         sub: user_id.to_string(),
         iss: config.jwt_issuer.clone(),
         aud: config.base_url.clone(),
-        exp: now + config.jwt_access_ttl_secs,
+        exp: now + ttl_override_secs.unwrap_or(config.jwt_access_ttl_secs),
         iat: now,
         jti: Uuid::new_v4().to_string(),
         scope: scope.to_string(),
@@ -1009,13 +1010,24 @@ mod tests {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
         let token =
-            generate_access_token(&keys, &config, &user_id, "openid profile", None).unwrap();
+            generate_access_token(&keys, &config, &user_id, "openid profile", None, None).unwrap();
 
         let claims = verify_token(&keys, &config, &token).unwrap();
         assert_eq!(claims.sub, user_id.to_string());
         assert_eq!(claims.token_type, "access");
         assert_eq!(claims.scope, "openid profile");
         assert_eq!(claims.iss, "http://localhost:3001");
+    }
+
+    #[test]
+    fn access_token_respects_ttl_override() {
+        let (keys, config) = test_keys_and_config();
+        let user_id = Uuid::new_v4();
+        let token =
+            generate_access_token(&keys, &config, &user_id, "openid", None, Some(300)).unwrap();
+
+        let claims = verify_token(&keys, &config, &token).unwrap();
+        assert_eq!(claims.exp - claims.iat, 300);
     }
 
     #[test]
@@ -1094,7 +1106,7 @@ mod tests {
     fn access_token_has_kid_header() {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
-        let token = generate_access_token(&keys, &config, &user_id, "openid", None).unwrap();
+        let token = generate_access_token(&keys, &config, &user_id, "openid", None, None).unwrap();
 
         // Decode header without validation to check kid
         let header = jsonwebtoken::decode_header(&token).unwrap();
@@ -1135,7 +1147,8 @@ mod tests {
     fn generate_id_token_with_at_hash() {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
-        let access_token = generate_access_token(&keys, &config, &user_id, "openid", None).unwrap();
+        let access_token =
+            generate_access_token(&keys, &config, &user_id, "openid", None, None).unwrap();
 
         let id_token = generate_id_token(
             &keys,
@@ -1233,7 +1246,7 @@ mod tests {
         // Verify that tokens without act/delegated fields still deserialize
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
-        let token = generate_access_token(&keys, &config, &user_id, "openid", None).unwrap();
+        let token = generate_access_token(&keys, &config, &user_id, "openid", None, None).unwrap();
 
         let claims = verify_token(&keys, &config, &token).unwrap();
         assert!(claims.act.is_none());
@@ -1310,7 +1323,7 @@ mod tests {
     fn sa_claim_skipped_when_none() {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
-        let token = generate_access_token(&keys, &config, &user_id, "openid", None).unwrap();
+        let token = generate_access_token(&keys, &config, &user_id, "openid", None, None).unwrap();
 
         let claims = verify_token(&keys, &config, &token).unwrap();
         assert!(claims.sa.is_none());

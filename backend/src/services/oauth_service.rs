@@ -179,7 +179,18 @@ fn validate_client_secret(client: &OauthClient, client_secret: Option<&str>) -> 
 /// for confidential clients. Persists the refresh token to the database
 /// and implements code replay detection.
 ///
-/// Returns (access_token, refresh_token, id_token, granted_scope).
+/// Returns the minted token strings plus metadata needed by the OAuth broker path.
+pub struct ExchangedTokens {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub refresh_token_jti: String,
+    pub id_token: Option<String>,
+    pub granted_scope: String,
+    pub user_id: String,
+    pub external_subject: Option<ExternalSubjectRef>,
+    pub broker_capability_enabled: bool,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn exchange_authorization_code(
     db: &mongodb::Database,
@@ -190,7 +201,8 @@ pub async fn exchange_authorization_code(
     redirect_uri: &str,
     code_verifier: Option<&str>,
     client_secret: Option<&str>,
-) -> AppResult<(String, String, Option<String>, String)> {
+    access_token_ttl_override_secs: Option<i64>,
+) -> AppResult<ExchangedTokens> {
     let code_hash = hash_token(code);
 
     // Atomically claim the authorization code (prevents TOCTOU race condition).
@@ -271,6 +283,7 @@ pub async fn exchange_authorization_code(
         .ok_or_else(|| AppError::BadRequest("OAuth client not found".to_string()))?;
 
     validate_client_secret(&client, client_secret)?;
+    let broker_capability_enabled = client.broker_capability_enabled;
 
     // PKCE verification (S256 only)
     if let Some(challenge) = &stored.code_challenge {
@@ -312,10 +325,14 @@ pub async fn exchange_authorization_code(
         &user_uuid,
         &stored.scope,
         Some(&rbac_data),
+        broker_capability_enabled
+            .then_some(access_token_ttl_override_secs)
+            .flatten(),
     )?;
 
     let (refresh_token_jwt, refresh_jti) =
         crate::crypto::jwt::generate_refresh_token(jwt_keys, config, &user_uuid)?;
+    let refresh_token_jti = refresh_jti.clone();
 
     // Persist OAuth refresh token to database for revocation support
     let refresh_id = Uuid::new_v4().to_string();
@@ -374,7 +391,16 @@ pub async fn exchange_authorization_code(
     };
 
     let granted_scope = stored.scope.clone();
-    Ok((access_token, refresh_token_jwt, id_token, granted_scope))
+    Ok(ExchangedTokens {
+        access_token,
+        refresh_token: refresh_token_jwt,
+        refresh_token_jti,
+        id_token,
+        granted_scope,
+        user_id: stored.user_id,
+        external_subject: stored.external_subject,
+        broker_capability_enabled,
+    })
 }
 
 /// Check whether a redirect URI is a loopback address per RFC 8252 section 7.3.

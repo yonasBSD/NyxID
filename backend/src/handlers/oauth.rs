@@ -15,8 +15,8 @@ use crate::models::service_account_token::{COLLECTION_NAME as SA_TOKENS, Service
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{AuthUser, OptionalAuthUser};
 use crate::services::{
-    audit_service, consent_service, oauth_client_service, oauth_service, service_account_service,
-    social_token_exchange_service, token_exchange_service,
+    audit_service, consent_service, oauth_broker_service, oauth_client_service, oauth_service,
+    service_account_service, social_token_exchange_service, token_exchange_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event, hash_short_id};
 
@@ -88,6 +88,8 @@ pub struct TokenResponse {
     pub refresh_token: Option<String>,
     pub id_token: Option<String>,
     pub scope: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binding_id: Option<String>,
     /// RFC 8693: Indicates the type of the issued token (only for token exchange grant).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub issued_token_type: Option<String>,
@@ -944,26 +946,57 @@ async fn token_inner(
                 .as_deref()
                 .ok_or_else(|| AppError::BadRequest("Missing client_id parameter".to_string()))?;
 
-            let (access_token, refresh_token, id_token, granted_scope) =
-                oauth_service::exchange_authorization_code(
+            let exchanged = oauth_service::exchange_authorization_code(
+                &state.db,
+                &state.config,
+                &state.jwt_keys,
+                code,
+                client_id_str,
+                redirect_uri,
+                body.code_verifier.as_deref(),
+                body.client_secret.as_deref(),
+                Some(oauth_broker_service::BROKER_ACCESS_TTL_SECS),
+            )
+            .await?;
+
+            if exchanged.broker_capability_enabled {
+                let granted_scopes: Vec<String> = exchanged
+                    .granted_scope
+                    .split_whitespace()
+                    .map(str::to_string)
+                    .collect();
+                let (binding_id, _binding_hash) = oauth_broker_service::create_binding(
                     &state.db,
-                    &state.config,
-                    &state.jwt_keys,
-                    code,
+                    &state.encryption_keys,
                     client_id_str,
-                    redirect_uri,
-                    body.code_verifier.as_deref(),
-                    body.client_secret.as_deref(),
+                    &exchanged.user_id,
+                    &exchanged.refresh_token,
+                    &exchanged.refresh_token_jti,
+                    &granted_scopes,
+                    exchanged.external_subject.as_ref(),
                 )
                 .await?;
 
+                return Ok(Json(TokenResponse {
+                    access_token: exchanged.access_token,
+                    token_type: "Bearer".to_string(),
+                    expires_in: oauth_broker_service::BROKER_ACCESS_TTL_SECS,
+                    refresh_token: None,
+                    id_token: exchanged.id_token,
+                    scope: Some(exchanged.granted_scope),
+                    binding_id: Some(binding_id),
+                    issued_token_type: None,
+                }));
+            }
+
             Ok(Json(TokenResponse {
-                access_token,
+                access_token: exchanged.access_token,
                 token_type: "Bearer".to_string(),
                 expires_in: state.config.jwt_access_ttl_secs,
-                refresh_token: Some(refresh_token),
-                id_token,
-                scope: Some(granted_scope),
+                refresh_token: Some(exchanged.refresh_token),
+                id_token: exchanged.id_token,
+                scope: Some(exchanged.granted_scope),
+                binding_id: None,
                 issued_token_type: None,
             }))
         }
@@ -988,6 +1021,7 @@ async fn token_inner(
                 refresh_token: Some(tokens.refresh_token),
                 id_token: None,
                 scope: None,
+                binding_id: None,
                 issued_token_type: None,
             }))
         }
@@ -1035,6 +1069,7 @@ async fn token_inner(
                     refresh_token: Some(result.refresh_token),
                     id_token: result.id_token,
                     scope: Some(result.scope),
+                    binding_id: None,
                     issued_token_type: Some(
                         "urn:ietf:params:oauth:token-type:access_token".to_string(),
                     ),
@@ -1090,6 +1125,7 @@ async fn token_inner(
                     refresh_token: None,
                     id_token: None,
                     scope: Some(result.scope),
+                    binding_id: None,
                     issued_token_type: Some(result.issued_token_type),
                 }))
             } else {
@@ -1143,6 +1179,7 @@ async fn token_inner(
                         refresh_token: None,
                         id_token: None,
                         scope: Some(response.scope),
+                        binding_id: None,
                         issued_token_type: None,
                     }))
                 }

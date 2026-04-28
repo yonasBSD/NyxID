@@ -10,9 +10,7 @@ pub const COLLECTION_NAME: &str = "oauth_broker_bindings";
 
 /// Length of the hex-encoded random suffix on `binding_id` strings.
 /// 32 hex chars = 128 bits of entropy, matching `crate::crypto::token::generate_random_token`.
-#[allow(dead_code)]
 pub const BINDING_ID_RANDOM_HEX_LEN: usize = 32;
-#[allow(dead_code)]
 pub const BINDING_ID_PREFIX: &str = "bnd_";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -71,9 +69,8 @@ pub struct OauthBrokerBinding {
 ///
 /// 128 bits of entropy. The raw value is returned ONCE to the OAuth client at issuance
 /// time and is never persisted server-side -- only its SHA-256 hash is stored.
-#[allow(dead_code)]
 pub fn generate_binding_id() -> String {
-    let mut bytes = [0u8; 16];
+    let mut bytes = [0u8; BINDING_ID_RANDOM_HEX_LEN / 2];
     rand::thread_rng().fill_bytes(&mut bytes);
     format!("{BINDING_ID_PREFIX}{}", hex::encode(bytes))
 }
@@ -82,7 +79,6 @@ pub fn generate_binding_id() -> String {
 ///
 /// SHA-256 hex (lowercase). This is `OauthBrokerBinding._id`. Use this for every Mongo
 /// query so callers never see the raw binding_id and the database leak surface is bounded.
-#[allow(dead_code)]
 pub fn hash_binding_id(binding_id: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(binding_id.as_bytes());
