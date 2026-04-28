@@ -4,6 +4,7 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
+use base64::Engine as _;
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 
@@ -196,6 +197,39 @@ fn oauth_error_response(err: AppError) -> Response {
         }),
     )
         .into_response()
+}
+
+fn parse_basic_client_credentials(headers: &HeaderMap) -> AppResult<Option<(String, String)>> {
+    let Some(value) = headers.get(header::AUTHORIZATION) else {
+        return Ok(None);
+    };
+    let raw = value
+        .to_str()
+        .map_err(|_| AppError::Unauthorized("Invalid client credentials".to_string()))?;
+    let Some(encoded) = raw
+        .strip_prefix("Basic ")
+        .or_else(|| raw.strip_prefix("basic "))
+    else {
+        return Ok(None);
+    };
+
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded.trim())
+        .map_err(|_| AppError::Unauthorized("Invalid client credentials".to_string()))?;
+    let decoded = String::from_utf8(decoded)
+        .map_err(|_| AppError::Unauthorized("Invalid client credentials".to_string()))?;
+    let (client_id, client_secret) = decoded
+        .split_once(':')
+        .ok_or_else(|| AppError::Unauthorized("Invalid client credentials".to_string()))?;
+
+    let client_id = urlencoding::decode(client_id)
+        .map_err(|_| AppError::Unauthorized("Invalid client credentials".to_string()))?
+        .into_owned();
+    let client_secret = urlencoding::decode(client_secret)
+        .map_err(|_| AppError::Unauthorized("Invalid client credentials".to_string()))?
+        .into_owned();
+
+    Ok(Some((client_id, client_secret)))
 }
 
 // --- Handlers ---
@@ -1027,10 +1061,29 @@ async fn token_inner(
         }
         // RFC 8693 Token Exchange
         "urn:ietf:params:oauth:grant-type:token-exchange" => {
+            let basic_client_credentials = parse_basic_client_credentials(headers)?;
+            if let (Some(form_client_id), Some((basic_client_id, _))) =
+                (body.client_id.as_deref(), basic_client_credentials.as_ref())
+                && form_client_id != basic_client_id
+            {
+                return Err(AppError::Unauthorized(
+                    "Invalid client credentials".to_string(),
+                ));
+            }
             let client_id = body
                 .client_id
                 .as_deref()
+                .or_else(|| {
+                    basic_client_credentials
+                        .as_ref()
+                        .map(|(client_id, _)| client_id.as_str())
+                })
                 .ok_or_else(|| AppError::BadRequest("Missing client_id".to_string()))?;
+            let client_secret_for_auth = body.client_secret.as_deref().or_else(|| {
+                basic_client_credentials
+                    .as_ref()
+                    .map(|(_, client_secret)| client_secret.as_str())
+            });
             let subject_token = body
                 .subject_token
                 .as_deref()
@@ -1055,7 +1108,7 @@ async fn token_inner(
                     &state.jwks_cache,
                     &state.http_client,
                     client_id,
-                    body.client_secret.as_deref(),
+                    client_secret_for_auth,
                     subject_token,
                     subject_token_type,
                     provider,
@@ -1079,6 +1132,7 @@ async fn token_inner(
                 let client_secret = body
                     .client_secret
                     .as_deref()
+                    .or(client_secret_for_auth)
                     .ok_or_else(|| AppError::BadRequest("Missing client_secret".to_string()))?;
 
                 let result = token_exchange_service::exchange_token(
@@ -1125,6 +1179,59 @@ async fn token_inner(
                     refresh_token: None,
                     id_token: None,
                     scope: Some(result.scope),
+                    binding_id: None,
+                    issued_token_type: Some(result.issued_token_type),
+                }))
+            } else if subject_token_type == oauth_broker_service::BROKER_SUBJECT_TOKEN_TYPE {
+                // RFC 8693 token exchange against an OauthBrokerBinding.
+                let client_secret = body
+                    .client_secret
+                    .as_deref()
+                    .or(client_secret_for_auth)
+                    .ok_or_else(|| AppError::BadRequest("Missing client_secret".to_string()))?;
+
+                let client =
+                    oauth_service::authenticate_client(&state.db, client_id, Some(client_secret))
+                        .await?;
+                if !client.broker_capability_enabled {
+                    return Err(AppError::ExternalTokenInvalid("invalid_grant".to_string()));
+                }
+
+                let result = oauth_broker_service::exchange_via_binding(
+                    &state.db,
+                    &state.encryption_keys,
+                    &state.jwt_keys,
+                    &state.config,
+                    client_id,
+                    subject_token,
+                    body.scope.as_deref(),
+                )
+                .await?;
+
+                let binding_hash =
+                    crate::models::oauth_broker_binding::hash_binding_id(subject_token);
+                audit_service::log_async(
+                    state.db.clone(),
+                    None,
+                    "oauth_broker_binding_token_refreshed".to_string(),
+                    Some(serde_json::json!({
+                        "client_id": client_id,
+                        "binding_hash": oauth_broker_service::binding_hash_prefix(&binding_hash),
+                        "scope": &result.granted_scope,
+                    })),
+                    None,
+                    None,
+                    None,
+                    None,
+                );
+
+                Ok(Json(TokenResponse {
+                    access_token: result.access_token,
+                    token_type: "Bearer".to_string(),
+                    expires_in: result.expires_in,
+                    refresh_token: None,
+                    id_token: None,
+                    scope: Some(result.granted_scope),
                     binding_id: None,
                     issued_token_type: Some(result.issued_token_type),
                 }))
