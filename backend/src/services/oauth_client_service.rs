@@ -9,9 +9,22 @@ use crate::models::consent::COLLECTION_NAME as CONSENTS;
 use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
 use crate::models::refresh_token::COLLECTION_NAME as REFRESH_TOKENS;
 
-/// Known OIDC scopes supported by NyxID. Used for validation of
+/// Known scopes supported by NyxID. Used for validation of
 /// `allowed_scopes` on OAuth clients.
-pub const KNOWN_OIDC_SCOPES: &[&str] = &["openid", "profile", "email", "roles", "groups", "proxy"];
+///
+/// The list mixes OIDC-standard scopes (openid, profile, email, roles,
+/// groups) with NyxID-specific extensions (proxy, urn:nyxid:scope:*).
+/// `urn:nyxid:scope:broker_binding` opts a client into the OAuth broker
+/// pattern when present in their allowed_scopes.
+pub const KNOWN_OIDC_SCOPES: &[&str] = &[
+    "openid",
+    "profile",
+    "email",
+    "roles",
+    "groups",
+    "proxy",
+    "urn:nyxid:scope:broker_binding",
+];
 
 /// Default allowed scopes for new OAuth clients.
 pub const DEFAULT_ALLOWED_SCOPES: &str = "openid profile email";

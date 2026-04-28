@@ -283,7 +283,8 @@ pub async fn exchange_authorization_code(
         .ok_or_else(|| AppError::BadRequest("OAuth client not found".to_string()))?;
 
     validate_client_secret(&client, client_secret)?;
-    let broker_capability_enabled = client.broker_capability_enabled;
+    let broker_capability_enabled =
+        crate::services::oauth_broker_service::is_broker_client(&client);
 
     // PKCE verification (S256 only)
     if let Some(challenge) = &stored.code_challenge {

@@ -34,6 +34,23 @@ pub const BROKER_SUBJECT_TOKEN_TYPE: &str = "urn:nyxid:params:oauth:token-type:b
 /// the standard RFC 8693 access_token URN.
 pub const ISSUED_TOKEN_TYPE_ACCESS_TOKEN: &str = "urn:ietf:params:oauth:token-type:access_token";
 
+/// Scope that, when present in an OAuth client's `allowed_scopes`, opts the
+/// client into broker-mode token issuance (response carries `binding_id`
+/// instead of `refresh_token`). Equivalent in effect to the per-client
+/// `broker_capability_enabled` flag — both triggers are honored.
+pub const BROKER_BINDING_SCOPE: &str = "urn:nyxid:scope:broker_binding";
+
+/// Returns true if the OAuth client should be treated as broker-capable.
+/// Either the admin flag is set, or the broker-binding scope is in the
+/// client's allowed_scopes (admin still controls scope assignment).
+pub fn is_broker_client(client: &crate::models::oauth_client::OauthClient) -> bool {
+    client.broker_capability_enabled
+        || client
+            .allowed_scopes
+            .split_whitespace()
+            .any(|s| s == BROKER_BINDING_SCOPE)
+}
+
 /// Default TTL (in seconds) for broker-issued access tokens.
 ///
 /// Broker-bound credentials demand fast revocation propagation -- short
@@ -545,7 +562,56 @@ mod tests {
     use crate::crypto::aes::EncryptionKeys;
     use crate::crypto::jwt::JwtKeys;
     use crate::models::oauth_broker_binding::BINDING_ID_PREFIX;
+    use crate::models::oauth_client::OauthClient;
     use crate::test_utils::{connect_test_database, test_app_config, test_encryption_keys};
+
+    fn oauth_client_for_broker_test(
+        broker_capability_enabled: bool,
+        allowed_scopes: &str,
+    ) -> OauthClient {
+        OauthClient {
+            id: "client-test".to_string(),
+            client_name: "Test".to_string(),
+            client_secret_hash: "hash".to_string(),
+            redirect_uris: vec![],
+            allowed_scopes: allowed_scopes.to_string(),
+            grant_types: "authorization_code".to_string(),
+            client_type: "confidential".to_string(),
+            is_active: true,
+            delegation_scopes: String::new(),
+            broker_capability_enabled,
+            created_by: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn is_broker_client_honors_admin_flag() {
+        let client = oauth_client_for_broker_test(true, "openid");
+        assert!(is_broker_client(&client));
+    }
+
+    #[test]
+    fn is_broker_client_honors_broker_binding_scope() {
+        let client =
+            oauth_client_for_broker_test(false, &format!("openid profile {BROKER_BINDING_SCOPE}"));
+        assert!(is_broker_client(&client));
+    }
+
+    #[test]
+    fn is_broker_client_false_without_either_trigger() {
+        let client = oauth_client_for_broker_test(false, "openid profile email");
+        assert!(!is_broker_client(&client));
+    }
+
+    #[test]
+    fn is_broker_client_does_not_match_scope_substring() {
+        // Make sure naive substring match doesn't accidentally trigger.
+        let client =
+            oauth_client_for_broker_test(false, "openid urn:nyxid:scope:broker_binding_NOPE");
+        assert!(!is_broker_client(&client));
+    }
 
     fn unused_jwt_keys() -> JwtKeys {
         JwtKeys {
