@@ -44,6 +44,17 @@ Same surface lives at `/settings/authorizations` (sidebar: **Authorizations**). 
 - `404 Not Found` on user-facing `DELETE /api/v1/users/me/broker-bindings/{hash}` if the binding doesn't belong to the current user. Same status whether it doesn't exist or belongs to someone else.
 - `400 Bad Request` on `GET /oauth/bindings` (reverse-lookup) with no external-subject criteria — that endpoint is filtered-by-criteria, not list-all.
 
+## V2 hardening (operator / integration-side)
+
+These are NyxID-side capabilities that affect how broker integrations are built and deployed, not how the user interacts with bindings. The user surface (CLI + web UI) is the same regardless of which capabilities a deployment has enabled.
+
+- **Sender-constrained access tokens** — broker access tokens can be DPoP-bound (RFC 9449, opt-in per request via `DPoP` header on the token-exchange call) or mTLS-bound (RFC 8705, when the deployment forwards a client cert via the configured `MTLS_CLIENT_CERT_HEADER`). Bound tokens carry a `cnf.jkt` or `cnf.x5t#S256` claim and are rejected at proxy time without the matching proof / cert.
+- **Pushed Authorization Requests** — broker clients can `POST /oauth/par` server-to-server before redirecting the user, so `external_subject_*` parameters never ride in the browser URL or Referer header. Discovery advertises `pushed_authorization_request_endpoint`.
+- **Binding introspection** — `POST /oauth/introspect` (RFC 7662) recognizes `binding_id` values via the explicit `token_type_hint=urn:nyxid:params:oauth:token-type:binding-id` URN or a defensive `bnd_` prefix, and returns active=true with metadata to the owning client. Useful when the holding integration wants to verify a stored binding without doing a full token-exchange round-trip.
+- **Revocation webhooks** — when the OAuth client has a `revocation_webhook_url` + secret configured, NyxID fires an HMAC-SHA256-signed `oauth_broker_binding.revoked` event on every revoke (client / user / reuse-detection cascade). Shrinks the propagation window from "wait for the 5-min access_token to expire" to "fire-and-forget HTTP within seconds." User-facing implication: a well-integrated app will react to a revoke within a couple of seconds rather than minutes.
+
+Discovery metadata (`/.well-known/openid-configuration`, `/.well-known/oauth-authorization-server`) advertises every capability the deployment supports, so integration code should detect rather than hard-code.
+
 ## Related skills
 
 - For OAuth consent / "Authorized Apps", see `references/admin.md`.
