@@ -35,6 +35,7 @@ use crypto::key_provider::KeyProvider;
 use crypto::local_key_provider::LocalKeyProvider;
 use models::mcp_session::McpSessionStore;
 
+use services::dpop_jti_cache::{DPOP_JTI_CACHE_CAPACITY, DPOP_JTI_CACHE_TTL_SECS, DpopJtiCache};
 use services::event_dedup_cache::EventDedupCache;
 use services::node_ws_manager::NodeWsManager;
 use services::provider_token_exchange_service::TokenExchangeCache;
@@ -90,6 +91,8 @@ pub struct AppState {
     pub per_message_edit_limiter: mw::rate_limit::SharedPerMessageEditRateLimiter,
     /// Best-effort idempotency cache for inbound channel events.
     pub event_dedup_cache: Arc<EventDedupCache>,
+    /// Per-process DPoP proof replay cache keyed by proof jti.
+    pub dpop_jti_cache: Arc<DpopJtiCache>,
     /// Active WebSocket passthrough connection count (for resource limiting)
     pub ws_passthrough_count: Arc<std::sync::atomic::AtomicUsize>,
     /// Generic downstream-provider token exchange cache with per-key
@@ -375,6 +378,10 @@ async fn main() {
         config.channel_event_dedup_capacity,
         std::time::Duration::from_secs(config.channel_event_dedup_ttl_secs),
     ));
+    let dpop_jti_cache = Arc::new(DpopJtiCache::new(
+        DPOP_JTI_CACHE_CAPACITY,
+        std::time::Duration::from_secs(DPOP_JTI_CACHE_TTL_SECS),
+    ));
     let per_message_edit_limiter = Arc::new(mw::rate_limit::PerMessageEditRateLimiter::new(
         config.channel_relay_edit_rate_limit_per_second,
         config.channel_relay_edit_rate_limit_burst,
@@ -418,6 +425,7 @@ async fn main() {
         per_channel_event_limiter,
         per_message_edit_limiter,
         event_dedup_cache,
+        dpop_jti_cache,
         ws_passthrough_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         token_exchange_cache: Arc::new(TokenExchangeCache::new()),
         telemetry: telemetry::TelemetryClient::from_config(&config),

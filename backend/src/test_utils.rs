@@ -15,39 +15,58 @@ use crate::models::user::{User, UserType};
 use crate::models::user_endpoint::UserEndpoint;
 use crate::models::user_service::UserService;
 use crate::mw::auth::{AuthMethod, AuthUser};
+use crate::services::dpop_jti_cache::{
+    DPOP_JTI_CACHE_CAPACITY, DPOP_JTI_CACHE_TTL_SECS, DpopJtiCache,
+};
 use crate::services::event_dedup_cache::EventDedupCache;
 use crate::services::node_ws_manager::NodeWsManager;
 use crate::services::provider_token_exchange_service::TokenExchangeCache;
 use crate::services::ssh_service::SshSessionManager;
 
 /// Connect to a fresh per-test MongoDB database. Tries a plain local mongod
-/// (standard port, no auth — matches CI's service container) first, then the
-/// docker-compose override on 27018. Returns `None` if neither is reachable
+/// docker-compose override on 27018 first, then a plain local mongod
+/// (standard port, no auth — matches CI's service container). Returns `None`
+/// if neither is reachable
 /// so integration tests can skip cleanly in environments without a running
 /// MongoDB.
 ///
 /// The probe uses short server-selection / connect timeouts so a missing
-/// MongoDB fails the test in well under a second instead of the driver's
+/// MongoDB fails the test quickly instead of the driver's
 /// 30s default per URI (which previously made absence-of-mongo look like
 /// a ~60s-per-test hang in CI before the tests eventually skipped).
 pub(crate) async fn connect_test_database(prefix: &str) -> Option<mongodb::Database> {
     let db_name = format!("nyxid_test_{prefix}_{}", uuid::Uuid::new_v4());
     let candidates = [
-        format!("mongodb://127.0.0.1:27017/{db_name}"),
         format!("mongodb://nyxid:nyxid_dev_password@127.0.0.1:27018/{db_name}?authSource=admin"),
+        format!("mongodb://127.0.0.1:27017/{db_name}"),
     ];
 
     for uri in candidates {
         let Ok(mut options) = mongodb::options::ClientOptions::parse(&uri).await else {
             continue;
         };
-        options.server_selection_timeout = Some(Duration::from_millis(250));
-        options.connect_timeout = Some(Duration::from_millis(250));
+        options.server_selection_timeout = Some(Duration::from_secs(1));
+        options.connect_timeout = Some(Duration::from_secs(1));
         let Ok(client) = mongodb::Client::with_options(options) else {
             continue;
         };
         let db = client.database(&db_name);
-        if db.run_command(doc! { "ping": 1 }).await.is_ok() {
+        if db.run_command(doc! { "ping": 1 }).await.is_err() {
+            continue;
+        }
+
+        let probe = db.collection::<mongodb::bson::Document>("__probe");
+        let write_ready = tokio::time::timeout(
+            Duration::from_secs(2),
+            probe.insert_one(doc! { "_id": "probe" }),
+        )
+        .await;
+        if matches!(write_ready, Ok(Ok(_))) {
+            let _ = tokio::time::timeout(
+                Duration::from_secs(2),
+                probe.delete_one(doc! { "_id": "probe" }),
+            )
+            .await;
             return Some(db);
         }
     }
@@ -193,6 +212,10 @@ pub(crate) fn test_app_state(db: mongodb::Database) -> AppState {
         event_dedup_cache: Arc::new(EventDedupCache::new(
             config.channel_event_dedup_capacity,
             Duration::from_secs(config.channel_event_dedup_ttl_secs),
+        )),
+        dpop_jti_cache: Arc::new(DpopJtiCache::new(
+            DPOP_JTI_CACHE_CAPACITY,
+            Duration::from_secs(DPOP_JTI_CACHE_TTL_SECS),
         )),
         ws_passthrough_count: Arc::new(AtomicUsize::new(0)),
         token_exchange_cache: Arc::new(TokenExchangeCache::new()),

@@ -329,6 +329,7 @@ pub async fn exchange_authorization_code(
         broker_capability_enabled
             .then_some(access_token_ttl_override_secs)
             .flatten(),
+        None,
     )?;
 
     let (refresh_token_jwt, refresh_jti) =

@@ -63,6 +63,10 @@ pub struct Claims {
     /// True if this token was issued to a service account.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sa: Option<bool>,
+    /// RFC 7800 confirmation claim. Broker-issued DPoP access tokens carry
+    /// `cnf.jkt`, the RFC 7638 thumbprint of the client's DPoP public JWK.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cnf: Option<Cnf>,
     /// True if this token was issued for channel relay callbacks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay: Option<bool>,
@@ -84,6 +88,12 @@ pub struct Claims {
     /// Inherited scope: allow all nodes flag from the agent key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_allow_all_nodes: Option<bool>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Cnf {
+    /// SHA-256 thumbprint of the DPoP proof JWK (RFC 7638).
+    pub jkt: String,
 }
 
 pub const RELAY_REPLY_AUDIENCE: &str = "channel-relay/reply";
@@ -283,6 +293,7 @@ pub fn generate_access_token(
     scope: &str,
     rbac: Option<&RbacClaimData>,
     ttl_override_secs: Option<i64>,
+    dpop_jkt: Option<&str>,
 ) -> Result<String, AppError> {
     let now = Utc::now().timestamp();
 
@@ -302,6 +313,9 @@ pub fn generate_access_token(
         act: None,
         delegated: None,
         sa: None,
+        cnf: dpop_jkt.map(|jkt| Cnf {
+            jkt: jkt.to_string(),
+        }),
         relay: None,
         relay_api_key_id: None,
         relay_api_key_name: None,
@@ -360,6 +374,7 @@ pub fn generate_relay_access_token(
         act: None,
         delegated: None,
         sa: None,
+        cnf: None,
         relay: Some(true),
         relay_api_key_id: Some(agent_scope.api_key_id.clone()),
         relay_api_key_name: Some(agent_scope.api_key_name.clone()),
@@ -464,6 +479,7 @@ pub fn generate_refresh_token(
         act: None,
         delegated: None,
         sa: None,
+        cnf: None,
         relay: None,
         relay_api_key_id: None,
         relay_api_key_name: None,
@@ -510,6 +526,7 @@ pub fn reissue_refresh_token(
         act: None,
         delegated: None,
         sa: None,
+        cnf: None,
         relay: None,
         relay_api_key_id: None,
         relay_api_key_name: None,
@@ -569,6 +586,7 @@ pub fn generate_delegated_access_token(
         }),
         delegated: Some(true),
         sa: None,
+        cnf: None,
         relay: None,
         relay_api_key_id: None,
         relay_api_key_name: None,
@@ -706,6 +724,7 @@ pub fn generate_service_account_token(
         act: None,
         delegated: None,
         sa: Some(true),
+        cnf: None,
         relay: None,
         relay_api_key_id: None,
         relay_api_key_name: None,
@@ -1010,7 +1029,8 @@ mod tests {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
         let token =
-            generate_access_token(&keys, &config, &user_id, "openid profile", None, None).unwrap();
+            generate_access_token(&keys, &config, &user_id, "openid profile", None, None, None)
+                .unwrap();
 
         let claims = verify_token(&keys, &config, &token).unwrap();
         assert_eq!(claims.sub, user_id.to_string());
@@ -1024,7 +1044,8 @@ mod tests {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
         let token =
-            generate_access_token(&keys, &config, &user_id, "openid", None, Some(300)).unwrap();
+            generate_access_token(&keys, &config, &user_id, "openid", None, Some(300), None)
+                .unwrap();
 
         let claims = verify_token(&keys, &config, &token).unwrap();
         assert_eq!(claims.exp - claims.iat, 300);
@@ -1085,6 +1106,7 @@ mod tests {
             act: None,
             delegated: None,
             sa: None,
+            cnf: None,
             relay: None,
             relay_api_key_id: None,
             relay_api_key_name: None,
@@ -1106,7 +1128,8 @@ mod tests {
     fn access_token_has_kid_header() {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
-        let token = generate_access_token(&keys, &config, &user_id, "openid", None, None).unwrap();
+        let token =
+            generate_access_token(&keys, &config, &user_id, "openid", None, None, None).unwrap();
 
         // Decode header without validation to check kid
         let header = jsonwebtoken::decode_header(&token).unwrap();
@@ -1148,7 +1171,7 @@ mod tests {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
         let access_token =
-            generate_access_token(&keys, &config, &user_id, "openid", None, None).unwrap();
+            generate_access_token(&keys, &config, &user_id, "openid", None, None, None).unwrap();
 
         let id_token = generate_id_token(
             &keys,
@@ -1190,6 +1213,7 @@ mod tests {
             act: None,
             delegated: None,
             sa: None,
+            cnf: None,
             relay: None,
             relay_api_key_id: None,
             relay_api_key_name: None,
@@ -1246,7 +1270,8 @@ mod tests {
         // Verify that tokens without act/delegated fields still deserialize
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
-        let token = generate_access_token(&keys, &config, &user_id, "openid", None, None).unwrap();
+        let token =
+            generate_access_token(&keys, &config, &user_id, "openid", None, None, None).unwrap();
 
         let claims = verify_token(&keys, &config, &token).unwrap();
         assert!(claims.act.is_none());
@@ -1323,7 +1348,8 @@ mod tests {
     fn sa_claim_skipped_when_none() {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
-        let token = generate_access_token(&keys, &config, &user_id, "openid", None, None).unwrap();
+        let token =
+            generate_access_token(&keys, &config, &user_id, "openid", None, None, None).unwrap();
 
         let claims = verify_token(&keys, &config, &token).unwrap();
         assert!(claims.sa.is_none());

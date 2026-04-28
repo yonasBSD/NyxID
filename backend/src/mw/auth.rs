@@ -238,6 +238,31 @@ fn path_matches_prefix(path: &str, prefix: &str) -> bool {
             .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
+fn validate_dpop_bound_access(
+    parts: &Parts,
+    state: &AppState,
+    expected_jkt: &str,
+) -> Result<(), AppError> {
+    let proof = parts
+        .headers
+        .get("dpop")
+        .ok_or_else(|| AppError::Unauthorized("DPoP proof required".to_string()))?
+        .to_str()
+        .map_err(|_| AppError::Unauthorized("invalid DPoP proof".to_string()))?;
+    let expected_htu =
+        crate::crypto::dpop::htu_from_base_and_path(&state.config.base_url, parts.uri.path())?;
+    let proof_jkt = crate::crypto::dpop::validate_proof(
+        proof,
+        parts.method.as_str(),
+        &expected_htu,
+        &state.dpop_jti_cache,
+    )?;
+    if proof_jkt != expected_jkt {
+        return Err(AppError::Unauthorized("DPoP cnf mismatch".to_string()));
+    }
+    Ok(())
+}
+
 impl FromRequestParts<AppState> for AuthUser {
     type Rejection = AppError;
 
@@ -258,7 +283,10 @@ impl FromRequestParts<AppState> for AuthUser {
                     AppError::Unauthorized("Invalid authorization header".to_string())
                 })?;
 
-                if let Some(token) = auth_str.strip_prefix("Bearer ") {
+                let bearer_token = auth_str.strip_prefix("Bearer ");
+                let dpop_token = auth_str.strip_prefix("DPoP ");
+                if let Some(token) = bearer_token.or(dpop_token) {
+                    let allow_api_key_fallback = bearer_token.is_some();
                     // Try JWT verification first. If it fails for a reason
                     // other than expiry, fall back to API-key validation so
                     // that OpenAI-compatible clients (which send API keys as
@@ -268,6 +296,9 @@ impl FromRequestParts<AppState> for AuthUser {
                         Ok(claims) => claims,
                         Err(AppError::TokenExpired) => return Err(AppError::TokenExpired),
                         Err(jwt_err) => {
+                            if !allow_api_key_fallback {
+                                return Err(jwt_err);
+                            }
                             match crate::services::key_service::validate_api_key(&state.db, token)
                                 .await
                             {
@@ -326,6 +357,10 @@ impl FromRequestParts<AppState> for AuthUser {
 
                     if claims.token_type != "access" {
                         return Err(AppError::Unauthorized("Expected access token".to_string()));
+                    }
+
+                    if let Some(cnf) = claims.cnf.as_ref() {
+                        validate_dpop_bound_access(parts, state, &cnf.jkt)?;
                     }
 
                     // Check if this is a service account token

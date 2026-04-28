@@ -3372,6 +3372,7 @@ dependencies = [
  "mongodb",
  "nix 0.31.2",
  "open",
+ "p256",
  "pty-process",
  "rand 0.8.5",
  "regex",

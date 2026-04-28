@@ -31,6 +31,7 @@ rand = "0.8.5"
 hex = "0.4.3"
 base64 = "0.22.1"
 rsa = { version = "0.9.10", features = ["pem"] }
+p256 = "0.13"
 totp-rs = { version = "5.7.1", features = ["qr", "gen_secret"] }
 validator = { version = "0.20", features = ["derive"] }
 governor = "0.10"

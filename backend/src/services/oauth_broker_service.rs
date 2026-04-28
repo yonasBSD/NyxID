@@ -60,6 +60,7 @@ pub const BROKER_ACCESS_TTL_SECS: i64 = 300;
 
 pub struct BindingExchangeResult {
     pub access_token: String,
+    pub token_type: String,
     pub expires_in: i64,
     pub granted_scope: String,
     pub issued_token_type: String,
@@ -76,6 +77,7 @@ struct BrokerExchangeContext<'a> {
     client_id: &'a str,
     binding_hash: &'a str,
     requested_scope: Option<&'a str>,
+    dpop_jkt: Option<&'a str>,
 }
 
 enum ExchangeOutcome {
@@ -212,6 +214,9 @@ pub async fn find_active_bindings_by_external_subject(
 /// re-rotating.
 // Broker exchange spans binding lookup, refresh-token rotation, JWT issuance,
 // encryption, and optimistic binding update in one operation.
+// Public service entry point keeps the broker exchange dependencies explicit;
+// grouping them would add an extra one-off request struct without reducing risk.
+#[allow(clippy::too_many_arguments)]
 pub async fn exchange_via_binding(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
@@ -220,6 +225,7 @@ pub async fn exchange_via_binding(
     client_id: &str,
     raw_binding_id: &str,
     requested_scope: Option<&str>,
+    dpop_jkt: Option<&str>,
 ) -> AppResult<BindingExchangeResult> {
     let binding_hash = hash_binding_id(raw_binding_id);
     let ctx = BrokerExchangeContext {
@@ -230,6 +236,7 @@ pub async fn exchange_via_binding(
         client_id,
         binding_hash: &binding_hash,
         requested_scope,
+        dpop_jkt,
     };
 
     for attempt in 0..MAX_BROKER_ROTATION_RETRIES {
@@ -377,6 +384,7 @@ async fn try_exchange_once(ctx: &BrokerExchangeContext<'_>) -> AppResult<Exchang
 
     Ok(ExchangeOutcome::Success(BindingExchangeResult {
         access_token,
+        token_type: broker_access_token_type(ctx.dpop_jkt).to_string(),
         expires_in: BROKER_ACCESS_TTL_SECS,
         granted_scope,
         issued_token_type: ISSUED_TOKEN_TYPE_ACCESS_TOKEN.to_string(),
@@ -444,6 +452,7 @@ async fn try_chain_follow(
 
     Ok(Some(BindingExchangeResult {
         access_token,
+        token_type: broker_access_token_type(ctx.dpop_jkt).to_string(),
         expires_in: BROKER_ACCESS_TTL_SECS,
         granted_scope,
         issued_token_type: ISSUED_TOKEN_TYPE_ACCESS_TOKEN.to_string(),
@@ -468,7 +477,12 @@ async fn mint_broker_access_token(
         granted_scope,
         Some(&rbac_data),
         Some(BROKER_ACCESS_TTL_SECS),
+        ctx.dpop_jkt,
     )
+}
+
+fn broker_access_token_type(dpop_jkt: Option<&str>) -> &'static str {
+    if dpop_jkt.is_some() { "DPoP" } else { "Bearer" }
 }
 
 fn verify_binding_refresh_jwt(
@@ -1547,6 +1561,7 @@ mod tests {
             "client-b",
             &raw_binding_id,
             None,
+            None,
         )
         .await;
         assert!(matches!(
@@ -1631,6 +1646,7 @@ mod tests {
             "client-x",
             &raw_a,
             None,
+            None,
         )
         .await;
 
@@ -1638,6 +1654,75 @@ mod tests {
             result,
             Err(AppError::ExternalTokenInvalid(message)) if message == "invalid_grant"
         ));
+    }
+
+    #[tokio::test]
+    async fn exchange_via_binding_sets_cnf_for_dpop_access_token() {
+        let Some(db) = connect_test_database("broker_dpop_cnf").await else {
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let (jwt_keys, config) = real_jwt_keys_and_config();
+        let user_id = Uuid::new_v4().to_string();
+        let raw_binding_id = generate_binding_id();
+        let (refresh_jwt, refresh) =
+            insert_refresh_token_jwt(&db, &jwt_keys, &config, "client-dpop", &user_id).await;
+
+        insert_binding(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &raw_binding_id,
+                client_id: "client-dpop",
+                user_id: &user_id,
+                refresh_token_jti: &refresh.jti,
+                refresh_token: &refresh_jwt,
+                scopes: vec!["openid".to_string(), "profile".to_string()],
+                created_at: Utc::now(),
+                revoked: false,
+                revoke_reason: None,
+            },
+        )
+        .await;
+
+        let signing_key = p256::ecdsa::SigningKey::random(&mut rand::rngs::OsRng);
+        let private_pem = {
+            use p256::pkcs8::{EncodePrivateKey, LineEnding};
+            signing_key
+                .to_pkcs8_pem(LineEnding::LF)
+                .expect("encode P-256 private key")
+        };
+        let encoding_key = jsonwebtoken::EncodingKey::from_ec_pem(private_pem.as_bytes())
+            .expect("EC encoding key");
+        let jwt_jwk = jsonwebtoken::jwk::Jwk::from_encoding_key(
+            &encoding_key,
+            jsonwebtoken::Algorithm::ES256,
+        )
+        .expect("derive public JWK");
+        let jwk: crate::crypto::dpop::Jwk =
+            serde_json::from_value(serde_json::to_value(jwt_jwk).expect("JWK JSON"))
+                .expect("DPoP JWK");
+        let jkt = crate::crypto::dpop::jwk_thumbprint(&jwk);
+
+        let result = exchange_via_binding(
+            &db,
+            &encryption_keys,
+            &jwt_keys,
+            &config,
+            "client-dpop",
+            &raw_binding_id,
+            Some("openid"),
+            Some(&jkt),
+        )
+        .await
+        .expect("exchange via DPoP-bound binding");
+
+        assert_eq!(result.token_type, "DPoP");
+        let claims = jwt::verify_token(&jwt_keys, &config, &result.access_token)
+            .expect("valid access token");
+        assert_eq!(claims.token_type, "access");
+        assert_eq!(claims.scope, "openid");
+        assert_eq!(claims.cnf.expect("cnf claim").jkt, jkt);
     }
 
     #[tokio::test]
@@ -1701,6 +1786,7 @@ mod tests {
             client_id: "client-x",
             binding_hash: &binding_hash,
             requested_scope: Some("openid"),
+            dpop_jkt: None,
         };
         let result = try_chain_follow(&ctx)
             .await
@@ -1768,6 +1854,7 @@ mod tests {
             &config,
             "client-x",
             &raw_binding_id,
+            None,
             None,
         )
         .await;
@@ -1886,6 +1973,7 @@ mod tests {
             &config,
             "client-x",
             &raw_one,
+            None,
             None,
         )
         .await;

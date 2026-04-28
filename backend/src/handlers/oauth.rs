@@ -1460,6 +1460,25 @@ async fn token_inner(
                     return Err(AppError::ExternalTokenInvalid("invalid_grant".to_string()));
                 }
 
+                let dpop_jkt = match headers.get("dpop") {
+                    Some(value) => {
+                        let proof = value.to_str().map_err(|_| {
+                            AppError::Unauthorized("invalid DPoP proof".to_string())
+                        })?;
+                        let htu = crate::crypto::dpop::htu_from_base_and_path(
+                            &state.config.base_url,
+                            "/oauth/token",
+                        )?;
+                        Some(crate::crypto::dpop::validate_proof(
+                            proof,
+                            "POST",
+                            &htu,
+                            &state.dpop_jti_cache,
+                        )?)
+                    }
+                    None => None,
+                };
+
                 let result = oauth_broker_service::exchange_via_binding(
                     &state.db,
                     &state.encryption_keys,
@@ -1468,6 +1487,7 @@ async fn token_inner(
                     client_id,
                     subject_token,
                     body.scope.as_deref(),
+                    dpop_jkt.as_deref(),
                 )
                 .await?;
 
@@ -1482,6 +1502,9 @@ async fn token_inner(
                         "binding_hash": oauth_broker_service::binding_hash_prefix(&binding_hash),
                         "scope": &result.granted_scope,
                         "via_chain_follow": result.via_chain_follow,
+                        "dpop_jkt": dpop_jkt
+                            .as_deref()
+                            .map(|jkt| jkt.chars().take(16).collect::<String>()),
                     })),
                     None,
                     None,
@@ -1491,7 +1514,7 @@ async fn token_inner(
 
                 Ok(Json(TokenResponse {
                     access_token: result.access_token,
-                    token_type: "Bearer".to_string(),
+                    token_type: result.token_type,
                     expires_in: result.expires_in,
                     refresh_token: None,
                     id_token: None,
