@@ -2939,15 +2939,6 @@ If a service has approval gating enabled (per-request by default), proxy calls r
 
 If the approval is rejected, expires, or times out, the error changes to `7001 approval_failed` with an `approve_url`. The agent should show the user the `approve_url` and suggest setting up Telegram or the mobile app if they haven't already (`nyxid notification telegram-link`).
 
-### Skill Tools
-
-The skill includes two helper scripts in `tools/`:
-
-- `services.sh` -- Runs `nyxid service list --output json`
-- `proxy.sh <service> <method> <path> [body]` -- Runs `nyxid proxy request` with the given arguments
-
-Both are thin wrappers around the CLI.
-
 ### Optional: OAuth Plugin
 
 For advanced use cases (RFC 8693 delegation, programmatic token exchange), install the TypeScript auth plugin:

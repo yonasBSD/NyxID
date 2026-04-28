@@ -44,7 +44,7 @@ You need NyxID auth before any of the steps below will work. Pick the route that
 **Using the `nyxid` CLI:** install it if you don't have it, then run `nyxid login`:
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/tools/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/scripts/install.sh)"
 source ~/.cargo/env
 nyxid login --base-url <BASE_URL>
 ```

@@ -328,7 +328,7 @@ a `NodeProxyTimeout` on the first WS upgrade. If the CLI hangs on
 connect, upgrade the node agent and restart the daemon:
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/tools/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/scripts/install.sh)"
 nyxid node daemon restart
 ```
 

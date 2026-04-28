@@ -12,6 +12,22 @@ const GITHUB_RAW: &str = "https://raw.githubusercontent.com/ChronoAIProject/NyxI
 /// Path within the repo to the canonical skill files.
 const SKILL_DIR: &str = "skills/nyxid";
 
+/// Reference files split out of SKILL.md per the Anthropic Agent Skills spec.
+/// These are fetched from GitHub and written under the skill's `references/`
+/// directory at install time. Keep in sync with the "Reference map" table in
+/// `skills/nyxid/SKILL.md`.
+const REFERENCE_FILES: &[&str] = &[
+    "services",
+    "proxy",
+    "managing",
+    "organizations",
+    "nodes",
+    "notifications",
+    "channels",
+    "openclaw",
+    "admin",
+];
+
 /// The default hosted NyxID URL used in the repo's SKILL.md.
 /// Replaced with the user's actual server URL at install time.
 const DEFAULT_HOSTED_URL: &str = "https://nyx-api.chrono-ai.fun";
@@ -137,6 +153,55 @@ fn home_dir() -> Result<PathBuf> {
     dirs::home_dir().context("Could not determine home directory")
 }
 
+/// Write every reference file from `content.references` under `<dir>/references/<name>`.
+fn write_references(dir: &Path, content: &SkillContent) -> Result<()> {
+    for (name, body) in &content.references {
+        write_file(&dir.join("references").join(name), body)?;
+    }
+    Ok(())
+}
+
+/// Remove legacy skill-layout artifacts left behind by older CLI binaries.
+///
+/// Pre-spec layout dropped `tools/{install,services,proxy}.sh` next to
+/// `SKILL.md`. The current spec uses `scripts/` for the same files. We only
+/// remove files we know we previously wrote, then attempt to remove the
+/// directory if it ends up empty -- this avoids nuking anything a user
+/// hand-placed under `tools/`.
+fn cleanup_legacy_layout(dir: &Path) {
+    let tools_dir = dir.join("tools");
+    if !tools_dir.exists() || tools_dir.is_symlink() {
+        return;
+    }
+
+    let legacy_files = ["install.sh", "services.sh", "proxy.sh"];
+    let mut any_removed = false;
+    for name in legacy_files {
+        let path = tools_dir.join(name);
+        if !path.exists() {
+            continue;
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => {
+                eprintln!("  Removed legacy {}", path.display());
+                any_removed = true;
+            }
+            Err(e) => {
+                eprintln!(
+                    "  Warning: could not remove legacy {} ({e})",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    if any_removed {
+        // Best-effort: only succeeds if the directory is now empty. If the
+        // user hand-placed extra files we leave the directory in place.
+        let _ = std::fs::remove_dir(&tools_dir);
+    }
+}
+
 fn cargo_home_dir(home: &Path) -> PathBuf {
     std::env::var("CARGO_HOME")
         .map(PathBuf::from)
@@ -248,9 +313,11 @@ struct SkillContent {
     skill_md: String,
     playbook: String,
     post_install: String,
+    /// `(filename, body)` pairs for every reference file under `references/`,
+    /// excluding `playbook.md` (fetched from the live server) and
+    /// `post-install.md` (printed inline, not written to the references dir).
+    references: Vec<(String, String)>,
     install_sh: String,
-    services_sh: String,
-    proxy_sh: String,
 }
 
 async fn fetch_skill_content(base_url: &str) -> Result<SkillContent> {
@@ -260,24 +327,27 @@ async fn fetch_skill_content(base_url: &str) -> Result<SkillContent> {
     let skill_md_raw = fetch_github(&format!("{SKILL_DIR}/SKILL.md")).await?;
     let skill_md = substitute_urls(&skill_md_raw, base_url, &dashboard);
 
-    let post_install = fetch_github(&format!("{SKILL_DIR}/POST_INSTALL.md"))
+    let post_install = fetch_github(&format!("{SKILL_DIR}/references/post-install.md"))
         .await
         .unwrap_or_default();
+
+    let mut references = Vec::with_capacity(REFERENCE_FILES.len());
+    for name in REFERENCE_FILES {
+        let body = fetch_github(&format!("{SKILL_DIR}/references/{name}.md")).await?;
+        references.push((format!("{name}.md"), body));
+    }
 
     eprintln!("  Fetching playbook from {base_url}/llms.txt...");
     let playbook = fetch_playbook(base_url).await?;
 
-    let install_sh = fetch_github(&format!("{SKILL_DIR}/tools/install.sh")).await?;
-    let services_sh = fetch_github(&format!("{SKILL_DIR}/tools/services.sh")).await?;
-    let proxy_sh = fetch_github(&format!("{SKILL_DIR}/tools/proxy.sh")).await?;
+    let install_sh = fetch_github(&format!("{SKILL_DIR}/scripts/install.sh")).await?;
 
     Ok(SkillContent {
         skill_md,
         playbook,
         post_install,
+        references,
         install_sh,
-        services_sh,
-        proxy_sh,
     })
 }
 
@@ -445,6 +515,8 @@ async fn install_claude_code(content: &SkillContent) -> Result<()> {
 
     write_file(&dir.join("SKILL.md"), &content.skill_md)?;
     write_file(&dir.join("references/playbook.md"), &content.playbook)?;
+    write_references(&dir, content)?;
+    cleanup_legacy_layout(&dir);
 
     eprintln!();
     print_post_install(AiToolTarget::ClaudeCode, content);
@@ -468,6 +540,8 @@ fn install_codex(content: &SkillContent) -> Result<()> {
 
     write_file(&dir.join("SKILL.md"), &content.skill_md)?;
     write_file(&dir.join("references/playbook.md"), &content.playbook)?;
+    write_references(&dir, content)?;
+    cleanup_legacy_layout(&dir);
 
     eprintln!();
     print_post_install(AiToolTarget::Codex, content);
@@ -479,16 +553,15 @@ fn install_openclaw(content: &SkillContent) -> Result<()> {
 
     write_file(&dir.join("SKILL.md"), &content.skill_md)?;
     write_file(&dir.join("references/playbook.md"), &content.playbook)?;
-    write_file(&dir.join("tools/install.sh"), &content.install_sh)?;
-    write_file(&dir.join("tools/services.sh"), &content.services_sh)?;
-    write_file(&dir.join("tools/proxy.sh"), &content.proxy_sh)?;
+    write_references(&dir, content)?;
+    write_file(&dir.join("scripts/install.sh"), &content.install_sh)?;
 
     #[cfg(unix)]
     {
-        make_executable(&dir.join("tools/install.sh"))?;
-        make_executable(&dir.join("tools/services.sh"))?;
-        make_executable(&dir.join("tools/proxy.sh"))?;
+        make_executable(&dir.join("scripts/install.sh"))?;
     }
+
+    cleanup_legacy_layout(&dir);
 
     eprintln!();
     print_post_install(AiToolTarget::Openclaw, content);
@@ -683,12 +756,16 @@ mod tests {
     }
 
     fn temp_test_dir() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!(
-            "nyxid-ai-setup-tests-{}-{suffix}",
+            "nyxid-ai-setup-tests-{}-{suffix}-{n}",
             std::process::id()
         ))
     }
@@ -702,5 +779,76 @@ mod tests {
     fn skill_paths_generic_returns_empty() {
         let paths = super::skill_paths(super::AiToolTarget::Generic).unwrap();
         assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn cleanup_legacy_layout_removes_known_legacy_files_and_empty_dir() {
+        let dir = temp_test_dir();
+        let tools = dir.join("tools");
+        fs::create_dir_all(&tools).unwrap();
+        fs::write(tools.join("install.sh"), "#!/bin/sh\n").unwrap();
+        fs::write(tools.join("services.sh"), "#!/bin/sh\n").unwrap();
+        fs::write(tools.join("proxy.sh"), "#!/bin/sh\n").unwrap();
+
+        super::cleanup_legacy_layout(&dir);
+
+        assert!(!tools.exists(), "empty tools/ dir should be removed");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn cleanup_legacy_layout_preserves_user_files_and_directory() {
+        let dir = temp_test_dir();
+        let tools = dir.join("tools");
+        fs::create_dir_all(&tools).unwrap();
+        fs::write(tools.join("install.sh"), "#!/bin/sh\n").unwrap();
+        let user_file = tools.join("my-custom.sh");
+        fs::write(&user_file, "#!/bin/sh\n# user content\n").unwrap();
+
+        super::cleanup_legacy_layout(&dir);
+
+        assert!(
+            !tools.join("install.sh").exists(),
+            "known legacy file should be removed"
+        );
+        assert!(user_file.exists(), "user-placed file must be preserved");
+        assert!(
+            tools.exists(),
+            "tools/ dir must remain when user files are present"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn cleanup_legacy_layout_skips_symlinks() {
+        let dir = temp_test_dir();
+        fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("scripts");
+        fs::create_dir_all(&real).unwrap();
+        fs::write(real.join("install.sh"), "#!/bin/sh\nreal\n").unwrap();
+
+        let tools = dir.join("tools");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("scripts", &tools).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir("scripts", &tools).unwrap();
+
+        super::cleanup_legacy_layout(&dir);
+
+        assert!(tools.is_symlink(), "symlinked tools/ must not be touched");
+        assert!(real.join("install.sh").exists(), "real target untouched");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn cleanup_legacy_layout_no_op_when_tools_missing() {
+        let dir = temp_test_dir();
+        fs::create_dir_all(&dir).unwrap();
+
+        // Should not panic when there is no tools/ to clean up.
+        super::cleanup_legacy_layout(&dir);
+
+        assert!(!dir.join("tools").exists());
+        fs::remove_dir_all(&dir).unwrap();
     }
 }
