@@ -1,4 +1,4 @@
-use std::sync::{Arc, atomic::AtomicUsize};
+use std::sync::{Arc, OnceLock, atomic::AtomicUsize};
 use std::time::Duration;
 
 use mongodb::bson::doc;
@@ -168,15 +168,53 @@ pub(crate) fn test_encryption_keys() -> EncryptionKeys {
     EncryptionKeys::from_config(&test_app_config())
 }
 
+/// Returns a process-wide RSA `JwtKeys` for tests, generated lazily once.
+///
+/// Generating an RSA keypair via the pure-Rust `rsa` crate is the dominant
+/// cost in many test paths (tens of seconds per call, even at 2048 bits, in
+/// debug profiles). Tests don't need production-grade key sizes or unique
+/// keys per test, so we share one 2048-bit pair across the entire test
+/// binary and clone the cheap `JwtKeys` handle for each caller.
+pub(crate) fn cached_test_jwt_keys() -> JwtKeys {
+    static CACHED: OnceLock<JwtKeys> = OnceLock::new();
+    CACHED.get_or_init(generate_test_jwt_keys).clone()
+}
+
+fn generate_test_jwt_keys() -> JwtKeys {
+    use jsonwebtoken::{DecodingKey, EncodingKey};
+    use rsa::pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey};
+    use rsa::traits::PublicKeyParts;
+    use sha2::{Digest, Sha256};
+
+    let mut rng = rand::thread_rng();
+    let private_key =
+        rsa::RsaPrivateKey::new(&mut rng, 2048).expect("generate test RSA private key");
+    let public_key = private_key.to_public_key();
+
+    let private_pem = private_key
+        .to_pkcs1_pem(rsa::pkcs1::LineEnding::LF)
+        .expect("encode test RSA private PEM");
+    let public_pem = public_key
+        .to_pkcs1_pem(rsa::pkcs1::LineEnding::LF)
+        .expect("encode test RSA public PEM");
+
+    let n_bytes = public_key.n().to_bytes_be();
+    let kid = hex::encode(&Sha256::digest(&n_bytes)[..8]);
+
+    JwtKeys {
+        encoding: EncodingKey::from_rsa_pem(private_pem.as_bytes())
+            .expect("build test RSA encoding key"),
+        decoding: DecodingKey::from_rsa_pem(public_pem.as_bytes())
+            .expect("build test RSA decoding key"),
+        kid,
+    }
+}
+
 /// Build a minimal `AppState` for handler tests.
 pub(crate) fn test_app_state(db: mongodb::Database) -> AppState {
-    let mut config = test_app_config();
-    let temp_dir = tempfile::tempdir().expect("create temp dir for jwt keys");
-    config.jwt_private_key_path = temp_dir.path().join("private.pem").display().to_string();
-    config.jwt_public_key_path = temp_dir.path().join("public.pem").display().to_string();
-
+    let config = test_app_config();
     let http_client = reqwest::Client::new();
-    let jwt_keys = JwtKeys::from_config(&config).expect("build test jwt keys");
+    let jwt_keys = cached_test_jwt_keys();
 
     AppState {
         db,

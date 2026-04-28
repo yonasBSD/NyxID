@@ -924,7 +924,9 @@ mod tests {
     use crate::crypto::jwt::JwtKeys;
     use crate::models::oauth_broker_binding::BINDING_ID_PREFIX;
     use crate::models::oauth_client::OauthClient;
-    use crate::test_utils::{connect_test_database, test_app_config, test_encryption_keys};
+    use crate::test_utils::{
+        cached_test_jwt_keys, connect_test_database, test_app_config, test_encryption_keys,
+    };
 
     fn oauth_client_for_broker_test(
         broker_capability_enabled: bool,
@@ -985,12 +987,12 @@ mod tests {
     }
 
     fn real_jwt_keys_and_config() -> (JwtKeys, AppConfig) {
-        let mut config = test_app_config();
-        let temp_dir = tempfile::tempdir().expect("create temp dir for jwt keys");
-        config.jwt_private_key_path = temp_dir.path().join("private.pem").display().to_string();
-        config.jwt_public_key_path = temp_dir.path().join("public.pem").display().to_string();
-        let keys = JwtKeys::from_config(&config).expect("build test jwt keys");
-        (keys, config)
+        // Process-wide cached keypair: avoids paying multi-second RSA
+        // generation per test. The returned config still carries the
+        // default placeholder paths from `test_app_config`, but nothing in
+        // the broker exchange paths reads those fields after `JwtKeys` is
+        // constructed.
+        (cached_test_jwt_keys(), test_app_config())
     }
 
     fn refresh_token_doc(jti: &str, client_id: &str, user_id: &str, revoked: bool) -> RefreshToken {

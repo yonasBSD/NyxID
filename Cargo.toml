@@ -19,3 +19,20 @@ uuid = { version = "1.23", features = ["v4", "serde"] }
 chrono = { version = "0.4.43", features = ["serde"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+
+# Pure-Rust RSA keygen and big-int math are catastrophically slow when compiled
+# without optimizations (a single 4096-bit keypair can take 30-120s in `cargo
+# test`'s default debug profile). Compile just these crates with full opts so
+# tests that mint JWT keys finish in seconds while the rest of the workspace
+# stays in fast-link debug.
+[profile.dev.package.rsa]
+opt-level = 3
+
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+
+[profile.test.package.rsa]
+opt-level = 3
+
+[profile.test.package.num-bigint-dig]
+opt-level = 3
