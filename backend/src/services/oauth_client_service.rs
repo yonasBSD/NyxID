@@ -1,6 +1,6 @@
 use chrono::Utc;
 use futures::TryStreamExt;
-use mongodb::bson::{self, doc};
+use mongodb::bson::{self, Binary, doc, spec::BinarySubtype};
 use uuid::Uuid;
 
 use crate::crypto::token::{generate_random_token, hash_token};
@@ -120,6 +120,8 @@ pub async fn seed_default_clients(db: &mongodb::Database) -> AppResult<()> {
         is_active: true,
         delegation_scopes: String::new(),
         broker_capability_enabled: false,
+        revocation_webhook_url: None,
+        revocation_webhook_secret_encrypted: None,
         created_by: Some("system".to_string()),
         created_at: now,
         updated_at: now,
@@ -223,6 +225,8 @@ pub async fn create_client(
     delegation_scopes: &str,
     allowed_scopes: &str,
     broker_capability_enabled: bool,
+    revocation_webhook_url: Option<&str>,
+    revocation_webhook_secret_encrypted: Option<Vec<u8>>,
 ) -> AppResult<(OauthClient, Option<String>)> {
     let client_id = Uuid::new_v4().to_string();
     let now = Utc::now();
@@ -246,6 +250,8 @@ pub async fn create_client(
         is_active: true,
         delegation_scopes: delegation_scopes.to_string(),
         broker_capability_enabled,
+        revocation_webhook_url: revocation_webhook_url.map(str::to_string),
+        revocation_webhook_secret_encrypted,
         created_by: Some(created_by.to_string()),
         created_at: now,
         updated_at: now,
@@ -345,6 +351,8 @@ pub async fn update_client_for_creator(
     delegation_scopes: Option<&str>,
     allowed_scopes: Option<&str>,
     broker_capability_enabled: Option<bool>,
+    revocation_webhook_url: Option<&str>,
+    revocation_webhook_secret_encrypted: Option<Vec<u8>>,
 ) -> AppResult<OauthClient> {
     let mut set_doc = doc! {
         "updated_at": bson::DateTime::from_chrono(Utc::now()),
@@ -373,6 +381,20 @@ pub async fn update_client_for_creator(
 
     if let Some(enabled) = broker_capability_enabled {
         set_doc.insert("broker_capability_enabled", enabled);
+    }
+
+    if let Some(url) = revocation_webhook_url {
+        set_doc.insert("revocation_webhook_url", url);
+    }
+
+    if let Some(secret) = revocation_webhook_secret_encrypted {
+        set_doc.insert(
+            "revocation_webhook_secret_encrypted",
+            Binary {
+                subtype: BinarySubtype::Generic,
+                bytes: secret,
+            },
+        );
     }
 
     let result = db
@@ -635,6 +657,8 @@ mod tests {
                 is_active: true,
                 delegation_scopes: String::new(),
                 broker_capability_enabled: false,
+                revocation_webhook_url: None,
+                revocation_webhook_secret_encrypted: None,
                 created_by: Some("dynamic_registration".to_string()),
                 created_at: now,
                 updated_at: now,
@@ -664,6 +688,8 @@ mod tests {
                     is_active: true,
                     delegation_scopes: String::new(),
                     broker_capability_enabled: false,
+                    revocation_webhook_url: None,
+                    revocation_webhook_secret_encrypted: None,
                     created_by: Some(created_by.to_string()),
                     created_at: now,
                     updated_at: now,
@@ -833,6 +859,8 @@ mod tests {
                     is_active: true,
                     delegation_scopes: String::new(),
                     broker_capability_enabled: false,
+                    revocation_webhook_url: None,
+                    revocation_webhook_secret_encrypted: None,
                     created_by: Some("system".to_string()),
                     created_at: now,
                     updated_at: now,

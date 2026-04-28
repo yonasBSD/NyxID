@@ -10,6 +10,7 @@ use chrono::{Duration, Utc};
 use futures::TryStreamExt;
 use mongodb::bson::{self, Binary, doc, spec::BinarySubtype};
 use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
+use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::config::AppConfig;
@@ -21,7 +22,9 @@ use crate::models::oauth_broker_binding::{
     COLLECTION_NAME as OAUTH_BROKER_BINDINGS, OauthBrokerBinding, generate_binding_id,
     hash_binding_id,
 };
+use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
 use crate::models::refresh_token::{COLLECTION_NAME as REFRESH_TOKENS, RefreshToken};
+use crate::services::cae_webhook_service::{self, RevocationEvent};
 
 /// Subject-token-type URN identifying a broker binding handle in RFC 8693
 /// token exchange requests. The `params:oauth` infix mirrors the IETF URN
@@ -71,7 +74,8 @@ const MAX_BROKER_ROTATION_RETRIES: usize = 3;
 
 struct BrokerExchangeContext<'a> {
     db: &'a mongodb::Database,
-    encryption_keys: &'a EncryptionKeys,
+    encryption_keys: Arc<EncryptionKeys>,
+    http_client: &'a reqwest::Client,
     jwt_keys: &'a JwtKeys,
     config: &'a AppConfig,
     client_id: &'a str,
@@ -220,7 +224,8 @@ pub async fn find_active_bindings_by_external_subject(
 #[allow(clippy::too_many_arguments)]
 pub async fn exchange_via_binding(
     db: &mongodb::Database,
-    encryption_keys: &EncryptionKeys,
+    encryption_keys: Arc<EncryptionKeys>,
+    http_client: &reqwest::Client,
     jwt_keys: &JwtKeys,
     config: &AppConfig,
     client_id: &str,
@@ -233,6 +238,7 @@ pub async fn exchange_via_binding(
     let ctx = BrokerExchangeContext {
         db,
         encryption_keys,
+        http_client,
         jwt_keys,
         config,
         client_id,
@@ -301,7 +307,7 @@ async fn try_exchange_once(ctx: &BrokerExchangeContext<'_>) -> AppResult<Exchang
         if refresh_token_doc.replaced_by.is_some() {
             return Ok(ExchangeOutcome::ChainFollow);
         }
-        cascade_revoke_reuse_detected(db, &binding, binding_hash).await?;
+        cascade_revoke_reuse_detected(ctx, &binding, binding_hash).await?;
         return Ok(ExchangeOutcome::ReuseDetected);
     }
 
@@ -347,7 +353,7 @@ async fn try_exchange_once(ctx: &BrokerExchangeContext<'_>) -> AppResult<Exchang
         .await?;
     if revoke_result.matched_count == 0 {
         return handle_refresh_revoke_conflict(
-            db,
+            ctx,
             &binding,
             binding_hash,
             &refresh_token_doc.id,
@@ -514,12 +520,13 @@ async fn cleanup_refresh_token(db: &mongodb::Database, refresh_token_id: &str) -
 }
 
 async fn handle_refresh_revoke_conflict(
-    db: &mongodb::Database,
+    ctx: &BrokerExchangeContext<'_>,
     binding: &OauthBrokerBinding,
     binding_hash: &str,
     refresh_token_id: &str,
     new_refresh_id: &str,
 ) -> AppResult<ExchangeOutcome> {
+    let db = ctx.db;
     cleanup_refresh_token(db, new_refresh_id).await?;
     let current = db
         .collection::<RefreshToken>(REFRESH_TOKENS)
@@ -531,20 +538,27 @@ async fn handle_refresh_revoke_conflict(
         if current.replaced_by.is_some() {
             return Ok(ExchangeOutcome::ChainFollow);
         }
-        cascade_revoke_reuse_detected(db, binding, binding_hash).await?;
+        cascade_revoke_reuse_detected(ctx, binding, binding_hash).await?;
         return Ok(ExchangeOutcome::ReuseDetected);
     }
     Ok(ExchangeOutcome::ChainFollow)
 }
 
 async fn cascade_revoke_reuse_detected(
-    db: &mongodb::Database,
+    ctx: &BrokerExchangeContext<'_>,
     binding: &OauthBrokerBinding,
     binding_hash: &str,
 ) -> AppResult<()> {
-    let cascade_count =
-        revoke_bindings_for_user_client(db, &binding.client_id, &binding.user_id, "reuse_detected")
-            .await?;
+    let db = ctx.db;
+    let cascade_count = revoke_bindings_for_user_client(
+        db,
+        ctx.encryption_keys.clone(),
+        ctx.http_client,
+        &binding.client_id,
+        &binding.user_id,
+        "reuse_detected",
+    )
+    .await?;
     crate::services::audit_service::log_async(
         db.clone(),
         Some(binding.user_id.clone()),
@@ -573,19 +587,29 @@ async fn cascade_revoke_reuse_detected(
 /// Returns the number of bindings modified.
 pub async fn revoke_bindings_for_user_client(
     db: &mongodb::Database,
+    encryption_keys: Arc<EncryptionKeys>,
+    http_client: &reqwest::Client,
     client_id: &str,
     user_id: &str,
     reason: &str,
 ) -> AppResult<u64> {
     let now = Utc::now();
+    let filter = doc! {
+        "client_id": client_id,
+        "user_id": user_id,
+        "revoked": false,
+    };
+    let bindings: Vec<OauthBrokerBinding> = db
+        .collection::<OauthBrokerBinding>(OAUTH_BROKER_BINDINGS)
+        .find(filter.clone())
+        .await?
+        .try_collect()
+        .await?;
+
     let result = db
         .collection::<OauthBrokerBinding>(OAUTH_BROKER_BINDINGS)
         .update_many(
-            doc! {
-                "client_id": client_id,
-                "user_id": user_id,
-                "revoked": false,
-            },
+            filter,
             doc! { "$set": {
                 "revoked": true,
                 "revoked_at": bson::DateTime::from_chrono(now),
@@ -593,6 +617,22 @@ pub async fn revoke_bindings_for_user_client(
             }},
         )
         .await?;
+
+    let revoke_source = revoke_source_for_reason(reason);
+    for binding in bindings {
+        spawn_revocation_webhook(
+            db.clone(),
+            encryption_keys.clone(),
+            http_client.clone(),
+            RevocationWebhookDispatch {
+                binding_hash: binding.id,
+                client_id: binding.client_id,
+                revoke_source,
+                reason: Some(reason.to_string()),
+                revoked_at: now,
+            },
+        );
+    }
 
     Ok(result.modified_count)
 }
@@ -605,6 +645,8 @@ pub async fn revoke_bindings_for_user_client(
 /// revoked.
 pub async fn revoke_binding_by_client(
     db: &mongodb::Database,
+    encryption_keys: Arc<EncryptionKeys>,
+    http_client: &reqwest::Client,
     client_id: &str,
     raw_binding_id: &str,
     reason: &str,
@@ -646,6 +688,19 @@ pub async fn revoke_binding_by_client(
         )
         .await?;
 
+    spawn_revocation_webhook(
+        db.clone(),
+        encryption_keys.clone(),
+        http_client.clone(),
+        RevocationWebhookDispatch {
+            binding_hash: binding.id,
+            client_id: binding.client_id,
+            revoke_source: "client",
+            reason: Some(reason.to_string()),
+            revoked_at: now,
+        },
+    );
+
     Ok(true)
 }
 
@@ -656,6 +711,8 @@ pub async fn revoke_binding_by_client(
 /// a 404 -- that's safe because the user can only see their own bindings.
 pub async fn revoke_binding_by_user(
     db: &mongodb::Database,
+    encryption_keys: Arc<EncryptionKeys>,
+    http_client: &reqwest::Client,
     user_id: &str,
     binding_hash: &str,
     reason: &str,
@@ -693,7 +750,106 @@ pub async fn revoke_binding_by_user(
         )
         .await?;
 
+    spawn_revocation_webhook(
+        db.clone(),
+        encryption_keys.clone(),
+        http_client.clone(),
+        RevocationWebhookDispatch {
+            binding_hash: binding.id,
+            client_id: binding.client_id,
+            revoke_source: "user",
+            reason: Some(reason.to_string()),
+            revoked_at: now,
+        },
+    );
+
     Ok(())
+}
+
+fn revoke_source_for_reason(reason: &str) -> &'static str {
+    match reason {
+        "client" | "client_revoked" => "client",
+        "user" | "user_revoked" => "user",
+        "reuse_detected" => "reuse_detected",
+        "admin" | "admin_revoked" => "admin",
+        _ => "admin",
+    }
+}
+
+struct RevocationWebhookDispatch {
+    binding_hash: String,
+    client_id: String,
+    revoke_source: &'static str,
+    reason: Option<String>,
+    revoked_at: chrono::DateTime<chrono::Utc>,
+}
+
+fn spawn_revocation_webhook(
+    db: mongodb::Database,
+    encryption_keys: Arc<EncryptionKeys>,
+    http_client: reqwest::Client,
+    dispatch: RevocationWebhookDispatch,
+) {
+    tokio::spawn(async move {
+        let binding_hash = dispatch.binding_hash;
+        let client_id = dispatch.client_id;
+        let client = match db
+            .collection::<OauthClient>(OAUTH_CLIENTS)
+            .find_one(doc! { "_id": &client_id })
+            .await
+        {
+            Ok(Some(client)) => client,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(
+                    client_id = %client_id,
+                    error = %error,
+                    "failed to load OAuth client for CAE webhook"
+                );
+                return;
+            }
+        };
+
+        if client.revocation_webhook_url.is_none() {
+            return;
+        }
+        let Some(encrypted_secret) = client.revocation_webhook_secret_encrypted.as_ref() else {
+            return;
+        };
+        let raw_secret = match encryption_keys.decrypt(encrypted_secret).await {
+            Ok(secret) => secret,
+            Err(error) => {
+                tracing::warn!(
+                    client_id = %client_id,
+                    binding_hash = %binding_hash_prefix(&binding_hash),
+                    error = %error,
+                    "failed to decrypt CAE webhook secret"
+                );
+                return;
+            }
+        };
+        let raw_secret = match String::from_utf8(raw_secret) {
+            Ok(secret) => secret,
+            Err(error) => {
+                tracing::warn!(
+                    client_id = %client_id,
+                    binding_hash = %binding_hash_prefix(&binding_hash),
+                    error = %error,
+                    "CAE webhook secret was not valid UTF-8"
+                );
+                return;
+            }
+        };
+
+        let event = RevocationEvent::new_at(
+            binding_hash,
+            client_id,
+            dispatch.revoke_source,
+            dispatch.reason,
+            dispatch.revoked_at,
+        );
+        cae_webhook_service::dispatch_revocation_event(http_client, client, raw_secret, event);
+    });
 }
 
 pub struct BindingListItem {
@@ -785,6 +941,8 @@ mod tests {
             is_active: true,
             delegation_scopes: String::new(),
             broker_capability_enabled,
+            revocation_webhook_url: None,
+            revocation_webhook_secret_encrypted: None,
             created_by: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -963,12 +1121,132 @@ mod tests {
             .expect("refresh token exists")
     }
 
+    async fn insert_oauth_client_with_cae(
+        db: &mongodb::Database,
+        encryption_keys: &EncryptionKeys,
+        client_id: &str,
+        webhook_url: &str,
+        raw_secret: &str,
+    ) {
+        let now = Utc::now();
+        let encrypted_secret = encryption_keys
+            .encrypt(raw_secret.as_bytes())
+            .await
+            .expect("encrypt CAE secret");
+        let client = OauthClient {
+            id: client_id.to_string(),
+            client_name: "CAE Test Client".to_string(),
+            client_secret_hash: "hash".to_string(),
+            redirect_uris: vec![],
+            allowed_scopes: "openid profile".to_string(),
+            grant_types: "authorization_code".to_string(),
+            client_type: "confidential".to_string(),
+            is_active: true,
+            delegation_scopes: String::new(),
+            broker_capability_enabled: true,
+            revocation_webhook_url: Some(webhook_url.to_string()),
+            revocation_webhook_secret_encrypted: Some(encrypted_secret),
+            created_by: Some("test".to_string()),
+            created_at: now,
+            updated_at: now,
+        };
+        db.collection::<OauthClient>(OAUTH_CLIENTS)
+            .insert_one(&client)
+            .await
+            .expect("insert OAuth client with CAE");
+    }
+
+    struct CapturedCaeRequest {
+        body: Vec<u8>,
+        signature: String,
+        event_header: String,
+        delivery_id: String,
+    }
+
+    async fn spawn_cae_receiver() -> (String, tokio::sync::oneshot::Receiver<CapturedCaeRequest>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind CAE test listener");
+        let address = listener.local_addr().expect("listener address");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buffer = Vec::new();
+            let mut header_end = None;
+            let mut content_length = 0usize;
+
+            loop {
+                let mut chunk = [0u8; 1024];
+                let Ok(read) = stream.read(&mut chunk).await else {
+                    return;
+                };
+                if read == 0 {
+                    return;
+                }
+                buffer.extend_from_slice(&chunk[..read]);
+
+                if header_end.is_none()
+                    && let Some(pos) = buffer.windows(4).position(|w| w == b"\r\n\r\n")
+                {
+                    header_end = Some(pos + 4);
+                    let headers = String::from_utf8_lossy(&buffer[..pos]);
+                    for line in headers.lines().skip(1) {
+                        if let Some((name, value)) = line.split_once(':')
+                            && name.eq_ignore_ascii_case("content-length")
+                        {
+                            content_length = value.trim().parse().unwrap_or(0);
+                        }
+                    }
+                }
+
+                if let Some(end) = header_end
+                    && buffer.len() >= end + content_length
+                {
+                    let headers = String::from_utf8_lossy(&buffer[..end]);
+                    let mut signature = String::new();
+                    let mut event_header = String::new();
+                    let mut delivery_id = String::new();
+                    for line in headers.lines().skip(1) {
+                        if let Some((name, value)) = line.split_once(':') {
+                            let value = value.trim().to_string();
+                            if name.eq_ignore_ascii_case("x-nyxid-signature") {
+                                signature = value;
+                            } else if name.eq_ignore_ascii_case("x-nyxid-event") {
+                                event_header = value;
+                            } else if name.eq_ignore_ascii_case("x-nyxid-delivery-id") {
+                                delivery_id = value;
+                            }
+                        }
+                    }
+                    let body = buffer[end..end + content_length].to_vec();
+                    let _ = stream
+                        .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                        .await;
+                    let _ = tx.send(CapturedCaeRequest {
+                        body,
+                        signature,
+                        event_header,
+                        delivery_id,
+                    });
+                    return;
+                }
+            }
+        });
+
+        (format!("http://{address}/cae"), rx)
+    }
+
     #[tokio::test]
     async fn create_binding_persists_and_decrypts() {
         let Some(db) = connect_test_database("broker_create").await else {
             return;
         };
-        let encryption_keys = test_encryption_keys();
+        let encryption_keys = std::sync::Arc::new(test_encryption_keys());
         let external_subject = ExternalSubjectRef {
             platform: "lark".to_string(),
             tenant: Some("tenant-1".to_string()),
@@ -1014,7 +1292,7 @@ mod tests {
         let Some(db) = connect_test_database("broker_get_owner").await else {
             return;
         };
-        let encryption_keys = test_encryption_keys();
+        let encryption_keys = std::sync::Arc::new(test_encryption_keys());
         let raw_binding_id = generate_binding_id();
         let user_id = Uuid::new_v4().to_string();
 
@@ -1051,7 +1329,7 @@ mod tests {
         let Some(db) = connect_test_database("broker_get_other").await else {
             return;
         };
-        let encryption_keys = test_encryption_keys();
+        let encryption_keys = std::sync::Arc::new(test_encryption_keys());
         let raw_binding_id = generate_binding_id();
 
         insert_binding(
@@ -1080,7 +1358,7 @@ mod tests {
         let Some(db) = connect_test_database("broker_get_revoked").await else {
             return;
         };
-        let encryption_keys = test_encryption_keys();
+        let encryption_keys = std::sync::Arc::new(test_encryption_keys());
         let raw_binding_id = generate_binding_id();
 
         insert_binding(
@@ -1111,7 +1389,7 @@ mod tests {
         let Some(db) = connect_test_database("broker_introspect_owner").await else {
             return;
         };
-        let encryption_keys = test_encryption_keys();
+        let encryption_keys = std::sync::Arc::new(test_encryption_keys());
         let raw_binding_id = generate_binding_id();
         let user_id = Uuid::new_v4().to_string();
         let scopes = vec!["openid".to_string(), "profile".to_string()];
@@ -1148,7 +1426,7 @@ mod tests {
         let Some(db) = connect_test_database("broker_introspect_revoked").await else {
             return;
         };
-        let encryption_keys = test_encryption_keys();
+        let encryption_keys = std::sync::Arc::new(test_encryption_keys());
         let raw_binding_id = generate_binding_id();
 
         insert_binding(
@@ -1179,7 +1457,7 @@ mod tests {
         let Some(db) = connect_test_database("broker_reverse").await else {
             return;
         };
-        let encryption_keys = test_encryption_keys();
+        let encryption_keys = std::sync::Arc::new(test_encryption_keys());
         let now = Utc::now();
         let raw_match = generate_binding_id();
         let raw_revoked = generate_binding_id();
@@ -1306,7 +1584,7 @@ mod tests {
         let Some(db) = connect_test_database("broker_reverse_no_tenant").await else {
             return;
         };
-        let encryption_keys = test_encryption_keys();
+        let encryption_keys = std::sync::Arc::new(test_encryption_keys());
         let raw_binding_id = generate_binding_id();
 
         insert_binding_with_external_subject(
@@ -1355,7 +1633,7 @@ mod tests {
         let Some(db) = connect_test_database("broker_revoke_client").await else {
             return;
         };
-        let encryption_keys = test_encryption_keys();
+        let encryption_keys = std::sync::Arc::new(test_encryption_keys());
         let raw_binding_id = generate_binding_id();
         let binding_hash = hash_binding_id(&raw_binding_id);
 
@@ -1377,9 +1655,16 @@ mod tests {
         )
         .await;
 
-        let revoked = revoke_binding_by_client(&db, "client-1", &raw_binding_id, "client_revoked")
-            .await
-            .expect("revoke binding");
+        let revoked = revoke_binding_by_client(
+            &db,
+            encryption_keys.clone(),
+            &reqwest::Client::new(),
+            "client-1",
+            &raw_binding_id,
+            "client_revoked",
+        )
+        .await
+        .expect("revoke binding");
         assert!(revoked);
 
         let binding = load_binding(&db, &binding_hash).await;
@@ -1388,15 +1673,101 @@ mod tests {
         let refresh = load_refresh_by_jti(&db, "jti-client-revoke").await;
         assert!(refresh.revoked);
 
-        let second = revoke_binding_by_client(&db, "client-1", &raw_binding_id, "client_revoked")
-            .await
-            .expect("idempotent revoke");
+        let second = revoke_binding_by_client(
+            &db,
+            encryption_keys.clone(),
+            &reqwest::Client::new(),
+            "client-1",
+            &raw_binding_id,
+            "client_revoked",
+        )
+        .await
+        .expect("idempotent revoke");
         assert!(!second);
-        let wrong_client =
-            revoke_binding_by_client(&db, "client-2", &raw_binding_id, "client_revoked")
-                .await
-                .expect("wrong client revoke");
+        let wrong_client = revoke_binding_by_client(
+            &db,
+            encryption_keys.clone(),
+            &reqwest::Client::new(),
+            "client-2",
+            &raw_binding_id,
+            "client_revoked",
+        )
+        .await
+        .expect("wrong client revoke");
         assert!(!wrong_client);
+    }
+
+    #[tokio::test]
+    async fn cae_webhook_dispatches_on_client_revoke() {
+        let Some(db) = connect_test_database("broker_cae_client_revoke").await else {
+            return;
+        };
+        let encryption_keys = std::sync::Arc::new(test_encryption_keys());
+        let http_client = reqwest::Client::new();
+        let (webhook_url, received) = spawn_cae_receiver().await;
+        let raw_secret = "cae-webhook-secret";
+        let client_id = "client-cae";
+        let raw_binding_id = generate_binding_id();
+        let binding_hash = hash_binding_id(&raw_binding_id);
+
+        insert_oauth_client_with_cae(&db, &encryption_keys, client_id, &webhook_url, raw_secret)
+            .await;
+        insert_refresh_token(&db, "jti-cae", client_id, "user-cae", false).await;
+        insert_binding(
+            &db,
+            &encryption_keys,
+            BindingSeed {
+                raw_binding_id: &raw_binding_id,
+                client_id,
+                user_id: "user-cae",
+                refresh_token_jti: "jti-cae",
+                refresh_token: "refresh-cae",
+                scopes: vec!["openid".to_string()],
+                created_at: Utc::now(),
+                revoked: false,
+                revoke_reason: None,
+            },
+        )
+        .await;
+
+        let revoked = revoke_binding_by_client(
+            &db,
+            encryption_keys.clone(),
+            &http_client,
+            client_id,
+            &raw_binding_id,
+            "client_revoked",
+        )
+        .await
+        .expect("revoke binding");
+        assert!(revoked);
+
+        let captured = tokio::time::timeout(std::time::Duration::from_secs(5), received)
+            .await
+            .expect("CAE webhook received")
+            .expect("receiver sent request");
+        assert_eq!(captured.event_header, "oauth_broker_binding.revoked");
+        assert!(!captured.delivery_id.is_empty());
+
+        use hmac::Mac as _;
+        type HmacSha256 = hmac::Hmac<sha2::Sha256>;
+        let mut mac =
+            <HmacSha256 as hmac::Mac>::new_from_slice(raw_secret.as_bytes()).expect("HMAC key");
+        mac.update(&captured.body);
+        let expected_signature = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+        assert_eq!(captured.signature, expected_signature);
+
+        let event: serde_json::Value =
+            serde_json::from_slice(&captured.body).expect("CAE JSON body");
+        assert_eq!(
+            event["event_type"].as_str(),
+            Some("oauth_broker_binding.revoked")
+        );
+        assert_eq!(event["binding_hash"].as_str(), Some(binding_hash.as_str()));
+        assert_eq!(event["client_id"].as_str(), Some(client_id));
+        assert_eq!(event["revoke_source"].as_str(), Some("client"));
+        assert_eq!(event["reason"].as_str(), Some("client_revoked"));
+        assert!(event["revoked_at"].is_string());
     }
 
     #[tokio::test]
@@ -1404,7 +1775,7 @@ mod tests {
         let Some(db) = connect_test_database("broker_revoke_user").await else {
             return;
         };
-        let encryption_keys = test_encryption_keys();
+        let encryption_keys = std::sync::Arc::new(test_encryption_keys());
         let raw_binding_id = generate_binding_id();
         let binding_hash = hash_binding_id(&raw_binding_id);
 
@@ -1426,13 +1797,28 @@ mod tests {
         )
         .await;
 
-        let wrong_user = revoke_binding_by_user(&db, "user-b", &binding_hash, "user_revoked").await;
+        let wrong_user = revoke_binding_by_user(
+            &db,
+            encryption_keys.clone(),
+            &reqwest::Client::new(),
+            "user-b",
+            &binding_hash,
+            "user_revoked",
+        )
+        .await;
         assert!(matches!(wrong_user, Err(AppError::NotFound(_))));
         assert!(!load_binding(&db, &binding_hash).await.revoked);
 
-        revoke_binding_by_user(&db, "user-a", &binding_hash, "user_revoked")
-            .await
-            .expect("owner revoke");
+        revoke_binding_by_user(
+            &db,
+            encryption_keys.clone(),
+            &reqwest::Client::new(),
+            "user-a",
+            &binding_hash,
+            "user_revoked",
+        )
+        .await
+        .expect("owner revoke");
         let binding = load_binding(&db, &binding_hash).await;
         assert!(binding.revoked);
         assert_eq!(binding.revoke_reason.as_deref(), Some("user_revoked"));
@@ -1444,7 +1830,7 @@ mod tests {
         let Some(db) = connect_test_database("broker_list").await else {
             return;
         };
-        let encryption_keys = test_encryption_keys();
+        let encryption_keys = std::sync::Arc::new(test_encryption_keys());
         let now = Utc::now();
         let old_raw = generate_binding_id();
         let revoked_raw = generate_binding_id();
@@ -1533,7 +1919,7 @@ mod tests {
         let Some(db) = connect_test_database("broker_xclient").await else {
             return;
         };
-        let encryption_keys = test_encryption_keys();
+        let encryption_keys = std::sync::Arc::new(test_encryption_keys());
         let config = test_app_config();
         let jwt_keys = unused_jwt_keys();
         let raw_binding_id = generate_binding_id();
@@ -1559,7 +1945,8 @@ mod tests {
 
         let result = exchange_via_binding(
             &db,
-            &encryption_keys,
+            encryption_keys.clone(),
+            &reqwest::Client::new(),
             &jwt_keys,
             &config,
             "client-b",
@@ -1584,7 +1971,7 @@ mod tests {
         let Some(db) = connect_test_database("broker_aad_swap").await else {
             return;
         };
-        let encryption_keys = test_encryption_keys();
+        let encryption_keys = std::sync::Arc::new(test_encryption_keys());
         let config = test_app_config();
         let jwt_keys = unused_jwt_keys();
         let user_id = Uuid::new_v4().to_string();
@@ -1645,7 +2032,8 @@ mod tests {
 
         let result = exchange_via_binding(
             &db,
-            &encryption_keys,
+            encryption_keys.clone(),
+            &reqwest::Client::new(),
             &jwt_keys,
             &config,
             "client-x",
@@ -1664,7 +2052,7 @@ mod tests {
 
     #[tokio::test]
     async fn exchange_via_binding_sets_cnf_for_dpop_access_token() {
-        let encryption_keys = test_encryption_keys();
+        let encryption_keys = std::sync::Arc::new(test_encryption_keys());
         let (jwt_keys, config) = real_jwt_keys_and_config();
         let Some(db) = connect_test_database("broker_dpop_cnf").await else {
             return;
@@ -1712,7 +2100,8 @@ mod tests {
 
         let result = exchange_via_binding(
             &db,
-            &encryption_keys,
+            encryption_keys.clone(),
+            &reqwest::Client::new(),
             &jwt_keys,
             &config,
             "client-dpop",
@@ -1736,7 +2125,7 @@ mod tests {
 
     #[tokio::test]
     async fn exchange_via_binding_sets_cnf_for_mtls_access_token() {
-        let encryption_keys = test_encryption_keys();
+        let encryption_keys = std::sync::Arc::new(test_encryption_keys());
         let (jwt_keys, config) = real_jwt_keys_and_config();
         let Some(db) = connect_test_database("broker_mtls_cnf").await else {
             return;
@@ -1769,7 +2158,8 @@ mod tests {
 
         let result = exchange_via_binding(
             &db,
-            &encryption_keys,
+            encryption_keys.clone(),
+            &reqwest::Client::new(),
             &jwt_keys,
             &config,
             "client-mtls",
@@ -1796,7 +2186,7 @@ mod tests {
         let Some(db) = connect_test_database("broker_chain_follow").await else {
             return;
         };
-        let encryption_keys = test_encryption_keys();
+        let encryption_keys = std::sync::Arc::new(test_encryption_keys());
         let (jwt_keys, config) = real_jwt_keys_and_config();
         let user_id = Uuid::new_v4().to_string();
         let raw_binding_id = generate_binding_id();
@@ -1844,9 +2234,11 @@ mod tests {
             .await
             .expect("update binding to replacement");
 
+        let http_client = reqwest::Client::new();
         let ctx = BrokerExchangeContext {
             db: &db,
-            encryption_keys: &encryption_keys,
+            encryption_keys: encryption_keys.clone(),
+            http_client: &http_client,
             jwt_keys: &jwt_keys,
             config: &config,
             client_id: "client-x",
@@ -1879,7 +2271,7 @@ mod tests {
         let Some(db) = connect_test_database("broker_chain_no_descendant").await else {
             return;
         };
-        let encryption_keys = test_encryption_keys();
+        let encryption_keys = std::sync::Arc::new(test_encryption_keys());
         let (jwt_keys, config) = real_jwt_keys_and_config();
         let user_id = Uuid::new_v4().to_string();
         let raw_binding_id = generate_binding_id();
@@ -1916,7 +2308,8 @@ mod tests {
 
         let result = exchange_via_binding(
             &db,
-            &encryption_keys,
+            encryption_keys.clone(),
+            &reqwest::Client::new(),
             &jwt_keys,
             &config,
             "client-x",
@@ -1941,7 +2334,7 @@ mod tests {
         let Some(db) = connect_test_database("broker_orphan_cleanup").await else {
             return;
         };
-        let encryption_keys = test_encryption_keys();
+        let encryption_keys = std::sync::Arc::new(test_encryption_keys());
         let raw_binding_id = generate_binding_id();
         let binding_hash = hash_binding_id(&raw_binding_id);
         let binding = insert_binding(
@@ -1965,9 +2358,24 @@ mod tests {
             insert_refresh_token(&db, "jti-winner", "client-x", "user-1", false).await;
         mark_refresh_replaced(&db, &old_refresh.id, &winner_refresh.id).await;
         let orphan = insert_refresh_token(&db, "jti-orphan", "client-x", "user-1", false).await;
+        let jwt_keys = unused_jwt_keys();
+        let config = test_app_config();
+        let http_client = reqwest::Client::new();
+        let ctx = BrokerExchangeContext {
+            db: &db,
+            encryption_keys: encryption_keys.clone(),
+            http_client: &http_client,
+            jwt_keys: &jwt_keys,
+            config: &config,
+            client_id: "client-x",
+            binding_hash: &binding_hash,
+            requested_scope: None,
+            dpop_jkt: None,
+            mtls_x5t_s256: None,
+        };
 
         let outcome = handle_refresh_revoke_conflict(
-            &db,
+            &ctx,
             &binding,
             &binding_hash,
             &old_refresh.id,
@@ -1990,7 +2398,7 @@ mod tests {
         let Some(db) = connect_test_database("broker_reuse").await else {
             return;
         };
-        let encryption_keys = test_encryption_keys();
+        let encryption_keys = std::sync::Arc::new(test_encryption_keys());
         let config = test_app_config();
         let jwt_keys = unused_jwt_keys();
         let user_id = Uuid::new_v4().to_string();
@@ -2036,7 +2444,8 @@ mod tests {
 
         let result = exchange_via_binding(
             &db,
-            &encryption_keys,
+            encryption_keys.clone(),
+            &reqwest::Client::new(),
             &jwt_keys,
             &config,
             "client-x",

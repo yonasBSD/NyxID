@@ -1512,7 +1512,8 @@ async fn token_inner(
 
                 let result = oauth_broker_service::exchange_via_binding(
                     &state.db,
-                    &state.encryption_keys,
+                    state.encryption_keys.clone(),
+                    &state.http_client,
                     &state.jwt_keys,
                     &state.config,
                     client_id,
@@ -1988,6 +1989,8 @@ pub async fn delete_binding(
 
     let revoked = oauth_broker_service::revoke_binding_by_client(
         &state.db,
+        state.encryption_keys.clone(),
+        &state.http_client,
         &client_id,
         &raw_binding_id,
         "client_revoked",
@@ -2056,6 +2059,8 @@ pub async fn revoke(State(state): State<AppState>, Form(body): Form<RevokeReques
     if is_broker_binding {
         let revoked = oauth_broker_service::revoke_binding_by_client(
             &state.db,
+            state.encryption_keys.clone(),
+            &state.http_client,
             caller_client_id,
             &body.token,
             "client_revoked",
@@ -2198,6 +2203,8 @@ pub async fn register_client(
         "",
         oauth_client_service::DEFAULT_MCP_ALLOWED_SCOPES,
         false,
+        None,
+        None,
     )
     .await?;
 

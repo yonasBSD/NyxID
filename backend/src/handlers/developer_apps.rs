@@ -90,6 +90,8 @@ pub struct CreateDeveloperOAuthClientRequest {
     /// Space-separated delegation scopes (empty = token exchange disabled).
     pub delegation_scopes: Option<String>,
     pub broker_capability_enabled: Option<bool>,
+    pub revocation_webhook_url: Option<String>,
+    pub revocation_webhook_secret: Option<String>,
     /// OIDC scopes this client is allowed to request (e.g. `["openid", "profile", "email", "roles"]`).
     /// Defaults to `["openid", "profile", "email"]` when omitted; `[]` canonicalizes to `["openid"]`.
     pub allowed_scopes: Option<Vec<String>>,
@@ -107,6 +109,8 @@ pub struct UpdateDeveloperOAuthClientRequest {
     /// Space-separated delegation scopes (empty = token exchange disabled).
     pub delegation_scopes: Option<String>,
     pub broker_capability_enabled: Option<bool>,
+    pub revocation_webhook_url: Option<String>,
+    pub revocation_webhook_secret: Option<String>,
     /// OIDC scopes this client is allowed to request. `[]` canonicalizes to `["openid"]`.
     pub allowed_scopes: Option<Vec<String>>,
 }
@@ -120,6 +124,7 @@ pub struct DeveloperOAuthClientResponse {
     pub allowed_scopes: String,
     pub delegation_scopes: String,
     pub broker_capability_enabled: bool,
+    pub revocation_webhook_url: Option<String>,
     pub is_active: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_secret: Option<String>,
@@ -148,6 +153,7 @@ fn to_response(c: OauthClient, secret: Option<String>) -> DeveloperOAuthClientRe
         allowed_scopes: c.allowed_scopes,
         delegation_scopes: c.delegation_scopes,
         broker_capability_enabled: c.broker_capability_enabled,
+        revocation_webhook_url: c.revocation_webhook_url,
         is_active: c.is_active,
         client_secret: secret,
         created_at: c.created_at.to_rfc3339(),
@@ -197,6 +203,10 @@ fn validate_redirect_uris(redirect_uris: &[String]) -> AppResult<Vec<String>> {
     Ok(validated)
 }
 
+fn normalize_optional_nonempty(input: Option<&str>) -> Option<&str> {
+    input.map(str::trim).filter(|value| !value.is_empty())
+}
+
 // ── Handlers ──
 
 /// POST /api/v1/developer/oauth-clients
@@ -242,6 +252,13 @@ pub async fn create_my_oauth_client(
         .map(oauth_client_service::validate_allowed_scopes_list)
         .transpose()?
         .unwrap_or_else(|| oauth_client_service::DEFAULT_ALLOWED_SCOPES.to_string());
+    let revocation_webhook_url =
+        normalize_optional_nonempty(body.revocation_webhook_url.as_deref());
+    let revocation_webhook_secret_encrypted =
+        match normalize_optional_nonempty(body.revocation_webhook_secret.as_deref()) {
+            Some(secret) => Some(state.encryption_keys.encrypt(secret.as_bytes()).await?),
+            None => None,
+        };
 
     let (client, raw_secret) = oauth_client_service::create_client(
         &state.db,
@@ -252,6 +269,8 @@ pub async fn create_my_oauth_client(
         delegation_scopes,
         &allowed_scopes,
         body.broker_capability_enabled.unwrap_or(false),
+        revocation_webhook_url,
+        revocation_webhook_secret_encrypted,
     )
     .await?;
 
@@ -339,6 +358,13 @@ pub async fn update_my_oauth_client(
         .as_deref()
         .map(oauth_client_service::validate_allowed_scopes_list)
         .transpose()?;
+    let revocation_webhook_url =
+        normalize_optional_nonempty(body.revocation_webhook_url.as_deref());
+    let revocation_webhook_secret_encrypted =
+        match normalize_optional_nonempty(body.revocation_webhook_secret.as_deref()) {
+            Some(secret) => Some(state.encryption_keys.encrypt(secret.as_bytes()).await?),
+            None => None,
+        };
 
     let updated = oauth_client_service::update_client_for_creator(
         &state.db,
@@ -349,6 +375,8 @@ pub async fn update_my_oauth_client(
         body.delegation_scopes.as_deref(),
         validated_allowed_scopes.as_deref(),
         body.broker_capability_enabled,
+        revocation_webhook_url,
+        revocation_webhook_secret_encrypted,
     )
     .await?;
 

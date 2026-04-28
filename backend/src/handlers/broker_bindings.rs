@@ -98,6 +98,8 @@ pub async fn revoke_my_broker_binding(
 
     oauth_broker_service::revoke_binding_by_user(
         &state.db,
+        state.encryption_keys.clone(),
+        &state.http_client,
         &user_id,
         &binding_hash,
         "user_revoked",

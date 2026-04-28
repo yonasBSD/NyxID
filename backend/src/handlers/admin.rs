@@ -200,6 +200,10 @@ fn extract_user_agent(headers: &HeaderMap) -> Option<String> {
         .map(String::from)
 }
 
+fn normalize_optional_nonempty(input: Option<&str>) -> Option<&str> {
+    input.map(str::trim).filter(|value| !value.is_empty())
+}
+
 /// Convert a User model into an AdminUserItem response struct.
 fn user_to_admin_item(u: User) -> AdminUserItem {
     AdminUserItem {
@@ -770,6 +774,8 @@ pub struct CreateOAuthClientRequest {
     /// Space-separated delegation scopes (empty = token exchange disabled).
     pub delegation_scopes: Option<String>,
     pub broker_capability_enabled: Option<bool>,
+    pub revocation_webhook_url: Option<String>,
+    pub revocation_webhook_secret: Option<String>,
     /// OIDC scopes this client is allowed to request.
     /// Defaults to `["openid", "profile", "email"]` when omitted; `[]` canonicalizes to `["openid"]`.
     pub allowed_scopes: Option<Vec<String>>,
@@ -784,6 +790,7 @@ pub struct OAuthClientResponse {
     pub allowed_scopes: String,
     pub delegation_scopes: String,
     pub broker_capability_enabled: bool,
+    pub revocation_webhook_url: Option<String>,
     pub is_active: bool,
     /// Raw client secret -- only returned at creation time.
     pub client_secret: Option<String>,
@@ -848,6 +855,13 @@ pub async fn create_oauth_client(
         .map(oauth_client_service::validate_allowed_scopes_list)
         .transpose()?
         .unwrap_or_else(|| oauth_client_service::DEFAULT_ALLOWED_SCOPES.to_string());
+    let revocation_webhook_url =
+        normalize_optional_nonempty(body.revocation_webhook_url.as_deref());
+    let revocation_webhook_secret_encrypted =
+        match normalize_optional_nonempty(body.revocation_webhook_secret.as_deref()) {
+            Some(secret) => Some(state.encryption_keys.encrypt(secret.as_bytes()).await?),
+            None => None,
+        };
 
     let (client, raw_secret) = oauth_client_service::create_client(
         &state.db,
@@ -858,6 +872,8 @@ pub async fn create_oauth_client(
         delegation_scopes,
         &allowed_scopes,
         body.broker_capability_enabled.unwrap_or(false),
+        revocation_webhook_url,
+        revocation_webhook_secret_encrypted,
     )
     .await?;
 
@@ -884,6 +900,7 @@ pub async fn create_oauth_client(
         allowed_scopes: client.allowed_scopes,
         delegation_scopes: client.delegation_scopes,
         broker_capability_enabled: client.broker_capability_enabled,
+        revocation_webhook_url: client.revocation_webhook_url,
         is_active: client.is_active,
         client_secret: raw_secret,
         created_at: client.created_at.to_rfc3339(),
@@ -912,6 +929,7 @@ pub async fn list_oauth_clients(
                 allowed_scopes: c.allowed_scopes,
                 delegation_scopes: c.delegation_scopes,
                 broker_capability_enabled: c.broker_capability_enabled,
+                revocation_webhook_url: c.revocation_webhook_url,
                 is_active: c.is_active,
                 client_secret: None, // never expose secret in list
                 created_at: c.created_at.to_rfc3339(),

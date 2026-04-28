@@ -784,6 +784,8 @@ pub async fn create_service(
                 "",
                 oauth_client_service::DEFAULT_ALLOWED_SCOPES,
                 false,
+                None,
+                None,
             )
             .await?;
 
