@@ -158,7 +158,6 @@ pub struct IntrospectResponse {
 #[derive(Debug, Deserialize)]
 pub struct RevokeRequest {
     pub token: String,
-    #[allow(dead_code)]
     pub token_type_hint: Option<String>,
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
@@ -1504,6 +1503,53 @@ pub async fn revoke(State(state): State<AppState>, Form(body): Form<RevokeReques
     .await
     .is_err()
     {
+        return StatusCode::OK;
+    }
+
+    // Broker-binding revocation: detect via the explicit token_type_hint or
+    // the `bnd_` prefix as a defensive fallback. RFC 7009 §2.1 makes the
+    // hint optional, but standardising on the URN keeps the wire shape
+    // aligned with the issued token type.
+    let is_broker_binding = body
+        .token_type_hint
+        .as_deref()
+        .map(|hint| hint == oauth_broker_service::BROKER_SUBJECT_TOKEN_TYPE)
+        .unwrap_or(false)
+        || body
+            .token
+            .starts_with(crate::models::oauth_broker_binding::BINDING_ID_PREFIX);
+
+    if is_broker_binding {
+        let revoked = oauth_broker_service::revoke_binding_by_client(
+            &state.db,
+            caller_client_id,
+            &body.token,
+            "client_revoked",
+        )
+        .await
+        .unwrap_or(false);
+
+        if revoked {
+            let binding_hash = crate::models::oauth_broker_binding::hash_binding_id(&body.token);
+            audit_service::log_async(
+                state.db.clone(),
+                None,
+                "oauth_broker_binding_revoked".to_string(),
+                Some(serde_json::json!({
+                    "revoke_source": "client",
+                    "client_id": caller_client_id,
+                    "binding_hash": oauth_broker_service::binding_hash_prefix(&binding_hash),
+                    "reason": "client_revoked",
+                })),
+                None,
+                None,
+                None,
+                None,
+            );
+        }
+
+        // RFC 7009: always return 200 regardless of whether the token was
+        // valid, owned by this client, or already revoked.
         return StatusCode::OK;
     }
 

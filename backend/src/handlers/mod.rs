@@ -10,6 +10,7 @@ pub mod agent_bindings;
 pub mod api_keys;
 pub mod approvals;
 pub mod auth;
+pub mod broker_bindings;
 pub mod catalog;
 pub mod channel_bots;
 pub mod channel_conversations;

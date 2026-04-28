@@ -7,7 +7,9 @@
 //! RFC 8693 token exchange (commit #5).
 
 use chrono::{Duration, Utc};
+use futures::TryStreamExt;
 use mongodb::bson::{self, Binary, doc, spec::BinarySubtype};
+use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
 use uuid::Uuid;
 
 use crate::config::AppConfig;
@@ -284,6 +286,139 @@ pub async fn revoke_bindings_for_user_client(
         .await?;
 
     Ok(result.modified_count)
+}
+
+/// Revoke a binding owned by `client_id` given its raw binding_id.
+///
+/// Idempotent: missing binding, mismatched ownership, already-revoked
+/// all return Ok(()) so RFC 7009 200-always semantics hold at the
+/// handler. Marks both the binding and its underlying RefreshToken
+/// revoked.
+pub async fn revoke_binding_by_client(
+    db: &mongodb::Database,
+    client_id: &str,
+    raw_binding_id: &str,
+    reason: &str,
+) -> AppResult<bool> {
+    let binding_hash = hash_binding_id(raw_binding_id);
+    let now = Utc::now();
+    let options = FindOneAndUpdateOptions::builder()
+        .return_document(ReturnDocument::After)
+        .build();
+
+    let binding = db
+        .collection::<OauthBrokerBinding>(OAUTH_BROKER_BINDINGS)
+        .find_one_and_update(
+            doc! {
+                "_id": &binding_hash,
+                "client_id": client_id,
+                "revoked": false,
+            },
+            doc! { "$set": {
+                "revoked": true,
+                "revoked_at": bson::DateTime::from_chrono(now),
+                "revoke_reason": reason,
+            }},
+        )
+        .with_options(options)
+        .await?;
+
+    let Some(binding) = binding else {
+        return Ok(false);
+    };
+
+    db.collection::<RefreshToken>(REFRESH_TOKENS)
+        .update_one(
+            doc! { "jti": &binding.refresh_token_jti, "revoked": false },
+            doc! { "$set": {
+                "revoked": true,
+                "revoked_at": bson::DateTime::from_chrono(now),
+            }},
+        )
+        .await?;
+
+    Ok(true)
+}
+
+/// Revoke a binding owned by `user_id` given its binding_hash (stored as _id).
+///
+/// Returns Err(AppError::NotFound) when the binding does not exist or
+/// belongs to a different user. The user-UI endpoint translates this to
+/// a 404 -- that's safe because the user can only see their own bindings.
+pub async fn revoke_binding_by_user(
+    db: &mongodb::Database,
+    user_id: &str,
+    binding_hash: &str,
+    reason: &str,
+) -> AppResult<()> {
+    let now = Utc::now();
+    let options = FindOneAndUpdateOptions::builder()
+        .return_document(ReturnDocument::After)
+        .build();
+
+    let binding = db
+        .collection::<OauthBrokerBinding>(OAUTH_BROKER_BINDINGS)
+        .find_one_and_update(
+            doc! {
+                "_id": binding_hash,
+                "user_id": user_id,
+                "revoked": false,
+            },
+            doc! { "$set": {
+                "revoked": true,
+                "revoked_at": bson::DateTime::from_chrono(now),
+                "revoke_reason": reason,
+            }},
+        )
+        .with_options(options)
+        .await?
+        .ok_or_else(|| AppError::NotFound("binding not found".to_string()))?;
+
+    db.collection::<RefreshToken>(REFRESH_TOKENS)
+        .update_one(
+            doc! { "jti": &binding.refresh_token_jti, "revoked": false },
+            doc! { "$set": {
+                "revoked": true,
+                "revoked_at": bson::DateTime::from_chrono(now),
+            }},
+        )
+        .await?;
+
+    Ok(())
+}
+
+pub struct BindingListItem {
+    pub binding_hash: String,
+    pub client_id: String,
+    pub external_subject: Option<ExternalSubjectRef>,
+    pub scopes: Vec<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub last_used_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// List a user's non-revoked broker bindings, newest first.
+pub async fn list_user_bindings(
+    db: &mongodb::Database,
+    user_id: &str,
+) -> AppResult<Vec<BindingListItem>> {
+    let cursor = db
+        .collection::<OauthBrokerBinding>(OAUTH_BROKER_BINDINGS)
+        .find(doc! { "user_id": user_id, "revoked": false })
+        .sort(doc! { "created_at": -1 })
+        .await?;
+    let bindings: Vec<OauthBrokerBinding> = cursor.try_collect().await?;
+
+    Ok(bindings
+        .into_iter()
+        .map(|binding| BindingListItem {
+            binding_hash: binding.id,
+            client_id: binding.client_id,
+            external_subject: binding.external_subject,
+            scopes: binding.scopes,
+            created_at: binding.created_at,
+            last_used_at: binding.last_used_at,
+        })
+        .collect())
 }
 
 pub fn binding_hash_prefix(binding_hash: &str) -> String {
