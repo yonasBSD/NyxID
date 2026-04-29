@@ -8,6 +8,7 @@ import {
   orgListItemSchema,
   orgResponseSchema,
   orgRoleSchema,
+  orgSlugSchema,
   ORG_ROLES,
   scopeSourceSchema,
   updateMemberRequestSchema,
@@ -39,6 +40,7 @@ describe("orgListItemSchema", () => {
   it("accepts a wire-format list item", () => {
     const result = orgListItemSchema.safeParse({
       id: "org-1",
+      slug: "chrono-ai",
       display_name: "Chrono AI",
       avatar_url: null,
       contact_email: "contact@chrono.ai",
@@ -51,6 +53,7 @@ describe("orgListItemSchema", () => {
   it("allows null display_name, avatar_url, and contact_email", () => {
     const result = orgListItemSchema.safeParse({
       id: "org-1",
+      slug: "chrono-ai",
       display_name: null,
       avatar_url: null,
       contact_email: null,
@@ -65,6 +68,7 @@ describe("orgResponseSchema", () => {
   it("requires a non-negative member_count", () => {
     const base = {
       id: "org-1",
+      slug: "acme",
       display_name: "Acme",
       avatar_url: null,
       contact_email: null,
@@ -82,6 +86,7 @@ describe("orgResponseSchema", () => {
   it("accepts a contact_email string", () => {
     const result = orgResponseSchema.safeParse({
       id: "org-1",
+      slug: "acme",
       display_name: "Acme",
       avatar_url: null,
       contact_email: "contact@acme.test",
@@ -196,6 +201,22 @@ describe("createOrgRequestSchema", () => {
       createOrgRequestSchema.safeParse({
         display_name: "a".repeat(129),
       }).success,
+    ).toBe(false);
+  });
+});
+
+describe("orgSlugSchema", () => {
+  it("accepts lowercase slugs with digits and hyphens", () => {
+    expect(orgSlugSchema.safeParse("chrono-ai-2").success).toBe(true);
+  });
+
+  it("rejects uppercase, edge hyphens, and uuid-shaped values", () => {
+    expect(orgSlugSchema.safeParse("Chrono-AI").success).toBe(false);
+    expect(orgSlugSchema.safeParse("-chrono").success).toBe(false);
+    expect(orgSlugSchema.safeParse("chrono-").success).toBe(false);
+    expect(
+      orgSlugSchema.safeParse("550e8400-e29b-41d4-a716-446655440000")
+        .success,
     ).toBe(false);
   });
 });
