@@ -4,6 +4,8 @@
 
 - [Node Management](#node-management)
   - [Org-owned nodes](#org-owned-nodes)
+  - [Two-machine org-node setup](#two-machine-org-node-setup)
+  - [Transferring an existing personal node to an org](#transferring-an-existing-personal-node-to-an-org)
   - [Setting up a new node](#setting-up-a-new-node)
   - [Managing the node service](#managing-the-node-service)
   - [Managing nodes](#managing-nodes)
@@ -30,6 +32,36 @@ The redeemed node belongs to the org. All current org admins can manage it; org 
 Audit events for shared node operations include `owner_user_id` when the actor differs from the owner, so org-owned node activity can be attributed to both the actor and owning org.
 
 Registration tokens carry the chosen owner at mint time. Admin role is verified when the token is issued, not when it is redeemed, so a token issued before an admin is revoked can still register a node until the token expires. The default TTL is 1 hour (`NODE_REGISTRATION_TOKEN_TTL_SECS`); delete pending registration tokens for that owner when removing org admins.
+
+### Two-machine org-node setup
+
+For confidential shared infrastructure, keep user login on the admin's laptop and run only node-agent commands on the shared VM.
+
+| Machine | Runs |
+|---|---|
+| Laptop | `nyxid login`, `nyxid node register-token --org`, `nyxid keys create --service-slug ... --node-id ...`, all node management ops (`rotate-token`, `transfer`, `delete`, manage bindings) |
+| VM | `nyxid node register --token`, `nyxid node credentials add` (purely local), `nyxid node start` / daemon. Never `nyxid login` on the VM. |
+
+The node's local credential store is keyed by service slug (`config.toml: credentials[<slug>]`). The binding to a NyxID `UserService` is established by matching slugs. Both ends must agree on the slug; no user identity passes through the VM.
+
+Fresh shared-box checklist:
+
+1. Admin on laptop: `nyxid node register-token --org <org-id>` -> copy the `nyx_nreg_...` token.
+2. Operator on VM: `nyxid node register --token nyx_nreg_... --url wss://...` -> token is consumed, node receives its own `nyx_nauth_...` stored in the OS keychain or local secret backend.
+3. Admin on laptop: `nyxid keys create --service-slug <slug> --node-id <node-id>` -> creates the org-owned `UserService` routing through the node.
+4. Operator on VM: `nyxid node credentials add <slug> --header X-API-Key` (interactive secret prompt) -> credential stored locally, encrypted.
+5. Operator on VM: `nyxid node start` (or `nyxid node daemon install` + `start`).
+6. Optional: Admin on laptop: `nyxid node transfer <node-id> --to <org-id>` if the node was registered to a person owner first.
+
+When an admin leaves the org, rotate the node's auth token (`nyxid node rotate-token <node-id>`), audit pending registration tokens for that org and revoke them, and audit any per-agent credential bindings created by the leaving admin.
+
+Org membership concepts are in [`organizations.md`](organizations.md). The broader management surface is in [`managing.md`](managing.md).
+
+### Transferring an existing personal node to an org
+
+Use `nyxid node transfer <node-id-or-name> --to <org-id>` when a node was registered under a person but should become shared org infrastructure. The caller must have write access to the current owner and be an admin of the destination org.
+
+Transfer changes only server-side ownership. The node auth token is per-node, so the existing VM connection keeps working. Active `NodeServiceBinding` rows for the node are deactivated, and any `UserService` with `node_id` set to that node is unrouted unless it already belongs to the new owner. Recreate only the org-owned bindings you still want after the transfer.
 
 ### Setting up a new node
 
@@ -110,6 +142,7 @@ nyxid node register-token --name "edge-tokyo" --output json  # scripted: prints 
 nyxid node delete <ID_OR_NAME> --yes                   # delete node
 nyxid node rotate-token <ID_OR_NAME>                   # interactive: opens browser wizard (shows new auth_token + signing_secret)
 nyxid node rotate-token <ID_OR_NAME> --output json     # scripted: prints raw secret to stdout (legacy shape)
+nyxid node transfer <ID_OR_NAME> --to <USER_OR_ORG_ID> # move node ownership, detaches cross-owner routing
 
 # nyxid node CLI (run on the node machine)
 nyxid node credentials setup --service <SLUG>          # auto-detect and setup (recommended)

@@ -34,6 +34,7 @@ nyxid service delete <id> --yes                                # remove service 
 > Default request header precedence is `catalog defaults -> UserService defaults -> caller`. The default is non-overridable unless `:overridable` is set on the value.
 
 > Node commands accept names (e.g., `--via-node test-server`) in addition to UUIDs.
+> For org-owned node operations, the two-machine VM playbook, and transfer cleanup behavior, see [`nodes.md`](nodes.md#two-machine-org-node-setup).
 
 ### Attaching an OpenAPI spec to a custom endpoint
 
