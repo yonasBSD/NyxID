@@ -17,7 +17,7 @@ use crate::models::downstream_service::{
 };
 use crate::models::node::NodeMetadata;
 use crate::mw::auth::AuthUser;
-use crate::services::{audit_service, node_routing_service, node_service};
+use crate::services::{audit_service, node_routing_service, node_service, org_service};
 use crate::telemetry::{
     context::{TelemetryContext, emit_event},
     sampling::hash_short_id,
@@ -31,6 +31,7 @@ use crate::telemetry::{
 #[derive(Debug, Deserialize)]
 pub struct CreateRegistrationTokenRequest {
     pub name: String,
+    pub owner_user_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -153,25 +154,47 @@ pub async fn create_registration_token(
     Json(body): Json<CreateRegistrationTokenRequest>,
 ) -> AppResult<Json<CreateRegistrationTokenResponse>> {
     let user_id_str = auth_user.user_id.to_string();
+    let owner_user_id = body.owner_user_id.as_deref().unwrap_or(&user_id_str);
+
+    if let Some(requested_owner) = body.owner_user_id.as_deref() {
+        let access =
+            org_service::resolve_owner_access(&state.db, &user_id_str, requested_owner).await?;
+        if !matches!(access, org_service::OwnerAccess::AsOrgAdmin { .. }) {
+            return Err(AppError::Forbidden(
+                "Only org admins can create registration tokens for that owner".to_string(),
+            ));
+        }
+    }
 
     let (token_id, raw_token, expires_at): (String, String, chrono::DateTime<chrono::Utc>) =
         node_service::create_registration_token(
             &state.db,
-            &user_id_str,
+            owner_user_id,
             &body.name,
             state.config.node_max_per_user,
             state.config.node_registration_token_ttl_secs,
         )
         .await?;
+    let owner_differs = owner_user_id != user_id_str;
+    let owner_user_id_for_audit = owner_user_id.to_string();
+    let event_data = if owner_differs {
+        serde_json::json!({
+            "token_id": &token_id,
+            "name": &body.name,
+            "owner_user_id": &owner_user_id_for_audit,
+        })
+    } else {
+        serde_json::json!({
+            "token_id": &token_id,
+            "name": &body.name,
+        })
+    };
 
     audit_service::log_async(
         state.db.clone(),
         Some(user_id_str),
         "node_registration_token_created".to_string(),
-        Some(serde_json::json!({
-            "token_id": &token_id,
-            "name": &body.name,
-        })),
+        Some(event_data),
         None,
         None,
         None,
@@ -554,4 +577,171 @@ pub async fn list_my_bound_services(
     .await?;
 
     Ok(Json(MyBoundServicesResponse { service_ids }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::node::{COLLECTION_NAME as NODES, Node, NodeMetrics, NodeStatus};
+    use crate::models::node_registration_token::{
+        COLLECTION_NAME as NODE_REG_TOKENS, NodeRegistrationToken,
+    };
+    use crate::models::org_membership::{
+        COLLECTION_NAME as ORG_MEMBERSHIPS, OrgMembership, OrgRole,
+    };
+    use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+    use crate::test_utils::{
+        connect_test_database, test_app_state, test_auth_user, test_membership, test_user,
+    };
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    fn test_node(owner_id: &str, name: &str) -> Node {
+        let now = Utc::now();
+        Node {
+            id: Uuid::new_v4().to_string(),
+            user_id: owner_id.to_string(),
+            name: name.to_string(),
+            status: NodeStatus::Offline,
+            auth_token_hash: "auth-hash".to_string(),
+            signing_secret_encrypted: None,
+            signing_secret_hash: "signing-hash".to_string(),
+            last_heartbeat_at: None,
+            connected_at: None,
+            metadata: None,
+            metrics: NodeMetrics::default(),
+            is_active: true,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[tokio::test]
+    async fn create_registration_token_accepts_org_admin_owner_scope() {
+        let Some(db) = connect_test_database("node_token_org_admin").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+
+        let admin_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&admin_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ])
+            .await
+            .expect("insert users");
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org_id, &admin_id, OrgRole::Admin, None))
+            .await
+            .expect("insert membership");
+
+        let state = test_app_state(db.clone());
+        let Json(response) = create_registration_token(
+            State(state),
+            test_auth_user(&admin_id),
+            Json(CreateRegistrationTokenRequest {
+                name: "org-node".to_string(),
+                owner_user_id: Some(org_id.clone()),
+            }),
+        )
+        .await
+        .expect("org admin can create owner-scoped token");
+
+        let stored = db
+            .collection::<NodeRegistrationToken>(NODE_REG_TOKENS)
+            .find_one(doc! { "_id": &response.token_id })
+            .await
+            .expect("query token")
+            .expect("token exists");
+        assert_eq!(stored.user_id, org_id);
+        assert_eq!(stored.name, "org-node");
+    }
+
+    #[tokio::test]
+    async fn create_registration_token_rejects_non_admin_owner_scope() {
+        let Some(db) = connect_test_database("node_token_non_admin").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+
+        let member_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&member_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ])
+            .await
+            .expect("insert users");
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org_id, &member_id, OrgRole::Member, None))
+            .await
+            .expect("insert membership");
+
+        let state = test_app_state(db);
+        let err = create_registration_token(
+            State(state),
+            test_auth_user(&member_id),
+            Json(CreateRegistrationTokenRequest {
+                name: "org-node".to_string(),
+                owner_user_id: Some(org_id),
+            }),
+        )
+        .await
+        .expect_err("org member cannot create owner-scoped token");
+
+        assert!(matches!(err, AppError::Forbidden(_)));
+    }
+
+    #[tokio::test]
+    async fn create_registration_token_counts_nodes_against_requested_owner_not_actor() {
+        let Some(db) = connect_test_database("node_token_owner_cap").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+
+        let admin_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&admin_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ])
+            .await
+            .expect("insert users");
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org_id, &admin_id, OrgRole::Admin, None))
+            .await
+            .expect("insert membership");
+
+        let actor_nodes: Vec<Node> = (0..10)
+            .map(|idx| test_node(&admin_id, &format!("actor-node-{idx}")))
+            .collect();
+        db.collection::<Node>(NODES)
+            .insert_many(actor_nodes)
+            .await
+            .expect("insert actor nodes at personal cap");
+
+        let state = test_app_state(db.clone());
+        let Json(response) = create_registration_token(
+            State(state),
+            test_auth_user(&admin_id),
+            Json(CreateRegistrationTokenRequest {
+                name: "org-node".to_string(),
+                owner_user_id: Some(org_id.clone()),
+            }),
+        )
+        .await
+        .expect("actor personal cap should not block org-owned token");
+
+        let stored = db
+            .collection::<NodeRegistrationToken>(NODE_REG_TOKENS)
+            .find_one(doc! { "_id": &response.token_id })
+            .await
+            .expect("query token")
+            .expect("token exists");
+        assert_eq!(stored.user_id, org_id);
+    }
 }

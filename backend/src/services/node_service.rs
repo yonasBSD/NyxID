@@ -1407,4 +1407,30 @@ mod tests {
         assert_eq!(listed[0].owner.kind, NodeOwnerKind::User);
         assert_eq!(listed[0].owner.id, actor_id);
     }
+
+    #[tokio::test]
+    async fn register_node_uses_registration_token_user_id_as_owner() {
+        let Some(db) = connect_test_database("node_register_token_owner").await else {
+            eprintln!("skipping node service registration test: no local MongoDB available");
+            return;
+        };
+
+        let org_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&org_id, UserType::Org))
+            .await
+            .expect("insert org user");
+
+        let (_token_id, raw_token, _expires_at) =
+            create_registration_token(&db, &org_id, "org-node", 10, 3600)
+                .await
+                .expect("create org-owned token");
+        let (node, _raw_auth_token, _raw_signing_secret) =
+            register_node(&db, &test_encryption_keys(), &raw_token, None)
+                .await
+                .expect("register node from org token");
+
+        assert_eq!(node.user_id, org_id);
+        assert_eq!(node.name, "org-node");
+    }
 }
