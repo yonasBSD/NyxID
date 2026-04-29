@@ -105,6 +105,7 @@ pub async fn register_user(
         email: email.to_lowercase(),
         password_hash: Some(password_hash),
         display_name: display_name.map(String::from),
+        slug: None,
         avatar_url: None,
         email_verified: auto_verify_email,
         email_verification_token: if auto_verify_email {
@@ -395,6 +396,7 @@ mod tests {
             email: "alice@example.com".to_string(),
             password_hash: Some("$argon2id$hash".to_string()),
             display_name: Some("Alice".to_string()),
+            slug: None,
             avatar_url: None,
             email_verified: true,
             email_verification_token: None,

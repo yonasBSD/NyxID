@@ -26,7 +26,9 @@ use crate::models::org_invite::OrgInvite;
 use crate::models::org_membership::{MemberScopeSource, OrgMembership, OrgRole};
 use crate::models::user::User;
 use crate::mw::auth::AuthUser;
-use crate::services::{audit_service, org_invite_service, org_role_scope_service, org_service};
+use crate::services::{
+    audit_service, org_invite_service, org_role_scope_service, org_service, org_slug,
+};
 
 /// Maximum invite TTL accepted by `POST /orgs/{id}/invites` and the
 /// matching CLI command. Mirrors the 30-day bound the web schema enforces
@@ -53,6 +55,7 @@ pub struct CreateOrgRequest {
 pub struct UpdateOrgRequest {
     #[validate(length(min = 1, max = 128, message = "display_name must be 1-128 characters"))]
     pub display_name: Option<String>,
+    pub slug: Option<String>,
     pub avatar_url: Option<String>,
     /// Update the org's contact email. Pass an empty string to clear back to
     /// the synthetic placeholder used when no contact email was provided at
@@ -607,11 +610,24 @@ pub async fn update_org(
             ));
         }
     }
+    if let Some(ref slug) = body.slug {
+        crate::handlers::admin_helpers::validate_slug(slug)?;
+        if org_slug::is_uuid_shaped(slug) {
+            return Err(AppError::ValidationError(
+                "Org slug must not be UUID-shaped".to_string(),
+            ));
+        }
+        let reserved = org_slug::reserve_slug(&state.db, slug, Some(&org_id)).await?;
+        if reserved != *slug {
+            return Err(AppError::OrgSlugTaken(slug.clone()));
+        }
+    }
 
     let org = org_service::update_org_user(
         &state.db,
         &org_id,
         body.display_name.as_deref(),
+        body.slug.as_deref(),
         body.avatar_url.as_deref(),
         body.contact_email.as_deref(),
     )

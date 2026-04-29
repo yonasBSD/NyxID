@@ -178,6 +178,7 @@ mod tests {
             email: "alice@example.com".to_string(),
             password_hash: None,
             display_name: Some("Alice".to_string()),
+            slug: None,
             avatar_url: None,
             email_verified: true,
             email_verification_token: None,

@@ -293,6 +293,10 @@ pub(crate) fn test_user(user_id: &str, user_type: UserType) -> User {
             UserType::Person => "Test User".to_string(),
             UserType::Org => "Test Org".to_string(),
         }),
+        slug: match user_type {
+            UserType::Person => None,
+            UserType::Org => Some("test-org".to_string()),
+        },
         avatar_url: None,
         email_verified: true,
         email_verification_token: None,

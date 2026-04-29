@@ -205,6 +205,9 @@ pub enum AppError {
     #[error("Organization not found: {0}")]
     OrgNotFound(String),
 
+    #[error("Organization slug is already taken: {0}")]
+    OrgSlugTaken(String),
+
     #[error("Organization membership required")]
     OrgMembershipRequired,
 
@@ -286,6 +289,7 @@ impl AppError {
             Self::OrgCannotAuthenticate => StatusCode::FORBIDDEN,
             Self::OrgQueryTimeout => StatusCode::SERVICE_UNAVAILABLE,
             Self::OrgNotFound(_) => StatusCode::NOT_FOUND,
+            Self::OrgSlugTaken(_) => StatusCode::CONFLICT,
             Self::OrgMembershipRequired => StatusCode::FORBIDDEN,
             Self::OrgRoleInsufficient(_) => StatusCode::FORBIDDEN,
             Self::OrgInviteInvalid(_) => StatusCode::BAD_REQUEST,
@@ -357,6 +361,7 @@ impl AppError {
             Self::OrgCannotAuthenticate => 1403,
             Self::OrgQueryTimeout => 8100,
             Self::OrgNotFound(_) => 8101,
+            Self::OrgSlugTaken(_) => 8107,
             Self::OrgMembershipRequired => 8102,
             Self::OrgRoleInsufficient(_) => 8103,
             Self::OrgInviteInvalid(_) => 8104,
@@ -458,6 +463,7 @@ impl AppError {
             Self::OrgCannotAuthenticate => "org_cannot_authenticate",
             Self::OrgQueryTimeout => "org_query_timeout",
             Self::OrgNotFound(_) => "org_not_found",
+            Self::OrgSlugTaken(_) => "org_slug_taken",
             Self::OrgMembershipRequired => "org_membership_required",
             Self::OrgRoleInsufficient(_) => "org_role_insufficient",
             Self::OrgInviteInvalid(_) => "org_invite_invalid",
