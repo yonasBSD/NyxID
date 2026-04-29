@@ -10,6 +10,9 @@ use crate::crypto::aes::EncryptionKeys;
 use crate::crypto::token::hash_token;
 use crate::errors::{AppError, AppResult};
 use crate::models::node::{COLLECTION_NAME as NODES, Node, NodeMetadata, NodeStatus};
+use crate::models::node_pending_credential::{
+    COLLECTION_NAME as NODE_PENDING_CREDENTIALS, NodePendingCredential,
+};
 use crate::models::node_registration_token::{
     COLLECTION_NAME as NODE_REG_TOKENS, NodeRegistrationToken,
 };
@@ -63,6 +66,7 @@ pub struct TransferNodeResult {
     pub new_owner_user_id: String,
     pub deactivated_bindings_count: u64,
     pub cleared_user_service_count: u64,
+    pub deactivated_pending_credentials_count: u64,
 }
 
 /// Create a one-time registration token for a new node.
@@ -421,12 +425,21 @@ pub async fn transfer_node_owner(
         )
         .await?;
 
+    let pending_credential_result = db
+        .collection::<NodePendingCredential>(NODE_PENDING_CREDENTIALS)
+        .update_many(
+            doc! { "node_id": node_id, "is_active": true },
+            doc! { "$set": { "is_active": false } },
+        )
+        .await?;
+
     Ok(TransferNodeResult {
         node_id: node_id.to_string(),
         previous_owner_user_id: node.user_id,
         new_owner_user_id: new_owner_user_id.to_string(),
         deactivated_bindings_count: binding_result.modified_count,
         cleared_user_service_count: service_result.modified_count,
+        deactivated_pending_credentials_count: pending_credential_result.modified_count,
     })
 }
 

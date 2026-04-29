@@ -185,6 +185,8 @@ pub struct AppConfig {
     pub node_proxy_timeout_secs: u64,
     /// Registration token validity in seconds (default: 3600 = 1 hour)
     pub node_registration_token_ttl_secs: i64,
+    /// Pending node credential metadata TTL in seconds (default: 86400 = 24 hours)
+    pub node_pending_credential_ttl_secs: i64,
     /// Maximum nodes per user (default: 10)
     pub node_max_per_user: u32,
     /// Maximum concurrent WebSocket connections (default: 100)
@@ -376,6 +378,10 @@ impl std::fmt::Debug for AppConfig {
             .field(
                 "node_registration_token_ttl_secs",
                 &self.node_registration_token_ttl_secs,
+            )
+            .field(
+                "node_pending_credential_ttl_secs",
+                &self.node_pending_credential_ttl_secs,
             )
             .field("node_max_per_user", &self.node_max_per_user)
             .field("node_max_ws_connections", &self.node_max_ws_connections)
@@ -664,6 +670,10 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(3600),
+            node_pending_credential_ttl_secs: env::var("NODE_PENDING_CREDENTIAL_TTL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(86_400),
             node_max_per_user: env::var("NODE_MAX_PER_USER")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1040,6 +1050,7 @@ mod tests {
             node_heartbeat_timeout_secs: 90,
             node_proxy_timeout_secs: 30,
             node_registration_token_ttl_secs: 3600,
+            node_pending_credential_ttl_secs: 86_400,
             node_max_per_user: 10,
             node_max_ws_connections: 100,
             node_max_stream_duration_secs: 300,

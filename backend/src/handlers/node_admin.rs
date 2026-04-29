@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
 };
@@ -16,8 +16,11 @@ use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
 use crate::models::node::NodeMetadata;
+use crate::models::node_pending_credential::InjectionMethod;
 use crate::mw::auth::AuthUser;
-use crate::services::{audit_service, node_routing_service, node_service, org_service};
+use crate::services::{
+    audit_service, node_pending_credential_service, node_routing_service, node_service, org_service,
+};
 use crate::telemetry::{
     context::{TelemetryContext, emit_event},
     sampling::hash_short_id,
@@ -47,6 +50,20 @@ pub struct UpdateBindingRequest {
 #[derive(Debug, Deserialize)]
 pub struct TransferNodeRequest {
     pub new_owner_user_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PushPendingCredentialRequest {
+    pub service_slug: String,
+    pub injection_method: InjectionMethod,
+    pub field_name: String,
+    pub target_url: Option<String>,
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct PendingCredentialListQuery {
+    pub include_history: Option<bool>,
 }
 
 // --- Response types ---
@@ -143,6 +160,33 @@ pub struct TransferNodeResponse {
     pub cleared_user_service_count: u64,
 }
 
+#[derive(Debug, Serialize)]
+pub struct PendingCredentialInfo {
+    pub id: String,
+    pub node_id: String,
+    pub service_slug: String,
+    pub injection_method: String,
+    pub field_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub created_by_user_id: String,
+    pub owner_user_id: String,
+    pub created_at: String,
+    pub expires_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consumed_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declined_at: Option<String>,
+    pub is_active: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PendingCredentialListResponse {
+    pub pending_credentials: Vec<PendingCredentialInfo>,
+}
+
 // --- Helpers ---
 
 /// Build NodeMetricsInfo from the embedded metrics on a Node model.
@@ -179,6 +223,27 @@ fn audit_event_data_with_owner(
         );
     }
     event_data
+}
+
+fn pending_credential_info(
+    pending: crate::models::node_pending_credential::NodePendingCredential,
+) -> PendingCredentialInfo {
+    PendingCredentialInfo {
+        id: pending.id,
+        node_id: pending.node_id,
+        service_slug: pending.service_slug,
+        injection_method: pending.injection_method.as_str().to_string(),
+        field_name: pending.field_name,
+        target_url: pending.target_url,
+        label: pending.label,
+        created_by_user_id: pending.created_by_user_id,
+        owner_user_id: pending.owner_user_id,
+        created_at: pending.created_at.to_rfc3339(),
+        expires_at: pending.expires_at.to_rfc3339(),
+        consumed_at: pending.consumed_at.map(|dt| dt.to_rfc3339()),
+        declined_at: pending.declined_at.map(|dt| dt.to_rfc3339()),
+        is_active: pending.is_active,
+    }
 }
 
 // --- Handlers ---
@@ -492,6 +557,7 @@ pub async fn transfer_node(
             "new_owner_user_id": &result.new_owner_user_id,
             "deactivated_bindings_count": result.deactivated_bindings_count,
             "cleared_user_service_count": result.cleared_user_service_count,
+            "deactivated_pending_credentials_count": result.deactivated_pending_credentials_count,
         })),
         None,
         None,
@@ -506,6 +572,115 @@ pub async fn transfer_node(
         deactivated_bindings_count: result.deactivated_bindings_count,
         cleared_user_service_count: result.cleared_user_service_count,
     }))
+}
+
+/// POST /api/v1/nodes/{node_id}/credentials/push
+pub async fn push_pending_credential(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(node_id): Path<String>,
+    Json(body): Json<PushPendingCredentialRequest>,
+) -> AppResult<Json<PendingCredentialInfo>> {
+    let user_id_str = auth_user.user_id.to_string();
+    let pending = node_pending_credential_service::create_pending_credential(
+        &state.db,
+        &user_id_str,
+        &node_id,
+        node_pending_credential_service::CreatePendingCredentialInput {
+            service_slug: body.service_slug,
+            injection_method: body.injection_method,
+            field_name: body.field_name,
+            target_url: body.target_url,
+            label: body.label,
+            ttl_secs: state.config.node_pending_credential_ttl_secs,
+        },
+    )
+    .await?;
+
+    audit_service::log_async(
+        state.db.clone(),
+        Some(user_id_str),
+        "node_credential_push_created".to_string(),
+        Some(serde_json::json!({
+            "node_id": &pending.node_id,
+            "service_slug": &pending.service_slug,
+            "injection_method": pending.injection_method.as_str(),
+            "owner_user_id": &pending.owner_user_id,
+        })),
+        None,
+        None,
+        None,
+        None,
+    );
+
+    if state.node_ws_manager.is_connected(&node_id)
+        && let Err(err) = state
+            .node_ws_manager
+            .send_pending_credentials_available(&node_id)
+    {
+        tracing::warn!(
+            node_id = %node_id,
+            error = %err,
+            "Failed to nudge node about pending credential"
+        );
+    }
+
+    Ok(Json(pending_credential_info(pending)))
+}
+
+/// GET /api/v1/nodes/{node_id}/credentials/pending
+pub async fn list_pending_credentials(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(node_id): Path<String>,
+    Query(query): Query<PendingCredentialListQuery>,
+) -> AppResult<Json<PendingCredentialListResponse>> {
+    let user_id_str = auth_user.user_id.to_string();
+    let pending = node_pending_credential_service::list_pending_credentials_for_admin(
+        &state.db,
+        &user_id_str,
+        &node_id,
+        query.include_history.unwrap_or(false),
+    )
+    .await?;
+
+    Ok(Json(PendingCredentialListResponse {
+        pending_credentials: pending.into_iter().map(pending_credential_info).collect(),
+    }))
+}
+
+/// DELETE /api/v1/nodes/{node_id}/credentials/pending/{pending_id}
+pub async fn cancel_pending_credential(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path((node_id, pending_id)): Path<(String, String)>,
+) -> AppResult<impl IntoResponse> {
+    let user_id_str = auth_user.user_id.to_string();
+    let pending = node_pending_credential_service::cancel_pending_credential(
+        &state.db,
+        &user_id_str,
+        &node_id,
+        &pending_id,
+    )
+    .await?;
+
+    audit_service::log_async(
+        state.db.clone(),
+        Some(user_id_str),
+        "node_credential_push_canceled".to_string(),
+        Some(serde_json::json!({
+            "node_id": &pending.node_id,
+            "pending_credential_id": &pending.id,
+            "service_slug": &pending.service_slug,
+            "owner_user_id": &pending.owner_user_id,
+        })),
+        None,
+        None,
+        None,
+        None,
+    );
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// GET /api/v1/nodes/{node_id}/bindings

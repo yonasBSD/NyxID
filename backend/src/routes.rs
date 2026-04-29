@@ -521,6 +521,18 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
             "/{node_id}/transfer",
             post(handlers::node_admin::transfer_node),
         )
+        .route(
+            "/{node_id}/credentials/push",
+            post(handlers::node_admin::push_pending_credential),
+        )
+        .route(
+            "/{node_id}/credentials/pending",
+            get(handlers::node_admin::list_pending_credentials),
+        )
+        .route(
+            "/{node_id}/credentials/pending/{pending_id}",
+            delete(handlers::node_admin::cancel_pending_credential),
+        )
         .route("/{node_id}/admins", get(handlers::node_admin::list_admins))
         .route(
             "/{node_id}/bindings",

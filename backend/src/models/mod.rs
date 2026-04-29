@@ -19,6 +19,7 @@ pub mod invite_code;
 pub mod mcp_session;
 pub mod mfa_factor;
 pub mod node;
+pub mod node_pending_credential;
 pub mod node_registration_token;
 pub mod node_service_binding;
 pub mod notification_channel;

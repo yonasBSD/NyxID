@@ -10,6 +10,72 @@
 
 use crate::errors::{AppError, AppResult};
 
+/// Validate a user-supplied URL that will be stored and later shown to a
+/// remote operator. Unlike `validate_base_url`, this rejects private,
+/// loopback, link-local, CGNAT, unspecified, and metadata targets because
+/// the server should not persist internal routing hints supplied from a
+/// different trust boundary.
+pub async fn validate_public_http_url(url: &str, field_name: &str) -> AppResult<()> {
+    if url.len() > 2048 {
+        return Err(AppError::ValidationError(format!(
+            "{field_name} must not exceed 2048 characters"
+        )));
+    }
+
+    let parsed = url::Url::parse(url)
+        .map_err(|_| AppError::ValidationError(format!("{field_name} must be a valid URL")))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(AppError::ValidationError(format!(
+            "{field_name} must use http or https"
+        )));
+    }
+    reject_url_userinfo(&parsed)?;
+
+    let host = parsed.host_str().ok_or_else(|| {
+        AppError::ValidationError(format!("{field_name} must include a hostname"))
+    })?;
+    let normalized_host = normalize_host(host);
+    if matches!(
+        normalized_host.as_str(),
+        "localhost" | "metadata.google.internal"
+    ) {
+        return Err(AppError::ValidationError(format!(
+            "{field_name} must not target a private or internal hostname"
+        )));
+    }
+
+    let port = parsed.port_or_known_default().ok_or_else(|| {
+        AppError::ValidationError(format!("{field_name} must include a valid port"))
+    })?;
+    let resolved_addrs = if let Ok(ip) = normalized_host.parse::<std::net::IpAddr>() {
+        vec![std::net::SocketAddr::new(ip, port)]
+    } else {
+        tokio::net::lookup_host((normalized_host.as_str(), port))
+            .await
+            .map_err(|e| {
+                AppError::ValidationError(format!("Failed to resolve {field_name} host: {e}"))
+            })?
+            .collect()
+    };
+
+    if resolved_addrs.is_empty() {
+        return Err(AppError::ValidationError(format!(
+            "{field_name} host did not resolve to any IP addresses"
+        )));
+    }
+    if resolved_addrs
+        .iter()
+        .map(std::net::SocketAddr::ip)
+        .any(is_private_or_internal_ip)
+    {
+        return Err(AppError::ValidationError(format!(
+            "{field_name} must not resolve to private or internal IP addresses"
+        )));
+    }
+
+    Ok(())
+}
+
 /// Validate that a URL has a valid scheme and hostname.
 ///
 /// Cloud metadata endpoints (169.254.169.254, metadata.google.internal)
@@ -87,9 +153,46 @@ pub fn reject_url_userinfo(parsed: &url::Url) -> AppResult<()> {
     Ok(())
 }
 
+fn normalize_host(host: &str) -> String {
+    host.trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim_end_matches('.')
+        .to_ascii_lowercase()
+}
+
+fn is_private_or_internal_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(ipv4) => {
+            ipv4.is_loopback()
+                || ipv4.is_private()
+                || ipv4.is_link_local()
+                || ipv4.is_unspecified()
+                || ipv4.is_broadcast()
+                || is_rfc6598_cgnat(ipv4)
+        }
+        std::net::IpAddr::V6(ipv6) => {
+            ipv6.is_loopback()
+                || ipv6.is_unspecified()
+                || (ipv6.segments()[0] & 0xfe00) == 0xfc00
+                || (ipv6.segments()[0] & 0xffc0) == 0xfe80
+                || ipv6
+                    .to_ipv4_mapped()
+                    .is_some_and(|mapped| is_private_or_internal_ip(mapped.into()))
+        }
+    }
+}
+
+fn is_rfc6598_cgnat(ipv4: std::net::Ipv4Addr) -> bool {
+    ipv4.octets()[0] == 100 && (64..=127).contains(&ipv4.octets()[1])
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{reject_url_userinfo, validate_base_url, validate_optional_spec_url};
+    use super::{
+        reject_url_userinfo, validate_base_url, validate_optional_spec_url,
+        validate_public_http_url,
+    };
 
     #[test]
     fn validate_base_url_accepts_public_url() {
@@ -153,5 +256,24 @@ mod tests {
         assert!(reject_url_userinfo(&with_both).is_err());
         let with_username_only = url::Url::parse("https://user@example.com/").unwrap();
         assert!(reject_url_userinfo(&with_username_only).is_err());
+    }
+
+    #[tokio::test]
+    async fn validate_public_http_url_rejects_internal_targets() {
+        assert!(
+            validate_public_http_url("http://127.0.0.1:3000", "target_url")
+                .await
+                .is_err()
+        );
+        assert!(
+            validate_public_http_url("http://localhost:3000", "target_url")
+                .await
+                .is_err()
+        );
+        assert!(
+            validate_public_http_url("http://10.0.0.5:3000", "target_url")
+                .await
+                .is_err()
+        );
     }
 }

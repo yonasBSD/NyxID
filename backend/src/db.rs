@@ -785,6 +785,45 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     )
     .await?;
 
+    // ── node_pending_credentials ──
+    let npc = db.collection::<mongodb::bson::Document>("node_pending_credentials");
+    npc.create_index(
+        IndexModel::builder()
+            .keys(doc! { "node_id": 1, "service_slug": 1 })
+            .options(
+                IndexOptions::builder()
+                    .name("node_pending_credentials_active_slug_unique".to_string())
+                    .unique(true)
+                    .partial_filter_expression(doc! { "is_active": true })
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
+    npc.create_index(
+        IndexModel::builder()
+            .keys(doc! { "expires_at": 1 })
+            .options(
+                IndexOptions::builder()
+                    .name("node_pending_credentials_expiry_ttl".to_string())
+                    .expire_after(Duration::from_secs(0))
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
+    npc.create_index(
+        IndexModel::builder()
+            .keys(doc! { "created_by_user_id": 1, "is_active": 1 })
+            .options(
+                IndexOptions::builder()
+                    .name("node_pending_credentials_creator_active".to_string())
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
+
     // ── cli_pairings (remote CLI pairing / Mode B wizard flow) ──
     let cli_pairings = db.collection::<mongodb::bson::Document>("cli_pairings");
     // `code_hash` is the primary lookup on `claim`; unique so a freak
