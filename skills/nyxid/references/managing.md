@@ -87,8 +87,8 @@ nyxid api-key rotate <ID_OR_NAME> --output json            # scripted: prints ra
 nyxid api-key delete <ID_OR_NAME> --yes
 
 # Org-owned agent keys (for sharing one agent identity across the whole org)
-nyxid api-key create --name "shared-coding-agent" --org <ORG_ID> --platform claude-code
-nyxid api-key list --org <ORG_ID>                     # list all keys owned by this org
+nyxid api-key create --name "shared-coding-agent" --org <ID|SLUG|NAME> --platform claude-code
+nyxid api-key list --org <ID|SLUG|NAME>               # list all keys owned by this org
 nyxid api-key rotate <ID> --output json               # any org admin can rotate
 nyxid api-key delete <ID> --yes                       # any org admin can delete
 

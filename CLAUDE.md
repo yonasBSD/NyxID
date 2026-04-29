@@ -152,6 +152,7 @@ Per-agent credential binding, rate limiting, and audit attribution for AI agents
 - Profile name validation: 1-64 chars, alphanumeric + hyphens + underscores only
 - Node multi-instance: profile-aware service labels (`dev.nyxid.node.{profile}` / `nyxid-node-{profile}.service`)
 - `nyxid api-key create --platform`, `nyxid api-key bind` commands for managing agent identities (consolidated from former `ai-setup agent` subcommands)
+- Organization `--org` flags accept UUID, slug, or display name. The CLI resolves in that order: UUID returns locally, slug calls `GET /orgs/{slug}`, and display-name lookup fetches `GET /orgs` once and errors with candidate rows when ambiguous. Org users have an auto-generated `slug`, visible in `nyxid org list`.
 
 **Frontend:**
 - API key detail page shows platform selector, rate limit editor, and credential bindings CRUD
