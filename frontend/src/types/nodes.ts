@@ -16,9 +16,23 @@ export interface NodeMetricsInfo {
   readonly last_success_at: string | null;
 }
 
+export interface NodeOwnerInfo {
+  readonly kind: "user" | "org";
+  readonly id: string;
+  readonly display_name: string;
+}
+
+export interface NodeAdminInfo {
+  readonly user_id: string;
+  readonly display_name: string | null;
+  readonly email: string | null;
+  readonly role: "owner" | "admin";
+}
+
 export interface NodeInfo {
   readonly id: string;
   readonly name: string;
+  readonly owner: NodeOwnerInfo;
   readonly status: string;
   readonly is_connected: boolean;
   readonly last_heartbeat_at: string | null;
@@ -31,6 +45,10 @@ export interface NodeInfo {
 
 export interface NodeListResponse {
   readonly nodes: readonly NodeInfo[];
+}
+
+export interface NodeAdminsResponse {
+  readonly admins: readonly NodeAdminInfo[];
 }
 
 export interface NodeBindingInfo {

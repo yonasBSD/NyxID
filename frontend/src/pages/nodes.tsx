@@ -11,12 +11,16 @@ import {
   useCreateRegistrationToken,
   useDeleteNode,
 } from "@/hooks/use-nodes";
+import { useOrgs } from "@/hooks/use-orgs";
 import { usePublicConfig } from "@/hooks/use-public-config";
+import { useAuthStore } from "@/stores/auth-store";
 import { ApiError } from "@/lib/api-client";
 import { formatRelativeTime } from "@/lib/utils";
 import { PageHeader } from "@/components/shared/page-header";
 import { CopyableField } from "@/components/shared/copyable-field";
+import { OrgScopeSelect } from "@/components/shared/org-scope-select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -47,6 +51,28 @@ import {
 import { HardDrive, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { NodeStatusBadge } from "@/components/shared/node-status-badge";
+import type { NodeInfo } from "@/types/nodes";
+
+function nodeOwnerLabel(
+  owner: NodeInfo["owner"],
+  currentUserId: string | null,
+): string {
+  if (owner.kind === "user" && owner.id === currentUserId) {
+    return "You";
+  }
+  return owner.display_name;
+}
+
+function canManageNode(
+  node: NodeInfo,
+  currentUserId: string | null,
+  adminOrgIds: ReadonlySet<string>,
+): boolean {
+  if (node.owner.kind === "user") {
+    return node.owner.id === currentUserId;
+  }
+  return adminOrgIds.has(node.owner.id);
+}
 
 function RegisterNodeDialog() {
   const [open, setOpen] = useState(false);
@@ -66,7 +92,7 @@ function RegisterNodeDialog() {
 
   const form = useForm<CreateRegistrationTokenFormData>({
     resolver: zodResolver(createRegistrationTokenSchema),
-    defaultValues: { name: "" },
+    defaultValues: { name: "", ownerUserId: null },
   });
 
   async function onSubmit(data: CreateRegistrationTokenFormData) {
@@ -180,6 +206,23 @@ function RegisterNodeDialog() {
                     </FormItem>
                   )}
                 />
+                <FormField
+                  control={form.control}
+                  name="ownerUserId"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Owner</FormLabel>
+                      <FormControl>
+                        <OrgScopeSelect
+                          value={field.value ?? null}
+                          onChange={field.onChange}
+                          label="Node owner"
+                        />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
                 <DialogFooter>
                   <Button type="button" variant="outline" onClick={handleClose}>
                     Cancel
@@ -199,11 +242,18 @@ function RegisterNodeDialog() {
 
 export function NodesPage() {
   const { data: nodes, isLoading, error } = useNodes();
+  const { data: orgs } = useOrgs();
+  const currentUserId = useAuthStore((state) => state.user?.id ?? null);
   const deleteMutation = useDeleteNode();
   const [deleteTarget, setDeleteTarget] = useState<{
     readonly id: string;
     readonly name: string;
   } | null>(null);
+  const adminOrgIds = new Set(
+    (orgs ?? [])
+      .filter((org) => org.your_role === "admin")
+      .map((org) => org.id),
+  );
 
   async function handleDelete() {
     if (!deleteTarget) return;
@@ -254,6 +304,7 @@ export function NodesPage() {
             <TableHeader>
               <TableRow>
                 <TableHead>Name</TableHead>
+                <TableHead>Owner</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead>Bindings</TableHead>
                 <TableHead>Last Heartbeat</TableHead>
@@ -279,6 +330,15 @@ export function NodesPage() {
                     )}
                   </TableCell>
                   <TableCell>
+                    <Badge
+                      variant={
+                        node.owner.kind === "org" ? "secondary" : "outline"
+                      }
+                    >
+                      {nodeOwnerLabel(node.owner, currentUserId)}
+                    </Badge>
+                  </TableCell>
+                  <TableCell>
                     <NodeStatusBadge
                       status={node.status}
                       isConnected={node.is_connected}
@@ -297,17 +357,19 @@ export function NodesPage() {
                     {formatRelativeTime(node.created_at)}
                   </TableCell>
                   <TableCell>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                      onClick={() =>
-                        setDeleteTarget({ id: node.id, name: node.name })
-                      }
-                    >
-                      <Trash2 className="h-4 w-4" />
-                      <span className="sr-only">Delete {node.name}</span>
-                    </Button>
+                    {canManageNode(node, currentUserId, adminOrgIds) && (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                        onClick={() =>
+                          setDeleteTarget({ id: node.id, name: node.name })
+                        }
+                      >
+                        <Trash2 className="h-4 w-4" />
+                        <span className="sr-only">Delete {node.name}</span>
+                      </Button>
+                    )}
                   </TableCell>
                 </TableRow>
               ))}

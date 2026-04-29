@@ -9,6 +9,7 @@ export const createRegistrationTokenSchema = z.object({
       /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/,
       "Lowercase alphanumeric and hyphens only, cannot start or end with hyphen",
     ),
+  ownerUserId: z.string().min(1).nullable().optional(),
 });
 
 export const createBindingSchema = z.object({

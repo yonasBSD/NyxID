@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useParams, useNavigate } from "@tanstack/react-router";
 import {
   useNode,
+  useNodeAdmins,
   useNodeBindings,
   useDeleteNode,
   useRotateNodeToken,
@@ -10,6 +11,7 @@ import {
   useDeleteBinding,
 } from "@/hooks/use-nodes";
 import { useServices } from "@/hooks/use-services";
+import { useAuthStore } from "@/stores/auth-store";
 import { ApiError } from "@/lib/api-client";
 import {
   buildNodeCredentialCommand,
@@ -57,18 +59,53 @@ import {
   Plus,
   Terminal,
   Trash2,
+  Users,
 } from "lucide-react";
 import { toast } from "sonner";
 import { NodeStatusBadge } from "@/components/shared/node-status-badge";
+import type { NodeAdminInfo, NodeInfo } from "@/types/nodes";
+
+function nodeOwnerLabel(
+  owner: NodeInfo["owner"],
+  currentUserId: string | null,
+): string {
+  if (owner.kind === "user" && owner.id === currentUserId) {
+    return "You";
+  }
+  return owner.display_name;
+}
+
+function adminDisplayName(admin: NodeAdminInfo, currentUserId: string | null) {
+  if (admin.user_id === currentUserId) {
+    return "You";
+  }
+  return admin.display_name ?? admin.email ?? admin.user_id;
+}
+
+function canManageNode(
+  node: NodeInfo | undefined,
+  currentUserId: string | null,
+  admins: readonly NodeAdminInfo[] | undefined,
+): boolean {
+  if (!node || !currentUserId) {
+    return false;
+  }
+  if (node.owner.kind === "user") {
+    return node.owner.id === currentUserId;
+  }
+  return (admins ?? []).some((admin) => admin.user_id === currentUserId);
+}
 
 export function NodeDetailPage() {
   const { nodeId } = useParams({ strict: false }) as { nodeId: string };
   const navigate = useNavigate();
 
   const { data: node, isLoading, error } = useNode(nodeId);
+  const { data: admins, isLoading: adminsLoading } = useNodeAdmins(nodeId);
   const { data: bindings, isLoading: bindingsLoading } =
     useNodeBindings(nodeId);
   const { data: services } = useServices();
+  const currentUserId = useAuthStore((state) => state.user?.id ?? null);
 
   const deleteMutation = useDeleteNode();
   const rotateMutation = useRotateNodeToken();
@@ -96,12 +133,13 @@ export function NodeDetailPage() {
       ? servicesBySlug.get(setupCommandSlug)
       : undefined;
   const setupCommandHint = getNodeCredentialPromptHint(setupService);
+  const canManage = canManageNode(node, currentUserId, admins);
 
   // Filter out services that already have bindings
   const boundServiceIds = new Set((bindings ?? []).map((b) => b.service_id));
-  const availableServices = (services ?? []).filter(
-    (s) => s.is_active && !boundServiceIds.has(s.id),
-  );
+  const availableServices = canManage
+    ? (services ?? []).filter((s) => s.is_active && !boundServiceIds.has(s.id))
+    : [];
 
   async function handleDelete() {
     try {
@@ -220,31 +258,41 @@ export function NodeDetailPage() {
       <PageHeader
         breadcrumbs={[{ label: "Nodes", to: "/nodes" }, { label: node.name }]}
         title={node.name}
-        description="Manage node settings and service bindings."
+        description={
+          canManage
+            ? "Manage node settings and service bindings."
+            : "View node status and service bindings."
+        }
         actions={
-          <div className="flex gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setShowRotateDialog(true)}
-            >
-              <KeyRound className="mr-2 h-4 w-4" />
-              Rotate Credentials
-            </Button>
-            <Button
-              variant="destructive"
-              size="sm"
-              onClick={() => setShowDeleteDialog(true)}
-            >
-              <Trash2 className="mr-2 h-4 w-4" />
-              Delete
-            </Button>
-          </div>
+          canManage ? (
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setShowRotateDialog(true)}
+              >
+                <KeyRound className="mr-2 h-4 w-4" />
+                Rotate Credentials
+              </Button>
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={() => setShowDeleteDialog(true)}
+              >
+                <Trash2 className="mr-2 h-4 w-4" />
+                Delete
+              </Button>
+            </div>
+          ) : undefined
         }
       />
 
       {/* Node Info */}
       <DetailSection title="Node Information">
+        <DetailRow
+          label="Owner"
+          value={nodeOwnerLabel(node.owner, currentUserId)}
+        />
         <div className="flex items-center justify-between border-b border-border py-2 text-sm last:border-b-0">
           <span className="text-text-tertiary">Status</span>
           <div className="flex items-center gap-1">
@@ -279,6 +327,41 @@ export function NodeDetailPage() {
         )}
         {node.metadata?.ip_address && (
           <DetailRow label="IP Address" value={node.metadata.ip_address} />
+        )}
+      </DetailSection>
+
+      {/* Shared with */}
+      <DetailSection title="Shared with">
+        {adminsLoading ? (
+          <div className="space-y-2">
+            <Skeleton className="h-8 w-full" />
+            <Skeleton className="h-8 w-2/3" />
+          </div>
+        ) : admins && admins.length > 0 ? (
+          <div className="divide-y divide-border">
+            {admins.map((admin) => (
+              <div
+                key={admin.user_id}
+                className="flex items-center justify-between py-2 text-sm"
+              >
+                <div className="flex min-w-0 items-center gap-2">
+                  <Users className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  <span className="truncate text-foreground">
+                    {adminDisplayName(admin, currentUserId)}
+                  </span>
+                </div>
+                <Badge
+                  variant={admin.role === "owner" ? "outline" : "secondary"}
+                >
+                  {admin.role === "owner" ? "Owner" : "Admin"}
+                </Badge>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-sm text-muted-foreground">
+            No admins are currently listed for this node.
+          </p>
         )}
       </DetailSection>
 
@@ -347,15 +430,17 @@ export function NodeDetailPage() {
               Services routed through this node for credential injection.
             </p>
           </div>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setShowBindDialog(true)}
-            disabled={availableServices.length === 0}
-          >
-            <Plus className="mr-2 h-4 w-4" />
-            Bind Service
-          </Button>
+          {canManage && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setShowBindDialog(true)}
+              disabled={availableServices.length === 0}
+            >
+              <Plus className="mr-2 h-4 w-4" />
+              Bind Service
+            </Button>
+          )}
         </div>
 
         {bindingsLoading ? (
@@ -371,8 +456,9 @@ export function NodeDetailPage() {
           <div className="flex flex-col items-center justify-center rounded-xl border border-border py-8 text-center">
             <Link2 className="mb-3 h-8 w-8 text-muted-foreground/50" />
             <p className="text-sm text-muted-foreground">
-              No services bound to this node. Bind a service to route proxy
-              requests through it.
+              {canManage
+                ? "No services bound to this node. Bind a service to route proxy requests through it."
+                : "No services are currently bound to this node."}
             </p>
           </div>
         ) : (
@@ -384,7 +470,7 @@ export function NodeDetailPage() {
                   <TableHead>Slug</TableHead>
                   <TableHead>Priority</TableHead>
                   <TableHead>Bound</TableHead>
-                  <TableHead className="w-[100px]" />
+                  {canManage && <TableHead className="w-[100px]" />}
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -410,74 +496,78 @@ export function NodeDetailPage() {
                         <span className="text-sm tabular-nums">
                           {String(binding.priority)}
                         </span>
-                        <div className="flex flex-col">
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-5 w-5 text-muted-foreground"
-                            onClick={() =>
-                              void handlePriorityChange(
-                                binding.id,
-                                binding.priority - 1,
-                              )
-                            }
-                          >
-                            <ArrowUp className="h-3 w-3" />
-                            <span className="sr-only">Increase priority</span>
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-5 w-5 text-muted-foreground"
-                            onClick={() =>
-                              void handlePriorityChange(
-                                binding.id,
-                                binding.priority + 1,
-                              )
-                            }
-                          >
-                            <ArrowDown className="h-3 w-3" />
-                            <span className="sr-only">Decrease priority</span>
-                          </Button>
-                        </div>
+                        {canManage && (
+                          <div className="flex flex-col">
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-5 w-5 text-muted-foreground"
+                              onClick={() =>
+                                void handlePriorityChange(
+                                  binding.id,
+                                  binding.priority - 1,
+                                )
+                              }
+                            >
+                              <ArrowUp className="h-3 w-3" />
+                              <span className="sr-only">Increase priority</span>
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-5 w-5 text-muted-foreground"
+                              onClick={() =>
+                                void handlePriorityChange(
+                                  binding.id,
+                                  binding.priority + 1,
+                                )
+                              }
+                            >
+                              <ArrowDown className="h-3 w-3" />
+                              <span className="sr-only">Decrease priority</span>
+                            </Button>
+                          </div>
+                        )}
                       </div>
                     </TableCell>
                     <TableCell className="text-muted-foreground">
                       {formatRelativeTime(binding.created_at)}
                     </TableCell>
-                    <TableCell>
-                      <div className="flex items-center gap-1">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-8 w-8 text-muted-foreground hover:text-foreground"
-                          onClick={() =>
-                            setSetupCommandSlug(binding.service_slug)
-                          }
-                        >
-                          <Terminal className="h-4 w-4" />
-                          <span className="sr-only">
-                            Setup command for {binding.service_name}
-                          </span>
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                          onClick={() =>
-                            setUnbindTarget({
-                              id: binding.id,
-                              name: binding.service_name,
-                            })
-                          }
-                        >
-                          <Trash2 className="h-4 w-4" />
-                          <span className="sr-only">
-                            Unbind {binding.service_name}
-                          </span>
-                        </Button>
-                      </div>
-                    </TableCell>
+                    {canManage && (
+                      <TableCell>
+                        <div className="flex items-center gap-1">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                            onClick={() =>
+                              setSetupCommandSlug(binding.service_slug)
+                            }
+                          >
+                            <Terminal className="h-4 w-4" />
+                            <span className="sr-only">
+                              Setup command for {binding.service_name}
+                            </span>
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                            onClick={() =>
+                              setUnbindTarget({
+                                id: binding.id,
+                                name: binding.service_name,
+                              })
+                            }
+                          >
+                            <Trash2 className="h-4 w-4" />
+                            <span className="sr-only">
+                              Unbind {binding.service_name}
+                            </span>
+                          </Button>
+                        </div>
+                      </TableCell>
+                    )}
                   </TableRow>
                 ))}
               </TableBody>

@@ -3,6 +3,8 @@ import { api } from "@/lib/api-client";
 import type {
   NodeInfo,
   NodeListResponse,
+  NodeAdminInfo,
+  NodeAdminsResponse,
   NodeBindingInfo,
   BindingListResponse,
   CreateRegistrationTokenResponse,
@@ -47,6 +49,17 @@ export function useNode(nodeId: string) {
   });
 }
 
+export function useNodeAdmins(nodeId: string) {
+  return useQuery({
+    queryKey: ["nodes", nodeId, "admins"],
+    queryFn: async (): Promise<readonly NodeAdminInfo[]> => {
+      const res = await api.get<NodeAdminsResponse>(`/nodes/${nodeId}/admins`);
+      return res.admins;
+    },
+    enabled: Boolean(nodeId),
+  });
+}
+
 export function useNodeBindings(nodeId: string) {
   return useQuery({
     queryKey: ["nodes", nodeId, "bindings"],
@@ -69,9 +82,15 @@ export function useCreateRegistrationToken() {
     mutationFn: async (
       data: CreateRegistrationTokenFormData,
     ): Promise<CreateRegistrationTokenResponse> => {
+      const body: { name: string; owner_user_id?: string } = {
+        name: data.name,
+      };
+      if (data.ownerUserId) {
+        body.owner_user_id = data.ownerUserId;
+      }
       return api.post<CreateRegistrationTokenResponse>(
         "/nodes/register-token",
-        data,
+        body,
       );
     },
     onSuccess: () => {
