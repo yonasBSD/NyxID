@@ -1683,6 +1683,34 @@ mod tests {
     }
 
     #[test]
+    fn node_credentials_accept_accepts_value_env() {
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "node",
+            "credentials",
+            "accept",
+            "openclaw",
+            "--value-env",
+            "OPENCLAW_KEY",
+        ])
+        .expect("node credentials accept should parse");
+
+        match cli.command {
+            Commands::Node {
+                command:
+                    NodeCommands::Credentials {
+                        command: NodeCredentialCommands::Accept { slug, value_env },
+                        ..
+                    },
+            } => {
+                assert_eq!(slug, "openclaw");
+                assert_eq!(value_env.as_deref(), Some("OPENCLAW_KEY"));
+            }
+            _ => panic!("unexpected parse result"),
+        }
+    }
+
+    #[test]
     fn service_add_oauth_accepts_custom_slug_flag() {
         let cli = Cli::try_parse_from([
             "nyxid", "service", "add", "api-lark", "--oauth", "--slug", "my-lark",
@@ -1897,6 +1925,24 @@ pub enum NodeCredentialCommands {
     },
     /// List configured credentials
     List,
+    /// List pushed credentials awaiting local acceptance
+    Pending,
+    /// Accept a pushed credential and store the secret locally
+    Accept {
+        /// Service slug to accept
+        slug: String,
+        /// Read the secret value from this environment variable
+        #[arg(long)]
+        value_env: Option<String>,
+    },
+    /// Decline a pushed credential without changing local credentials
+    Decline {
+        /// Service slug to decline
+        slug: String,
+        /// Optional reason to send to NyxID
+        #[arg(long)]
+        reason: Option<String>,
+    },
     /// Remove a credential for a service
     Remove {
         /// Service slug to remove

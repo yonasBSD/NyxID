@@ -7,6 +7,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use base64::Engine as _;
+use serde::Deserialize;
 
 use super::config::{self, NodeConfig};
 use super::credential_store::{CredentialStore, SharedCredentials, SharedCredentialsSender};
@@ -16,6 +17,23 @@ use super::secret_backend::SecretBackend;
 use super::ws_client;
 
 use crate::cli::CredentialSecretFormat;
+
+#[derive(Clone, Debug, Deserialize)]
+struct PendingCredentialMetadata {
+    id: String,
+    service_slug: String,
+    injection_method: String,
+    field_name: String,
+    target_url: Option<String>,
+    label: Option<String>,
+    created_at: String,
+    expires_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PendingCredentialListResponse {
+    pending_credentials: Vec<PendingCredentialMetadata>,
+}
 
 // ---------------------------------------------------------------------------
 // Top-level commands
@@ -413,6 +431,94 @@ pub async fn cmd_credentials(
             }
             Ok(())
         }
+        NodeCredentialCommands::Pending => {
+            let node_config = NodeConfig::load(&config_file)?;
+            let backend = SecretBackend::from_config(&node_config, &config_dir)?;
+            let pending = fetch_pending_credentials_for_node(&node_config, &backend).await?;
+
+            if pending.is_empty() {
+                println!("No pending credentials.");
+                return Ok(());
+            }
+
+            println!("Pending credentials:");
+            for item in pending {
+                println!(
+                    "  {}: {} {} (age {}, expires {})",
+                    item.service_slug,
+                    item.injection_method,
+                    item.field_name,
+                    format_pending_age(&item.created_at),
+                    item.expires_at
+                );
+                if let Some(label) = item.label.as_deref().filter(|label| !label.is_empty()) {
+                    println!("    Label: {label}");
+                }
+                if let Some(url) = item.target_url.as_deref().filter(|url| !url.is_empty()) {
+                    println!("    Verify target URL before accepting: {url}");
+                }
+            }
+            Ok(())
+        }
+        NodeCredentialCommands::Accept { slug, value_env } => {
+            let service = slug.to_lowercase();
+            let mut node_config = NodeConfig::load(&config_file)?;
+            let backend = SecretBackend::from_config(&node_config, &config_dir)?;
+            let pending = find_pending_credential(&node_config, &backend, &service).await?;
+
+            if let Some(url) = pending.target_url.as_deref().filter(|url| !url.is_empty()) {
+                println!("Verify target URL before accepting: {url}");
+            }
+
+            let secret = match value_env {
+                Some(env_name) => {
+                    let value = std::env::var(&env_name).map_err(|_| {
+                        super::error::Error::Validation(format!(
+                            "Environment variable '{env_name}' is not set"
+                        ))
+                    })?;
+                    read_secret_value(Some(value), "credential value")?
+                }
+                None => prompt_secret(&format!("Enter credential value for '{service}'"))?,
+            };
+
+            store_pending_credential_locally(&mut node_config, &backend, &pending, &secret)?;
+            node_config.save(&config_file)?;
+
+            let mut api = node_agent_api_client(&node_config, &backend)?;
+            api.post_empty(
+                &format!("/node-agent/pending-credentials/{}/consume", pending.id),
+                &serde_json::json!({}),
+            )
+            .await
+            .map_err(|error| {
+                super::error::Error::Config(format!("Failed to mark credential consumed: {error}"))
+            })?;
+
+            println!(
+                "Credential accepted for '{}' ({}).",
+                pending.service_slug, pending.injection_method
+            );
+            Ok(())
+        }
+        NodeCredentialCommands::Decline { slug, reason } => {
+            let service = slug.to_lowercase();
+            let node_config = NodeConfig::load(&config_file)?;
+            let backend = SecretBackend::from_config(&node_config, &config_dir)?;
+            let pending = find_pending_credential(&node_config, &backend, &service).await?;
+            let mut api = node_agent_api_client(&node_config, &backend)?;
+            api.post_empty(
+                &format!("/node-agent/pending-credentials/{}/decline", pending.id),
+                &serde_json::json!({ "reason": reason }),
+            )
+            .await
+            .map_err(|error| {
+                super::error::Error::Config(format!("Failed to decline credential: {error}"))
+            })?;
+
+            println!("Credential push declined for '{}'.", pending.service_slug);
+            Ok(())
+        }
         NodeCredentialCommands::AddOauth {
             service: raw_service,
             from_catalog,
@@ -714,6 +820,116 @@ async fn oauth_refresh_loop(
         if config_changed && let Err(e) = updated_config.save(&config_file) {
             tracing::error!(error = %e, "Failed to save config after OAuth refresh");
         }
+    }
+}
+
+fn api_base_url_from_node_ws_url(ws_url: &str) -> String {
+    let http_url = if let Some(rest) = ws_url.strip_prefix("ws://") {
+        format!("http://{rest}")
+    } else if let Some(rest) = ws_url.strip_prefix("wss://") {
+        format!("https://{rest}")
+    } else {
+        ws_url.to_string()
+    };
+
+    http_url
+        .trim_end_matches('/')
+        .strip_suffix("/api/v1/nodes/ws")
+        .unwrap_or_else(|| http_url.trim_end_matches('/'))
+        .to_string()
+}
+
+fn node_agent_api_client(
+    node_config: &NodeConfig,
+    backend: &SecretBackend,
+) -> Result<crate::api::ApiClient> {
+    let auth_token = backend.load_auth_token(node_config)?;
+    let base_api_url = api_base_url_from_node_ws_url(&node_config.server.url);
+    crate::api::ApiClient::new(&base_api_url, auth_token)
+        .map(crate::api::ApiClient::without_token_refresh)
+        .map_err(|error| {
+            super::error::Error::Config(format!("Failed to create node-agent API client: {error}"))
+        })
+}
+
+async fn fetch_pending_credentials_for_node(
+    node_config: &NodeConfig,
+    backend: &SecretBackend,
+) -> Result<Vec<PendingCredentialMetadata>> {
+    let mut api = node_agent_api_client(node_config, backend)?;
+    let response: PendingCredentialListResponse = api
+        .get("/node-agent/pending-credentials")
+        .await
+        .map_err(|error| {
+            super::error::Error::Config(format!("Failed to list pending credentials: {error}"))
+        })?;
+    Ok(response.pending_credentials)
+}
+
+async fn find_pending_credential(
+    node_config: &NodeConfig,
+    backend: &SecretBackend,
+    service_slug: &str,
+) -> Result<PendingCredentialMetadata> {
+    let pending = fetch_pending_credentials_for_node(node_config, backend).await?;
+    pending
+        .into_iter()
+        .find(|item| item.service_slug == service_slug)
+        .ok_or_else(|| {
+            super::error::Error::Config(format!(
+                "No pending credential found for service '{service_slug}'"
+            ))
+        })
+}
+
+fn store_pending_credential_locally(
+    node_config: &mut NodeConfig,
+    backend: &SecretBackend,
+    pending: &PendingCredentialMetadata,
+    secret: &str,
+) -> Result<()> {
+    match pending.injection_method.as_str() {
+        "header" => node_config.add_header_credential_via(
+            &pending.service_slug,
+            &pending.field_name,
+            secret,
+            pending.target_url.as_deref(),
+            backend,
+        ),
+        "query-param" => node_config.add_query_param_credential_via(
+            &pending.service_slug,
+            &pending.field_name,
+            secret,
+            pending.target_url.as_deref(),
+            backend,
+        ),
+        "path-prefix" => node_config.add_path_prefix_credential_via(
+            &pending.service_slug,
+            &pending.field_name,
+            secret,
+            pending.target_url.as_deref(),
+            backend,
+        ),
+        other => Err(super::error::Error::Validation(format!(
+            "Unsupported injection method '{other}'"
+        ))),
+    }
+}
+
+fn format_pending_age(created_at: &str) -> String {
+    let Ok(created) = chrono::DateTime::parse_from_rfc3339(created_at) else {
+        return "-".to_string();
+    };
+    let age = chrono::Utc::now().signed_duration_since(created.with_timezone(&chrono::Utc));
+    let seconds = age.num_seconds().max(0);
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3_600 {
+        format!("{}m", seconds / 60)
+    } else if seconds < 86_400 {
+        format!("{}h", seconds / 3_600)
+    } else {
+        format!("{}d", seconds / 86_400)
     }
 }
 
@@ -1995,6 +2211,18 @@ mod tests {
         let err = format_secret_value("token-only".to_string(), CredentialSecretFormat::Basic)
             .unwrap_err();
         assert!(matches!(err, Error::Validation(_)));
+    }
+
+    #[test]
+    fn api_base_url_from_node_ws_url_derives_http_api_root() {
+        assert_eq!(
+            api_base_url_from_node_ws_url("ws://localhost:3001/api/v1/nodes/ws"),
+            "http://localhost:3001"
+        );
+        assert_eq!(
+            api_base_url_from_node_ws_url("wss://auth.example.com/api/v1/nodes/ws"),
+            "https://auth.example.com"
+        );
     }
 
     #[test]
