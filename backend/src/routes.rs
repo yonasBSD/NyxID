@@ -517,6 +517,7 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
             "/{node_id}/rotate-token",
             post(handlers::node_admin::rotate_token),
         )
+        .route("/{node_id}/admins", get(handlers::node_admin::list_admins))
         .route(
             "/{node_id}/bindings",
             get(handlers::node_admin::list_bindings).post(handlers::node_admin::create_binding),

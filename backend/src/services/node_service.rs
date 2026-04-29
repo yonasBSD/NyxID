@@ -41,6 +41,21 @@ pub struct NodeWithOwner {
     pub owner: NodeOwnerInfo,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NodeAdminRole {
+    Owner,
+    Admin,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeAdminInfo {
+    pub user_id: String,
+    pub display_name: Option<String>,
+    pub email: Option<String>,
+    pub role: NodeAdminRole,
+}
+
 /// Create a one-time registration token for a new node.
 /// Returns (token_id, raw_token, expires_at). The raw token is shown once and never stored.
 pub async fn create_registration_token(
@@ -932,13 +947,59 @@ async fn attach_owner_info(
         .collect())
 }
 
-#[allow(dead_code)]
 pub async fn owner_info_for_node(db: &mongodb::Database, node: &Node) -> AppResult<NodeOwnerInfo> {
     let owner = db
         .collection::<User>(USERS)
         .find_one(doc! { "_id": &node.user_id })
         .await?;
     Ok(owner_info_from_user_id(&node.user_id, owner.as_ref()))
+}
+
+pub async fn list_node_admins(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    node_id: &str,
+) -> AppResult<Vec<NodeAdminInfo>> {
+    let node = get_node(db, actor_user_id, node_id).await?;
+    let owner = db
+        .collection::<User>(USERS)
+        .find_one(doc! { "_id": &node.user_id })
+        .await?;
+
+    if !matches!(owner.as_ref().map(|u| u.user_type), Some(UserType::Org)) {
+        return Ok(vec![admin_info_from_user(
+            &node.user_id,
+            owner.as_ref(),
+            NodeAdminRole::Owner,
+        )]);
+    }
+
+    let memberships = org_service::list_members_for_org(db, &node.user_id, false).await?;
+    let admin_user_ids: Vec<String> = memberships
+        .into_iter()
+        .filter(|membership| matches!(membership.role, OrgRole::Admin))
+        .map(|membership| membership.member_user_id)
+        .collect();
+    if admin_user_ids.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let admin_id_array: bson::Array = admin_user_ids
+        .iter()
+        .map(|id| bson::Bson::String(id.clone()))
+        .collect();
+    let users: Vec<User> = db
+        .collection::<User>(USERS)
+        .find(doc! { "_id": { "$in": admin_id_array } })
+        .await?
+        .try_collect()
+        .await?;
+    let user_map: HashMap<String, User> = users.into_iter().map(|u| (u.id.clone(), u)).collect();
+
+    Ok(admin_user_ids
+        .into_iter()
+        .map(|user_id| admin_info_from_user(&user_id, user_map.get(&user_id), NodeAdminRole::Admin))
+        .collect())
 }
 
 fn owner_info_from_user_id(owner_id: &str, owner: Option<&User>) -> NodeOwnerInfo {
@@ -960,6 +1021,15 @@ fn owner_info_from_user_id(owner_id: &str, owner: Option<&User>) -> NodeOwnerInf
         kind,
         id: owner_id.to_string(),
         display_name,
+    }
+}
+
+fn admin_info_from_user(user_id: &str, user: Option<&User>, role: NodeAdminRole) -> NodeAdminInfo {
+    NodeAdminInfo {
+        user_id: user_id.to_string(),
+        display_name: user.and_then(|u| u.display_name.clone()),
+        email: user.map(|u| u.email.clone()),
+        role,
     }
 }
 

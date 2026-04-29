@@ -78,6 +78,7 @@ pub struct NodeMetricsInfo {
 pub struct NodeInfo {
     pub id: String,
     pub name: String,
+    pub owner: node_service::NodeOwnerInfo,
     pub status: String,
     pub is_connected: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -123,6 +124,11 @@ pub struct CreateBindingResponse {
     pub message: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct NodeAdminsResponse {
+    pub admins: Vec<node_service::NodeAdminInfo>,
+}
+
 // --- Helpers ---
 
 /// Build NodeMetricsInfo from the embedded metrics on a Node model.
@@ -143,6 +149,22 @@ pub fn build_metrics_info(metrics: &crate::models::node::NodeMetrics) -> NodeMet
         last_error_at: metrics.last_error_at.map(|dt| dt.to_rfc3339()),
         last_success_at: metrics.last_success_at.map(|dt| dt.to_rfc3339()),
     }
+}
+
+fn audit_event_data_with_owner(
+    actor_user_id: &str,
+    owner_user_id: &str,
+    mut event_data: serde_json::Value,
+) -> serde_json::Value {
+    if actor_user_id != owner_user_id
+        && let serde_json::Value::Object(ref mut object) = event_data
+    {
+        object.insert(
+            "owner_user_id".to_string(),
+            serde_json::Value::String(owner_user_id.to_string()),
+        );
+    }
+    event_data
 }
 
 // --- Handlers ---
@@ -259,6 +281,7 @@ pub async fn list_nodes(
             NodeInfo {
                 id: node.id.clone(),
                 name: node.name.clone(),
+                owner: node_with_owner.owner.clone(),
                 status: node.status.as_str().to_string(),
                 is_connected: state.node_ws_manager.is_connected(&node.id),
                 last_heartbeat_at: node.last_heartbeat_at.map(|dt| dt.to_rfc3339()),
@@ -282,6 +305,7 @@ pub async fn get_node(
 ) -> AppResult<Json<NodeInfo>> {
     let user_id_str = auth_user.user_id.to_string();
     let node = node_service::get_node(&state.db, &user_id_str, &node_id).await?;
+    let owner = node_service::owner_info_for_node(&state.db, &node).await?;
 
     let binding_count = state
         .db
@@ -292,6 +316,7 @@ pub async fn get_node(
     Ok(Json(NodeInfo {
         id: node.id.clone(),
         name: node.name,
+        owner,
         status: node.status.as_str().to_string(),
         is_connected: state.node_ws_manager.is_connected(&node.id),
         last_heartbeat_at: node.last_heartbeat_at.map(|dt| dt.to_rfc3339()),
@@ -311,6 +336,7 @@ pub async fn delete_node(
     Path(node_id): Path<String>,
 ) -> AppResult<impl IntoResponse> {
     let user_id_str = auth_user.user_id.to_string();
+    let node = node_service::get_node(&state.db, &user_id_str, &node_id).await?;
 
     node_service::delete_node(&state.db, &user_id_str, &node_id).await?;
 
@@ -326,7 +352,11 @@ pub async fn delete_node(
         state.db.clone(),
         Some(user_id_str.clone()),
         "node_deleted".to_string(),
-        Some(serde_json::json!({ "node_id": &node_id })),
+        Some(audit_event_data_with_owner(
+            &user_id_str,
+            &node.user_id,
+            serde_json::json!({ "node_id": &node_id }),
+        )),
         None,
         None,
         None,
@@ -355,6 +385,7 @@ pub async fn rotate_token(
     Path(node_id): Path<String>,
 ) -> AppResult<Json<RotateTokenResponse>> {
     let user_id_str = auth_user.user_id.to_string();
+    let node = node_service::get_node(&state.db, &user_id_str, &node_id).await?;
 
     let (raw_token, raw_signing_secret) =
         node_service::rotate_auth_token(&state.db, &state.encryption_keys, &user_id_str, &node_id)
@@ -376,9 +407,13 @@ pub async fn rotate_token(
 
     audit_service::log_async(
         state.db.clone(),
-        Some(user_id_str),
+        Some(user_id_str.clone()),
         "node_token_rotated".to_string(),
-        Some(serde_json::json!({ "node_id": &node_id })),
+        Some(audit_event_data_with_owner(
+            &user_id_str,
+            &node.user_id,
+            serde_json::json!({ "node_id": &node_id }),
+        )),
         None,
         None,
         None,
@@ -392,6 +427,18 @@ pub async fn rotate_token(
             "Auth token and signing secret rotated. The node must reconnect with the new token."
                 .to_string(),
     }))
+}
+
+/// GET /api/v1/nodes/{node_id}/admins
+pub async fn list_admins(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(node_id): Path<String>,
+) -> AppResult<Json<NodeAdminsResponse>> {
+    let user_id_str = auth_user.user_id.to_string();
+    let admins = node_service::list_node_admins(&state.db, &user_id_str, &node_id).await?;
+
+    Ok(Json(NodeAdminsResponse { admins }))
 }
 
 /// GET /api/v1/nodes/{node_id}/bindings
@@ -471,13 +518,17 @@ pub async fn create_binding(
 
     audit_service::log_async(
         state.db.clone(),
-        Some(user_id_str),
+        Some(user_id_str.clone()),
         "node_binding_created".to_string(),
-        Some(serde_json::json!({
-            "binding_id": &binding.id,
-            "node_id": &node_id,
-            "service_id": &body.service_id,
-        })),
+        Some(audit_event_data_with_owner(
+            &user_id_str,
+            &binding.user_id,
+            serde_json::json!({
+                "binding_id": &binding.id,
+                "node_id": &node_id,
+                "service_id": &body.service_id,
+            }),
+        )),
         None,
         None,
         None,
@@ -500,6 +551,7 @@ pub async fn update_binding(
     Json(body): Json<UpdateBindingRequest>,
 ) -> AppResult<impl IntoResponse> {
     let user_id_str = auth_user.user_id.to_string();
+    let node = node_service::get_node(&state.db, &user_id_str, &node_id).await?;
 
     if let Some(priority) = body.priority {
         node_service::update_binding_priority(
@@ -514,13 +566,17 @@ pub async fn update_binding(
 
     audit_service::log_async(
         state.db.clone(),
-        Some(user_id_str),
+        Some(user_id_str.clone()),
         "node_binding_updated".to_string(),
-        Some(serde_json::json!({
-            "binding_id": &binding_id,
-            "node_id": &node_id,
-            "priority": body.priority,
-        })),
+        Some(audit_event_data_with_owner(
+            &user_id_str,
+            &node.user_id,
+            serde_json::json!({
+                "binding_id": &binding_id,
+                "node_id": &node_id,
+                "priority": body.priority,
+            }),
+        )),
         None,
         None,
         None,
@@ -537,14 +593,22 @@ pub async fn delete_binding(
     Path((node_id, binding_id)): Path<(String, String)>,
 ) -> AppResult<impl IntoResponse> {
     let user_id_str = auth_user.user_id.to_string();
+    let node = node_service::get_node(&state.db, &user_id_str, &node_id).await?;
 
     node_service::delete_binding(&state.db, &user_id_str, &node_id, &binding_id).await?;
 
     audit_service::log_async(
         state.db.clone(),
-        Some(user_id_str),
+        Some(user_id_str.clone()),
         "node_binding_deleted".to_string(),
-        Some(serde_json::json!({ "binding_id": &binding_id })),
+        Some(audit_event_data_with_owner(
+            &user_id_str,
+            &node.user_id,
+            serde_json::json!({
+                "binding_id": &binding_id,
+                "node_id": &node_id,
+            }),
+        )),
         None,
         None,
         None,
@@ -743,5 +807,202 @@ mod tests {
             .expect("query token")
             .expect("token exists");
         assert_eq!(stored.user_id, org_id);
+    }
+
+    #[tokio::test]
+    async fn list_nodes_returns_owner_metadata_for_personal_and_org_nodes() {
+        let Some(db) = connect_test_database("node_list_owner_metadata").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+
+        let actor_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&actor_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ])
+            .await
+            .expect("insert users");
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org_id, &actor_id, OrgRole::Admin, None))
+            .await
+            .expect("insert membership");
+
+        let personal_node = test_node(&actor_id, "personal-node");
+        let org_node = test_node(&org_id, "org-node");
+        db.collection::<Node>(NODES)
+            .insert_many([personal_node.clone(), org_node.clone()])
+            .await
+            .expect("insert nodes");
+
+        let state = test_app_state(db);
+        let Json(response) = list_nodes(State(state), test_auth_user(&actor_id))
+            .await
+            .expect("list nodes");
+
+        let personal = response
+            .nodes
+            .iter()
+            .find(|node| node.id == personal_node.id)
+            .expect("personal node listed");
+        assert_eq!(personal.owner.kind, node_service::NodeOwnerKind::User);
+        assert_eq!(personal.owner.id, actor_id);
+
+        let org = response
+            .nodes
+            .iter()
+            .find(|node| node.id == org_node.id)
+            .expect("org node listed");
+        assert_eq!(org.owner.kind, node_service::NodeOwnerKind::Org);
+        assert_eq!(org.owner.id, org_id);
+        assert_eq!(org.owner.display_name, "Test Org");
+    }
+
+    #[tokio::test]
+    async fn get_node_returns_owner_metadata_for_org_member() {
+        let Some(db) = connect_test_database("node_get_owner_metadata").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+
+        let member_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&member_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ])
+            .await
+            .expect("insert users");
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org_id, &member_id, OrgRole::Member, None))
+            .await
+            .expect("insert membership");
+        let org_node = test_node(&org_id, "org-node");
+        db.collection::<Node>(NODES)
+            .insert_one(org_node.clone())
+            .await
+            .expect("insert node");
+
+        let state = test_app_state(db);
+        let Json(response) = get_node(
+            State(state),
+            test_auth_user(&member_id),
+            Path(org_node.id.clone()),
+        )
+        .await
+        .expect("get org node");
+
+        assert_eq!(response.id, org_node.id);
+        assert_eq!(response.owner.kind, node_service::NodeOwnerKind::Org);
+        assert_eq!(response.owner.id, org_id);
+    }
+
+    #[tokio::test]
+    async fn list_admins_returns_personal_owner() {
+        let Some(db) = connect_test_database("node_admins_personal").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+
+        let owner_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&owner_id, UserType::Person))
+            .await
+            .expect("insert owner");
+        let node = test_node(&owner_id, "personal-node");
+        db.collection::<Node>(NODES)
+            .insert_one(node.clone())
+            .await
+            .expect("insert node");
+
+        let state = test_app_state(db);
+        let Json(response) = list_admins(
+            State(state),
+            test_auth_user(&owner_id),
+            Path(node.id.clone()),
+        )
+        .await
+        .expect("list admins");
+
+        assert_eq!(response.admins.len(), 1);
+        assert_eq!(response.admins[0].user_id, owner_id);
+        assert_eq!(response.admins[0].role, node_service::NodeAdminRole::Owner);
+    }
+
+    #[tokio::test]
+    async fn list_admins_returns_org_admins_for_readable_org_node() {
+        let Some(db) = connect_test_database("node_admins_org").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+
+        let admin_a_id = Uuid::new_v4().to_string();
+        let admin_b_id = Uuid::new_v4().to_string();
+        let member_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&admin_a_id, UserType::Person),
+                test_user(&admin_b_id, UserType::Person),
+                test_user(&member_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ])
+            .await
+            .expect("insert users");
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_many([
+                test_membership(&org_id, &admin_a_id, OrgRole::Admin, None),
+                test_membership(&org_id, &admin_b_id, OrgRole::Admin, None),
+                test_membership(&org_id, &member_id, OrgRole::Member, None),
+            ])
+            .await
+            .expect("insert memberships");
+        let node = test_node(&org_id, "org-node");
+        db.collection::<Node>(NODES)
+            .insert_one(node.clone())
+            .await
+            .expect("insert node");
+
+        let state = test_app_state(db);
+        let Json(response) = list_admins(
+            State(state),
+            test_auth_user(&member_id),
+            Path(node.id.clone()),
+        )
+        .await
+        .expect("member can list node admins");
+
+        let mut admin_ids: Vec<&str> = response
+            .admins
+            .iter()
+            .map(|admin| admin.user_id.as_str())
+            .collect();
+        admin_ids.sort_unstable();
+        let mut expected = vec![admin_a_id.as_str(), admin_b_id.as_str()];
+        expected.sort_unstable();
+        assert_eq!(admin_ids, expected);
+        assert!(
+            response
+                .admins
+                .iter()
+                .all(|admin| admin.role == node_service::NodeAdminRole::Admin)
+        );
+    }
+
+    #[test]
+    fn audit_event_data_with_owner_adds_owner_only_when_shared() {
+        let personal =
+            audit_event_data_with_owner("user-1", "user-1", serde_json::json!({ "node_id": "n1" }));
+        assert!(personal.get("owner_user_id").is_none());
+
+        let shared =
+            audit_event_data_with_owner("user-1", "org-1", serde_json::json!({ "node_id": "n1" }));
+        assert_eq!(
+            shared.get("owner_user_id").and_then(|v| v.as_str()),
+            Some("org-1")
+        );
     }
 }
