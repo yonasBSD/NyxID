@@ -76,6 +76,12 @@ pub enum Commands {
         #[command(subcommand)]
         command: NodeCommands,
     },
+    /// Push credential setup metadata to node operators
+    #[command(name = "node-credential")]
+    NodeCredential {
+        #[command(subcommand)]
+        command: NodeCredentialAdminCommands,
+    },
     /// Proxy requests through NyxID
     Proxy {
         #[command(subcommand)]
@@ -1306,6 +1312,70 @@ pub enum NodeCommands {
     },
 }
 
+// ---- Node credential admin commands (laptop side) ----
+
+#[derive(Subcommand)]
+pub enum NodeCredentialAdminCommands {
+    /// Push credential setup metadata to a node operator
+    Push {
+        /// Node ID or name
+        node: String,
+        /// Service slug
+        #[arg(long)]
+        slug: String,
+        /// Injection method
+        #[arg(long, value_enum)]
+        injection_method: PendingCredentialInjectionMethod,
+        /// Header name, query parameter name, or path prefix value
+        #[arg(long)]
+        field_name: String,
+        /// Target URL associated with this credential
+        #[arg(long)]
+        target_url: Option<String>,
+        /// Human-readable label
+        #[arg(long)]
+        label: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// List pending credential pushes for a node
+    List {
+        /// Node ID or name
+        node: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Cancel a pending credential push
+    Cancel {
+        /// Node ID or name
+        node: String,
+        /// Pending credential ID
+        pending_id: String,
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum PendingCredentialInjectionMethod {
+    Header,
+    QueryParam,
+    PathPrefix,
+}
+
+impl PendingCredentialInjectionMethod {
+    pub fn wire_value(self) -> &'static str {
+        match self {
+            Self::Header => "header",
+            Self::QueryParam => "query-param",
+            Self::PathPrefix => "path-prefix",
+        }
+    }
+}
+
 // ---- Node Docker subcommands ----
 
 #[derive(Args, Clone)]
@@ -1557,6 +1627,56 @@ mod tests {
                 assert_eq!(id, "edge-node");
                 assert_eq!(to, "11111111-2222-3333-4444-555555555555");
                 assert!(yes);
+            }
+            _ => panic!("unexpected parse result"),
+        }
+    }
+
+    #[test]
+    fn node_credential_push_accepts_metadata_flags() {
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "node-credential",
+            "push",
+            "edge-node",
+            "--slug",
+            "openclaw",
+            "--injection-method",
+            "query-param",
+            "--field-name",
+            "api_key",
+            "--target-url",
+            "https://gateway.example.com/v1",
+            "--label",
+            "prod",
+        ])
+        .expect("node-credential push should parse");
+
+        match cli.command {
+            Commands::NodeCredential {
+                command:
+                    NodeCredentialAdminCommands::Push {
+                        node,
+                        slug,
+                        injection_method,
+                        field_name,
+                        target_url,
+                        label,
+                        ..
+                    },
+            } => {
+                assert_eq!(node, "edge-node");
+                assert_eq!(slug, "openclaw");
+                assert_eq!(
+                    injection_method,
+                    PendingCredentialInjectionMethod::QueryParam
+                );
+                assert_eq!(field_name, "api_key");
+                assert_eq!(
+                    target_url.as_deref(),
+                    Some("https://gateway.example.com/v1")
+                );
+                assert_eq!(label.as_deref(), Some("prod"));
             }
             _ => panic!("unexpected parse result"),
         }

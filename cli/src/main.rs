@@ -122,6 +122,7 @@ fn command_names(command: &Commands) -> (&'static str, &'static str) {
         Commands::ApiKey { .. } => ("api_key", "subcommand"),
         Commands::Org { .. } => ("org", "subcommand"),
         Commands::Node { .. } => ("node", "subcommand"),
+        Commands::NodeCredential { .. } => ("node_credential", "subcommand"),
         Commands::Proxy { .. } => ("proxy", "subcommand"),
         Commands::Ssh(_) => ("ssh", "subcommand"),
         Commands::Openclaw { .. } => ("openclaw", "subcommand"),
@@ -182,6 +183,7 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::ApiKey { command } => commands::api_key::run(command).await,
         Commands::Org { command } => commands::org::run(command).await,
         Commands::Node { command } => commands::node::run(command).await,
+        Commands::NodeCredential { command } => commands::node_credential::run(command).await,
 
         // C8-C10: Proxy
         Commands::Proxy { command } => commands::proxy::run(command).await,

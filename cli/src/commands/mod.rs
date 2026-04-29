@@ -13,6 +13,7 @@ pub mod lark_permission;
 pub mod mcp;
 pub mod mfa;
 pub mod node;
+pub mod node_credential;
 pub mod notification;
 pub mod oauth;
 pub mod openclaw;
