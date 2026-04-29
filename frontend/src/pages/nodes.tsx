@@ -92,7 +92,7 @@ function RegisterNodeDialog() {
 
   const form = useForm<CreateRegistrationTokenFormData>({
     resolver: zodResolver(createRegistrationTokenSchema),
-    defaultValues: { name: "", ownerUserId: null },
+    defaultValues: { name: "", owner_user_id: null },
   });
 
   async function onSubmit(data: CreateRegistrationTokenFormData) {
@@ -208,7 +208,7 @@ function RegisterNodeDialog() {
                 />
                 <FormField
                   control={form.control}
-                  name="ownerUserId"
+                  name="owner_user_id"
                   render={({ field }) => (
                     <FormItem>
                       <FormLabel>Owner</FormLabel>

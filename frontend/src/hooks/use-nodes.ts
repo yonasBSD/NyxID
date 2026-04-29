@@ -82,15 +82,9 @@ export function useCreateRegistrationToken() {
     mutationFn: async (
       data: CreateRegistrationTokenFormData,
     ): Promise<CreateRegistrationTokenResponse> => {
-      const body: { name: string; owner_user_id?: string } = {
-        name: data.name,
-      };
-      if (data.ownerUserId) {
-        body.owner_user_id = data.ownerUserId;
-      }
       return api.post<CreateRegistrationTokenResponse>(
         "/nodes/register-token",
-        body,
+        data,
       );
     },
     onSuccess: () => {
