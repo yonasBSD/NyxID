@@ -1,6 +1,9 @@
+use std::collections::HashMap;
+
 use chrono::{DateTime, Duration, Utc};
 use futures::TryStreamExt;
-use mongodb::bson::doc;
+use mongodb::bson::{self, doc};
+use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::crypto::aes::EncryptionKeys;
@@ -13,7 +16,30 @@ use crate::models::node_registration_token::{
 use crate::models::node_service_binding::{
     COLLECTION_NAME as NODE_SERVICE_BINDINGS, NodeServiceBinding,
 };
+use crate::models::org_membership::OrgRole;
+use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
 use crate::models::user_service::COLLECTION_NAME as USER_SERVICES;
+use crate::services::org_service::{self, OwnerAccess};
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NodeOwnerKind {
+    User,
+    Org,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeOwnerInfo {
+    pub kind: NodeOwnerKind,
+    pub id: String,
+    pub display_name: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NodeWithOwner {
+    pub node: Node,
+    pub owner: NodeOwnerInfo,
+}
 
 /// Create a one-time registration token for a new node.
 /// Returns (token_id, raw_token, expires_at). The raw token is shown once and never stored.
@@ -208,10 +234,9 @@ pub async fn get_node_signing_secret(
 
 /// Get a single node by ID, verifying ownership.
 pub async fn get_node(db: &mongodb::Database, user_id: &str, node_id: &str) -> AppResult<Node> {
-    db.collection::<Node>(NODES)
-        .find_one(doc! { "_id": node_id, "user_id": user_id, "is_active": true })
-        .await?
-        .ok_or_else(|| AppError::NodeNotFound("Node not found".to_string()))
+    let node = load_active_node(db, node_id).await?;
+    ensure_node_readable_by_access(db, user_id, &node).await?;
+    Ok(node)
 }
 
 /// Look up a node and verify the actor has write access to it -- either as
@@ -238,35 +263,49 @@ pub async fn ensure_node_writable_by_actor(
         .await?
         .ok_or_else(|| AppError::NodeNotFound("Node not found".to_string()))?;
 
-    let access =
-        crate::services::org_service::resolve_owner_access(db, actor_user_id, &node.user_id)
-            .await?;
-    if !access.can_write() {
-        return Err(AppError::NodeNotFound("Node not found".to_string()));
-    }
+    ensure_node_writable_by_access(db, actor_user_id, &node).await?;
     Ok(node)
 }
 
-/// List all active nodes for a user.
-pub async fn list_user_nodes(db: &mongodb::Database, user_id: &str) -> AppResult<Vec<Node>> {
+/// List all active nodes reachable by a user, including org-owned nodes for
+/// orgs where the actor is an admin or member.
+pub async fn list_user_nodes(
+    db: &mongodb::Database,
+    user_id: &str,
+) -> AppResult<Vec<NodeWithOwner>> {
+    let memberships = org_service::list_memberships_for_member(db, user_id, false).await?;
+    let mut owner_ids = vec![user_id.to_string()];
+    for membership in memberships {
+        if membership.role.can_proxy() && !owner_ids.iter().any(|id| id == &membership.org_user_id)
+        {
+            owner_ids.push(membership.org_user_id);
+        }
+    }
+
+    let owner_id_array: bson::Array = owner_ids
+        .iter()
+        .map(|id| bson::Bson::String(id.clone()))
+        .collect();
     let nodes: Vec<Node> = db
         .collection::<Node>(NODES)
-        .find(doc! { "user_id": user_id, "is_active": true })
+        .find(doc! { "user_id": { "$in": owner_id_array }, "is_active": true })
         .sort(doc! { "created_at": -1 })
         .await?
         .try_collect()
         .await?;
-    Ok(nodes)
+    attach_owner_info(db, nodes).await
 }
 
 /// Soft-delete a node and its bindings.
 pub async fn delete_node(db: &mongodb::Database, user_id: &str, node_id: &str) -> AppResult<()> {
     let now = bson::DateTime::from_chrono(Utc::now());
+    let node = load_active_node(db, node_id).await?;
+    ensure_node_writable_by_access(db, user_id, &node).await?;
 
     let result = db
         .collection::<Node>(NODES)
         .update_one(
-            doc! { "_id": node_id, "user_id": user_id, "is_active": true },
+            doc! { "_id": node_id, "is_active": true },
             doc! { "$set": { "is_active": false, "status": NodeStatus::Offline.as_str(), "updated_at": &now } },
         )
         .await?;
@@ -398,6 +437,8 @@ pub async fn rotate_auth_token(
     user_id: &str,
     node_id: &str,
 ) -> AppResult<(String, String)> {
+    let _node = ensure_node_writable_by_actor(db, user_id, node_id).await?;
+
     let raw_token = format!("nyx_nauth_{}", hex::encode(rand::random::<[u8; 32]>()));
     let token_hash = hash_token(&raw_token);
     let raw_signing_secret = hex::encode(rand::random::<[u8; 32]>());
@@ -410,7 +451,7 @@ pub async fn rotate_auth_token(
     let result = db
         .collection::<Node>(NODES)
         .update_one(
-            doc! { "_id": node_id, "user_id": user_id, "is_active": true },
+            doc! { "_id": node_id, "is_active": true },
             doc! { "$set": {
                 "auth_token_hash": &token_hash,
                 "signing_secret_encrypted": bson::Binary {
@@ -439,14 +480,13 @@ pub async fn update_binding_priority(
     binding_id: &str,
     priority: i32,
 ) -> AppResult<()> {
-    // Verify node ownership
-    let _node = get_node(db, user_id, node_id).await?;
+    let node = ensure_node_writable_by_actor(db, user_id, node_id).await?;
 
     let now = bson::DateTime::from_chrono(Utc::now());
     let result = db
         .collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
         .update_one(
-            doc! { "_id": binding_id, "user_id": user_id, "node_id": node_id, "is_active": true },
+            doc! { "_id": binding_id, "user_id": &node.user_id, "node_id": node_id, "is_active": true },
             doc! { "$set": { "priority": priority, "updated_at": &now } },
         )
         .await?;
@@ -725,13 +765,17 @@ pub async fn create_binding(
     node_id: &str,
     service_id: &str,
 ) -> AppResult<NodeServiceBinding> {
-    // Verify node ownership
-    let _node = get_node(db, user_id, node_id).await?;
+    let node = ensure_node_writable_by_actor(db, user_id, node_id).await?;
 
     // Check for existing binding (same node + service)
     let existing = db
         .collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
-        .find_one(doc! { "node_id": node_id, "service_id": service_id, "is_active": true })
+        .find_one(doc! {
+            "node_id": node_id,
+            "service_id": service_id,
+            "user_id": &node.user_id,
+            "is_active": true,
+        })
         .await?;
 
     if existing.is_some() {
@@ -744,7 +788,7 @@ pub async fn create_binding(
     let binding = NodeServiceBinding {
         id: uuid::Uuid::new_v4().to_string(),
         node_id: node_id.to_string(),
-        user_id: user_id.to_string(),
+        user_id: node.user_id.clone(),
         service_id: service_id.to_string(),
         is_active: true,
         priority: 0,
@@ -772,12 +816,11 @@ pub async fn list_bindings(
     user_id: &str,
     node_id: &str,
 ) -> AppResult<Vec<NodeServiceBinding>> {
-    // Verify node ownership
-    let _node = get_node(db, user_id, node_id).await?;
+    let node = get_node(db, user_id, node_id).await?;
 
     let bindings: Vec<NodeServiceBinding> = db
         .collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
-        .find(doc! { "node_id": node_id, "is_active": true })
+        .find(doc! { "node_id": node_id, "user_id": &node.user_id, "is_active": true })
         .sort(doc! { "created_at": -1 })
         .await?
         .try_collect()
@@ -793,12 +836,13 @@ pub async fn delete_binding(
     node_id: &str,
     binding_id: &str,
 ) -> AppResult<()> {
+    let node = ensure_node_writable_by_actor(db, user_id, node_id).await?;
     let now = bson::DateTime::from_chrono(Utc::now());
 
     let result = db
         .collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
         .update_one(
-            doc! { "_id": binding_id, "user_id": user_id, "node_id": node_id, "is_active": true },
+            doc! { "_id": binding_id, "user_id": &node.user_id, "node_id": node_id, "is_active": true },
             doc! { "$set": { "is_active": false, "updated_at": &now } },
         )
         .await?;
@@ -811,9 +855,266 @@ pub async fn delete_binding(
     Ok(())
 }
 
+async fn load_active_node(db: &mongodb::Database, node_id: &str) -> AppResult<Node> {
+    db.collection::<Node>(NODES)
+        .find_one(doc! { "_id": node_id, "is_active": true })
+        .await?
+        .ok_or_else(|| AppError::NodeNotFound("Node not found".to_string()))
+}
+
+async fn ensure_node_readable_by_access(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    node: &Node,
+) -> AppResult<OwnerAccess> {
+    let access = org_service::resolve_owner_access(db, actor_user_id, &node.user_id).await?;
+    if node_access_can_read(&access) {
+        Ok(access)
+    } else {
+        Err(AppError::NodeNotFound("Node not found".to_string()))
+    }
+}
+
+async fn ensure_node_writable_by_access(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    node: &Node,
+) -> AppResult<OwnerAccess> {
+    let access = org_service::resolve_owner_access(db, actor_user_id, &node.user_id).await?;
+    if access.can_write() {
+        Ok(access)
+    } else {
+        Err(AppError::NodeNotFound("Node not found".to_string()))
+    }
+}
+
+fn node_access_can_read(access: &OwnerAccess) -> bool {
+    match access {
+        OwnerAccess::Direct | OwnerAccess::AsOrgAdmin { .. } => true,
+        OwnerAccess::AsOrgMember { role, .. } => matches!(role, OrgRole::Member),
+        OwnerAccess::Forbidden => false,
+    }
+}
+
+async fn attach_owner_info(
+    db: &mongodb::Database,
+    nodes: Vec<Node>,
+) -> AppResult<Vec<NodeWithOwner>> {
+    if nodes.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let mut owner_ids = Vec::<String>::new();
+    for node in &nodes {
+        if !owner_ids.iter().any(|id| id == &node.user_id) {
+            owner_ids.push(node.user_id.clone());
+        }
+    }
+
+    let owner_id_array: bson::Array = owner_ids
+        .iter()
+        .map(|id| bson::Bson::String(id.clone()))
+        .collect();
+    let owners: Vec<User> = db
+        .collection::<User>(USERS)
+        .find(doc! { "_id": { "$in": owner_id_array } })
+        .await?
+        .try_collect()
+        .await?;
+    let owner_map: HashMap<String, User> = owners.into_iter().map(|u| (u.id.clone(), u)).collect();
+
+    Ok(nodes
+        .into_iter()
+        .map(|node| {
+            let owner = owner_info_from_user_id(&node.user_id, owner_map.get(&node.user_id));
+            NodeWithOwner { node, owner }
+        })
+        .collect())
+}
+
+#[allow(dead_code)]
+pub async fn owner_info_for_node(db: &mongodb::Database, node: &Node) -> AppResult<NodeOwnerInfo> {
+    let owner = db
+        .collection::<User>(USERS)
+        .find_one(doc! { "_id": &node.user_id })
+        .await?;
+    Ok(owner_info_from_user_id(&node.user_id, owner.as_ref()))
+}
+
+fn owner_info_from_user_id(owner_id: &str, owner: Option<&User>) -> NodeOwnerInfo {
+    let kind = match owner.map(|u| u.user_type) {
+        Some(UserType::Org) => NodeOwnerKind::Org,
+        _ => NodeOwnerKind::User,
+    };
+    let display_name = owner
+        .and_then(|u| u.display_name.clone())
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| {
+            owner
+                .map(|u| u.email.clone())
+                .filter(|email| !email.trim().is_empty())
+        })
+        .unwrap_or_else(|| owner_id.to_string());
+
+    NodeOwnerInfo {
+        kind,
+        id: owner_id.to_string(),
+        display_name,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::decode_node_signing_secret;
+    use super::*;
+    use crate::models::node::NodeMetrics;
+    use crate::models::node_service_binding::COLLECTION_NAME as NODE_SERVICE_BINDINGS;
+    use crate::models::org_membership::{
+        COLLECTION_NAME as ORG_MEMBERSHIPS, OrgMembership, OrgRole,
+    };
+    use crate::models::user::{COLLECTION_NAME as USERS, UserType};
+    use crate::test_utils::{
+        connect_test_database, test_encryption_keys, test_membership, test_user,
+    };
+    use uuid::Uuid;
+
+    #[derive(Clone, Copy, Debug)]
+    enum AccessCase {
+        Direct,
+        AsOrgAdmin,
+        AsOrgMember,
+        NoAccess,
+    }
+
+    impl AccessCase {
+        fn all() -> [Self; 4] {
+            [
+                Self::Direct,
+                Self::AsOrgAdmin,
+                Self::AsOrgMember,
+                Self::NoAccess,
+            ]
+        }
+
+        fn label(self) -> &'static str {
+            match self {
+                Self::Direct => "direct",
+                Self::AsOrgAdmin => "org_admin",
+                Self::AsOrgMember => "org_member",
+                Self::NoAccess => "no_access",
+            }
+        }
+
+        fn can_read(self) -> bool {
+            matches!(self, Self::Direct | Self::AsOrgAdmin | Self::AsOrgMember)
+        }
+
+        fn can_write(self) -> bool {
+            matches!(self, Self::Direct | Self::AsOrgAdmin)
+        }
+    }
+
+    struct NodeAclFixture {
+        actor_id: String,
+        owner_id: String,
+        node: Node,
+        binding: NodeServiceBinding,
+    }
+
+    fn make_node(owner_id: &str, name: &str) -> Node {
+        let now = Utc::now();
+        Node {
+            id: Uuid::new_v4().to_string(),
+            user_id: owner_id.to_string(),
+            name: name.to_string(),
+            status: NodeStatus::Offline,
+            auth_token_hash: "auth-hash".to_string(),
+            signing_secret_encrypted: None,
+            signing_secret_hash: "signing-hash".to_string(),
+            last_heartbeat_at: None,
+            connected_at: None,
+            metadata: None,
+            metrics: NodeMetrics::default(),
+            is_active: true,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn make_binding(owner_id: &str, node_id: &str, service_id: &str) -> NodeServiceBinding {
+        let now = Utc::now();
+        NodeServiceBinding {
+            id: Uuid::new_v4().to_string(),
+            node_id: node_id.to_string(),
+            user_id: owner_id.to_string(),
+            service_id: service_id.to_string(),
+            is_active: true,
+            priority: 0,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    async fn seed_acl_fixture(db: &mongodb::Database, case: AccessCase) -> NodeAclFixture {
+        let actor_id = Uuid::new_v4().to_string();
+        let owner_id = match case {
+            AccessCase::Direct => actor_id.clone(),
+            AccessCase::AsOrgAdmin | AccessCase::AsOrgMember | AccessCase::NoAccess => {
+                Uuid::new_v4().to_string()
+            }
+        };
+        let service_id = Uuid::new_v4().to_string();
+        let node = make_node(&owner_id, &format!("node-{}", case.label()));
+        let binding = make_binding(&owner_id, &node.id, &service_id);
+
+        let mut users = vec![test_user(&actor_id, UserType::Person)];
+        if owner_id != actor_id {
+            users.push(test_user(&owner_id, UserType::Org));
+        }
+        db.collection::<User>(USERS)
+            .insert_many(users)
+            .await
+            .expect("insert users");
+
+        match case {
+            AccessCase::AsOrgAdmin => {
+                db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+                    .insert_one(test_membership(&owner_id, &actor_id, OrgRole::Admin, None))
+                    .await
+                    .expect("insert admin membership");
+            }
+            AccessCase::AsOrgMember => {
+                db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+                    .insert_one(test_membership(&owner_id, &actor_id, OrgRole::Member, None))
+                    .await
+                    .expect("insert member membership");
+            }
+            AccessCase::Direct | AccessCase::NoAccess => {}
+        }
+
+        db.collection::<Node>(NODES)
+            .insert_one(node.clone())
+            .await
+            .expect("insert node");
+        db.collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
+            .insert_one(binding.clone())
+            .await
+            .expect("insert binding");
+
+        NodeAclFixture {
+            actor_id,
+            owner_id,
+            node,
+            binding,
+        }
+    }
+
+    fn assert_node_not_found<T: std::fmt::Debug>(result: AppResult<T>, case: AccessCase) {
+        let err = result.expect_err("operation should fail");
+        assert!(
+            matches!(err, AppError::NodeNotFound(_)),
+            "case {case:?} returned unexpected error: {err}"
+        );
+    }
 
     #[test]
     fn decodes_node_signing_secret_hex() {
@@ -831,5 +1132,279 @@ mod tests {
     fn rejects_node_signing_secret_invalid_hex() {
         let error = decode_node_signing_secret(b"not-hex", "node-1").expect_err("invalid hex");
         assert!(error.to_string().contains("not valid hex"));
+    }
+
+    #[tokio::test]
+    async fn get_node_uses_org_owner_acl_matrix() {
+        let Some(db) = connect_test_database("node_get_acl").await else {
+            eprintln!("skipping node service ACL test: no local MongoDB available");
+            return;
+        };
+
+        for case in AccessCase::all() {
+            let fixture = seed_acl_fixture(&db, case).await;
+            let result = get_node(&db, &fixture.actor_id, &fixture.node.id).await;
+            if case.can_read() {
+                let node = result.expect("readable case should load node");
+                assert_eq!(node.id, fixture.node.id, "case {case:?}");
+            } else {
+                assert_node_not_found(result, case);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn list_bindings_uses_org_owner_acl_matrix() {
+        let Some(db) = connect_test_database("node_list_bindings_acl").await else {
+            eprintln!("skipping node service ACL test: no local MongoDB available");
+            return;
+        };
+
+        for case in AccessCase::all() {
+            let fixture = seed_acl_fixture(&db, case).await;
+            let result = list_bindings(&db, &fixture.actor_id, &fixture.node.id).await;
+            if case.can_read() {
+                let bindings = result.expect("readable case should list bindings");
+                assert_eq!(bindings.len(), 1, "case {case:?}");
+                assert_eq!(bindings[0].id, fixture.binding.id, "case {case:?}");
+            } else {
+                assert_node_not_found(result, case);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_node_uses_org_owner_acl_matrix() {
+        let Some(db) = connect_test_database("node_delete_acl").await else {
+            eprintln!("skipping node service ACL test: no local MongoDB available");
+            return;
+        };
+
+        for case in AccessCase::all() {
+            let fixture = seed_acl_fixture(&db, case).await;
+            let result = delete_node(&db, &fixture.actor_id, &fixture.node.id).await;
+            if case.can_write() {
+                result.expect("writable case should delete node");
+                let stored = get_node_by_id(&db, &fixture.node.id)
+                    .await
+                    .expect("query node");
+                assert!(stored.is_none(), "case {case:?}");
+            } else {
+                assert_node_not_found(result, case);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn rotate_auth_token_uses_org_owner_acl_matrix() {
+        let Some(db) = connect_test_database("node_rotate_acl").await else {
+            eprintln!("skipping node service ACL test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+
+        for case in AccessCase::all() {
+            let fixture = seed_acl_fixture(&db, case).await;
+            let result =
+                rotate_auth_token(&db, &encryption_keys, &fixture.actor_id, &fixture.node.id).await;
+            if case.can_write() {
+                let (auth_token, signing_secret) =
+                    result.expect("writable case should rotate credentials");
+                assert!(auth_token.starts_with("nyx_nauth_"), "case {case:?}");
+                assert_eq!(signing_secret.len(), 64, "case {case:?}");
+            } else {
+                assert_node_not_found(result, case);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn update_binding_priority_uses_org_owner_acl_matrix() {
+        let Some(db) = connect_test_database("node_update_binding_acl").await else {
+            eprintln!("skipping node service ACL test: no local MongoDB available");
+            return;
+        };
+
+        for case in AccessCase::all() {
+            let fixture = seed_acl_fixture(&db, case).await;
+            let result = update_binding_priority(
+                &db,
+                &fixture.actor_id,
+                &fixture.node.id,
+                &fixture.binding.id,
+                5,
+            )
+            .await;
+            if case.can_write() {
+                result.expect("writable case should update binding");
+                let stored = db
+                    .collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
+                    .find_one(doc! { "_id": &fixture.binding.id })
+                    .await
+                    .expect("query binding")
+                    .expect("binding exists");
+                assert_eq!(stored.priority, 5, "case {case:?}");
+            } else {
+                assert_node_not_found(result, case);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn create_binding_uses_org_owner_acl_matrix() {
+        let Some(db) = connect_test_database("node_create_binding_acl").await else {
+            eprintln!("skipping node service ACL test: no local MongoDB available");
+            return;
+        };
+
+        for case in AccessCase::all() {
+            let fixture = seed_acl_fixture(&db, case).await;
+            let service_id = Uuid::new_v4().to_string();
+            let result =
+                create_binding(&db, &fixture.actor_id, &fixture.node.id, &service_id).await;
+            if case.can_write() {
+                let binding = result.expect("writable case should create binding");
+                assert_eq!(binding.user_id, fixture.owner_id, "case {case:?}");
+                assert_eq!(binding.node_id, fixture.node.id, "case {case:?}");
+                assert_eq!(binding.service_id, service_id, "case {case:?}");
+            } else {
+                assert_node_not_found(result, case);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_binding_uses_org_owner_acl_matrix() {
+        let Some(db) = connect_test_database("node_delete_binding_acl").await else {
+            eprintln!("skipping node service ACL test: no local MongoDB available");
+            return;
+        };
+
+        for case in AccessCase::all() {
+            let fixture = seed_acl_fixture(&db, case).await;
+            let result = delete_binding(
+                &db,
+                &fixture.actor_id,
+                &fixture.node.id,
+                &fixture.binding.id,
+            )
+            .await;
+            if case.can_write() {
+                result.expect("writable case should delete binding");
+                let stored = db
+                    .collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
+                    .find_one(doc! { "_id": &fixture.binding.id })
+                    .await
+                    .expect("query binding")
+                    .expect("binding exists");
+                assert!(!stored.is_active, "case {case:?}");
+            } else {
+                assert_node_not_found(result, case);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn list_user_nodes_includes_personal_and_member_org_nodes_with_owner_metadata() {
+        let Some(db) = connect_test_database("node_list_owner_info").await else {
+            eprintln!("skipping node service ACL test: no local MongoDB available");
+            return;
+        };
+
+        let actor_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        let viewer_org_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&actor_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+                test_user(&viewer_org_id, UserType::Org),
+            ])
+            .await
+            .expect("insert users");
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_many([
+                test_membership(&org_id, &actor_id, OrgRole::Member, None),
+                test_membership(&viewer_org_id, &actor_id, OrgRole::Viewer, None),
+            ])
+            .await
+            .expect("insert memberships");
+
+        let personal_node = make_node(&actor_id, "personal-node");
+        let org_node = make_node(&org_id, "org-node");
+        let viewer_org_node = make_node(&viewer_org_id, "viewer-org-node");
+        db.collection::<Node>(NODES)
+            .insert_many([
+                personal_node.clone(),
+                org_node.clone(),
+                viewer_org_node.clone(),
+            ])
+            .await
+            .expect("insert nodes");
+
+        let listed = list_user_nodes(&db, &actor_id)
+            .await
+            .expect("list reachable nodes");
+        let ids: Vec<&str> = listed.iter().map(|entry| entry.node.id.as_str()).collect();
+        assert!(ids.contains(&personal_node.id.as_str()));
+        assert!(ids.contains(&org_node.id.as_str()));
+        assert!(!ids.contains(&viewer_org_node.id.as_str()));
+
+        let personal = listed
+            .iter()
+            .find(|entry| entry.node.id == personal_node.id)
+            .expect("personal node listed");
+        assert_eq!(personal.owner.kind, NodeOwnerKind::User);
+        assert_eq!(personal.owner.id, actor_id);
+        assert_eq!(personal.owner.display_name, "Test User");
+
+        let org = listed
+            .iter()
+            .find(|entry| entry.node.id == org_node.id)
+            .expect("org node listed");
+        assert_eq!(org.owner.kind, NodeOwnerKind::Org);
+        assert_eq!(org.owner.id, org_id);
+        assert_eq!(org.owner.display_name, "Test Org");
+    }
+
+    #[tokio::test]
+    async fn personal_user_node_access_remains_unchanged() {
+        let Some(db) = connect_test_database("node_personal_regression").await else {
+            eprintln!("skipping node service ACL test: no local MongoDB available");
+            return;
+        };
+
+        let actor_id = Uuid::new_v4().to_string();
+        let other_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&actor_id, UserType::Person),
+                test_user(&other_id, UserType::Person),
+            ])
+            .await
+            .expect("insert users");
+        let owned = make_node(&actor_id, "owned-node");
+        let other = make_node(&other_id, "other-node");
+        db.collection::<Node>(NODES)
+            .insert_many([owned.clone(), other.clone()])
+            .await
+            .expect("insert nodes");
+
+        let loaded = get_node(&db, &actor_id, &owned.id)
+            .await
+            .expect("owner can get personal node");
+        assert_eq!(loaded.id, owned.id);
+        assert_node_not_found(
+            get_node(&db, &actor_id, &other.id).await,
+            AccessCase::NoAccess,
+        );
+
+        let listed = list_user_nodes(&db, &actor_id)
+            .await
+            .expect("list personal nodes");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].node.id, owned.id);
+        assert_eq!(listed[0].owner.kind, NodeOwnerKind::User);
+        assert_eq!(listed[0].owner.id, actor_id);
     }
 }

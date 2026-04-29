@@ -200,7 +200,7 @@ pub async fn list_nodes(
     } else {
         let node_id_array: bson::Array = nodes
             .iter()
-            .map(|n| bson::Bson::String(n.id.clone()))
+            .map(|n| bson::Bson::String(n.node.id.clone()))
             .collect();
         let pipeline = vec![
             doc! { "$match": { "node_id": { "$in": node_id_array }, "is_active": true } },
@@ -231,17 +231,20 @@ pub async fn list_nodes(
 
     let node_infos: Vec<NodeInfo> = nodes
         .iter()
-        .map(|node| NodeInfo {
-            id: node.id.clone(),
-            name: node.name.clone(),
-            status: node.status.as_str().to_string(),
-            is_connected: state.node_ws_manager.is_connected(&node.id),
-            last_heartbeat_at: node.last_heartbeat_at.map(|dt| dt.to_rfc3339()),
-            connected_at: node.connected_at.map(|dt| dt.to_rfc3339()),
-            metadata: node.metadata.clone(),
-            metrics: Some(build_metrics_info(&node.metrics)),
-            binding_count: binding_counts.get(&node.id).copied().unwrap_or(0),
-            created_at: node.created_at.to_rfc3339(),
+        .map(|node_with_owner| {
+            let node = &node_with_owner.node;
+            NodeInfo {
+                id: node.id.clone(),
+                name: node.name.clone(),
+                status: node.status.as_str().to_string(),
+                is_connected: state.node_ws_manager.is_connected(&node.id),
+                last_heartbeat_at: node.last_heartbeat_at.map(|dt| dt.to_rfc3339()),
+                connected_at: node.connected_at.map(|dt| dt.to_rfc3339()),
+                metadata: node.metadata.clone(),
+                metrics: Some(build_metrics_info(&node.metrics)),
+                binding_count: binding_counts.get(&node.id).copied().unwrap_or(0),
+                created_at: node.created_at.to_rfc3339(),
+            }
         })
         .collect();
 
