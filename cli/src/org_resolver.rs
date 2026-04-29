@@ -197,6 +197,7 @@ fn is_slug_shape(input: &str) -> bool {
     bytes[1..]
         .iter()
         .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+        && bytes.iter().any(|b| b.is_ascii_lowercase())
 }
 
 #[cfg(test)]
@@ -280,6 +281,16 @@ mod tests {
         assert_eq!(resolved, "org-1");
         assert_eq!(lookup.key_calls, 1);
         assert_eq!(lookup.list_calls, 0);
+    }
+
+    #[test]
+    fn slug_shape_rejects_all_digits() {
+        assert!(!is_slug_shape("12345"));
+    }
+
+    #[test]
+    fn slug_shape_accepts_mixed_alphanumeric() {
+        assert!(is_slug_shape("abc-123"));
     }
 
     #[tokio::test]

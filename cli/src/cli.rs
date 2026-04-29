@@ -1164,7 +1164,7 @@ pub enum NodeCommands {
         /// wizard input is provided).
         #[arg(long)]
         name: Option<String>,
-        /// Org owner. You must be an admin of the org.
+        /// Organization to act on (UUID, slug, or display name). You must be an admin of the org. Accepts the legacy --owner alias for backwards compatibility.
         #[arg(
             long,
             value_name = "ID|SLUG|NAME",

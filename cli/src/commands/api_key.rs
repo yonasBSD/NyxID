@@ -25,15 +25,9 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
             no_wait,
             auth,
         } => {
-            let mut org_api = if org.is_some() {
-                Some(ApiClient::from_auth(&auth)?)
-            } else {
-                None
-            };
+            let mut api = ApiClient::from_auth(&auth)?;
             let org = match org {
-                Some(raw) => {
-                    Some(resolve_org_id(org_api.as_mut().expect("api exists"), &raw).await?)
-                }
+                Some(raw) => Some(resolve_org_id(&mut api, &raw).await?),
                 None => None,
             };
 
@@ -67,11 +61,6 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
                 };
                 return crate::wizard::run_api_key_create_wizard(&auth, prefill, no_wait).await;
             }
-
-            let mut api = match org_api {
-                Some(api) => api,
-                None => ApiClient::from_auth(&auth)?,
-            };
 
             let key_name = match name {
                 Some(n) => n,
