@@ -1166,6 +1166,19 @@ pub enum NodeCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
+    /// Transfer a node to a person or org owner
+    Transfer {
+        /// Node ID or name
+        id: String,
+        /// Destination user or org ID
+        #[arg(long, value_name = "USER_OR_ORG_ID")]
+        to: String,
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// Rotate node auth token
     RotateToken {
         /// Node ID
@@ -1519,6 +1532,31 @@ mod tests {
             } => {
                 assert_eq!(name.as_deref(), Some("edge-node"));
                 assert_eq!(org.as_deref(), Some("11111111-2222-3333-4444-555555555555"));
+            }
+            _ => panic!("unexpected parse result"),
+        }
+    }
+
+    #[test]
+    fn node_transfer_accepts_to_and_yes_flags() {
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "node",
+            "transfer",
+            "edge-node",
+            "--to",
+            "11111111-2222-3333-4444-555555555555",
+            "--yes",
+        ])
+        .expect("node transfer should accept --to and --yes");
+
+        match cli.command {
+            Commands::Node {
+                command: NodeCommands::Transfer { id, to, yes, .. },
+            } => {
+                assert_eq!(id, "edge-node");
+                assert_eq!(to, "11111111-2222-3333-4444-555555555555");
+                assert!(yes);
             }
             _ => panic!("unexpected parse result"),
         }

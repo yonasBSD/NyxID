@@ -123,6 +123,10 @@ pub async fn run(command: NodeCommands) -> Result<()> {
                     eprintln!("Name:       {name}");
                     eprintln!("ID:         {node_id}");
                     eprintln!("Owner:      {owner}");
+                    eprintln!(
+                        "Owner type: {}",
+                        owner_type_label(node.get("owner")).unwrap_or("-")
+                    );
                     eprintln!("Status:     {status}");
                     eprintln!("Last Seen:  {last_seen}");
                     eprintln!("Version:    {version}");
@@ -150,6 +154,75 @@ pub async fn run(command: NodeCommands) -> Result<()> {
                         eprintln!("  Success:        {success}");
                         eprintln!("  Errors:         {errors}");
                     }
+                }
+            }
+            Ok(())
+        }
+
+        NodeCommands::Transfer { id, to, yes, auth } => {
+            let mut api = ApiClient::from_auth(&auth)?;
+            let resolved_id = resolve_node_id(&mut api, &id).await?;
+            let node: Value = api.get(&format!("/nodes/{resolved_id}")).await?;
+            let bindings: Value = api.get(&format!("/nodes/{resolved_id}/bindings")).await?;
+            let current_user_id = api
+                .get_value("/users/me")
+                .await
+                .ok()
+                .and_then(|user| user["id"].as_str().map(str::to_string));
+            let service_detach_count = count_visible_services_detached_by_transfer(
+                &mut api,
+                &resolved_id,
+                &to,
+                current_user_id.as_deref(),
+            )
+            .await
+            .unwrap_or(0);
+
+            let node_name = node["name"].as_str().unwrap_or(&id);
+            let current_owner = owner_label(node.get("owner"), current_user_id.as_deref());
+            let binding_count = bindings
+                .get("bindings")
+                .and_then(|v| v.as_array())
+                .map(Vec::len)
+                .unwrap_or(0);
+
+            if !yes {
+                eprintln!("Transfer node: {node_name}");
+                eprintln!("Current owner: {current_owner}");
+                eprintln!("New owner ID:  {to}");
+                eprintln!("Bindings to deactivate: {binding_count}");
+                eprintln!("AI Services to detach:  {service_detach_count}");
+                eprint!("Proceed with transfer? [y/N] ");
+                std::io::stderr().flush()?;
+                let mut answer = String::new();
+                std::io::stdin().read_line(&mut answer)?;
+                if !answer.trim().eq_ignore_ascii_case("y") {
+                    eprintln!("Cancelled.");
+                    return Ok(());
+                }
+            }
+
+            let result: Value = api
+                .post(
+                    &format!("/nodes/{resolved_id}/transfer"),
+                    &serde_json::json!({ "new_owner_user_id": to }),
+                )
+                .await?;
+
+            match auth.output {
+                OutputFormat::Json => {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                }
+                OutputFormat::Table => {
+                    let new_owner =
+                        owner_label(result.get("new_owner"), current_user_id.as_deref());
+                    let deactivated = result["deactivated_bindings_count"].as_u64().unwrap_or(0);
+                    let cleared = result["cleared_user_service_count"].as_u64().unwrap_or(0);
+                    eprintln!("Node transferred.");
+                    eprintln!("New owner: {new_owner}");
+                    eprintln!(
+                        "Detached {deactivated} binding(s) and cleared node routing from {cleared} AI Service(s)."
+                    );
                 }
             }
             Ok(())
@@ -537,6 +610,42 @@ fn owner_label(owner: Option<&Value>, current_user_id: Option<&str>) -> String {
     } else {
         format!("{display_name} (user)")
     }
+}
+
+fn owner_type_label(owner: Option<&Value>) -> Option<&'static str> {
+    match owner?.get("kind")?.as_str()? {
+        "org" => Some("org"),
+        "user" => Some("person"),
+        _ => Some("unknown"),
+    }
+}
+
+async fn count_visible_services_detached_by_transfer(
+    api: &mut ApiClient,
+    node_id: &str,
+    new_owner_id: &str,
+    current_user_id: Option<&str>,
+) -> Result<usize> {
+    let services: Value = api.get("/keys").await?;
+    let Some(items) = services.get("keys").and_then(|v| v.as_array()) else {
+        return Ok(0);
+    };
+
+    Ok(items
+        .iter()
+        .filter(|service| service["node_id"].as_str() == Some(node_id))
+        .filter(|service| {
+            let owner_id = match service
+                .get("credential_source")
+                .and_then(|source| source["type"].as_str())
+            {
+                Some("org") => service["credential_source"]["org_id"].as_str(),
+                Some("personal") => current_user_id,
+                _ => None,
+            };
+            owner_id != Some(new_owner_id)
+        })
+        .count())
 }
 
 fn admin_label(admin: &Value) -> String {
