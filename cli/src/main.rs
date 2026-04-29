@@ -3,6 +3,7 @@ mod auth;
 mod cli;
 mod commands;
 pub mod node;
+pub mod org_resolver;
 mod skill_self_heal;
 mod telemetry;
 #[cfg(test)]
