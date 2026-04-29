@@ -107,6 +107,23 @@ pub async fn list_pending_credentials_for_admin(
         .map_err(AppError::from)
 }
 
+pub async fn list_pending_credentials_for_node(
+    db: &mongodb::Database,
+    node_id: &str,
+) -> AppResult<Vec<NodePendingCredential>> {
+    db.collection::<NodePendingCredential>(NODE_PENDING_CREDENTIALS)
+        .find(doc! {
+            "node_id": node_id,
+            "is_active": true,
+            "expires_at": { "$gt": bson::DateTime::from_chrono(Utc::now()) },
+        })
+        .sort(doc! { "created_at": -1 })
+        .await?
+        .try_collect()
+        .await
+        .map_err(AppError::from)
+}
+
 pub async fn cancel_pending_credential(
     db: &mongodb::Database,
     actor_user_id: &str,
@@ -124,6 +141,56 @@ pub async fn cancel_pending_credential(
                 "is_active": true,
             },
             doc! { "$set": { "is_active": false, "updated_at": &now } },
+        )
+        .await?
+        .ok_or_else(|| AppError::NotFound("Pending credential not found".to_string()))
+}
+
+pub async fn consume_pending_credential_for_node(
+    db: &mongodb::Database,
+    node_id: &str,
+    pending_id: &str,
+) -> AppResult<NodePendingCredential> {
+    complete_pending_credential_for_node(db, node_id, pending_id, CompletionKind::Consumed).await
+}
+
+pub async fn decline_pending_credential_for_node(
+    db: &mongodb::Database,
+    node_id: &str,
+    pending_id: &str,
+) -> AppResult<NodePendingCredential> {
+    complete_pending_credential_for_node(db, node_id, pending_id, CompletionKind::Declined).await
+}
+
+enum CompletionKind {
+    Consumed,
+    Declined,
+}
+
+async fn complete_pending_credential_for_node(
+    db: &mongodb::Database,
+    node_id: &str,
+    pending_id: &str,
+    kind: CompletionKind,
+) -> AppResult<NodePendingCredential> {
+    let now_chrono = Utc::now();
+    let now = bson::DateTime::from_chrono(now_chrono);
+    let timestamp_field = match kind {
+        CompletionKind::Consumed => "consumed_at",
+        CompletionKind::Declined => "declined_at",
+    };
+    let mut set_doc = doc! { "is_active": false };
+    set_doc.insert(timestamp_field, now);
+
+    db.collection::<NodePendingCredential>(NODE_PENDING_CREDENTIALS)
+        .find_one_and_update(
+            doc! {
+                "_id": pending_id,
+                "node_id": node_id,
+                "is_active": true,
+                "expires_at": { "$gt": bson::DateTime::from_chrono(now_chrono) },
+            },
+            doc! { "$set": set_doc },
         )
         .await?
         .ok_or_else(|| AppError::NotFound("Pending credential not found".to_string()))

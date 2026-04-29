@@ -544,6 +544,20 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
                 .delete(handlers::node_admin::delete_binding),
         );
 
+    let node_agent_routes = Router::new()
+        .route(
+            "/pending-credentials",
+            get(handlers::node_agent::list_pending_credentials),
+        )
+        .route(
+            "/pending-credentials/{pending_id}/consume",
+            post(handlers::node_agent::consume_pending_credential),
+        )
+        .route(
+            "/pending-credentials/{pending_id}/decline",
+            post(handlers::node_agent::decline_pending_credential),
+        );
+
     let unified_key_routes = Router::new()
         .route(
             "/",
@@ -899,6 +913,7 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
             post(handlers::channel_webhooks::slack_webhook),
         )
         .nest("/api/v1/integrations", integration_routes)
+        .nest("/api/v1/node-agent", node_agent_routes)
         .nest("/api/v1", api_v1)
         // WebSocket endpoint for node agents. Auth happens in-message (not middleware).
         // Rate limiting: global per-IP rate limiter covers HTTP upgrade requests.
