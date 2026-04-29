@@ -1065,11 +1065,23 @@ pub async fn set_primary_org(
 
 #[cfg(test)]
 mod tests {
-    use super::{CreateOrgRequest, UpdateMemberRequest, create_org, get_org, list_orgs};
-    use crate::models::user::{COLLECTION_NAME as USERS, UserType};
-    use crate::test_utils::{connect_test_database, test_app_state, test_auth_user, test_user};
+    use super::{
+        CreateOrgRequest, UpdateMemberRequest, UpdateOrgRequest, create_org, get_org, list_orgs,
+        update_org,
+    };
+    use crate::db::{ensure_indexes, migrate_backfill_org_slugs};
+    use crate::errors::AppError;
+    use crate::models::org_membership::{
+        COLLECTION_NAME as ORG_MEMBERSHIPS, OrgMembership, OrgRole,
+    };
+    use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+    use crate::test_utils::{
+        connect_test_database, test_app_state, test_auth_user, test_membership, test_user,
+    };
     use axum::Json;
     use axum::extract::{Path, State};
+    use bson::doc;
+    use futures::TryStreamExt;
     use uuid::Uuid;
 
     // Regression tests for ChronoAIProject/NyxID#363: `allowed_service_ids:
@@ -1158,5 +1170,121 @@ mod tests {
                 .iter()
                 .any(|org| org.id == created.id && org.slug == "chrono-ai")
         );
+    }
+
+    #[tokio::test]
+    async fn backfill_index_and_duplicate_patch_conflict() {
+        let Some(db) = connect_test_database("org_slug_migration").await else {
+            eprintln!("Skipping MongoDB-backed test; no test database available");
+            return;
+        };
+
+        let actor_id = Uuid::new_v4().to_string();
+        let org_a_id = Uuid::new_v4().to_string();
+        let org_b_id = Uuid::new_v4().to_string();
+
+        let mut actor = test_user(&actor_id, UserType::Person);
+        actor.email = "actor@example.com".to_string();
+
+        let mut org_a = test_user(&org_a_id, UserType::Org);
+        org_a.email = "org-a@example.com".to_string();
+        org_a.display_name = Some("Acme Labs".to_string());
+        org_a.slug = None;
+
+        let mut org_b = test_user(&org_b_id, UserType::Org);
+        org_b.email = "org-b@example.com".to_string();
+        org_b.display_name = Some("Acme Labs".to_string());
+        org_b.slug = None;
+
+        let users = db.collection::<User>(USERS);
+        users.insert_one(actor).await.expect("insert actor");
+        users.insert_one(org_a).await.expect("insert dirty org a");
+
+        let mut org_b_doc = bson::to_document(&org_b).expect("serialize dirty org b");
+        org_b_doc.remove("slug");
+        db.collection::<bson::Document>(USERS)
+            .insert_one(org_b_doc)
+            .await
+            .expect("insert dirty org b without slug field");
+
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_many([
+                test_membership(&org_a_id, &actor_id, OrgRole::Admin, None),
+                test_membership(&org_b_id, &actor_id, OrgRole::Admin, None),
+            ])
+            .await
+            .expect("insert admin memberships");
+
+        migrate_backfill_org_slugs(&db)
+            .await
+            .expect("backfill org slugs");
+
+        let docs: Vec<bson::Document> = db
+            .collection::<bson::Document>(USERS)
+            .find(doc! { "_id": { "$in": [&org_a_id, &org_b_id] } })
+            .await
+            .expect("find backfilled orgs")
+            .try_collect()
+            .await
+            .expect("collect backfilled orgs");
+        let mut slugs: Vec<String> = docs
+            .iter()
+            .map(|doc| doc.get_str("slug").expect("slug set").to_string())
+            .collect();
+        slugs.sort();
+        assert_eq!(slugs, vec!["acme-labs", "acme-labs-2"]);
+
+        ensure_indexes(&db).await.expect("ensure indexes");
+        let indexes = db
+            .run_command(doc! { "listIndexes": USERS })
+            .await
+            .expect("list user indexes");
+        let index_docs = indexes
+            .get_document("cursor")
+            .expect("cursor")
+            .get_array("firstBatch")
+            .expect("first batch");
+        let slug_index = index_docs
+            .iter()
+            .filter_map(|value| value.as_document())
+            .find(|index| index.get_str("name") == Ok("users_org_slug_unique"))
+            .expect("users_org_slug_unique index");
+        assert_eq!(slug_index.get_bool("unique"), Ok(true));
+        assert_eq!(
+            slug_index
+                .get_document("partialFilterExpression")
+                .expect("partial filter")
+                .get_str("user_type"),
+            Ok("org")
+        );
+        assert_eq!(
+            slug_index
+                .get_document("partialFilterExpression")
+                .expect("partial filter")
+                .get_document("slug")
+                .expect("slug filter")
+                .get_str("$type"),
+            Ok("string")
+        );
+
+        let state = test_app_state(db);
+        let result = update_org(
+            State(state),
+            test_auth_user(&actor_id),
+            Path(org_b_id),
+            Json(UpdateOrgRequest {
+                display_name: None,
+                slug: Some("acme-labs".to_string()),
+                avatar_url: None,
+                contact_email: None,
+            }),
+        )
+        .await;
+
+        match result {
+            Err(AppError::OrgSlugTaken(slug)) => assert_eq!(slug, "acme-labs"),
+            Err(other) => panic!("unexpected error: {other}"),
+            Ok(_) => panic!("duplicate slug patch should fail"),
+        }
     }
 }

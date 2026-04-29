@@ -357,4 +357,27 @@ mod tests {
         assert_eq!(lookup.key_calls, 1);
         assert_eq!(lookup.list_calls, 1);
     }
+
+    #[tokio::test]
+    async fn display_name_resolution_reuses_cached_org_list() {
+        let mut lookup = FakeOrgLookup {
+            orgs: vec![
+                candidate("org-1", "chrono-ai", "Chrono AI"),
+                candidate("org-2", "nyxid-labs", "NyxID Labs"),
+            ],
+            ..Default::default()
+        };
+        let mut cache = None;
+
+        let first = resolve_fake(&mut lookup, &mut cache, "Chrono AI")
+            .await
+            .expect("resolve first display name");
+        let second = resolve_fake(&mut lookup, &mut cache, "NyxID Labs")
+            .await
+            .expect("resolve second display name");
+
+        assert_eq!(first, "org-1");
+        assert_eq!(second, "org-2");
+        assert_eq!(lookup.list_calls, 1);
+    }
 }
