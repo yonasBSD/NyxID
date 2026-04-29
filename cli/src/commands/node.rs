@@ -186,10 +186,7 @@ pub async fn run(command: NodeCommands) -> Result<()> {
             // so existing interactive-but-not-wizardable sessions (SSH)
             // keep working the same way they always did.
             let mut api = ApiClient::from_auth(&auth)?;
-            let owner_user_id = match org.as_deref() {
-                Some(org_ref) => Some(resolve_org_id(&mut api, org_ref).await?),
-                None => None,
-            };
+            let owner_user_id = org;
 
             let node_name = match name {
                 Some(n) if !n.trim().is_empty() => n.trim().to_string(),
@@ -477,9 +474,9 @@ fn resolve_effective_config(
     }
 }
 
-/// Cheap UUID-shape check used to short-circuit the `/nodes` round-trip when
-/// the caller already passed a node ID.
-fn looks_like_node_id(id_or_name: &str) -> bool {
+/// Cheap UUID-shape check used to short-circuit a round-trip when the caller
+/// already passed an ID.
+fn looks_like_uuid(id_or_name: &str) -> bool {
     id_or_name.len() == 36 && id_or_name.contains('-')
 }
 
@@ -507,7 +504,7 @@ fn find_node_id_by_name(nodes: &Value, name: &str) -> Option<String> {
 /// Names that don't match a visible node fall through as-is so the backend
 /// can return its usual `node_not_found` error.
 pub(crate) async fn resolve_node_id(api: &mut ApiClient, id_or_name: &str) -> Result<String> {
-    if looks_like_node_id(id_or_name) {
+    if looks_like_uuid(id_or_name) {
         return Ok(id_or_name.to_string());
     }
 
@@ -518,72 +515,6 @@ pub(crate) async fn resolve_node_id(api: &mut ApiClient, id_or_name: &str) -> Re
 
     // Fall back to treating it as an ID (let the server decide).
     Ok(id_or_name.to_string())
-}
-
-/// Resolve an org owner argument for `node register-token --org`.
-///
-/// Existing org-aware commands mostly accept raw IDs. For node registration we
-/// also support a lightweight display-name slug (`"My Team"` -> `my-team`) so
-/// scripts can use stable, human-readable owner arguments without adding an org
-/// schema field.
-async fn resolve_org_id(api: &mut ApiClient, id_or_slug: &str) -> Result<String> {
-    if looks_like_node_id(id_or_slug) {
-        return Ok(id_or_slug.to_string());
-    }
-
-    let orgs: Value = api.get("/orgs").await?;
-    find_org_id(&orgs, id_or_slug)
-        .ok_or_else(|| anyhow::anyhow!("Org '{id_or_slug}' not found in your memberships"))
-}
-
-fn find_org_id(orgs: &Value, id_or_slug: &str) -> Option<String> {
-    let needle = id_or_slug.trim();
-    if needle.is_empty() {
-        return None;
-    }
-
-    let items = orgs
-        .get("orgs")
-        .and_then(|v| v.as_array())
-        .or_else(|| orgs.as_array())?;
-
-    items.iter().find_map(|org| {
-        let id = org["id"].as_str()?;
-        let display_name = org["display_name"].as_str();
-        let explicit_slug = org["slug"].as_str();
-        let generated_slug = display_name.map(slugify_org_name);
-
-        if id == needle
-            || explicit_slug == Some(needle)
-            || display_name == Some(needle)
-            || generated_slug.as_deref() == Some(needle)
-        {
-            Some(id.to_string())
-        } else {
-            None
-        }
-    })
-}
-
-fn slugify_org_name(display_name: &str) -> String {
-    let mut slug = String::new();
-    let mut last_was_dash = false;
-
-    for ch in display_name.chars().flat_map(char::to_lowercase) {
-        if ch.is_ascii_alphanumeric() {
-            slug.push(ch);
-            last_was_dash = false;
-        } else if !last_was_dash && !slug.is_empty() {
-            slug.push('-');
-            last_was_dash = true;
-        }
-    }
-
-    while slug.ends_with('-') {
-        slug.pop();
-    }
-
-    slug
 }
 
 fn owner_label(owner: Option<&Value>, current_user_id: Option<&str>) -> String {
@@ -846,11 +777,11 @@ mod tests {
 
     #[test]
     fn uuid_shape_is_detected() {
-        assert!(looks_like_node_id("dbf51e02-633d-4293-a896-ec0fb383f30b"));
-        assert!(!looks_like_node_id("wh"));
-        assert!(!looks_like_node_id("my-laptop-node"));
+        assert!(looks_like_uuid("dbf51e02-633d-4293-a896-ec0fb383f30b"));
+        assert!(!looks_like_uuid("wh"));
+        assert!(!looks_like_uuid("my-laptop-node"));
         // 36 chars but no hyphen -> not a UUID shape
-        assert!(!looks_like_node_id(&"a".repeat(36)));
+        assert!(!looks_like_uuid(&"a".repeat(36)));
     }
 
     #[test]
@@ -894,40 +825,6 @@ mod tests {
         assert_eq!(
             find_node_id_by_name(&resp, "wh").as_deref(),
             Some("dbf51e02-633d-4293-a896-ec0fb383f30b")
-        );
-    }
-
-    #[test]
-    fn find_org_id_matches_id_display_name_and_slug() {
-        let resp = json!({
-            "orgs": [
-                {
-                    "id": "11111111-2222-3333-4444-555555555555",
-                    "display_name": "Team Alpha"
-                },
-                {
-                    "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-                    "display_name": "Other",
-                    "slug": "explicit-slug"
-                }
-            ]
-        });
-
-        assert_eq!(
-            find_org_id(&resp, "11111111-2222-3333-4444-555555555555").as_deref(),
-            Some("11111111-2222-3333-4444-555555555555")
-        );
-        assert_eq!(
-            find_org_id(&resp, "Team Alpha").as_deref(),
-            Some("11111111-2222-3333-4444-555555555555")
-        );
-        assert_eq!(
-            find_org_id(&resp, "team-alpha").as_deref(),
-            Some("11111111-2222-3333-4444-555555555555")
-        );
-        assert_eq!(
-            find_org_id(&resp, "explicit-slug").as_deref(),
-            Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
         );
     }
 

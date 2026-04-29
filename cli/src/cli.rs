@@ -1139,8 +1139,8 @@ pub enum NodeCommands {
         /// wizard input is provided).
         #[arg(long)]
         name: Option<String>,
-        /// Org owner ID or slug. You must be an admin of the org.
-        #[arg(long, value_name = "ID_OR_SLUG")]
+        /// Org owner ID. You must be an admin of the org.
+        #[arg(long, value_name = "ID")]
         org: Option<String>,
         /// Skip the browser wizard and print the new token to the
         /// terminal. The new token is shown ONCE — copy it before
@@ -1509,7 +1509,7 @@ mod tests {
             "--name",
             "edge-node",
             "--org",
-            "team-alpha",
+            "11111111-2222-3333-4444-555555555555",
         ])
         .expect("node register-token should accept --org");
 
@@ -1518,7 +1518,7 @@ mod tests {
                 command: NodeCommands::RegisterToken { name, org, .. },
             } => {
                 assert_eq!(name.as_deref(), Some("edge-node"));
-                assert_eq!(org.as_deref(), Some("team-alpha"));
+                assert_eq!(org.as_deref(), Some("11111111-2222-3333-4444-555555555555"));
             }
             _ => panic!("unexpected parse result"),
         }
