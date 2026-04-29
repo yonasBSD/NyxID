@@ -13,6 +13,14 @@ pub async fn run(command: NodeCommands) -> Result<()> {
         NodeCommands::List { auth } => {
             let mut api = ApiClient::from_auth(&auth)?;
             let nodes: Value = api.get("/nodes").await?;
+            let current_user_id = match auth.output {
+                OutputFormat::Json => None,
+                OutputFormat::Table => api
+                    .get_value("/users/me")
+                    .await
+                    .ok()
+                    .and_then(|user| user["id"].as_str().map(str::to_string)),
+            };
 
             match auth.output {
                 OutputFormat::Json => {
@@ -34,14 +42,15 @@ pub async fn run(command: NodeCommands) -> Result<()> {
 
                         let mut table = Table::new();
                         table.load_preset(UTF8_FULL_CONDENSED);
-                        table.set_header(["ID", "Name", "Status", "Last Seen"]);
+                        table.set_header(["ID", "Name", "Owner", "Status", "Last Seen"]);
 
                         for node in items {
                             let id = node["id"].as_str().or(node["_id"].as_str()).unwrap_or("-");
                             let name = node["name"].as_str().unwrap_or("-");
+                            let owner = owner_label(node.get("owner"), current_user_id.as_deref());
                             let status = node["status"].as_str().unwrap_or("-");
                             let last_seen = node["last_heartbeat_at"].as_str().unwrap_or("-");
-                            table.add_row([id, name, status, last_seen]);
+                            table.add_row([id, name, owner.as_str(), status, last_seen]);
                         }
                         eprintln!("{table}");
                     }
@@ -80,7 +89,19 @@ pub async fn run(command: NodeCommands) -> Result<()> {
 
             match auth.output {
                 OutputFormat::Json => {
-                    println!("{}", serde_json::to_string_pretty(&node)?);
+                    let node_id = node["id"].as_str().or(node["_id"].as_str()).unwrap_or(&id);
+                    let admins: Value = api.get(&format!("/nodes/{node_id}/admins")).await?;
+                    let mut payload = node.clone();
+                    if let Some(obj) = payload.as_object_mut() {
+                        obj.insert(
+                            "admins".to_string(),
+                            admins
+                                .get("admins")
+                                .cloned()
+                                .unwrap_or_else(|| Value::Array(vec![])),
+                        );
+                    }
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
                 }
                 OutputFormat::Table => {
                     let name = node["name"].as_str().unwrap_or("-");
@@ -91,12 +112,33 @@ pub async fn run(command: NodeCommands) -> Result<()> {
                         .get("metadata")
                         .and_then(|m| m["agent_version"].as_str())
                         .unwrap_or("-");
+                    let current_user_id = api
+                        .get_value("/users/me")
+                        .await
+                        .ok()
+                        .and_then(|user| user["id"].as_str().map(str::to_string));
+                    let owner = owner_label(node.get("owner"), current_user_id.as_deref());
+                    let admins: Value = api.get(&format!("/nodes/{node_id}/admins")).await?;
 
                     eprintln!("Name:       {name}");
                     eprintln!("ID:         {node_id}");
+                    eprintln!("Owner:      {owner}");
                     eprintln!("Status:     {status}");
                     eprintln!("Last Seen:  {last_seen}");
                     eprintln!("Version:    {version}");
+
+                    let admin_items = admins
+                        .get("admins")
+                        .and_then(|v| v.as_array())
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]);
+                    if !admin_items.is_empty() {
+                        eprintln!();
+                        eprintln!("Admins:");
+                        for admin in admin_items {
+                            eprintln!("  {}", admin_label(admin));
+                        }
+                    }
 
                     if let Some(metrics) = node.get("metrics") {
                         let total = metrics["total_requests"].as_u64().unwrap_or(0);
@@ -115,6 +157,7 @@ pub async fn run(command: NodeCommands) -> Result<()> {
 
         NodeCommands::RegisterToken {
             name,
+            org,
             terminal,
             no_wait,
             auth,
@@ -124,9 +167,12 @@ pub async fn run(command: NodeCommands) -> Result<()> {
             // the scripted path below. `--no-wait` forces the
             // pairing variant and wins over both `--output json`
             // and local-browser preference (only `--terminal`
-            // overrides it).
+            // overrides it). Org-owned token creation is kept in the
+            // scripted path because the browser wizard only allowlists
+            // personal node registration fields.
             let interactive_output = matches!(auth.output, OutputFormat::Table);
-            let wizard_eligible = !terminal
+            let wizard_eligible = org.is_none()
+                && !terminal
                 && (no_wait || (interactive_output && crate::wizard::is_browser_flow_eligible()));
 
             if wizard_eligible {
@@ -140,6 +186,10 @@ pub async fn run(command: NodeCommands) -> Result<()> {
             // so existing interactive-but-not-wizardable sessions (SSH)
             // keep working the same way they always did.
             let mut api = ApiClient::from_auth(&auth)?;
+            let owner_user_id = match org.as_deref() {
+                Some(org_ref) => Some(resolve_org_id(&mut api, org_ref).await?),
+                None => None,
+            };
 
             let node_name = match name {
                 Some(n) if !n.trim().is_empty() => n.trim().to_string(),
@@ -157,12 +207,12 @@ pub async fn run(command: NodeCommands) -> Result<()> {
                 }
             };
 
-            let result: Value = api
-                .post(
-                    "/nodes/register-token",
-                    &serde_json::json!({ "name": node_name }),
-                )
-                .await?;
+            let mut body = serde_json::json!({ "name": node_name });
+            if let Some(owner_id) = owner_user_id {
+                body["owner_user_id"] = Value::String(owner_id);
+            }
+
+            let result: Value = api.post("/nodes/register-token", &body).await?;
 
             match auth.output {
                 OutputFormat::Json => {
@@ -470,6 +520,105 @@ pub(crate) async fn resolve_node_id(api: &mut ApiClient, id_or_name: &str) -> Re
     Ok(id_or_name.to_string())
 }
 
+/// Resolve an org owner argument for `node register-token --org`.
+///
+/// Existing org-aware commands mostly accept raw IDs. For node registration we
+/// also support a lightweight display-name slug (`"My Team"` -> `my-team`) so
+/// scripts can use stable, human-readable owner arguments without adding an org
+/// schema field.
+async fn resolve_org_id(api: &mut ApiClient, id_or_slug: &str) -> Result<String> {
+    if looks_like_node_id(id_or_slug) {
+        return Ok(id_or_slug.to_string());
+    }
+
+    let orgs: Value = api.get("/orgs").await?;
+    find_org_id(&orgs, id_or_slug)
+        .ok_or_else(|| anyhow::anyhow!("Org '{id_or_slug}' not found in your memberships"))
+}
+
+fn find_org_id(orgs: &Value, id_or_slug: &str) -> Option<String> {
+    let needle = id_or_slug.trim();
+    if needle.is_empty() {
+        return None;
+    }
+
+    let items = orgs
+        .get("orgs")
+        .and_then(|v| v.as_array())
+        .or_else(|| orgs.as_array())?;
+
+    items.iter().find_map(|org| {
+        let id = org["id"].as_str()?;
+        let display_name = org["display_name"].as_str();
+        let explicit_slug = org["slug"].as_str();
+        let generated_slug = display_name.map(slugify_org_name);
+
+        if id == needle
+            || explicit_slug == Some(needle)
+            || display_name == Some(needle)
+            || generated_slug.as_deref() == Some(needle)
+        {
+            Some(id.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+fn slugify_org_name(display_name: &str) -> String {
+    let mut slug = String::new();
+    let mut last_was_dash = false;
+
+    for ch in display_name.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch);
+            last_was_dash = false;
+        } else if !last_was_dash && !slug.is_empty() {
+            slug.push('-');
+            last_was_dash = true;
+        }
+    }
+
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+
+    slug
+}
+
+fn owner_label(owner: Option<&Value>, current_user_id: Option<&str>) -> String {
+    let Some(owner) = owner else {
+        return "-".to_string();
+    };
+    let id = owner["id"].as_str().unwrap_or("-");
+    let kind = owner["kind"].as_str().unwrap_or("user");
+    if kind == "user" && current_user_id == Some(id) {
+        return "You".to_string();
+    }
+
+    let display_name = owner["display_name"]
+        .as_str()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(id);
+
+    if kind == "org" {
+        display_name.to_string()
+    } else {
+        format!("{display_name} (user)")
+    }
+}
+
+fn admin_label(admin: &Value) -> String {
+    let id = admin["user_id"].as_str().unwrap_or("-");
+    let name = admin["display_name"]
+        .as_str()
+        .or_else(|| admin["email"].as_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(id);
+    let role = admin["role"].as_str().unwrap_or("admin");
+    format!("{name} ({role})")
+}
+
 // ---- Docker subcommands ----
 
 const DOCKER_IMAGE: &str = "nyxid-node:latest";
@@ -746,5 +895,69 @@ mod tests {
             find_node_id_by_name(&resp, "wh").as_deref(),
             Some("dbf51e02-633d-4293-a896-ec0fb383f30b")
         );
+    }
+
+    #[test]
+    fn find_org_id_matches_id_display_name_and_slug() {
+        let resp = json!({
+            "orgs": [
+                {
+                    "id": "11111111-2222-3333-4444-555555555555",
+                    "display_name": "Team Alpha"
+                },
+                {
+                    "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                    "display_name": "Other",
+                    "slug": "explicit-slug"
+                }
+            ]
+        });
+
+        assert_eq!(
+            find_org_id(&resp, "11111111-2222-3333-4444-555555555555").as_deref(),
+            Some("11111111-2222-3333-4444-555555555555")
+        );
+        assert_eq!(
+            find_org_id(&resp, "Team Alpha").as_deref(),
+            Some("11111111-2222-3333-4444-555555555555")
+        );
+        assert_eq!(
+            find_org_id(&resp, "team-alpha").as_deref(),
+            Some("11111111-2222-3333-4444-555555555555")
+        );
+        assert_eq!(
+            find_org_id(&resp, "explicit-slug").as_deref(),
+            Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+        );
+    }
+
+    #[test]
+    fn owner_label_marks_current_user_as_you() {
+        let owner = json!({
+            "kind": "user",
+            "id": "user-1",
+            "display_name": "Kai"
+        });
+        assert_eq!(owner_label(Some(&owner), Some("user-1")), "You");
+        assert_eq!(owner_label(Some(&owner), Some("other")), "Kai (user)");
+    }
+
+    #[test]
+    fn admin_label_prefers_display_name_then_email() {
+        let named = json!({
+            "user_id": "user-1",
+            "display_name": "Kai",
+            "email": "kai@example.com",
+            "role": "admin"
+        });
+        assert_eq!(admin_label(&named), "Kai (admin)");
+
+        let email_only = json!({
+            "user_id": "user-2",
+            "display_name": null,
+            "email": "member@example.com",
+            "role": "owner"
+        });
+        assert_eq!(admin_label(&email_only), "member@example.com (owner)");
     }
 }

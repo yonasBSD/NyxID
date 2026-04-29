@@ -1139,6 +1139,9 @@ pub enum NodeCommands {
         /// wizard input is provided).
         #[arg(long)]
         name: Option<String>,
+        /// Org owner ID or slug. You must be an admin of the org.
+        #[arg(long, value_name = "ID_OR_SLUG")]
+        org: Option<String>,
         /// Skip the browser wizard and print the new token to the
         /// terminal. The new token is shown ONCE — copy it before
         /// scrolling away. Equivalent to setting `NYXID_NO_WIZARD=1`
@@ -1492,6 +1495,30 @@ mod tests {
             } => {
                 assert_eq!(provider_id, "provider-1");
                 assert_eq!(org.as_deref(), Some("org-1"));
+            }
+            _ => panic!("unexpected parse result"),
+        }
+    }
+
+    #[test]
+    fn node_register_token_accepts_org_flag() {
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "node",
+            "register-token",
+            "--name",
+            "edge-node",
+            "--org",
+            "team-alpha",
+        ])
+        .expect("node register-token should accept --org");
+
+        match cli.command {
+            Commands::Node {
+                command: NodeCommands::RegisterToken { name, org, .. },
+            } => {
+                assert_eq!(name.as_deref(), Some("edge-node"));
+                assert_eq!(org.as_deref(), Some("team-alpha"));
             }
             _ => panic!("unexpected parse result"),
         }
