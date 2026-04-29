@@ -16,7 +16,12 @@ export const createBindingSchema = z.object({
   service_id: z.string().min(1, "Service is required"),
 });
 
+export const transferNodeSchema = z.object({
+  new_owner_user_id: z.string().min(1, "Destination owner is required"),
+});
+
 export type CreateRegistrationTokenFormData = z.infer<
   typeof createRegistrationTokenSchema
 >;
 export type CreateBindingFormData = z.infer<typeof createBindingSchema>;
+export type TransferNodeFormData = z.infer<typeof transferNodeSchema>;

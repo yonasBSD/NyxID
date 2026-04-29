@@ -10,8 +10,12 @@ import type {
   CreateRegistrationTokenResponse,
   RotateNodeTokenResponse,
   CreateBindingResponse,
+  TransferNodeResponse,
 } from "@/types/nodes";
-import type { CreateRegistrationTokenFormData } from "@/schemas/nodes";
+import type {
+  CreateRegistrationTokenFormData,
+  TransferNodeFormData,
+} from "@/schemas/nodes";
 
 // --- Query hooks ---
 
@@ -115,6 +119,38 @@ export function useRotateNodeToken() {
     },
     onSuccess: (_data, nodeId) => {
       void queryClient.invalidateQueries({ queryKey: ["nodes", nodeId] });
+    },
+  });
+}
+
+export function useTransferNode() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async ({
+      nodeId,
+      data,
+    }: {
+      readonly nodeId: string;
+      readonly data: TransferNodeFormData;
+    }): Promise<TransferNodeResponse> => {
+      return api.post<TransferNodeResponse>(
+        `/nodes/${nodeId}/transfer`,
+        data,
+      );
+    },
+    onSuccess: (_data, variables) => {
+      void queryClient.invalidateQueries({ queryKey: ["nodes"] });
+      void queryClient.invalidateQueries({
+        queryKey: ["nodes", variables.nodeId],
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["nodes", variables.nodeId, "bindings"],
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["nodes", variables.nodeId, "admins"],
+      });
+      void queryClient.invalidateQueries({ queryKey: ["keys"] });
     },
   });
 }

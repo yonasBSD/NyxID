@@ -6,10 +6,12 @@ import {
   useNodeBindings,
   useDeleteNode,
   useRotateNodeToken,
+  useTransferNode,
   useCreateBinding,
   useUpdateBinding,
   useDeleteBinding,
 } from "@/hooks/use-nodes";
+import { useKeys } from "@/hooks/use-keys";
 import { useServices } from "@/hooks/use-services";
 import { useAuthStore } from "@/stores/auth-store";
 import { ApiError } from "@/lib/api-client";
@@ -23,9 +25,11 @@ import { PageHeader } from "@/components/shared/page-header";
 import { CopyableField } from "@/components/shared/copyable-field";
 import { DetailRow } from "@/components/shared/detail-row";
 import { DetailSection } from "@/components/shared/detail-section";
+import { OrgScopeSelect } from "@/components/shared/org-scope-select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -52,6 +56,7 @@ import {
 import {
   Activity,
   ArrowDown,
+  ArrowRightLeft,
   ArrowUp,
   HardDrive,
   KeyRound,
@@ -64,6 +69,7 @@ import {
 import { toast } from "sonner";
 import { NodeStatusBadge } from "@/components/shared/node-status-badge";
 import type { NodeAdminInfo, NodeInfo } from "@/types/nodes";
+import type { KeyInfo } from "@/types/keys";
 
 function nodeOwnerLabel(
   owner: NodeInfo["owner"],
@@ -96,6 +102,14 @@ function canManageNode(
   return (admins ?? []).some((admin) => admin.user_id === currentUserId);
 }
 
+function keyOwnerId(key: KeyInfo, currentUserId: string | null): string | null {
+  const source = key.credential_source;
+  if (!source || source.type === "personal") {
+    return currentUserId;
+  }
+  return source.org_id;
+}
+
 export function NodeDetailPage() {
   const { nodeId } = useParams({ strict: false }) as { nodeId: string };
   const navigate = useNavigate();
@@ -105,16 +119,21 @@ export function NodeDetailPage() {
   const { data: bindings, isLoading: bindingsLoading } =
     useNodeBindings(nodeId);
   const { data: services } = useServices();
+  const { data: keys } = useKeys();
   const currentUserId = useAuthStore((state) => state.user?.id ?? null);
 
   const deleteMutation = useDeleteNode();
   const rotateMutation = useRotateNodeToken();
+  const transferMutation = useTransferNode();
   const createBindingMutation = useCreateBinding();
   const updateBindingMutation = useUpdateBinding();
   const deleteBindingMutation = useDeleteBinding();
 
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [showRotateDialog, setShowRotateDialog] = useState(false);
+  const [showTransferDialog, setShowTransferDialog] = useState(false);
+  const [transferOwnerId, setTransferOwnerId] = useState<string | null>(null);
+  const [transferConfirmed, setTransferConfirmed] = useState(false);
   const [rotatedCredentials, setRotatedCredentials] = useState<{
     readonly auth_token: string;
     readonly signing_secret: string;
@@ -134,6 +153,18 @@ export function NodeDetailPage() {
       : undefined;
   const setupCommandHint = getNodeCredentialPromptHint(setupService);
   const canManage = canManageNode(node, currentUserId, admins);
+  const transferTargetOwnerId = transferOwnerId ?? currentUserId ?? "";
+  const transferIsNoop =
+    Boolean(node) && node?.owner.id === transferTargetOwnerId;
+  const transferBindingCount = bindings?.length ?? node?.binding_count ?? 0;
+  const transferServiceDetachCount =
+    node && transferTargetOwnerId
+      ? (keys ?? []).filter(
+          (key) =>
+            key.node_id === node.id &&
+            keyOwnerId(key, currentUserId) !== transferTargetOwnerId,
+        ).length
+      : 0;
 
   // Filter out services that already have bindings
   const boundServiceIds = new Set((bindings ?? []).map((b) => b.service_id));
@@ -168,6 +199,27 @@ export function NodeDetailPage() {
         err instanceof ApiError ? err.message : "Failed to rotate token",
       );
       setShowRotateDialog(false);
+    }
+  }
+
+  async function handleTransferNode() {
+    if (!node || !transferTargetOwnerId) return;
+    try {
+      const result = await transferMutation.mutateAsync({
+        nodeId,
+        data: { new_owner_user_id: transferTargetOwnerId },
+      });
+      toast.success(
+        `Node transferred to ${nodeOwnerLabel(result.new_owner, currentUserId)}`,
+      );
+      setShowTransferDialog(false);
+      setTransferOwnerId(null);
+      setTransferConfirmed(false);
+      void navigate({ to: "/nodes" });
+    } catch (err) {
+      toast.error(
+        err instanceof ApiError ? err.message : "Failed to transfer node",
+      );
     }
   }
 
@@ -266,6 +318,18 @@ export function NodeDetailPage() {
         actions={
           canManage ? (
             <div className="flex gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setTransferOwnerId(null);
+                  setTransferConfirmed(false);
+                  setShowTransferDialog(true);
+                }}
+              >
+                <ArrowRightLeft className="mr-2 h-4 w-4" />
+                Transfer
+              </Button>
               <Button
                 variant="outline"
                 size="sm"
@@ -575,6 +639,92 @@ export function NodeDetailPage() {
           </div>
         )}
       </div>
+
+      {/* Transfer Ownership */}
+      <Dialog
+        open={showTransferDialog}
+        onOpenChange={(open) => {
+          setShowTransferDialog(open);
+          if (!open) {
+            setTransferOwnerId(null);
+            setTransferConfirmed(false);
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Transfer Ownership</DialogTitle>
+            <DialogDescription>
+              Move &quot;{node.name}&quot; to another owner. Existing node
+              credentials keep working, but service routing is detached where
+              ownership no longer matches.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <p className="text-sm font-medium text-foreground">
+                Destination owner
+              </p>
+              <OrgScopeSelect
+                value={transferOwnerId}
+                onChange={(value) => {
+                  setTransferOwnerId(value);
+                  setTransferConfirmed(false);
+                }}
+                label="Destination owner"
+              />
+            </div>
+            <div className="rounded-md border border-border bg-muted/40 p-3 text-sm">
+              <p className="font-medium text-foreground">Transfer preview</p>
+              <ul className="mt-2 space-y-1 text-muted-foreground">
+                <li>{String(transferBindingCount)} bindings will be deactivated.</li>
+                <li>
+                  {String(transferServiceDetachCount)} AI Services will lose
+                  their node routing.
+                </li>
+              </ul>
+              {transferIsNoop && (
+                <p className="mt-2 text-xs text-destructive">
+                  Choose a different owner before transferring.
+                </p>
+              )}
+            </div>
+            <label className="flex items-start gap-2 text-sm text-muted-foreground">
+              <Checkbox
+                checked={transferConfirmed}
+                onCheckedChange={(checked) =>
+                  setTransferConfirmed(checked === true)
+                }
+              />
+              <span>
+                I understand that existing bindings will be deactivated and
+                cross-owner services will stop routing through this node.
+              </span>
+            </label>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setShowTransferDialog(false);
+                setTransferOwnerId(null);
+                setTransferConfirmed(false);
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => void handleTransferNode()}
+              disabled={
+                !transferConfirmed || transferIsNoop || !transferTargetOwnerId
+              }
+              isLoading={transferMutation.isPending}
+            >
+              Transfer
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Delete Confirmation */}
       <Dialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>

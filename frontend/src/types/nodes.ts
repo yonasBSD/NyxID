@@ -85,6 +85,14 @@ export interface CreateBindingResponse {
   readonly message: string;
 }
 
+export interface TransferNodeResponse {
+  readonly node_id: string;
+  readonly previous_owner: NodeOwnerInfo;
+  readonly new_owner: NodeOwnerInfo;
+  readonly deactivated_bindings_count: number;
+  readonly cleared_user_service_count: number;
+}
+
 export interface AdminNodeInfo {
   readonly id: string;
   readonly name: string;
