@@ -518,6 +518,23 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
             post(handlers::node_admin::rotate_token),
         )
         .route(
+            "/{node_id}/transfer",
+            post(handlers::node_admin::transfer_node),
+        )
+        .route(
+            "/{node_id}/credentials/push",
+            post(handlers::node_admin::push_pending_credential),
+        )
+        .route(
+            "/{node_id}/credentials/pending",
+            get(handlers::node_admin::list_pending_credentials),
+        )
+        .route(
+            "/{node_id}/credentials/pending/{pending_id}",
+            delete(handlers::node_admin::cancel_pending_credential),
+        )
+        .route("/{node_id}/admins", get(handlers::node_admin::list_admins))
+        .route(
             "/{node_id}/bindings",
             get(handlers::node_admin::list_bindings).post(handlers::node_admin::create_binding),
         )
@@ -525,6 +542,20 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
             "/{node_id}/bindings/{binding_id}",
             patch(handlers::node_admin::update_binding)
                 .delete(handlers::node_admin::delete_binding),
+        );
+
+    let node_agent_routes = Router::new()
+        .route(
+            "/pending-credentials",
+            get(handlers::node_agent::list_pending_credentials),
+        )
+        .route(
+            "/pending-credentials/{pending_id}/consume",
+            post(handlers::node_agent::consume_pending_credential),
+        )
+        .route(
+            "/pending-credentials/{pending_id}/decline",
+            post(handlers::node_agent::decline_pending_credential),
         );
 
     let unified_key_routes = Router::new()
@@ -882,6 +913,7 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
             post(handlers::channel_webhooks::slack_webhook),
         )
         .nest("/api/v1/integrations", integration_routes)
+        .nest("/api/v1/node-agent", node_agent_routes)
         .nest("/api/v1", api_v1)
         // WebSocket endpoint for node agents. Auth happens in-message (not middleware).
         // Rate limiting: global per-IP rate limiter covers HTTP upgrade requests.

@@ -16,9 +16,23 @@ export interface NodeMetricsInfo {
   readonly last_success_at: string | null;
 }
 
+export interface NodeOwnerInfo {
+  readonly kind: "user" | "org";
+  readonly id: string;
+  readonly display_name: string;
+}
+
+export interface NodeAdminInfo {
+  readonly user_id: string;
+  readonly display_name: string | null;
+  readonly email: string | null;
+  readonly role: "owner" | "admin";
+}
+
 export interface NodeInfo {
   readonly id: string;
   readonly name: string;
+  readonly owner: NodeOwnerInfo;
   readonly status: string;
   readonly is_connected: boolean;
   readonly last_heartbeat_at: string | null;
@@ -31,6 +45,10 @@ export interface NodeInfo {
 
 export interface NodeListResponse {
   readonly nodes: readonly NodeInfo[];
+}
+
+export interface NodeAdminsResponse {
+  readonly admins: readonly NodeAdminInfo[];
 }
 
 export interface NodeBindingInfo {
@@ -65,6 +83,40 @@ export interface CreateBindingResponse {
   readonly service_id: string;
   readonly service_name: string;
   readonly message: string;
+}
+
+export interface TransferNodeResponse {
+  readonly node_id: string;
+  readonly previous_owner: NodeOwnerInfo;
+  readonly new_owner: NodeOwnerInfo;
+  readonly deactivated_bindings_count: number;
+  readonly cleared_user_service_count: number;
+}
+
+export type NodePendingCredentialInjectionMethod =
+  | "header"
+  | "query-param"
+  | "path-prefix";
+
+export interface NodePendingCredentialInfo {
+  readonly id: string;
+  readonly node_id: string;
+  readonly service_slug: string;
+  readonly injection_method: NodePendingCredentialInjectionMethod;
+  readonly field_name: string;
+  readonly target_url?: string;
+  readonly label?: string;
+  readonly created_by_user_id: string;
+  readonly owner_user_id: string;
+  readonly created_at: string;
+  readonly expires_at: string;
+  readonly consumed_at?: string;
+  readonly declined_at?: string;
+  readonly is_active: boolean;
+}
+
+export interface NodePendingCredentialsResponse {
+  readonly pending_credentials: readonly NodePendingCredentialInfo[];
 }
 
 export interface AdminNodeInfo {

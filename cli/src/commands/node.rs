@@ -13,6 +13,14 @@ pub async fn run(command: NodeCommands) -> Result<()> {
         NodeCommands::List { auth } => {
             let mut api = ApiClient::from_auth(&auth)?;
             let nodes: Value = api.get("/nodes").await?;
+            let current_user_id = match auth.output {
+                OutputFormat::Json => None,
+                OutputFormat::Table => api
+                    .get_value("/users/me")
+                    .await
+                    .ok()
+                    .and_then(|user| user["id"].as_str().map(str::to_string)),
+            };
 
             match auth.output {
                 OutputFormat::Json => {
@@ -34,14 +42,15 @@ pub async fn run(command: NodeCommands) -> Result<()> {
 
                         let mut table = Table::new();
                         table.load_preset(UTF8_FULL_CONDENSED);
-                        table.set_header(["ID", "Name", "Status", "Last Seen"]);
+                        table.set_header(["ID", "Name", "Owner", "Status", "Last Seen"]);
 
                         for node in items {
                             let id = node["id"].as_str().or(node["_id"].as_str()).unwrap_or("-");
                             let name = node["name"].as_str().unwrap_or("-");
+                            let owner = owner_label(node.get("owner"), current_user_id.as_deref());
                             let status = node["status"].as_str().unwrap_or("-");
                             let last_seen = node["last_heartbeat_at"].as_str().unwrap_or("-");
-                            table.add_row([id, name, status, last_seen]);
+                            table.add_row([id, name, owner.as_str(), status, last_seen]);
                         }
                         eprintln!("{table}");
                     }
@@ -80,7 +89,19 @@ pub async fn run(command: NodeCommands) -> Result<()> {
 
             match auth.output {
                 OutputFormat::Json => {
-                    println!("{}", serde_json::to_string_pretty(&node)?);
+                    let node_id = node["id"].as_str().or(node["_id"].as_str()).unwrap_or(&id);
+                    let admins: Value = api.get(&format!("/nodes/{node_id}/admins")).await?;
+                    let mut payload = node.clone();
+                    if let Some(obj) = payload.as_object_mut() {
+                        obj.insert(
+                            "admins".to_string(),
+                            admins
+                                .get("admins")
+                                .cloned()
+                                .unwrap_or_else(|| Value::Array(vec![])),
+                        );
+                    }
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
                 }
                 OutputFormat::Table => {
                     let name = node["name"].as_str().unwrap_or("-");
@@ -91,12 +112,37 @@ pub async fn run(command: NodeCommands) -> Result<()> {
                         .get("metadata")
                         .and_then(|m| m["agent_version"].as_str())
                         .unwrap_or("-");
+                    let current_user_id = api
+                        .get_value("/users/me")
+                        .await
+                        .ok()
+                        .and_then(|user| user["id"].as_str().map(str::to_string));
+                    let owner = owner_label(node.get("owner"), current_user_id.as_deref());
+                    let admins: Value = api.get(&format!("/nodes/{node_id}/admins")).await?;
 
                     eprintln!("Name:       {name}");
                     eprintln!("ID:         {node_id}");
+                    eprintln!("Owner:      {owner}");
+                    eprintln!(
+                        "Owner type: {}",
+                        owner_type_label(node.get("owner")).unwrap_or("-")
+                    );
                     eprintln!("Status:     {status}");
                     eprintln!("Last Seen:  {last_seen}");
                     eprintln!("Version:    {version}");
+
+                    let admin_items = admins
+                        .get("admins")
+                        .and_then(|v| v.as_array())
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]);
+                    if !admin_items.is_empty() {
+                        eprintln!();
+                        eprintln!("Admins:");
+                        for admin in admin_items {
+                            eprintln!("  {}", admin_label(admin));
+                        }
+                    }
 
                     if let Some(metrics) = node.get("metrics") {
                         let total = metrics["total_requests"].as_u64().unwrap_or(0);
@@ -113,8 +159,78 @@ pub async fn run(command: NodeCommands) -> Result<()> {
             Ok(())
         }
 
+        NodeCommands::Transfer { id, to, yes, auth } => {
+            let mut api = ApiClient::from_auth(&auth)?;
+            let resolved_id = resolve_node_id(&mut api, &id).await?;
+            let node: Value = api.get(&format!("/nodes/{resolved_id}")).await?;
+            let bindings: Value = api.get(&format!("/nodes/{resolved_id}/bindings")).await?;
+            let current_user_id = api
+                .get_value("/users/me")
+                .await
+                .ok()
+                .and_then(|user| user["id"].as_str().map(str::to_string));
+            let service_detach_count = count_visible_services_detached_by_transfer(
+                &mut api,
+                &resolved_id,
+                &to,
+                current_user_id.as_deref(),
+            )
+            .await
+            .unwrap_or(0);
+
+            let node_name = node["name"].as_str().unwrap_or(&id);
+            let current_owner = owner_label(node.get("owner"), current_user_id.as_deref());
+            let binding_count = bindings
+                .get("bindings")
+                .and_then(|v| v.as_array())
+                .map(Vec::len)
+                .unwrap_or(0);
+
+            if !yes {
+                eprintln!("Transfer node: {node_name}");
+                eprintln!("Current owner: {current_owner}");
+                eprintln!("New owner ID:  {to}");
+                eprintln!("Bindings to deactivate: {binding_count}");
+                eprintln!("AI Services to detach:  {service_detach_count}");
+                eprint!("Proceed with transfer? [y/N] ");
+                std::io::stderr().flush()?;
+                let mut answer = String::new();
+                std::io::stdin().read_line(&mut answer)?;
+                if !answer.trim().eq_ignore_ascii_case("y") {
+                    eprintln!("Cancelled.");
+                    return Ok(());
+                }
+            }
+
+            let result: Value = api
+                .post(
+                    &format!("/nodes/{resolved_id}/transfer"),
+                    &serde_json::json!({ "new_owner_user_id": to }),
+                )
+                .await?;
+
+            match auth.output {
+                OutputFormat::Json => {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                }
+                OutputFormat::Table => {
+                    let new_owner =
+                        owner_label(result.get("new_owner"), current_user_id.as_deref());
+                    let deactivated = result["deactivated_bindings_count"].as_u64().unwrap_or(0);
+                    let cleared = result["cleared_user_service_count"].as_u64().unwrap_or(0);
+                    eprintln!("Node transferred.");
+                    eprintln!("New owner: {new_owner}");
+                    eprintln!(
+                        "Detached {deactivated} binding(s) and cleared node routing from {cleared} AI Service(s)."
+                    );
+                }
+            }
+            Ok(())
+        }
+
         NodeCommands::RegisterToken {
             name,
+            org,
             terminal,
             no_wait,
             auth,
@@ -124,9 +240,12 @@ pub async fn run(command: NodeCommands) -> Result<()> {
             // the scripted path below. `--no-wait` forces the
             // pairing variant and wins over both `--output json`
             // and local-browser preference (only `--terminal`
-            // overrides it).
+            // overrides it). Org-owned token creation is kept in the
+            // scripted path because the browser wizard only allowlists
+            // personal node registration fields.
             let interactive_output = matches!(auth.output, OutputFormat::Table);
-            let wizard_eligible = !terminal
+            let wizard_eligible = org.is_none()
+                && !terminal
                 && (no_wait || (interactive_output && crate::wizard::is_browser_flow_eligible()));
 
             if wizard_eligible {
@@ -140,6 +259,7 @@ pub async fn run(command: NodeCommands) -> Result<()> {
             // so existing interactive-but-not-wizardable sessions (SSH)
             // keep working the same way they always did.
             let mut api = ApiClient::from_auth(&auth)?;
+            let owner_user_id = org;
 
             let node_name = match name {
                 Some(n) if !n.trim().is_empty() => n.trim().to_string(),
@@ -157,12 +277,12 @@ pub async fn run(command: NodeCommands) -> Result<()> {
                 }
             };
 
-            let result: Value = api
-                .post(
-                    "/nodes/register-token",
-                    &serde_json::json!({ "name": node_name }),
-                )
-                .await?;
+            let mut body = serde_json::json!({ "name": node_name });
+            if let Some(owner_id) = owner_user_id {
+                body["owner_user_id"] = Value::String(owner_id);
+            }
+
+            let result: Value = api.post("/nodes/register-token", &body).await?;
 
             match auth.output {
                 OutputFormat::Json => {
@@ -427,9 +547,9 @@ fn resolve_effective_config(
     }
 }
 
-/// Cheap UUID-shape check used to short-circuit the `/nodes` round-trip when
-/// the caller already passed a node ID.
-fn looks_like_node_id(id_or_name: &str) -> bool {
+/// Cheap UUID-shape check used to short-circuit a round-trip when the caller
+/// already passed an ID.
+fn looks_like_uuid(id_or_name: &str) -> bool {
     id_or_name.len() == 36 && id_or_name.contains('-')
 }
 
@@ -457,7 +577,7 @@ fn find_node_id_by_name(nodes: &Value, name: &str) -> Option<String> {
 /// Names that don't match a visible node fall through as-is so the backend
 /// can return its usual `node_not_found` error.
 pub(crate) async fn resolve_node_id(api: &mut ApiClient, id_or_name: &str) -> Result<String> {
-    if looks_like_node_id(id_or_name) {
+    if looks_like_uuid(id_or_name) {
         return Ok(id_or_name.to_string());
     }
 
@@ -468,6 +588,75 @@ pub(crate) async fn resolve_node_id(api: &mut ApiClient, id_or_name: &str) -> Re
 
     // Fall back to treating it as an ID (let the server decide).
     Ok(id_or_name.to_string())
+}
+
+fn owner_label(owner: Option<&Value>, current_user_id: Option<&str>) -> String {
+    let Some(owner) = owner else {
+        return "-".to_string();
+    };
+    let id = owner["id"].as_str().unwrap_or("-");
+    let kind = owner["kind"].as_str().unwrap_or("user");
+    if kind == "user" && current_user_id == Some(id) {
+        return "You".to_string();
+    }
+
+    let display_name = owner["display_name"]
+        .as_str()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(id);
+
+    if kind == "org" {
+        display_name.to_string()
+    } else {
+        format!("{display_name} (user)")
+    }
+}
+
+fn owner_type_label(owner: Option<&Value>) -> Option<&'static str> {
+    match owner?.get("kind")?.as_str()? {
+        "org" => Some("org"),
+        "user" => Some("person"),
+        _ => Some("unknown"),
+    }
+}
+
+async fn count_visible_services_detached_by_transfer(
+    api: &mut ApiClient,
+    node_id: &str,
+    new_owner_id: &str,
+    current_user_id: Option<&str>,
+) -> Result<usize> {
+    let services: Value = api.get("/keys").await?;
+    let Some(items) = services.get("keys").and_then(|v| v.as_array()) else {
+        return Ok(0);
+    };
+
+    Ok(items
+        .iter()
+        .filter(|service| service["node_id"].as_str() == Some(node_id))
+        .filter(|service| {
+            let owner_id = match service
+                .get("credential_source")
+                .and_then(|source| source["type"].as_str())
+            {
+                Some("org") => service["credential_source"]["org_id"].as_str(),
+                Some("personal") => current_user_id,
+                _ => None,
+            };
+            owner_id != Some(new_owner_id)
+        })
+        .count())
+}
+
+fn admin_label(admin: &Value) -> String {
+    let id = admin["user_id"].as_str().unwrap_or("-");
+    let name = admin["display_name"]
+        .as_str()
+        .or_else(|| admin["email"].as_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(id);
+    let role = admin["role"].as_str().unwrap_or("admin");
+    format!("{name} ({role})")
 }
 
 // ---- Docker subcommands ----
@@ -697,11 +886,11 @@ mod tests {
 
     #[test]
     fn uuid_shape_is_detected() {
-        assert!(looks_like_node_id("dbf51e02-633d-4293-a896-ec0fb383f30b"));
-        assert!(!looks_like_node_id("wh"));
-        assert!(!looks_like_node_id("my-laptop-node"));
+        assert!(looks_like_uuid("dbf51e02-633d-4293-a896-ec0fb383f30b"));
+        assert!(!looks_like_uuid("wh"));
+        assert!(!looks_like_uuid("my-laptop-node"));
         // 36 chars but no hyphen -> not a UUID shape
-        assert!(!looks_like_node_id(&"a".repeat(36)));
+        assert!(!looks_like_uuid(&"a".repeat(36)));
     }
 
     #[test]
@@ -746,5 +935,35 @@ mod tests {
             find_node_id_by_name(&resp, "wh").as_deref(),
             Some("dbf51e02-633d-4293-a896-ec0fb383f30b")
         );
+    }
+
+    #[test]
+    fn owner_label_marks_current_user_as_you() {
+        let owner = json!({
+            "kind": "user",
+            "id": "user-1",
+            "display_name": "Kai"
+        });
+        assert_eq!(owner_label(Some(&owner), Some("user-1")), "You");
+        assert_eq!(owner_label(Some(&owner), Some("other")), "Kai (user)");
+    }
+
+    #[test]
+    fn admin_label_prefers_display_name_then_email() {
+        let named = json!({
+            "user_id": "user-1",
+            "display_name": "Kai",
+            "email": "kai@example.com",
+            "role": "admin"
+        });
+        assert_eq!(admin_label(&named), "Kai (admin)");
+
+        let email_only = json!({
+            "user_id": "user-2",
+            "display_name": null,
+            "email": "member@example.com",
+            "role": "owner"
+        });
+        assert_eq!(admin_label(&email_only), "member@example.com (owner)");
     }
 }

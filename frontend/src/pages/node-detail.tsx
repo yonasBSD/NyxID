@@ -2,15 +2,23 @@ import { useState } from "react";
 import { useParams, useNavigate } from "@tanstack/react-router";
 import {
   useNode,
+  useNodeAdmins,
   useNodeBindings,
+  useNodePendingCredentials,
   useDeleteNode,
   useRotateNodeToken,
+  useTransferNode,
+  usePushNodeCredential,
+  useCancelNodePendingCredential,
   useCreateBinding,
   useUpdateBinding,
   useDeleteBinding,
 } from "@/hooks/use-nodes";
+import { useKeys } from "@/hooks/use-keys";
 import { useServices } from "@/hooks/use-services";
+import { useAuthStore } from "@/stores/auth-store";
 import { ApiError } from "@/lib/api-client";
+import { pushNodeCredentialSchema } from "@/schemas/nodes";
 import {
   buildNodeCredentialCommand,
   getNodeCredentialPromptHint,
@@ -21,9 +29,13 @@ import { PageHeader } from "@/components/shared/page-header";
 import { CopyableField } from "@/components/shared/copyable-field";
 import { DetailRow } from "@/components/shared/detail-row";
 import { DetailSection } from "@/components/shared/detail-section";
+import { OrgScopeSelect } from "@/components/shared/org-scope-select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   Dialog,
   DialogContent,
@@ -50,34 +62,118 @@ import {
 import {
   Activity,
   ArrowDown,
+  ArrowRightLeft,
   ArrowUp,
   HardDrive,
   KeyRound,
   Link2,
   Plus,
+  Send,
   Terminal,
   Trash2,
+  Users,
 } from "lucide-react";
 import { toast } from "sonner";
 import { NodeStatusBadge } from "@/components/shared/node-status-badge";
+import type {
+  NodeAdminInfo,
+  NodeInfo,
+  NodePendingCredentialInjectionMethod,
+} from "@/types/nodes";
+import type { KeyInfo } from "@/types/keys";
+
+function nodeOwnerLabel(
+  owner: NodeInfo["owner"],
+  currentUserId: string | null,
+): string {
+  if (owner.kind === "user" && owner.id === currentUserId) {
+    return "You";
+  }
+  return owner.display_name;
+}
+
+function adminDisplayName(admin: NodeAdminInfo, currentUserId: string | null) {
+  if (admin.user_id === currentUserId) {
+    return "You";
+  }
+  return admin.display_name ?? admin.email ?? admin.user_id;
+}
+
+function canManageNode(
+  node: NodeInfo | undefined,
+  currentUserId: string | null,
+  admins: readonly NodeAdminInfo[] | undefined,
+): boolean {
+  if (!node || !currentUserId) {
+    return false;
+  }
+  if (node.owner.kind === "user") {
+    return node.owner.id === currentUserId;
+  }
+  return (admins ?? []).some((admin) => admin.user_id === currentUserId);
+}
+
+function keyOwnerId(key: KeyInfo, currentUserId: string | null): string | null {
+  const source = key.credential_source;
+  if (!source || source.type === "personal") {
+    return currentUserId;
+  }
+  return source.org_id;
+}
+
+function injectionMethodLabel(
+  method: NodePendingCredentialInjectionMethod,
+): string {
+  switch (method) {
+    case "query-param":
+      return "Query param";
+    case "path-prefix":
+      return "Path prefix";
+    case "header":
+      return "Header";
+  }
+}
+
+function defaultFieldNameForMethod(
+  method: NodePendingCredentialInjectionMethod,
+): string {
+  switch (method) {
+    case "query-param":
+      return "api_key";
+    case "path-prefix":
+      return "api";
+    case "header":
+      return "X-API-Key";
+  }
+}
 
 export function NodeDetailPage() {
   const { nodeId } = useParams({ strict: false }) as { nodeId: string };
   const navigate = useNavigate();
 
   const { data: node, isLoading, error } = useNode(nodeId);
+  const { data: admins, isLoading: adminsLoading } = useNodeAdmins(nodeId);
   const { data: bindings, isLoading: bindingsLoading } =
     useNodeBindings(nodeId);
   const { data: services } = useServices();
+  const { data: keys } = useKeys();
+  const currentUserId = useAuthStore((state) => state.user?.id ?? null);
 
   const deleteMutation = useDeleteNode();
   const rotateMutation = useRotateNodeToken();
+  const transferMutation = useTransferNode();
+  const pushCredentialMutation = usePushNodeCredential(nodeId);
+  const cancelPendingCredentialMutation =
+    useCancelNodePendingCredential(nodeId);
   const createBindingMutation = useCreateBinding();
   const updateBindingMutation = useUpdateBinding();
   const deleteBindingMutation = useDeleteBinding();
 
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [showRotateDialog, setShowRotateDialog] = useState(false);
+  const [showTransferDialog, setShowTransferDialog] = useState(false);
+  const [transferOwnerId, setTransferOwnerId] = useState<string | null>(null);
+  const [transferConfirmed, setTransferConfirmed] = useState(false);
   const [rotatedCredentials, setRotatedCredentials] = useState<{
     readonly auth_token: string;
     readonly signing_secret: string;
@@ -89,6 +185,12 @@ export function NodeDetailPage() {
     readonly name: string;
   } | null>(null);
   const [setupCommandSlug, setSetupCommandSlug] = useState<string | null>(null);
+  const [credentialSlug, setCredentialSlug] = useState("");
+  const [credentialInjectionMethod, setCredentialInjectionMethod] =
+    useState<NodePendingCredentialInjectionMethod>("header");
+  const [credentialFieldName, setCredentialFieldName] = useState("X-API-Key");
+  const [credentialTargetUrl, setCredentialTargetUrl] = useState("");
+  const [credentialLabel, setCredentialLabel] = useState("");
 
   const servicesBySlug = new Map((services ?? []).map((s) => [s.slug, s]));
   const setupService =
@@ -96,12 +198,27 @@ export function NodeDetailPage() {
       ? servicesBySlug.get(setupCommandSlug)
       : undefined;
   const setupCommandHint = getNodeCredentialPromptHint(setupService);
+  const canManage = canManageNode(node, currentUserId, admins);
+  const { data: pendingCredentials, isLoading: pendingCredentialsLoading } =
+    useNodePendingCredentials(nodeId, canManage);
+  const transferTargetOwnerId = transferOwnerId ?? currentUserId ?? "";
+  const transferIsNoop =
+    Boolean(node) && node?.owner.id === transferTargetOwnerId;
+  const transferBindingCount = bindings?.length ?? node?.binding_count ?? 0;
+  const transferServiceDetachCount =
+    node && transferTargetOwnerId
+      ? (keys ?? []).filter(
+          (key) =>
+            key.node_id === node.id &&
+            keyOwnerId(key, currentUserId) !== transferTargetOwnerId,
+        ).length
+      : 0;
 
   // Filter out services that already have bindings
   const boundServiceIds = new Set((bindings ?? []).map((b) => b.service_id));
-  const availableServices = (services ?? []).filter(
-    (s) => s.is_active && !boundServiceIds.has(s.id),
-  );
+  const availableServices = canManage
+    ? (services ?? []).filter((s) => s.is_active && !boundServiceIds.has(s.id))
+    : [];
 
   async function handleDelete() {
     try {
@@ -130,6 +247,27 @@ export function NodeDetailPage() {
         err instanceof ApiError ? err.message : "Failed to rotate token",
       );
       setShowRotateDialog(false);
+    }
+  }
+
+  async function handleTransferNode() {
+    if (!node || !transferTargetOwnerId) return;
+    try {
+      const result = await transferMutation.mutateAsync({
+        nodeId,
+        data: { new_owner_user_id: transferTargetOwnerId },
+      });
+      toast.success(
+        `Node transferred to ${nodeOwnerLabel(result.new_owner, currentUserId)}`,
+      );
+      setShowTransferDialog(false);
+      setTransferOwnerId(null);
+      setTransferConfirmed(false);
+      void navigate({ to: "/nodes" });
+    } catch (err) {
+      toast.error(
+        err instanceof ApiError ? err.message : "Failed to transfer node",
+      );
     }
   }
 
@@ -188,6 +326,48 @@ export function NodeDetailPage() {
     }
   }
 
+  async function handlePushCredential() {
+    const parsed = pushNodeCredentialSchema.safeParse({
+      service_slug: credentialSlug,
+      injection_method: credentialInjectionMethod,
+      field_name: credentialFieldName,
+      target_url: credentialTargetUrl,
+      label: credentialLabel,
+    });
+
+    if (!parsed.success) {
+      toast.error(parsed.error.issues[0]?.message ?? "Invalid credential push");
+      return;
+    }
+
+    try {
+      await pushCredentialMutation.mutateAsync(parsed.data);
+      toast.success("Credential push created");
+      setCredentialSlug("");
+      setCredentialInjectionMethod("header");
+      setCredentialFieldName("X-API-Key");
+      setCredentialTargetUrl("");
+      setCredentialLabel("");
+    } catch (err) {
+      toast.error(
+        err instanceof ApiError ? err.message : "Failed to push credential",
+      );
+    }
+  }
+
+  async function handleCancelPendingCredential(pendingCredentialId: string) {
+    try {
+      await cancelPendingCredentialMutation.mutateAsync(pendingCredentialId);
+      toast.success("Pending credential canceled");
+    } catch (err) {
+      toast.error(
+        err instanceof ApiError
+          ? err.message
+          : "Failed to cancel pending credential",
+      );
+    }
+  }
+
   if (isLoading) {
     return (
       <div className="space-y-8">
@@ -220,31 +400,53 @@ export function NodeDetailPage() {
       <PageHeader
         breadcrumbs={[{ label: "Nodes", to: "/nodes" }, { label: node.name }]}
         title={node.name}
-        description="Manage node settings and service bindings."
+        description={
+          canManage
+            ? "Manage node settings and service bindings."
+            : "View node status and service bindings."
+        }
         actions={
-          <div className="flex gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setShowRotateDialog(true)}
-            >
-              <KeyRound className="mr-2 h-4 w-4" />
-              Rotate Credentials
-            </Button>
-            <Button
-              variant="destructive"
-              size="sm"
-              onClick={() => setShowDeleteDialog(true)}
-            >
-              <Trash2 className="mr-2 h-4 w-4" />
-              Delete
-            </Button>
-          </div>
+          canManage ? (
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setTransferOwnerId(null);
+                  setTransferConfirmed(false);
+                  setShowTransferDialog(true);
+                }}
+              >
+                <ArrowRightLeft className="mr-2 h-4 w-4" />
+                Transfer
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setShowRotateDialog(true)}
+              >
+                <KeyRound className="mr-2 h-4 w-4" />
+                Rotate Credentials
+              </Button>
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={() => setShowDeleteDialog(true)}
+              >
+                <Trash2 className="mr-2 h-4 w-4" />
+                Delete
+              </Button>
+            </div>
+          ) : undefined
         }
       />
 
       {/* Node Info */}
       <DetailSection title="Node Information">
+        <DetailRow
+          label="Owner"
+          value={nodeOwnerLabel(node.owner, currentUserId)}
+        />
         <div className="flex items-center justify-between border-b border-border py-2 text-sm last:border-b-0">
           <span className="text-text-tertiary">Status</span>
           <div className="flex items-center gap-1">
@@ -279,6 +481,41 @@ export function NodeDetailPage() {
         )}
         {node.metadata?.ip_address && (
           <DetailRow label="IP Address" value={node.metadata.ip_address} />
+        )}
+      </DetailSection>
+
+      {/* Shared with */}
+      <DetailSection title="Shared with">
+        {adminsLoading ? (
+          <div className="space-y-2">
+            <Skeleton className="h-8 w-full" />
+            <Skeleton className="h-8 w-2/3" />
+          </div>
+        ) : admins && admins.length > 0 ? (
+          <div className="divide-y divide-border">
+            {admins.map((admin) => (
+              <div
+                key={admin.user_id}
+                className="flex items-center justify-between py-2 text-sm"
+              >
+                <div className="flex min-w-0 items-center gap-2">
+                  <Users className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  <span className="truncate text-foreground">
+                    {adminDisplayName(admin, currentUserId)}
+                  </span>
+                </div>
+                <Badge
+                  variant={admin.role === "owner" ? "outline" : "secondary"}
+                >
+                  {admin.role === "owner" ? "Owner" : "Admin"}
+                </Badge>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-sm text-muted-foreground">
+            No admins are currently listed for this node.
+          </p>
         )}
       </DetailSection>
 
@@ -347,15 +584,17 @@ export function NodeDetailPage() {
               Services routed through this node for credential injection.
             </p>
           </div>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setShowBindDialog(true)}
-            disabled={availableServices.length === 0}
-          >
-            <Plus className="mr-2 h-4 w-4" />
-            Bind Service
-          </Button>
+          {canManage && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setShowBindDialog(true)}
+              disabled={availableServices.length === 0}
+            >
+              <Plus className="mr-2 h-4 w-4" />
+              Bind Service
+            </Button>
+          )}
         </div>
 
         {bindingsLoading ? (
@@ -371,8 +610,9 @@ export function NodeDetailPage() {
           <div className="flex flex-col items-center justify-center rounded-xl border border-border py-8 text-center">
             <Link2 className="mb-3 h-8 w-8 text-muted-foreground/50" />
             <p className="text-sm text-muted-foreground">
-              No services bound to this node. Bind a service to route proxy
-              requests through it.
+              {canManage
+                ? "No services bound to this node. Bind a service to route proxy requests through it."
+                : "No services are currently bound to this node."}
             </p>
           </div>
         ) : (
@@ -384,7 +624,7 @@ export function NodeDetailPage() {
                   <TableHead>Slug</TableHead>
                   <TableHead>Priority</TableHead>
                   <TableHead>Bound</TableHead>
-                  <TableHead className="w-[100px]" />
+                  {canManage && <TableHead className="w-[100px]" />}
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -410,74 +650,78 @@ export function NodeDetailPage() {
                         <span className="text-sm tabular-nums">
                           {String(binding.priority)}
                         </span>
-                        <div className="flex flex-col">
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-5 w-5 text-muted-foreground"
-                            onClick={() =>
-                              void handlePriorityChange(
-                                binding.id,
-                                binding.priority - 1,
-                              )
-                            }
-                          >
-                            <ArrowUp className="h-3 w-3" />
-                            <span className="sr-only">Increase priority</span>
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-5 w-5 text-muted-foreground"
-                            onClick={() =>
-                              void handlePriorityChange(
-                                binding.id,
-                                binding.priority + 1,
-                              )
-                            }
-                          >
-                            <ArrowDown className="h-3 w-3" />
-                            <span className="sr-only">Decrease priority</span>
-                          </Button>
-                        </div>
+                        {canManage && (
+                          <div className="flex flex-col">
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-5 w-5 text-muted-foreground"
+                              onClick={() =>
+                                void handlePriorityChange(
+                                  binding.id,
+                                  binding.priority - 1,
+                                )
+                              }
+                            >
+                              <ArrowUp className="h-3 w-3" />
+                              <span className="sr-only">Increase priority</span>
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-5 w-5 text-muted-foreground"
+                              onClick={() =>
+                                void handlePriorityChange(
+                                  binding.id,
+                                  binding.priority + 1,
+                                )
+                              }
+                            >
+                              <ArrowDown className="h-3 w-3" />
+                              <span className="sr-only">Decrease priority</span>
+                            </Button>
+                          </div>
+                        )}
                       </div>
                     </TableCell>
                     <TableCell className="text-muted-foreground">
                       {formatRelativeTime(binding.created_at)}
                     </TableCell>
-                    <TableCell>
-                      <div className="flex items-center gap-1">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-8 w-8 text-muted-foreground hover:text-foreground"
-                          onClick={() =>
-                            setSetupCommandSlug(binding.service_slug)
-                          }
-                        >
-                          <Terminal className="h-4 w-4" />
-                          <span className="sr-only">
-                            Setup command for {binding.service_name}
-                          </span>
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                          onClick={() =>
-                            setUnbindTarget({
-                              id: binding.id,
-                              name: binding.service_name,
-                            })
-                          }
-                        >
-                          <Trash2 className="h-4 w-4" />
-                          <span className="sr-only">
-                            Unbind {binding.service_name}
-                          </span>
-                        </Button>
-                      </div>
-                    </TableCell>
+                    {canManage && (
+                      <TableCell>
+                        <div className="flex items-center gap-1">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                            onClick={() =>
+                              setSetupCommandSlug(binding.service_slug)
+                            }
+                          >
+                            <Terminal className="h-4 w-4" />
+                            <span className="sr-only">
+                              Setup command for {binding.service_name}
+                            </span>
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                            onClick={() =>
+                              setUnbindTarget({
+                                id: binding.id,
+                                name: binding.service_name,
+                              })
+                            }
+                          >
+                            <Trash2 className="h-4 w-4" />
+                            <span className="sr-only">
+                              Unbind {binding.service_name}
+                            </span>
+                          </Button>
+                        </div>
+                      </TableCell>
+                    )}
                   </TableRow>
                 ))}
               </TableBody>
@@ -485,6 +729,277 @@ export function NodeDetailPage() {
           </div>
         )}
       </div>
+
+      {canManage && (
+        <div className="space-y-4">
+          <div>
+            <h3 className="text-lg font-medium">Push Credential to VM Operator</h3>
+            <p className="text-sm text-muted-foreground">
+              The VM operator will be prompted for the secret value when they
+              accept this on the VM. The secret never leaves the VM.
+            </p>
+          </div>
+
+          <div className="rounded-xl border border-border p-4">
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="credential-service-slug">Service slug</Label>
+                <Input
+                  id="credential-service-slug"
+                  value={credentialSlug}
+                  onChange={(event) => setCredentialSlug(event.target.value)}
+                  placeholder="openclaw"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="credential-field-name">Field name</Label>
+                <Input
+                  id="credential-field-name"
+                  value={credentialFieldName}
+                  onChange={(event) =>
+                    setCredentialFieldName(event.target.value)
+                  }
+                  placeholder="X-API-Key"
+                />
+              </div>
+              <div className="space-y-2">
+                <p className="text-sm font-medium text-foreground">
+                  Injection method
+                </p>
+                <div className="grid gap-2 sm:grid-cols-3">
+                  {(
+                    [
+                      "header",
+                      "query-param",
+                      "path-prefix",
+                    ] as const
+                  ).map((method) => (
+                    <label
+                      key={method}
+                      className="flex cursor-pointer items-center gap-2 rounded-md border border-border px-3 py-2 text-sm"
+                    >
+                      <input
+                        type="radio"
+                        name="credential-injection-method"
+                        value={method}
+                        checked={credentialInjectionMethod === method}
+                        onChange={() => {
+                          const previousDefault = defaultFieldNameForMethod(
+                            credentialInjectionMethod,
+                          );
+                          setCredentialInjectionMethod(method);
+                          if (
+                            credentialFieldName.trim() === "" ||
+                            credentialFieldName === previousDefault
+                          ) {
+                            setCredentialFieldName(
+                              defaultFieldNameForMethod(method),
+                            );
+                          }
+                        }}
+                        className="h-4 w-4"
+                      />
+                      {injectionMethodLabel(method)}
+                    </label>
+                  ))}
+                </div>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="credential-target-url">Target URL</Label>
+                <Input
+                  id="credential-target-url"
+                  value={credentialTargetUrl}
+                  onChange={(event) =>
+                    setCredentialTargetUrl(event.target.value)
+                  }
+                  placeholder="https://gateway.example.com/v1"
+                />
+              </div>
+              <div className="space-y-2 md:col-span-2">
+                <Label htmlFor="credential-label">Label</Label>
+                <Input
+                  id="credential-label"
+                  value={credentialLabel}
+                  onChange={(event) => setCredentialLabel(event.target.value)}
+                  placeholder="Production gateway"
+                />
+              </div>
+            </div>
+            <div className="mt-4 flex justify-end">
+              <Button
+                onClick={() => void handlePushCredential()}
+                disabled={!credentialSlug.trim() || !credentialFieldName.trim()}
+                isLoading={pushCredentialMutation.isPending}
+              >
+                <Send className="mr-2 h-4 w-4" />
+                Push
+              </Button>
+            </div>
+          </div>
+
+          <div className="space-y-3">
+            <h4 className="text-sm font-medium text-foreground">
+              Pending Credentials
+            </h4>
+            {pendingCredentialsLoading ? (
+              <div className="space-y-2">
+                <Skeleton className="h-10 w-full" />
+                <Skeleton className="h-10 w-2/3" />
+              </div>
+            ) : !pendingCredentials || pendingCredentials.length === 0 ? (
+              <p className="text-sm text-muted-foreground">
+                No pending credentials are waiting for this node.
+              </p>
+            ) : (
+              <div className="rounded-xl border border-border">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Slug</TableHead>
+                      <TableHead>Method</TableHead>
+                      <TableHead>Field</TableHead>
+                      <TableHead>Age</TableHead>
+                      <TableHead>Target</TableHead>
+                      <TableHead className="w-[96px]" />
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {pendingCredentials.map((credential) => (
+                      <TableRow key={credential.id}>
+                        <TableCell>
+                          <div className="space-y-1">
+                            <code className="text-xs">
+                              {credential.service_slug}
+                            </code>
+                            {credential.label && (
+                              <p className="text-xs text-muted-foreground">
+                                {credential.label}
+                              </p>
+                            )}
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          {injectionMethodLabel(credential.injection_method)}
+                        </TableCell>
+                        <TableCell>
+                          <code className="text-xs text-muted-foreground">
+                            {credential.field_name}
+                          </code>
+                        </TableCell>
+                        <TableCell>
+                          {formatRelativeTime(credential.created_at)}
+                        </TableCell>
+                        <TableCell className="max-w-[240px] truncate text-muted-foreground">
+                          {credential.target_url ?? "-"}
+                        </TableCell>
+                        <TableCell>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="text-muted-foreground hover:text-destructive"
+                            onClick={() =>
+                              void handleCancelPendingCredential(credential.id)
+                            }
+                            isLoading={cancelPendingCredentialMutation.isPending}
+                          >
+                            Cancel
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Transfer Ownership */}
+      <Dialog
+        open={showTransferDialog}
+        onOpenChange={(open) => {
+          setShowTransferDialog(open);
+          if (!open) {
+            setTransferOwnerId(null);
+            setTransferConfirmed(false);
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Transfer Ownership</DialogTitle>
+            <DialogDescription>
+              Move &quot;{node.name}&quot; to another owner. Existing node
+              credentials keep working, but service routing is detached where
+              ownership no longer matches.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <p className="text-sm font-medium text-foreground">
+                Destination owner
+              </p>
+              <OrgScopeSelect
+                value={transferOwnerId}
+                onChange={(value) => {
+                  setTransferOwnerId(value);
+                  setTransferConfirmed(false);
+                }}
+                label="Destination owner"
+              />
+            </div>
+            <div className="rounded-md border border-border bg-muted/40 p-3 text-sm">
+              <p className="font-medium text-foreground">Transfer preview</p>
+              <ul className="mt-2 space-y-1 text-muted-foreground">
+                <li>{String(transferBindingCount)} bindings will be deactivated.</li>
+                <li>
+                  {String(transferServiceDetachCount)} AI Services will lose
+                  their node routing.
+                </li>
+              </ul>
+              {transferIsNoop && (
+                <p className="mt-2 text-xs text-destructive">
+                  Choose a different owner before transferring.
+                </p>
+              )}
+            </div>
+            <label className="flex items-start gap-2 text-sm text-muted-foreground">
+              <Checkbox
+                checked={transferConfirmed}
+                onCheckedChange={(checked) =>
+                  setTransferConfirmed(checked === true)
+                }
+              />
+              <span>
+                I understand that existing bindings will be deactivated and
+                cross-owner services will stop routing through this node.
+              </span>
+            </label>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setShowTransferDialog(false);
+                setTransferOwnerId(null);
+                setTransferConfirmed(false);
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => void handleTransferNode()}
+              disabled={
+                !transferConfirmed || transferIsNoop || !transferTargetOwnerId
+              }
+              isLoading={transferMutation.isPending}
+            >
+              Transfer
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Delete Confirmation */}
       <Dialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>

@@ -659,6 +659,13 @@ struct WsCredentialRemove {
     service_slug: String,
 }
 
+/// JSON message nudging a connected node to pull pending credential metadata.
+#[derive(Debug, Serialize)]
+struct WsPendingCredentialsAvailable {
+    #[serde(rename = "type")]
+    msg_type: &'static str,
+}
+
 /// Outcome of a `credential_update` / `credential_remove` ack from a
 /// node agent. `Ok` means the node persisted the change; `Err` carries
 /// the node's error message.
@@ -1308,6 +1315,38 @@ impl NodeWsManager {
             node_id = %node_id,
             service_slug = %service_slug,
             "Sent credential_remove to node"
+        );
+
+        Ok(())
+    }
+
+    /// Notify a connected node that pending credential metadata is available.
+    /// The node pulls details through the node-agent HTTP endpoint; this frame
+    /// intentionally carries no secret material and no semi-sensitive metadata.
+    pub fn send_pending_credentials_available(&self, node_id: &str) -> AppResult<()> {
+        let conn = self
+            .connections
+            .get(node_id)
+            .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
+
+        let msg = WsPendingCredentialsAvailable {
+            msg_type: "pending_credentials_available",
+        };
+        let json = serde_json::to_string(&msg).map_err(|e| {
+            AppError::Internal(format!(
+                "Failed to serialize pending_credentials_available: {e}"
+            ))
+        })?;
+
+        conn.tx
+            .try_send(NodeOutboundMessage::Text(json))
+            .map_err(|_| {
+                AppError::NodeOffline(format!("Node {node_id} connection closed or buffer full"))
+            })?;
+
+        tracing::info!(
+            node_id = %node_id,
+            "Sent pending_credentials_available to node"
         );
 
         Ok(())

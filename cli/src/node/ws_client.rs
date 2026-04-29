@@ -1,10 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use base64::Engine;
 use futures::{SinkExt, StreamExt};
+use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, watch};
@@ -87,6 +88,24 @@ const WS_READ_IDLE_TIMEOUT_FLOOR_SECS: u64 = 30;
 /// extremely long heartbeat interval we cap the watchdog at one hour so a
 /// silently dead connection is eventually detected.
 const WS_READ_IDLE_TIMEOUT_CEILING_SECS: u64 = 3600;
+/// Fallback cadence for pending credential checks. The backend also sends a
+/// WebSocket nudge when a push is created, but in multi-instance deployments
+/// that nudge can land on a different backend worker than the node's socket.
+const PENDING_CREDENTIAL_POLL_INTERVAL_SECS: u64 = 120;
+const PENDING_CREDENTIAL_POLL_BACKOFF_INITIAL_SECS: u64 = 5;
+const PENDING_CREDENTIAL_POLL_BACKOFF_MAX_SECS: u64 = 300;
+const PENDING_CREDENTIAL_POLL_TIMEOUT_SECS: u64 = 10;
+
+#[derive(Debug, Deserialize)]
+struct PendingCredentialPollResponse {
+    pending_credentials: Vec<PendingCredentialPollItem>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct PendingCredentialPollItem {
+    id: String,
+    service_slug: String,
+}
 
 /// Compute the WebSocket read-idle timeout from the server-advertised
 /// heartbeat interval. Returns `None` when the server did not advertise an
@@ -249,7 +268,21 @@ pub async fn run_with_shutdown(
         .unwrap_or(std::path::Path::new("."))
         .to_path_buf();
     let storage_backend = config.storage_backend.clone();
+    let pending_poll_shutdown_rx = shutdown_rx.clone();
+    let connection_shutdown_rx = shutdown_rx;
+    let pending_poll_server_url = config.server.url.clone();
+    let pending_poll_node_id = config.node.id.clone();
+    let pending_poll_auth_token = auth_token.clone();
     drop(backend);
+    let pending_poll_task = tokio::spawn(async move {
+        pending_credential_poll_loop(
+            pending_poll_server_url,
+            pending_poll_node_id,
+            pending_poll_auth_token,
+            pending_poll_shutdown_rx,
+        )
+        .await;
+    });
     let mut connection_task = tokio::spawn({
         let in_flight = in_flight.clone();
         async move {
@@ -263,7 +296,7 @@ pub async fn run_with_shutdown(
                 &credentials,
                 &credential_sender,
                 in_flight,
-                shutdown_rx,
+                connection_shutdown_rx,
             )
             .await;
         }
@@ -273,6 +306,15 @@ pub async fn run_with_shutdown(
         result = &mut connection_task => {
             if let Err(error) = result {
                 tracing::error!(%error, "Connection loop terminated unexpectedly");
+            }
+            let _ = shutdown_tx.send(true);
+            if !pending_poll_task.is_finished() {
+                pending_poll_task.abort();
+            }
+            if let Err(error) = pending_poll_task.await
+                && !error.is_cancelled()
+            {
+                tracing::error!(%error, "Pending credential poll loop terminated unexpectedly");
             }
         }
         _ = shutdown_signal() => {
@@ -299,9 +341,127 @@ pub async fn run_with_shutdown(
             {
                 tracing::error!(%error, "Connection loop terminated unexpectedly during shutdown");
             }
+            if !pending_poll_task.is_finished() {
+                pending_poll_task.abort();
+            }
+            if let Err(error) = pending_poll_task.await
+                && !error.is_cancelled()
+            {
+                tracing::error!(%error, "Pending credential poll loop terminated unexpectedly during shutdown");
+            }
             tracing::info!("Shutdown complete");
         }
     }
+}
+
+async fn pending_credential_poll_loop(
+    server_ws_url: String,
+    node_id: String,
+    auth_token: String,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let api_base_url = node_agent_api_base_url_from_ws_url(&server_ws_url);
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(Duration::from_secs(PENDING_CREDENTIAL_POLL_TIMEOUT_SECS))
+        .build()
+    else {
+        tracing::debug!("Failed to create pending credential poll HTTP client");
+        return;
+    };
+    let mut seen_pending_ids = HashSet::<String>::new();
+    let mut backoff = ExponentialBackoff::new(
+        Duration::from_secs(PENDING_CREDENTIAL_POLL_BACKOFF_INITIAL_SECS),
+        Duration::from_secs(PENDING_CREDENTIAL_POLL_BACKOFF_MAX_SECS),
+        2.0,
+    );
+    let mut next_delay = Duration::from_secs(0);
+
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(next_delay) => {}
+            _ = wait_for_shutdown(&mut shutdown) => break,
+        }
+
+        let poll = poll_pending_credentials(&client, &api_base_url, &auth_token);
+        let pending = tokio::select! {
+            result = poll => result,
+            _ = wait_for_shutdown(&mut shutdown) => break,
+        };
+
+        match pending {
+            Ok(pending) => {
+                backoff.reset();
+                next_delay = Duration::from_secs(PENDING_CREDENTIAL_POLL_INTERVAL_SECS);
+                let active_ids = pending
+                    .iter()
+                    .map(|item| item.id.clone())
+                    .collect::<HashSet<_>>();
+                for item in pending {
+                    if seen_pending_ids.insert(item.id.clone()) {
+                        tracing::info!(
+                            node_id = %node_id,
+                            service_slug = %item.service_slug,
+                            pending_credential_id = %item.id,
+                            "Pending credential available; run `nyxid node credentials pending` on this node to review"
+                        );
+                    }
+                }
+                seen_pending_ids.retain(|id| active_ids.contains(id));
+            }
+            Err(error) => {
+                let delay = backoff.next_delay();
+                next_delay = delay;
+                tracing::debug!(
+                    node_id = %node_id,
+                    %error,
+                    delay_secs = delay.as_secs(),
+                    "Pending credential poll failed; backing off"
+                );
+            }
+        }
+    }
+}
+
+async fn poll_pending_credentials(
+    client: &reqwest::Client,
+    api_base_url: &str,
+    auth_token: &str,
+) -> std::result::Result<Vec<PendingCredentialPollItem>, String> {
+    let url = format!(
+        "{}/api/v1/node-agent/pending-credentials",
+        api_base_url.trim_end_matches('/')
+    );
+    let response = client
+        .get(url)
+        .bearer_auth(auth_token)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("HTTP {}", status.as_u16()));
+    }
+    response
+        .json::<PendingCredentialPollResponse>()
+        .await
+        .map(|response| response.pending_credentials)
+        .map_err(|error| error.to_string())
+}
+
+fn node_agent_api_base_url_from_ws_url(ws_url: &str) -> String {
+    let http_url = if let Some(rest) = ws_url.strip_prefix("ws://") {
+        format!("http://{rest}")
+    } else if let Some(rest) = ws_url.strip_prefix("wss://") {
+        format!("https://{rest}")
+    } else {
+        ws_url.to_string()
+    };
+
+    http_url
+        .trim_end_matches('/')
+        .strip_suffix("/api/v1/nodes/ws")
+        .unwrap_or_else(|| http_url.trim_end_matches('/'))
+        .to_string()
 }
 
 /// Main connection loop with exponential backoff reconnection.
@@ -3395,6 +3555,44 @@ mod tests {
         // interval, to avoid flapping deployments that customize
         // NODE_HEARTBEAT_INTERVAL_SECS above 90.
         assert_eq!(compute_ws_read_idle_timeout_secs(None), None);
+    }
+
+    #[test]
+    fn node_agent_api_base_url_derives_from_node_ws_url() {
+        assert_eq!(
+            node_agent_api_base_url_from_ws_url("ws://localhost:3001/api/v1/nodes/ws"),
+            "http://localhost:3001"
+        );
+        assert_eq!(
+            node_agent_api_base_url_from_ws_url("wss://auth.example.com/api/v1/nodes/ws"),
+            "https://auth.example.com"
+        );
+        assert_eq!(
+            node_agent_api_base_url_from_ws_url("https://auth.example.com"),
+            "https://auth.example.com"
+        );
+    }
+
+    #[test]
+    fn pending_credential_poll_response_parses_metadata() {
+        let parsed: PendingCredentialPollResponse = serde_json::from_value(serde_json::json!({
+            "pending_credentials": [
+                {
+                    "id": "pending-1",
+                    "service_slug": "openclaw",
+                    "injection_method": "header",
+                    "field_name": "X-API-Key",
+                    "target_url": null,
+                    "label": "prod",
+                    "created_at": "2026-04-29T00:00:00Z"
+                }
+            ]
+        }))
+        .expect("pending credential response parses");
+
+        assert_eq!(parsed.pending_credentials.len(), 1);
+        assert_eq!(parsed.pending_credentials[0].id, "pending-1");
+        assert_eq!(parsed.pending_credentials[0].service_slug, "openclaw");
     }
 
     #[tokio::test]

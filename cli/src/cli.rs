@@ -76,6 +76,12 @@ pub enum Commands {
         #[command(subcommand)]
         command: NodeCommands,
     },
+    /// Push credential setup metadata to node operators
+    #[command(name = "node-credential")]
+    NodeCredential {
+        #[command(subcommand)]
+        command: NodeCredentialAdminCommands,
+    },
     /// Proxy requests through NyxID
     Proxy {
         #[command(subcommand)]
@@ -1139,6 +1145,9 @@ pub enum NodeCommands {
         /// wizard input is provided).
         #[arg(long)]
         name: Option<String>,
+        /// Org owner ID. You must be an admin of the org.
+        #[arg(long, value_name = "ID")]
+        org: Option<String>,
         /// Skip the browser wizard and print the new token to the
         /// terminal. The new token is shown ONCE — copy it before
         /// scrolling away. Equivalent to setting `NYXID_NO_WIZARD=1`
@@ -1157,6 +1166,19 @@ pub enum NodeCommands {
     Delete {
         /// Node ID
         id: String,
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Transfer a node to a person or org owner
+    Transfer {
+        /// Node ID or name
+        id: String,
+        /// Destination user or org ID
+        #[arg(long, value_name = "USER_OR_ORG_ID")]
+        to: String,
         /// Skip confirmation prompt
         #[arg(long)]
         yes: bool,
@@ -1288,6 +1310,70 @@ pub enum NodeCommands {
         #[command(subcommand)]
         command: NodeDockerCommands,
     },
+}
+
+// ---- Node credential admin commands (laptop side) ----
+
+#[derive(Subcommand)]
+pub enum NodeCredentialAdminCommands {
+    /// Push credential setup metadata to a node operator
+    Push {
+        /// Node ID or name
+        node: String,
+        /// Service slug
+        #[arg(long)]
+        slug: String,
+        /// Injection method
+        #[arg(long, value_enum)]
+        injection_method: PendingCredentialInjectionMethod,
+        /// Header name, query parameter name, or path prefix value
+        #[arg(long)]
+        field_name: String,
+        /// Target URL associated with this credential
+        #[arg(long)]
+        target_url: Option<String>,
+        /// Human-readable label
+        #[arg(long)]
+        label: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// List pending credential pushes for a node
+    List {
+        /// Node ID or name
+        node: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Cancel a pending credential push
+    Cancel {
+        /// Node ID or name
+        node: String,
+        /// Pending credential ID
+        pending_id: String,
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum PendingCredentialInjectionMethod {
+    Header,
+    QueryParam,
+    PathPrefix,
+}
+
+impl PendingCredentialInjectionMethod {
+    pub fn wire_value(self) -> &'static str {
+        match self {
+            Self::Header => "header",
+            Self::QueryParam => "query-param",
+            Self::PathPrefix => "path-prefix",
+        }
+    }
 }
 
 // ---- Node Docker subcommands ----
@@ -1492,6 +1578,133 @@ mod tests {
             } => {
                 assert_eq!(provider_id, "provider-1");
                 assert_eq!(org.as_deref(), Some("org-1"));
+            }
+            _ => panic!("unexpected parse result"),
+        }
+    }
+
+    #[test]
+    fn node_register_token_accepts_org_flag() {
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "node",
+            "register-token",
+            "--name",
+            "edge-node",
+            "--org",
+            "11111111-2222-3333-4444-555555555555",
+        ])
+        .expect("node register-token should accept --org");
+
+        match cli.command {
+            Commands::Node {
+                command: NodeCommands::RegisterToken { name, org, .. },
+            } => {
+                assert_eq!(name.as_deref(), Some("edge-node"));
+                assert_eq!(org.as_deref(), Some("11111111-2222-3333-4444-555555555555"));
+            }
+            _ => panic!("unexpected parse result"),
+        }
+    }
+
+    #[test]
+    fn node_transfer_accepts_to_and_yes_flags() {
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "node",
+            "transfer",
+            "edge-node",
+            "--to",
+            "11111111-2222-3333-4444-555555555555",
+            "--yes",
+        ])
+        .expect("node transfer should accept --to and --yes");
+
+        match cli.command {
+            Commands::Node {
+                command: NodeCommands::Transfer { id, to, yes, .. },
+            } => {
+                assert_eq!(id, "edge-node");
+                assert_eq!(to, "11111111-2222-3333-4444-555555555555");
+                assert!(yes);
+            }
+            _ => panic!("unexpected parse result"),
+        }
+    }
+
+    #[test]
+    fn node_credential_push_accepts_metadata_flags() {
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "node-credential",
+            "push",
+            "edge-node",
+            "--slug",
+            "openclaw",
+            "--injection-method",
+            "query-param",
+            "--field-name",
+            "api_key",
+            "--target-url",
+            "https://gateway.example.com/v1",
+            "--label",
+            "prod",
+        ])
+        .expect("node-credential push should parse");
+
+        match cli.command {
+            Commands::NodeCredential {
+                command:
+                    NodeCredentialAdminCommands::Push {
+                        node,
+                        slug,
+                        injection_method,
+                        field_name,
+                        target_url,
+                        label,
+                        ..
+                    },
+            } => {
+                assert_eq!(node, "edge-node");
+                assert_eq!(slug, "openclaw");
+                assert_eq!(
+                    injection_method,
+                    PendingCredentialInjectionMethod::QueryParam
+                );
+                assert_eq!(field_name, "api_key");
+                assert_eq!(
+                    target_url.as_deref(),
+                    Some("https://gateway.example.com/v1")
+                );
+                assert_eq!(label.as_deref(), Some("prod"));
+            }
+            _ => panic!("unexpected parse result"),
+        }
+    }
+
+    #[test]
+    fn node_credentials_accept_accepts_value_env() {
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "node",
+            "credentials",
+            "accept",
+            "openclaw",
+            "--value-env",
+            "OPENCLAW_KEY",
+        ])
+        .expect("node credentials accept should parse");
+
+        match cli.command {
+            Commands::Node {
+                command:
+                    NodeCommands::Credentials {
+                        command: NodeCredentialCommands::Accept { slug, value_env },
+                        ..
+                    },
+            } => {
+                assert_eq!(slug, "openclaw");
+                assert_eq!(value_env.as_deref(), Some("OPENCLAW_KEY"));
             }
             _ => panic!("unexpected parse result"),
         }
@@ -1712,6 +1925,24 @@ pub enum NodeCredentialCommands {
     },
     /// List configured credentials
     List,
+    /// List pushed credentials awaiting local acceptance
+    Pending,
+    /// Accept a pushed credential and store the secret locally
+    Accept {
+        /// Service slug to accept
+        slug: String,
+        /// Read the secret value from this environment variable
+        #[arg(long)]
+        value_env: Option<String>,
+    },
+    /// Decline a pushed credential without changing local credentials
+    Decline {
+        /// Service slug to decline
+        slug: String,
+        /// Optional reason to send to NyxID
+        #[arg(long)]
+        reason: Option<String>,
+    },
     /// Remove a credential for a service
     Remove {
         /// Service slug to remove

@@ -32,6 +32,7 @@ pub mod llm_usage_service;
 pub mod mcp_service;
 pub mod mfa_service;
 pub mod node_metrics_service;
+pub mod node_pending_credential_service;
 pub mod node_routing_service;
 pub mod node_service;
 pub mod node_ws_manager;

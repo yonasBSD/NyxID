@@ -3,6 +3,10 @@
 ## Table of contents
 
 - [Node Management](#node-management)
+  - [Org-owned nodes](#org-owned-nodes)
+  - [Two-machine org-node setup](#two-machine-org-node-setup)
+  - [Remote credential provisioning](#remote-credential-provisioning)
+  - [Transferring an existing personal node to an org](#transferring-an-existing-personal-node-to-an-org)
   - [Setting up a new node](#setting-up-a-new-node)
   - [Managing the node service](#managing-the-node-service)
   - [Managing nodes](#managing-nodes)
@@ -11,6 +15,71 @@
 ## Node Management
 
 Nodes are for users who do not want their credentials stored on the NyxID server. Instead, credentials stay encrypted on the user's own machine (the node). When a proxy request comes in, NyxID passes it through to the node agent via WebSocket, the node injects the credential locally and forwards the request to the downstream service. The credential never leaves the node.
+
+`Node.user_id` is a polymorphic owner field, matching `UserService`: it can point to a person user or an org user. Do not add or expect a separate node `org_id`.
+
+### Org-owned nodes
+
+Org admins can mint registration tokens for an org:
+
+```bash
+nyxid node register-token --org <ORG_ID>
+```
+
+The redeemed node belongs to the org. All current org admins can manage it; org members can list it and proxy through org services routed to it. Only org admins can create org-scoped registration tokens, delete org-owned nodes, rotate node auth tokens, or manage node bindings.
+
+`nyxid node list` includes accessible personal and org-owned nodes. `nyxid node show <ID_OR_NAME>` prints owner metadata and the admin list. The API endpoint `GET /api/v1/nodes/{node_id}/admins` returns the users who can manage a node: the personal owner for personal nodes, or all org admins for org-owned nodes.
+
+Audit events for shared node operations include `owner_user_id` when the actor differs from the owner, so org-owned node activity can be attributed to both the actor and owning org.
+
+Registration tokens carry the chosen owner at mint time. Admin role is verified when the token is issued, not when it is redeemed, so a token issued before an admin is revoked can still register a node until the token expires. The default TTL is 1 hour (`NODE_REGISTRATION_TOKEN_TTL_SECS`); delete pending registration tokens for that owner when removing org admins.
+
+### Two-machine org-node setup
+
+For confidential shared infrastructure, keep user login on the admin's laptop and run only node-agent commands on the shared VM.
+
+| Machine | Runs |
+|---|---|
+| Laptop | `nyxid login`, `nyxid node register-token --org`, `nyxid keys create --service-slug ... --node-id ...`, all node management ops (`rotate-token`, `transfer`, `delete`, manage bindings) |
+| VM | `nyxid node register --token`, `nyxid node credentials add` (purely local), `nyxid node start` / daemon. Never `nyxid login` on the VM. |
+
+The node's local credential store is keyed by service slug (`config.toml: credentials[<slug>]`). The binding to a NyxID `UserService` is established by matching slugs. Both ends must agree on the slug; no user identity passes through the VM.
+
+Fresh shared-box checklist:
+
+1. Admin on laptop: `nyxid node register-token --org <org-id>` -> copy the `nyx_nreg_...` token.
+2. Operator on VM: `nyxid node register --token nyx_nreg_... --url wss://...` -> token is consumed, node receives its own `nyx_nauth_...` stored in the OS keychain or local secret backend.
+3. Admin on laptop: `nyxid keys create --service-slug <slug> --node-id <node-id>` -> creates the org-owned `UserService` routing through the node.
+4. Operator on VM: `nyxid node credentials add <slug> --header X-API-Key` (interactive secret prompt) -> credential stored locally, encrypted.
+5. Operator on VM: `nyxid node start` (or `nyxid node daemon install` + `start`).
+6. Optional: Admin on laptop: `nyxid node transfer <node-id> --to <org-id>` if the node was registered to a person owner first.
+
+When an admin leaves the org, rotate the node's auth token (`nyxid node rotate-token <node-id>`), audit pending registration tokens for that org and revoke them, and audit any per-agent credential bindings created by the leaving admin.
+
+Org membership concepts are in [`organizations.md`](organizations.md). The broader management surface is in [`managing.md`](managing.md).
+
+### Remote credential provisioning
+
+Remote credential provisioning lets an org admin push setup metadata to a node operator without seeing or transmitting the secret value. NyxID stores only the pending credential metadata: node ID, service slug, injection method, field name, optional target URL, label, creator, owner, and expiry. The secret is entered on the VM and stored only in the node's local encrypted credential store.
+
+| Laptop (admin) | VM (operator) |
+|---|---|
+| `nyxid node-credential push <node-id-or-name> --slug <slug> --injection-method header --field-name X-API-Key [--target-url ...] [--label ...]` |  |
+| Relay the slug, injection method, and field name to the operator. Do not send a secret value. | `nyxid node credentials pending` |
+|  | Verify the slug, method, field name, and target URL. |
+|  | `nyxid node credentials accept <slug>` and enter the secret when prompted. For non-interactive provisioning, use `--value-env <ENVVAR>`. |
+| `nyxid node-credential list <node-id-or-name>` |  |
+| `nyxid node-credential cancel <node-id-or-name> <pending-id>` if the push is wrong or stale. | `nyxid node credentials decline <slug> --reason "wrong target"` if the operator refuses it. |
+
+Pending credentials expire automatically. The default TTL is 24 hours (`NODE_PENDING_CREDENTIAL_TTL_SECS`). Expired entries are not returned to admins or nodes; create a fresh push if the operator misses the window.
+
+Decline means the VM operator reviewed the metadata and refused to store a local secret for it. It does not remove or modify existing local credentials. Cancel means an admin withdrew the pending push before acceptance; a later VM-side accept for that pending ID fails.
+
+### Transferring an existing personal node to an org
+
+Use `nyxid node transfer <node-id-or-name> --to <org-id>` when a node was registered under a person but should become shared org infrastructure. The caller must have write access to the current owner and be an admin of the destination org.
+
+Transfer changes only server-side ownership. The node auth token is per-node, so the existing VM connection keeps working. Active `NodeServiceBinding` rows and pending credential pushes for the node are deactivated, and any `UserService` with `node_id` set to that node is unrouted unless it already belongs to the new owner. Recreate only the org-owned bindings and credential pushes you still want after the transfer.
 
 ### Setting up a new node
 
@@ -86,15 +155,23 @@ nyxid node daemon uninstall                             # remove service (stops 
 nyxid node list --output json                          # list nodes (includes IDs)
 nyxid node show <ID_OR_NAME> --output json             # show node details + metrics
 nyxid node register-token                              # interactive: opens browser wizard (v3.1)
+nyxid node register-token --org <ORG_ID>               # org-owned node token (admin only)
 nyxid node register-token --name "edge-tokyo" --output json  # scripted: prints raw nyx_nreg_... (legacy shape)
 nyxid node delete <ID_OR_NAME> --yes                   # delete node
 nyxid node rotate-token <ID_OR_NAME>                   # interactive: opens browser wizard (shows new auth_token + signing_secret)
 nyxid node rotate-token <ID_OR_NAME> --output json     # scripted: prints raw secret to stdout (legacy shape)
+nyxid node transfer <ID_OR_NAME> --to <USER_OR_ORG_ID> # move node ownership, detaches cross-owner routing
+nyxid node-credential push <ID_OR_NAME> --slug <SLUG> --injection-method header --field-name X-API-Key
+nyxid node-credential list <ID_OR_NAME>                # list pending credential pushes
+nyxid node-credential cancel <ID_OR_NAME> <PENDING_ID> # cancel a pending credential push
 
 # nyxid node CLI (run on the node machine)
 nyxid node credentials setup --service <SLUG>          # auto-detect and setup (recommended)
 nyxid node credentials add --service <SLUG> --header Authorization --secret-format bearer
 nyxid node credentials add-oauth --service <SLUG> --from-catalog  # OAuth from node
+nyxid node credentials pending                         # list pushed credentials awaiting local acceptance
+nyxid node credentials accept <SLUG>                   # enter and store the secret locally, then mark consumed
+nyxid node credentials decline <SLUG> --reason "..."   # refuse a pending credential push
 nyxid node credentials list                            # list configured credentials
 nyxid node credentials remove --service <SLUG>         # remove credential
 ```

@@ -184,6 +184,8 @@ fn audit_org_routing(
             "routed_via": "org",
             "service_id": service_id,
             "user_service_id": user_service_id,
+            // Org-routed audits use org_user_id; node-routed audits use owner_user_id.
+            // Owner-centric audit queries must check both fields.
             "org_user_id": routing.org_user_id,
             "member_user_id": routing.member_user_id,
             "membership_id": routing.membership_id,
@@ -226,6 +228,46 @@ fn audit_personal_routing(
         auth_user.api_key_id.clone(),
         auth_user.api_key_name.clone(),
     );
+}
+
+fn add_owner_user_id_if_shared(
+    value: &mut serde_json::Value,
+    owner_user_id: &str,
+    actor_user_id: &str,
+) {
+    if owner_user_id != actor_user_id
+        && let Some(object) = value.as_object_mut()
+    {
+        object.insert(
+            "owner_user_id".to_string(),
+            serde_json::Value::String(owner_user_id.to_string()),
+        );
+    }
+}
+
+fn node_proxy_audit_event_data(
+    service_id: &str,
+    method: &str,
+    path: &str,
+    response_status: u16,
+    node_id: &str,
+    service_owner_user_id: &str,
+    proxy_actor_user_id: &str,
+) -> serde_json::Value {
+    let mut event_data = serde_json::json!({
+        "service_id": service_id,
+        "method": method,
+        "path": path,
+        "response_status": response_status,
+        "routed_via": "node",
+        "node_id": node_id,
+    });
+
+    // Node-routed audits use polymorphic owner_user_id; org-routed audits use org_user_id.
+    // Owner-centric audit queries must check both fields.
+    add_owner_user_id_if_shared(&mut event_data, service_owner_user_id, proxy_actor_user_id);
+
+    event_data
 }
 
 struct DownstreamWsConnection {
@@ -1524,6 +1566,7 @@ async fn execute_proxy_inner(
 
         // Node-routed WS passthrough: tunnel through the management WS.
         if let Some(ref node_route) = node_route {
+            let proxy_actor_user_id = auth_user.proxy_resolution_user_id();
             return handle_ws_passthrough_via_node(
                 ws_upgrade,
                 state,
@@ -1536,6 +1579,8 @@ async fn execute_proxy_inner(
                 query.as_deref(),
                 node_route,
                 &ws_forward_headers,
+                service_owner_for_approval,
+                &proxy_actor_user_id,
             )
             .await;
         }
@@ -1856,18 +1901,20 @@ async fn execute_proxy_inner(
                         }
                     };
 
+                    let proxy_actor_user_id = auth_user.proxy_resolution_user_id();
                     audit_service::log_async(
                         state.db.clone(),
                         Some(user_id_str),
                         "proxy_request".to_string(),
-                        Some(serde_json::json!({
-                            "service_id": service_id,
-                            "method": method_str,
-                            "path": path,
-                            "response_status": response.status().as_u16(),
-                            "routed_via": "node",
-                            "node_id": node_id,
-                        })),
+                        Some(node_proxy_audit_event_data(
+                            service_id,
+                            &method_str,
+                            path,
+                            response.status().as_u16(),
+                            node_id,
+                            service_owner_for_approval,
+                            &proxy_actor_user_id,
+                        )),
                         None,
                         None,
                         auth_user.api_key_id.clone(),
@@ -3186,6 +3233,8 @@ async fn handle_ws_passthrough_via_node(
     query: Option<&str>,
     node_route: &node_routing_service::NodeRoute,
     forward_headers: &[(String, String)],
+    service_owner_user_id: &str,
+    proxy_actor_user_id: &str,
 ) -> AppResult<Response> {
     use crate::services::node_ws_manager::NodeWsProxyRequest;
 
@@ -3359,18 +3408,26 @@ async fn handle_ws_passthrough_via_node(
     let node_id_owned = node_id.to_string();
     let ak_id = auth_user.api_key_id.clone();
     let ak_name = auth_user.api_key_name.clone();
+    let service_owner_user_id_owned = service_owner_user_id.to_string();
+    let proxy_actor_user_id_owned = proxy_actor_user_id.to_string();
 
+    let mut upgrade_event = serde_json::json!({
+        "service_id": service_id,
+        "path": path,
+        "acting_client_id": &acting_client_id,
+        "routed_via": "node",
+        "node_id": node_id,
+    });
+    add_owner_user_id_if_shared(
+        &mut upgrade_event,
+        service_owner_user_id,
+        proxy_actor_user_id,
+    );
     audit_service::log_async(
         state.db.clone(),
         Some(user_id_str.clone()),
         "proxy_ws_upgrade".to_string(),
-        Some(serde_json::json!({
-            "service_id": service_id,
-            "path": path,
-            "acting_client_id": &acting_client_id,
-            "routed_via": "node",
-            "node_id": node_id,
-        })),
+        Some(upgrade_event),
         None,
         None,
         ak_id.clone(),
@@ -3381,6 +3438,8 @@ async fn handle_ws_passthrough_via_node(
     let ws_manager = state.node_ws_manager.clone();
     let sid = service_id_owned.clone();
     let sess_id = session_id.clone();
+    let owner_for_audit = service_owner_user_id_owned.clone();
+    let actor_for_audit = proxy_actor_user_id_owned.clone();
     let ws_upgrade = ws_upgrade.max_message_size(WS_PASSTHROUGH_MAX_MESSAGE_SIZE);
     let ws_upgrade = if let Some(protocol) = ws_proxy_session.selected_protocol.clone() {
         ws_upgrade.protocols([protocol])
@@ -3401,6 +3460,8 @@ async fn handle_ws_passthrough_via_node(
                 user_id_str.clone(),
                 ak_id.clone(),
                 ak_name.clone(),
+                owner_for_audit.clone(),
+                actor_for_audit.clone(),
             )
             .await;
 
@@ -3408,17 +3469,19 @@ async fn handle_ws_passthrough_via_node(
             let _ = ws_manager.send_ws_proxy_close(&node_id_owned, &sess_id, None, None);
             drop(guard); // explicitly decrement counter
 
+            let mut disconnect_event = serde_json::json!({
+                "service_id": sid,
+                "duration_secs": duration.as_secs(),
+                "acting_client_id": &acting_client_id,
+                "routed_via": "node",
+                "node_id": node_id_owned,
+            });
+            add_owner_user_id_if_shared(&mut disconnect_event, &owner_for_audit, &actor_for_audit);
             audit_service::log_async(
                 db,
                 Some(user_id_str),
                 "proxy_ws_disconnect".to_string(),
-                Some(serde_json::json!({
-                    "service_id": sid,
-                    "duration_secs": duration.as_secs(),
-                    "acting_client_id": &acting_client_id,
-                    "routed_via": "node",
-                    "node_id": node_id_owned,
-                })),
+                Some(disconnect_event),
                 None,
                 None,
                 ak_id,
@@ -3441,6 +3504,8 @@ async fn bridge_websockets_via_node(
     user_id: String,
     api_key_id: Option<String>,
     api_key_name: Option<String>,
+    service_owner_user_id: String,
+    proxy_actor_user_id: String,
 ) -> std::time::Duration {
     use crate::services::node_ws_manager::WsProxyFrame;
 
@@ -3536,17 +3601,23 @@ async fn bridge_websockets_via_node(
                         }
                     }
                     Some(WsProxyFrame::Injected { trigger_kind, frame_index }) => {
+                        let mut event_data = serde_json::json!({
+                            "service_id": service_id,
+                            "trigger_kind": trigger_kind,
+                            "frame_index_in": frame_index,
+                            "routed_via": "node",
+                            "node_id": node_id,
+                        });
+                        add_owner_user_id_if_shared(
+                            &mut event_data,
+                            &service_owner_user_id,
+                            &proxy_actor_user_id,
+                        );
                         audit_service::log_async(
                             db.clone(),
                             Some(user_id.clone()),
                             "ws_frame_auth_injected".to_string(),
-                            Some(serde_json::json!({
-                                "service_id": service_id,
-                                "trigger_kind": trigger_kind,
-                                "frame_index_in": frame_index,
-                                "routed_via": "node",
-                                "node_id": node_id,
-                            })),
+                            Some(event_data),
                             None,
                             None,
                             api_key_id.clone(),
@@ -4434,8 +4505,12 @@ mod tests {
 #[cfg(test)]
 mod proxy_resolution_integration_tests {
     use super::{proxy_request_by_slug_inner, proxy_request_inner};
+    use crate::AppState;
+    use crate::crypto::token::hash_token;
     use crate::errors::AppError;
     use crate::models::approval_request::{ApprovalRequest, COLLECTION_NAME as APPROVAL_REQUESTS};
+    use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
+    use crate::models::node::{COLLECTION_NAME as NODES, Node, NodeMetrics, NodeStatus};
     use crate::models::notification_channel::{
         COLLECTION_NAME as NOTIFICATION_CHANNELS, NotificationChannel,
     };
@@ -4449,6 +4524,7 @@ mod proxy_resolution_integration_tests {
     use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
     use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
     use crate::mw::auth::{AuthMethod, AuthUser};
+    use crate::services::node_ws_manager::{NodeOutboundMessage, NodeProxyResponse};
     use crate::test_utils::{
         connect_test_database, test_app_state, test_membership, test_user, test_user_endpoint,
         test_user_service,
@@ -4462,6 +4538,7 @@ mod proxy_resolution_integration_tests {
     use chrono::Utc;
     use mongodb::bson::doc;
     use tokio::net::TcpListener;
+    use tokio::sync::mpsc;
     use uuid::Uuid;
 
     async fn downstream_ok(uri: Uri) -> (StatusCode, String) {
@@ -4488,6 +4565,18 @@ mod proxy_resolution_integration_tests {
             .uri(uri)
             .body(Body::empty())
             .expect("build proxy request")
+    }
+
+    fn ws_proxy_request(uri: &str) -> Request<Body> {
+        Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .header("connection", "Upgrade")
+            .header("upgrade", "websocket")
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+            .body(Body::empty())
+            .expect("build websocket proxy request")
     }
 
     fn service_account_auth(service_account_id: &str, owner_user_id: &str) -> AuthUser {
@@ -4598,6 +4687,96 @@ mod proxy_resolution_integration_tests {
         service
     }
 
+    async fn insert_online_node(state: &AppState, owner_user_id: &str, name: &str) -> Node {
+        let raw_signing_secret = "11".repeat(32);
+        let signing_secret_encrypted = state
+            .encryption_keys
+            .encrypt(raw_signing_secret.as_bytes())
+            .await
+            .expect("encrypt node signing secret");
+        let now = Utc::now();
+        let node = Node {
+            id: Uuid::new_v4().to_string(),
+            user_id: owner_user_id.to_string(),
+            name: name.to_string(),
+            status: NodeStatus::Online,
+            auth_token_hash: hash_token("test-node-auth-token"),
+            signing_secret_encrypted: Some(signing_secret_encrypted),
+            signing_secret_hash: hash_token(&raw_signing_secret),
+            last_heartbeat_at: Some(now),
+            connected_at: Some(now),
+            metadata: None,
+            metrics: NodeMetrics::default(),
+            is_active: true,
+            created_at: now,
+            updated_at: now,
+        };
+
+        state
+            .db
+            .collection::<Node>(NODES)
+            .insert_one(node.clone())
+            .await
+            .expect("insert online node");
+
+        node
+    }
+
+    async fn wait_for_node_audit_event(
+        db: &mongodb::Database,
+        node_id: &str,
+        event_type: &str,
+    ) -> Option<AuditLog> {
+        for _ in 0..20 {
+            let found = db
+                .collection::<AuditLog>(AUDIT_LOG)
+                .find_one(doc! {
+                    "event_type": event_type,
+                    "event_data.routed_via": "node",
+                    "event_data.node_id": node_id,
+                })
+                .await
+                .expect("query audit log");
+            if found.is_some() {
+                return found;
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+
+        None
+    }
+
+    async fn wait_for_node_proxy_audit(db: &mongodb::Database, node_id: &str) -> Option<AuditLog> {
+        wait_for_node_audit_event(db, node_id, "proxy_request").await
+    }
+
+    fn spawn_ws_open_responder(
+        state: &AppState,
+        node_id: &str,
+        mut rx: mpsc::Receiver<NodeOutboundMessage>,
+        expected_slug: String,
+    ) -> tokio::task::JoinHandle<()> {
+        let manager = state.node_ws_manager.clone();
+        let node_id = node_id.to_string();
+        tokio::spawn(async move {
+            let Some(NodeOutboundMessage::Text(msg)) = rx.recv().await else {
+                panic!("expected outbound node ws_proxy_open request");
+            };
+            let parsed: serde_json::Value = serde_json::from_str(&msg).expect("valid ws request");
+            assert_eq!(parsed["type"].as_str(), Some("ws_proxy_open"));
+            assert_eq!(
+                parsed["service_slug"].as_str(),
+                Some(expected_slug.as_str())
+            );
+            let session_id = parsed["session_id"].as_str().expect("session id");
+            assert!(
+                manager.deliver_ws_proxy_opened(&node_id, session_id, None),
+                "ws proxy open ack should be delivered"
+            );
+        })
+    }
+
     async fn find_approval_request(
         db: &mongodb::Database,
         owner_user_id: &str,
@@ -4645,6 +4824,249 @@ mod proxy_resolution_integration_tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(resolved_slug, service.slug);
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn org_member_proxy_through_org_node_audits_owner_user_id() {
+        let Some(db) = connect_test_database("proxy_org_node").await else {
+            eprintln!("skipping proxy integration test: no local MongoDB available");
+            return;
+        };
+
+        let org_id = Uuid::new_v4().to_string();
+        let member_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_many([
+                test_user(&org_id, UserType::Org),
+                test_user(&member_id, UserType::Person),
+            ])
+            .await
+            .unwrap();
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org_id, &member_id, OrgRole::Member, None))
+            .await
+            .unwrap();
+
+        let state = test_app_state(db.clone());
+        let node = insert_online_node(&state, &org_id, "org-node").await;
+
+        let endpoint = test_user_endpoint(
+            &Uuid::new_v4().to_string(),
+            &org_id,
+            "Org Node Target",
+            "https://node-target.example.test",
+            None,
+            None,
+        );
+        let service = test_user_service(
+            &Uuid::new_v4().to_string(),
+            &org_id,
+            "org-node-target",
+            &endpoint.id,
+            None,
+            Some(&node.id),
+        );
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(endpoint)
+            .await
+            .expect("insert endpoint");
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(service.clone())
+            .await
+            .expect("insert user service");
+
+        let (tx, mut rx) = mpsc::channel(256);
+        state.node_ws_manager.register_connection(&node.id, tx);
+        let manager = state.node_ws_manager.clone();
+        let node_id = node.id.clone();
+        let expected_slug = service.slug.clone();
+        let responder = tokio::spawn(async move {
+            let Some(NodeOutboundMessage::Text(msg)) = rx.recv().await else {
+                panic!("expected outbound node proxy request");
+            };
+            let parsed: serde_json::Value = serde_json::from_str(&msg).expect("valid node request");
+            assert_eq!(
+                parsed["service_slug"].as_str(),
+                Some(expected_slug.as_str())
+            );
+            let request_id = parsed["request_id"]
+                .as_str()
+                .expect("request id")
+                .to_string();
+            manager.deliver_proxy_response(
+                &node_id,
+                NodeProxyResponse {
+                    request_id,
+                    status: 200,
+                    headers: vec![("content-type".to_string(), "text/plain".to_string())],
+                    body: b"proxied-through-node".to_vec(),
+                },
+            );
+        });
+
+        let mut resolved_slug = String::new();
+        let response = proxy_request_by_slug_inner(
+            &state,
+            &access_token_auth(&member_id),
+            &service.slug,
+            "status",
+            proxy_request("/proxy/s/org-node-target/status"),
+            &mut resolved_slug,
+        )
+        .await
+        .expect("org member should proxy through org node");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(resolved_slug, service.slug);
+        responder.await.expect("node responder task");
+
+        let audit = wait_for_node_proxy_audit(&db, &node.id)
+            .await
+            .expect("node-routed proxy audit should be written");
+        let data = audit.event_data.expect("event data");
+        assert_eq!(
+            data.get("routed_via").and_then(|v| v.as_str()),
+            Some("node")
+        );
+        assert_eq!(
+            data.get("owner_user_id").and_then(|v| v.as_str()),
+            Some(org_id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn org_member_ws_upgrade_through_org_node_audits_owner_user_id() {
+        let Some(db) = connect_test_database("proxy_ws_org_node").await else {
+            eprintln!("skipping proxy integration test: no local MongoDB available");
+            return;
+        };
+
+        let org_id = Uuid::new_v4().to_string();
+        let member_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_many([
+                test_user(&org_id, UserType::Org),
+                test_user(&member_id, UserType::Person),
+            ])
+            .await
+            .unwrap();
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org_id, &member_id, OrgRole::Member, None))
+            .await
+            .unwrap();
+
+        let state = test_app_state(db.clone());
+        let node = insert_online_node(&state, &org_id, "org-ws-node").await;
+        let service = insert_user_service(
+            &db,
+            &org_id,
+            "org-node-ws-target",
+            "https://node-ws-target.example.test",
+            None,
+        )
+        .await;
+        db.collection::<UserService>(USER_SERVICES)
+            .update_one(
+                doc! { "_id": &service.id },
+                doc! { "$set": { "node_id": &node.id } },
+            )
+            .await
+            .expect("attach node to service");
+
+        let (tx, rx) = mpsc::channel(256);
+        state.node_ws_manager.register_connection(&node.id, tx);
+        let responder = spawn_ws_open_responder(&state, &node.id, rx, service.slug.clone());
+
+        let mut resolved_slug = String::new();
+        let response = proxy_request_by_slug_inner(
+            &state,
+            &access_token_auth(&member_id),
+            &service.slug,
+            "socket",
+            ws_proxy_request("/proxy/s/org-node-ws-target/socket"),
+            &mut resolved_slug,
+        )
+        .await
+        .expect("org member should open ws through org node");
+
+        assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+        assert_eq!(resolved_slug, service.slug);
+        responder.await.expect("node ws responder task");
+
+        let audit = wait_for_node_audit_event(&db, &node.id, "proxy_ws_upgrade")
+            .await
+            .expect("node-routed ws upgrade audit should be written");
+        let data = audit.event_data.expect("event data");
+        assert_eq!(
+            data.get("routed_via").and_then(|v| v.as_str()),
+            Some("node")
+        );
+        assert_eq!(
+            data.get("owner_user_id").and_then(|v| v.as_str()),
+            Some(org_id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn personal_ws_upgrade_through_personal_node_omits_owner_user_id() {
+        let Some(db) = connect_test_database("proxy_ws_personal").await else {
+            eprintln!("skipping proxy integration test: no local MongoDB available");
+            return;
+        };
+
+        let owner_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&owner_id, UserType::Person))
+            .await
+            .unwrap();
+
+        let state = test_app_state(db.clone());
+        let node = insert_online_node(&state, &owner_id, "personal-ws-node").await;
+        let service = insert_user_service(
+            &db,
+            &owner_id,
+            "personal-node-ws-target",
+            "https://node-ws-target.example.test",
+            None,
+        )
+        .await;
+        db.collection::<UserService>(USER_SERVICES)
+            .update_one(
+                doc! { "_id": &service.id },
+                doc! { "$set": { "node_id": &node.id } },
+            )
+            .await
+            .expect("attach node to service");
+
+        let (tx, rx) = mpsc::channel(256);
+        state.node_ws_manager.register_connection(&node.id, tx);
+        let responder = spawn_ws_open_responder(&state, &node.id, rx, service.slug.clone());
+
+        let mut resolved_slug = String::new();
+        let response = proxy_request_by_slug_inner(
+            &state,
+            &access_token_auth(&owner_id),
+            &service.slug,
+            "socket",
+            ws_proxy_request("/proxy/s/personal-node-ws-target/socket"),
+            &mut resolved_slug,
+        )
+        .await
+        .expect("owner should open ws through personal node");
+
+        assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+        assert_eq!(resolved_slug, service.slug);
+        responder.await.expect("node ws responder task");
+
+        let audit = wait_for_node_audit_event(&db, &node.id, "proxy_ws_upgrade")
+            .await
+            .expect("node-routed ws upgrade audit should be written");
+        let data = audit.event_data.expect("event data");
+        assert_eq!(
+            data.get("routed_via").and_then(|v| v.as_str()),
+            Some("node")
+        );
+        assert!(data.get("owner_user_id").is_none());
     }
 
     #[tokio::test]

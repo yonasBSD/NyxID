@@ -73,6 +73,8 @@ Add new entries here when introducing additional vendored URN types.
 ### 6. Node Proxy Conventions
 
 - `NodeWsManager` is an in-memory connection pool shared via `Arc` in `AppState`; uses `DashMap` for lock-free concurrent access
+- `Node.user_id` is the polymorphic owner field, matching `UserService` / `UserApiKey`: it may point to a person user or an org user (`user_type=Org`). Do not add a separate `org_id` to node-related models; use `org_service::resolve_owner_access(actor, node.user_id)` for ACL.
+- Registration tokens carry the chosen owner at mint time; admin role is verified at issuance, not at redemption. A revoked admin can still complete a node registration within the token TTL (default 1h, `NODE_REGISTRATION_TOKEN_TTL_SECS`). Operators removing org admins should also delete pending registration tokens for that owner.
 - Node auth tokens (`nyx_nauth_...`) and registration tokens (`nyx_nreg_...`) are 32-byte random values; only SHA-256 hashes are stored
 - HMAC signing secrets are generated at registration; stored as SHA-256 hashes on server, encrypted locally on the node agent
 - WebSocket handler (`handlers/node_ws.rs`) authenticates in the first message, not via HTTP middleware

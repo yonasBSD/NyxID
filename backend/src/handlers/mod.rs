@@ -34,6 +34,7 @@ pub mod mcp;
 pub mod mcp_transport;
 pub mod mfa;
 pub mod node_admin;
+pub mod node_agent;
 pub mod node_ws;
 pub mod notifications;
 pub mod oauth;
