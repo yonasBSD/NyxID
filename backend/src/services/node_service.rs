@@ -18,7 +18,7 @@ use crate::models::node_service_binding::{
 };
 use crate::models::org_membership::OrgRole;
 use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
-use crate::models::user_service::COLLECTION_NAME as USER_SERVICES;
+use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::services::org_service::{self, OwnerAccess};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,6 +54,15 @@ pub struct NodeAdminInfo {
     pub display_name: Option<String>,
     pub email: Option<String>,
     pub role: NodeAdminRole,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TransferNodeResult {
+    pub node_id: String,
+    pub previous_owner_user_id: String,
+    pub new_owner_user_id: String,
+    pub deactivated_bindings_count: u64,
+    pub cleared_user_service_count: u64,
 }
 
 /// Create a one-time registration token for a new node.
@@ -309,6 +318,116 @@ pub async fn list_user_nodes(
         .try_collect()
         .await?;
     attach_owner_info(db, nodes).await
+}
+
+/// Transfer an active node to another owner and detach owner-scoped routing state.
+pub async fn transfer_node_owner(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    node_id: &str,
+    new_owner_user_id: &str,
+    max_nodes_per_user: u32,
+) -> AppResult<TransferNodeResult> {
+    let node = load_active_node(db, node_id).await?;
+    ensure_node_writable_by_access(db, actor_user_id, &node).await?;
+
+    if new_owner_user_id == node.user_id {
+        return Err(AppError::BadRequest(
+            "node already belongs to that owner".to_string(),
+        ));
+    }
+
+    let destination_access =
+        org_service::resolve_owner_access(db, actor_user_id, new_owner_user_id).await?;
+    if !destination_access.can_write() {
+        return Err(AppError::Forbidden(
+            "You must be the destination owner or an admin of the destination org".to_string(),
+        ));
+    }
+
+    let destination_name_collision = db
+        .collection::<Node>(NODES)
+        .find_one(doc! {
+            "user_id": new_owner_user_id,
+            "name": &node.name,
+            "is_active": true,
+        })
+        .await?;
+    if destination_name_collision.is_some() {
+        return Err(AppError::BadRequest(format!(
+            "An active node named '{}' already exists for the destination owner. Rename one of them and retry.",
+            node.name
+        )));
+    }
+
+    let destination_node_count = db
+        .collection::<Node>(NODES)
+        .count_documents(doc! {
+            "user_id": new_owner_user_id,
+            "is_active": true,
+        })
+        .await?;
+    if destination_node_count >= max_nodes_per_user as u64 {
+        return Err(AppError::BadRequest(format!(
+            "Maximum of {max_nodes_per_user} nodes per user reached"
+        )));
+    }
+
+    let now = bson::DateTime::from_chrono(Utc::now());
+
+    // This deployment path does not use multi-document transactions elsewhere.
+    // Keep the sequence narrow and idempotent: ownership flips first, then every
+    // dependent route/binding cleanup can safely be retried by node_id.
+    let update_result = db
+        .collection::<Node>(NODES)
+        .update_one(
+            doc! {
+                "_id": node_id,
+                "user_id": &node.user_id,
+                "is_active": true,
+            },
+            doc! {
+                "$set": {
+                    "user_id": new_owner_user_id,
+                    "updated_at": &now,
+                }
+            },
+        )
+        .await?;
+    if update_result.matched_count == 0 {
+        return Err(AppError::NodeNotFound("Node not found".to_string()));
+    }
+
+    let binding_result = db
+        .collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
+        .update_many(
+            doc! { "node_id": node_id, "is_active": true },
+            doc! { "$set": { "is_active": false, "updated_at": &now } },
+        )
+        .await?;
+
+    let service_result = db
+        .collection::<UserService>(USER_SERVICES)
+        .update_many(
+            doc! {
+                "node_id": node_id,
+                "user_id": { "$ne": new_owner_user_id },
+                "is_active": true,
+            },
+            doc! {
+                "$unset": { "node_id": "" },
+                "$set": { "updated_at": &now },
+            },
+        )
+        .await?;
+
+    Ok(TransferNodeResult {
+        node_id: node_id.to_string(),
+        previous_owner_user_id: node.user_id,
+        new_owner_user_id: new_owner_user_id.to_string(),
+        deactivated_bindings_count: binding_result.modified_count,
+        cleared_user_service_count: service_result.modified_count,
+    })
 }
 
 /// Soft-delete a node and its bindings.

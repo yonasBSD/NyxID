@@ -44,6 +44,11 @@ pub struct UpdateBindingRequest {
     pub priority: Option<i32>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct TransferNodeRequest {
+    pub new_owner_user_id: String,
+}
+
 // --- Response types ---
 
 #[derive(Debug, Serialize)]
@@ -127,6 +132,15 @@ pub struct CreateBindingResponse {
 #[derive(Debug, Serialize)]
 pub struct NodeAdminsResponse {
     pub admins: Vec<node_service::NodeAdminInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TransferNodeResponse {
+    pub node_id: String,
+    pub previous_owner: node_service::NodeOwnerInfo,
+    pub new_owner: node_service::NodeOwnerInfo,
+    pub deactivated_bindings_count: u64,
+    pub cleared_user_service_count: u64,
 }
 
 // --- Helpers ---
@@ -444,6 +458,56 @@ pub async fn list_admins(
     Ok(Json(NodeAdminsResponse { admins }))
 }
 
+/// POST /api/v1/nodes/{node_id}/transfer
+pub async fn transfer_node(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(node_id): Path<String>,
+    Json(body): Json<TransferNodeRequest>,
+) -> AppResult<Json<TransferNodeResponse>> {
+    let user_id_str = auth_user.user_id.to_string();
+    let node = node_service::get_node(&state.db, &user_id_str, &node_id).await?;
+    let previous_owner = node_service::owner_info_for_node(&state.db, &node).await?;
+
+    let result = node_service::transfer_node_owner(
+        &state.db,
+        &user_id_str,
+        &node_id,
+        &body.new_owner_user_id,
+        state.config.node_max_per_user,
+    )
+    .await?;
+
+    let mut transferred_node = node.clone();
+    transferred_node.user_id = result.new_owner_user_id.clone();
+    let new_owner = node_service::owner_info_for_node(&state.db, &transferred_node).await?;
+
+    audit_service::log_async(
+        state.db.clone(),
+        Some(user_id_str),
+        "node_transferred".to_string(),
+        Some(serde_json::json!({
+            "node_id": &result.node_id,
+            "previous_owner_user_id": &result.previous_owner_user_id,
+            "new_owner_user_id": &result.new_owner_user_id,
+            "deactivated_bindings_count": result.deactivated_bindings_count,
+            "cleared_user_service_count": result.cleared_user_service_count,
+        })),
+        None,
+        None,
+        None,
+        None,
+    );
+
+    Ok(Json(TransferNodeResponse {
+        node_id: result.node_id,
+        previous_owner,
+        new_owner,
+        deactivated_bindings_count: result.deactivated_bindings_count,
+        cleared_user_service_count: result.cleared_user_service_count,
+    }))
+}
+
 /// GET /api/v1/nodes/{node_id}/bindings
 pub async fn list_bindings(
     State(state): State<AppState>,
@@ -649,16 +713,22 @@ pub async fn list_my_bound_services(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
     use crate::models::node::{COLLECTION_NAME as NODES, Node, NodeMetrics, NodeStatus};
     use crate::models::node_registration_token::{
         COLLECTION_NAME as NODE_REG_TOKENS, NodeRegistrationToken,
+    };
+    use crate::models::node_service_binding::{
+        COLLECTION_NAME as NODE_SERVICE_BINDINGS, NodeServiceBinding,
     };
     use crate::models::org_membership::{
         COLLECTION_NAME as ORG_MEMBERSHIPS, OrgMembership, OrgRole,
     };
     use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+    use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
     use crate::test_utils::{
         connect_test_database, test_app_state, test_auth_user, test_membership, test_user,
+        test_user_service,
     };
     use chrono::Utc;
     use uuid::Uuid;
@@ -681,6 +751,45 @@ mod tests {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    fn test_binding(owner_id: &str, node_id: &str, service_id: &str) -> NodeServiceBinding {
+        let now = Utc::now();
+        NodeServiceBinding {
+            id: Uuid::new_v4().to_string(),
+            node_id: node_id.to_string(),
+            user_id: owner_id.to_string(),
+            service_id: service_id.to_string(),
+            is_active: true,
+            priority: 0,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    async fn wait_for_transfer_audit(db: &mongodb::Database, node_id: &str) -> Option<AuditLog> {
+        for _ in 0..20 {
+            let found = db
+                .collection::<AuditLog>(AUDIT_LOG)
+                .find_one(doc! {
+                    "event_type": "node_transferred",
+                    "event_data.node_id": node_id,
+                })
+                .await
+                .expect("query audit log");
+            if found.is_some() {
+                return found;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        None
+    }
+
+    async fn insert_users(db: &mongodb::Database, users: Vec<User>) {
+        db.collection::<User>(USERS)
+            .insert_many(users)
+            .await
+            .expect("insert users");
     }
 
     #[tokio::test]
@@ -936,6 +1045,425 @@ mod tests {
         assert_eq!(response.id, org_node.id);
         assert_eq!(response.owner.kind, node_service::NodeOwnerKind::Org);
         assert_eq!(response.owner.id, org_id);
+    }
+
+    #[tokio::test]
+    async fn transfer_personal_node_to_admin_org_succeeds_and_detaches_old_routes() {
+        let Some(db) = connect_test_database("node_transfer_personal_to_org").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+
+        let admin_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        insert_users(
+            &db,
+            vec![
+                test_user(&admin_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ],
+        )
+        .await;
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org_id, &admin_id, OrgRole::Admin, None))
+            .await
+            .expect("insert membership");
+
+        let node = test_node(&admin_id, "edge-node");
+        let binding = test_binding(&admin_id, &node.id, "svc-old");
+        let old_service = test_user_service(
+            &Uuid::new_v4().to_string(),
+            &admin_id,
+            "old-service",
+            &Uuid::new_v4().to_string(),
+            Some("svc-old"),
+            Some(&node.id),
+        );
+        let new_owner_service = test_user_service(
+            &Uuid::new_v4().to_string(),
+            &org_id,
+            "org-service",
+            &Uuid::new_v4().to_string(),
+            Some("svc-org"),
+            Some(&node.id),
+        );
+        db.collection::<Node>(NODES)
+            .insert_one(node.clone())
+            .await
+            .expect("insert node");
+        db.collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
+            .insert_one(binding.clone())
+            .await
+            .expect("insert binding");
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_many([old_service.clone(), new_owner_service.clone()])
+            .await
+            .expect("insert user services");
+
+        let state = test_app_state(db.clone());
+        let Json(response) = transfer_node(
+            State(state),
+            test_auth_user(&admin_id),
+            Path(node.id.clone()),
+            Json(TransferNodeRequest {
+                new_owner_user_id: org_id.clone(),
+            }),
+        )
+        .await
+        .expect("transfer succeeds");
+
+        assert_eq!(response.node_id, node.id);
+        assert_eq!(response.previous_owner.id, admin_id);
+        assert_eq!(response.new_owner.id, org_id);
+        assert_eq!(response.deactivated_bindings_count, 1);
+        assert_eq!(response.cleared_user_service_count, 1);
+
+        let transferred = db
+            .collection::<Node>(NODES)
+            .find_one(doc! { "_id": &node.id })
+            .await
+            .expect("query node")
+            .expect("node exists");
+        assert_eq!(transferred.user_id, org_id);
+
+        let updated_binding = db
+            .collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
+            .find_one(doc! { "_id": &binding.id })
+            .await
+            .expect("query binding")
+            .expect("binding exists");
+        assert!(!updated_binding.is_active);
+
+        let old_service_after = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! { "_id": &old_service.id })
+            .await
+            .expect("query old service")
+            .expect("old service exists");
+        assert_eq!(old_service_after.node_id, None);
+
+        let new_owner_service_after = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! { "_id": &new_owner_service.id })
+            .await
+            .expect("query new owner service")
+            .expect("new owner service exists");
+        assert_eq!(
+            new_owner_service_after.node_id.as_deref(),
+            Some(node.id.as_str())
+        );
+
+        let audit = wait_for_transfer_audit(&db, &node.id)
+            .await
+            .expect("transfer audit");
+        let data = audit.event_data.expect("audit data");
+        assert_eq!(
+            data.get("previous_owner_user_id").and_then(|v| v.as_str()),
+            Some(admin_id.as_str())
+        );
+        assert_eq!(
+            data.get("new_owner_user_id").and_then(|v| v.as_str()),
+            Some(org_id.as_str())
+        );
+        assert_eq!(
+            data.get("deactivated_bindings_count")
+                .and_then(|v| v.as_u64()),
+            Some(1)
+        );
+        assert_eq!(
+            data.get("cleared_user_service_count")
+                .and_then(|v| v.as_u64()),
+            Some(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn transfer_org_node_between_administered_orgs_succeeds() {
+        let Some(db) = connect_test_database("node_transfer_org_to_org").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+
+        let admin_id = Uuid::new_v4().to_string();
+        let org_a_id = Uuid::new_v4().to_string();
+        let org_b_id = Uuid::new_v4().to_string();
+        insert_users(
+            &db,
+            vec![
+                test_user(&admin_id, UserType::Person),
+                test_user(&org_a_id, UserType::Org),
+                test_user(&org_b_id, UserType::Org),
+            ],
+        )
+        .await;
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_many([
+                test_membership(&org_a_id, &admin_id, OrgRole::Admin, None),
+                test_membership(&org_b_id, &admin_id, OrgRole::Admin, None),
+            ])
+            .await
+            .expect("insert memberships");
+        let node = test_node(&org_a_id, "shared-node");
+        db.collection::<Node>(NODES)
+            .insert_one(node.clone())
+            .await
+            .expect("insert node");
+
+        let state = test_app_state(db.clone());
+        let _ = transfer_node(
+            State(state),
+            test_auth_user(&admin_id),
+            Path(node.id.clone()),
+            Json(TransferNodeRequest {
+                new_owner_user_id: org_b_id.clone(),
+            }),
+        )
+        .await
+        .expect("transfer succeeds");
+
+        let transferred = db
+            .collection::<Node>(NODES)
+            .find_one(doc! { "_id": &node.id })
+            .await
+            .expect("query node")
+            .expect("node exists");
+        assert_eq!(transferred.user_id, org_b_id);
+    }
+
+    #[tokio::test]
+    async fn transfer_org_node_by_member_returns_not_found() {
+        let Some(db) = connect_test_database("node_transfer_member_denied").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+
+        let member_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        insert_users(
+            &db,
+            vec![
+                test_user(&member_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ],
+        )
+        .await;
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org_id, &member_id, OrgRole::Member, None))
+            .await
+            .expect("insert membership");
+        let node = test_node(&org_id, "member-denied-node");
+        db.collection::<Node>(NODES)
+            .insert_one(node.clone())
+            .await
+            .expect("insert node");
+
+        let state = test_app_state(db);
+        let err = transfer_node(
+            State(state),
+            test_auth_user(&member_id),
+            Path(node.id),
+            Json(TransferNodeRequest {
+                new_owner_user_id: member_id,
+            }),
+        )
+        .await
+        .expect_err("member cannot transfer org node");
+
+        assert!(matches!(err, AppError::NodeNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn transfer_to_same_owner_returns_bad_request() {
+        let Some(db) = connect_test_database("node_transfer_same_owner").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+
+        let owner_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&owner_id, UserType::Person))
+            .await
+            .expect("insert owner");
+        let node = test_node(&owner_id, "same-owner-node");
+        db.collection::<Node>(NODES)
+            .insert_one(node.clone())
+            .await
+            .expect("insert node");
+
+        let state = test_app_state(db);
+        let err = transfer_node(
+            State(state),
+            test_auth_user(&owner_id),
+            Path(node.id),
+            Json(TransferNodeRequest {
+                new_owner_user_id: owner_id,
+            }),
+        )
+        .await
+        .expect_err("same-owner transfer rejected");
+
+        assert!(
+            matches!(err, AppError::BadRequest(message) if message == "node already belongs to that owner")
+        );
+    }
+
+    #[tokio::test]
+    async fn transfer_name_collision_returns_explicit_bad_request() {
+        let Some(db) = connect_test_database("node_transfer_name_collision").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+
+        let admin_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        insert_users(
+            &db,
+            vec![
+                test_user(&admin_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ],
+        )
+        .await;
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org_id, &admin_id, OrgRole::Admin, None))
+            .await
+            .expect("insert membership");
+        let source_node = test_node(&admin_id, "duplicate-node");
+        let colliding_node = test_node(&org_id, "duplicate-node");
+        db.collection::<Node>(NODES)
+            .insert_many([source_node.clone(), colliding_node])
+            .await
+            .expect("insert nodes");
+
+        let state = test_app_state(db);
+        let err = transfer_node(
+            State(state),
+            test_auth_user(&admin_id),
+            Path(source_node.id),
+            Json(TransferNodeRequest {
+                new_owner_user_id: org_id,
+            }),
+        )
+        .await
+        .expect_err("name collision rejected");
+
+        assert!(
+            matches!(err, AppError::BadRequest(message) if message.contains("An active node named 'duplicate-node' already exists for the destination owner"))
+        );
+    }
+
+    #[tokio::test]
+    async fn transfer_destination_at_node_cap_returns_bad_request() {
+        let Some(db) = connect_test_database("node_transfer_cap").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+
+        let admin_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        insert_users(
+            &db,
+            vec![
+                test_user(&admin_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ],
+        )
+        .await;
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org_id, &admin_id, OrgRole::Admin, None))
+            .await
+            .expect("insert membership");
+
+        let source_node = test_node(&admin_id, "source-node");
+        let mut nodes = vec![source_node.clone()];
+        nodes.extend((0..10).map(|idx| test_node(&org_id, &format!("org-node-{idx}"))));
+        db.collection::<Node>(NODES)
+            .insert_many(nodes)
+            .await
+            .expect("insert nodes");
+
+        let state = test_app_state(db);
+        let err = transfer_node(
+            State(state),
+            test_auth_user(&admin_id),
+            Path(source_node.id),
+            Json(TransferNodeRequest {
+                new_owner_user_id: org_id,
+            }),
+        )
+        .await
+        .expect_err("cap rejected");
+
+        assert!(
+            matches!(err, AppError::BadRequest(message) if message == "Maximum of 10 nodes per user reached")
+        );
+    }
+
+    #[tokio::test]
+    async fn transfer_updates_list_visibility_for_previous_and_new_owner_members() {
+        let Some(db) = connect_test_database("node_transfer_list_visibility").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+
+        let admin_id = Uuid::new_v4().to_string();
+        let org_a_member_id = Uuid::new_v4().to_string();
+        let org_b_member_id = Uuid::new_v4().to_string();
+        let org_a_id = Uuid::new_v4().to_string();
+        let org_b_id = Uuid::new_v4().to_string();
+        insert_users(
+            &db,
+            vec![
+                test_user(&admin_id, UserType::Person),
+                test_user(&org_a_member_id, UserType::Person),
+                test_user(&org_b_member_id, UserType::Person),
+                test_user(&org_a_id, UserType::Org),
+                test_user(&org_b_id, UserType::Org),
+            ],
+        )
+        .await;
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_many([
+                test_membership(&org_a_id, &admin_id, OrgRole::Admin, None),
+                test_membership(&org_b_id, &admin_id, OrgRole::Admin, None),
+                test_membership(&org_a_id, &org_a_member_id, OrgRole::Member, None),
+                test_membership(&org_b_id, &org_b_member_id, OrgRole::Member, None),
+            ])
+            .await
+            .expect("insert memberships");
+        let node = test_node(&org_a_id, "moving-node");
+        db.collection::<Node>(NODES)
+            .insert_one(node.clone())
+            .await
+            .expect("insert node");
+
+        let state = test_app_state(db.clone());
+        let _ = transfer_node(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            Path(node.id.clone()),
+            Json(TransferNodeRequest {
+                new_owner_user_id: org_b_id,
+            }),
+        )
+        .await
+        .expect("transfer succeeds");
+
+        let Json(previous_response) =
+            list_nodes(State(state.clone()), test_auth_user(&org_a_member_id))
+                .await
+                .expect("previous owner member can list nodes");
+        assert!(
+            !previous_response
+                .nodes
+                .iter()
+                .any(|item| item.id == node.id)
+        );
+
+        let Json(new_response) = list_nodes(State(state), test_auth_user(&org_b_member_id))
+            .await
+            .expect("new owner member can list nodes");
+        assert!(new_response.nodes.iter().any(|item| item.id == node.id));
     }
 
     #[tokio::test]
