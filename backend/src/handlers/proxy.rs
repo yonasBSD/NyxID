@@ -228,6 +228,36 @@ fn audit_personal_routing(
     );
 }
 
+fn node_proxy_audit_event_data(
+    service_id: &str,
+    method: &str,
+    path: &str,
+    response_status: u16,
+    node_id: &str,
+    service_owner_user_id: &str,
+    proxy_actor_user_id: &str,
+) -> serde_json::Value {
+    let mut event_data = serde_json::json!({
+        "service_id": service_id,
+        "method": method,
+        "path": path,
+        "response_status": response_status,
+        "routed_via": "node",
+        "node_id": node_id,
+    });
+
+    if service_owner_user_id != proxy_actor_user_id
+        && let serde_json::Value::Object(ref mut object) = event_data
+    {
+        object.insert(
+            "owner_user_id".to_string(),
+            serde_json::Value::String(service_owner_user_id.to_string()),
+        );
+    }
+
+    event_data
+}
+
 struct DownstreamWsConnection {
     stream: tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -1856,18 +1886,20 @@ async fn execute_proxy_inner(
                         }
                     };
 
+                    let proxy_actor_user_id = auth_user.proxy_resolution_user_id();
                     audit_service::log_async(
                         state.db.clone(),
                         Some(user_id_str),
                         "proxy_request".to_string(),
-                        Some(serde_json::json!({
-                            "service_id": service_id,
-                            "method": method_str,
-                            "path": path,
-                            "response_status": response.status().as_u16(),
-                            "routed_via": "node",
-                            "node_id": node_id,
-                        })),
+                        Some(node_proxy_audit_event_data(
+                            service_id,
+                            &method_str,
+                            path,
+                            response.status().as_u16(),
+                            node_id,
+                            service_owner_for_approval,
+                            &proxy_actor_user_id,
+                        )),
                         None,
                         None,
                         auth_user.api_key_id.clone(),
@@ -4434,8 +4466,12 @@ mod tests {
 #[cfg(test)]
 mod proxy_resolution_integration_tests {
     use super::{proxy_request_by_slug_inner, proxy_request_inner};
+    use crate::AppState;
+    use crate::crypto::token::hash_token;
     use crate::errors::AppError;
     use crate::models::approval_request::{ApprovalRequest, COLLECTION_NAME as APPROVAL_REQUESTS};
+    use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
+    use crate::models::node::{COLLECTION_NAME as NODES, Node, NodeMetrics, NodeStatus};
     use crate::models::notification_channel::{
         COLLECTION_NAME as NOTIFICATION_CHANNELS, NotificationChannel,
     };
@@ -4449,6 +4485,7 @@ mod proxy_resolution_integration_tests {
     use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
     use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
     use crate::mw::auth::{AuthMethod, AuthUser};
+    use crate::services::node_ws_manager::{NodeOutboundMessage, NodeProxyResponse};
     use crate::test_utils::{
         connect_test_database, test_app_state, test_membership, test_user, test_user_endpoint,
         test_user_service,
@@ -4462,6 +4499,7 @@ mod proxy_resolution_integration_tests {
     use chrono::Utc;
     use mongodb::bson::doc;
     use tokio::net::TcpListener;
+    use tokio::sync::mpsc;
     use uuid::Uuid;
 
     async fn downstream_ok(uri: Uri) -> (StatusCode, String) {
@@ -4598,6 +4636,62 @@ mod proxy_resolution_integration_tests {
         service
     }
 
+    async fn insert_online_node(state: &AppState, owner_user_id: &str, name: &str) -> Node {
+        let raw_signing_secret = "11".repeat(32);
+        let signing_secret_encrypted = state
+            .encryption_keys
+            .encrypt(raw_signing_secret.as_bytes())
+            .await
+            .expect("encrypt node signing secret");
+        let now = Utc::now();
+        let node = Node {
+            id: Uuid::new_v4().to_string(),
+            user_id: owner_user_id.to_string(),
+            name: name.to_string(),
+            status: NodeStatus::Online,
+            auth_token_hash: hash_token("test-node-auth-token"),
+            signing_secret_encrypted: Some(signing_secret_encrypted),
+            signing_secret_hash: hash_token(&raw_signing_secret),
+            last_heartbeat_at: Some(now),
+            connected_at: Some(now),
+            metadata: None,
+            metrics: NodeMetrics::default(),
+            is_active: true,
+            created_at: now,
+            updated_at: now,
+        };
+
+        state
+            .db
+            .collection::<Node>(NODES)
+            .insert_one(node.clone())
+            .await
+            .expect("insert online node");
+
+        node
+    }
+
+    async fn wait_for_node_proxy_audit(db: &mongodb::Database, node_id: &str) -> Option<AuditLog> {
+        for _ in 0..20 {
+            let found = db
+                .collection::<AuditLog>(AUDIT_LOG)
+                .find_one(doc! {
+                    "event_type": "proxy_request",
+                    "event_data.routed_via": "node",
+                    "event_data.node_id": node_id,
+                })
+                .await
+                .expect("query audit log");
+            if found.is_some() {
+                return found;
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+
+        None
+    }
+
     async fn find_approval_request(
         db: &mongodb::Database,
         owner_user_id: &str,
@@ -4645,6 +4739,114 @@ mod proxy_resolution_integration_tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(resolved_slug, service.slug);
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn org_member_proxy_through_org_node_audits_owner_user_id() {
+        let Some(db) = connect_test_database("proxy_org_node").await else {
+            eprintln!("skipping proxy integration test: no local MongoDB available");
+            return;
+        };
+
+        let org_id = Uuid::new_v4().to_string();
+        let member_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_many([
+                test_user(&org_id, UserType::Org),
+                test_user(&member_id, UserType::Person),
+            ])
+            .await
+            .unwrap();
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org_id, &member_id, OrgRole::Member, None))
+            .await
+            .unwrap();
+
+        let state = test_app_state(db.clone());
+        let node = insert_online_node(&state, &org_id, "org-node").await;
+
+        let endpoint = test_user_endpoint(
+            &Uuid::new_v4().to_string(),
+            &org_id,
+            "Org Node Target",
+            "https://node-target.example.test",
+            None,
+            None,
+        );
+        let service = test_user_service(
+            &Uuid::new_v4().to_string(),
+            &org_id,
+            "org-node-target",
+            &endpoint.id,
+            None,
+            Some(&node.id),
+        );
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(endpoint)
+            .await
+            .expect("insert endpoint");
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(service.clone())
+            .await
+            .expect("insert user service");
+
+        let (tx, mut rx) = mpsc::channel(256);
+        state.node_ws_manager.register_connection(&node.id, tx);
+        let manager = state.node_ws_manager.clone();
+        let node_id = node.id.clone();
+        let expected_slug = service.slug.clone();
+        let responder = tokio::spawn(async move {
+            let Some(NodeOutboundMessage::Text(msg)) = rx.recv().await else {
+                panic!("expected outbound node proxy request");
+            };
+            let parsed: serde_json::Value = serde_json::from_str(&msg).expect("valid node request");
+            assert_eq!(
+                parsed["service_slug"].as_str(),
+                Some(expected_slug.as_str())
+            );
+            let request_id = parsed["request_id"]
+                .as_str()
+                .expect("request id")
+                .to_string();
+            manager.deliver_proxy_response(
+                &node_id,
+                NodeProxyResponse {
+                    request_id,
+                    status: 200,
+                    headers: vec![("content-type".to_string(), "text/plain".to_string())],
+                    body: b"proxied-through-node".to_vec(),
+                },
+            );
+        });
+
+        let mut resolved_slug = String::new();
+        let response = proxy_request_by_slug_inner(
+            &state,
+            &access_token_auth(&member_id),
+            &service.slug,
+            "status",
+            proxy_request("/proxy/s/org-node-target/status"),
+            &mut resolved_slug,
+        )
+        .await
+        .expect("org member should proxy through org node");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(resolved_slug, service.slug);
+        responder.await.expect("node responder task");
+
+        let audit = wait_for_node_proxy_audit(&db, &node.id)
+            .await
+            .expect("node-routed proxy audit should be written");
+        let data = audit.event_data.expect("event data");
+        assert_eq!(
+            data.get("routed_via").and_then(|v| v.as_str()),
+            Some("node")
+        );
+        assert_eq!(
+            data.get("owner_user_id").and_then(|v| v.as_str()),
+            Some(org_id.as_str())
+        );
     }
 
     #[tokio::test]
