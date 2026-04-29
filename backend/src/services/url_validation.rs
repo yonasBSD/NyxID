@@ -35,6 +35,10 @@ pub async fn validate_public_http_url(url: &str, field_name: &str) -> AppResult<
         AppError::ValidationError(format!("{field_name} must include a hostname"))
     })?;
     let normalized_host = normalize_host(host);
+    // Fast-path obvious local/internal names here. This list is not intended
+    // to be exhaustive; the DNS resolution check below is the actual safety
+    // guard and catches private, loopback, link-local, and metadata targets
+    // regardless of which hostname resolved to them.
     if matches!(
         normalized_host.as_str(),
         "localhost" | "metadata.google.internal"

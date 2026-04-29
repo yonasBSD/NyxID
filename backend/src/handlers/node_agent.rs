@@ -14,6 +14,7 @@ use crate::services::{audit_service, node_pending_credential_service, node_servi
 
 #[derive(Debug, Deserialize)]
 pub struct DeclinePendingCredentialRequest {
+    #[serde(default)]
     pub reason: Option<String>,
 }
 
@@ -112,7 +113,7 @@ pub async fn decline_pending_credential(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(pending_id): Path<String>,
-    body: Option<Json<DeclinePendingCredentialRequest>>,
+    Json(body): Json<Option<DeclinePendingCredentialRequest>>,
 ) -> AppResult<impl IntoResponse> {
     let node = authenticate_node(&state, &headers).await?;
     let pending = node_pending_credential_service::decline_pending_credential_for_node(
@@ -133,7 +134,7 @@ pub async fn decline_pending_credential(
             "owner_user_id": &pending.owner_user_id,
             "reason_present": body
                 .as_ref()
-                .and_then(|Json(body)| body.reason.as_deref())
+                .and_then(|body| body.reason.as_deref())
                 .is_some_and(|reason| !reason.trim().is_empty()),
         })),
         None,
@@ -143,4 +144,16 @@ pub async fn decline_pending_credential(
     );
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DeclinePendingCredentialRequest;
+
+    #[test]
+    fn decline_request_accepts_empty_json_object() {
+        let parsed: Option<DeclinePendingCredentialRequest> =
+            serde_json::from_str("{}").expect("empty object parses");
+        assert!(parsed.expect("request body").reason.is_none());
+    }
 }

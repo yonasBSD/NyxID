@@ -25,7 +25,7 @@ pub async fn create_pending_credential(
     input: CreatePendingCredentialInput,
 ) -> AppResult<NodePendingCredential> {
     validate_service_slug(&input.service_slug)?;
-    validate_field_name(&input.field_name)?;
+    validate_field_name(&input.field_name, &input.injection_method)?;
     let target_url = clean_optional_string(input.target_url);
     if let Some(url) = target_url.as_deref() {
         url_validation::validate_public_http_url(url, "target_url").await?;
@@ -132,6 +132,9 @@ pub async fn cancel_pending_credential(
 ) -> AppResult<NodePendingCredential> {
     node_service::ensure_node_writable_by_actor(db, actor_user_id, node_id).await?;
 
+    // Consume rejects expired pushes because accepting stale setup metadata is
+    // correctness-critical. Cancel intentionally remains admin housekeeping:
+    // it can deactivate an expired active row so cleanup is idempotent.
     let now = bson::DateTime::from_chrono(Utc::now());
     db.collection::<NodePendingCredential>(NODE_PENDING_CREDENTIALS)
         .find_one_and_update(
@@ -221,18 +224,108 @@ fn validate_service_slug(slug: &str) -> AppResult<()> {
     Ok(())
 }
 
-fn validate_field_name(field_name: &str) -> AppResult<()> {
+fn validate_field_name(field_name: &str, injection_method: &InjectionMethod) -> AppResult<()> {
     if field_name.is_empty() || field_name.len() > 128 {
         return Err(AppError::ValidationError(
             "field_name must be 1-128 characters".to_string(),
         ));
     }
-    if field_name.chars().any(char::is_control) {
-        return Err(AppError::ValidationError(
-            "field_name must not contain control characters".to_string(),
-        ));
+
+    match injection_method {
+        InjectionMethod::Header => {
+            for ch in field_name.chars() {
+                if !is_http_token_char(ch) {
+                    return Err(disallowed_field_char_error("header", ch));
+                }
+            }
+        }
+        InjectionMethod::QueryParam => {
+            validate_percent_encoding(field_name, "query-param")?;
+            for ch in field_name.chars() {
+                if ch == '%' {
+                    continue;
+                }
+                if !is_rfc3986_unreserved(ch) {
+                    return Err(disallowed_field_char_error("query-param", ch));
+                }
+            }
+        }
+        InjectionMethod::PathPrefix => {
+            validate_percent_encoding(field_name, "path-prefix")?;
+            for ch in field_name.chars() {
+                if ch == '%' {
+                    continue;
+                }
+                if ch.is_control() || ch.is_whitespace() || matches!(ch, '?' | '#') {
+                    return Err(disallowed_field_char_error("path-prefix", ch));
+                }
+                if !ch.is_ascii() {
+                    return Err(disallowed_field_char_error("path-prefix", ch));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn is_http_token_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric()
+        || matches!(
+            ch,
+            '!' | '#'
+                | '$'
+                | '%'
+                | '&'
+                | '\''
+                | '*'
+                | '+'
+                | '-'
+                | '.'
+                | '^'
+                | '_'
+                | '`'
+                | '|'
+                | '~'
+        )
+}
+
+fn is_rfc3986_unreserved(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '-' | '.' | '_' | '~')
+}
+
+fn validate_percent_encoding(value: &str, method: &str) -> AppResult<()> {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let valid = index + 2 < bytes.len()
+                && bytes[index + 1].is_ascii_hexdigit()
+                && bytes[index + 2].is_ascii_hexdigit();
+            if !valid {
+                return Err(AppError::ValidationError(format!(
+                    "field_name for {method} contains invalid percent-encoding"
+                )));
+            }
+            index += 3;
+        } else {
+            index += 1;
+        }
     }
     Ok(())
+}
+
+fn disallowed_field_char_error(method: &str, ch: char) -> AppError {
+    let display = match ch {
+        ' ' => "space".to_string(),
+        '\t' => "tab".to_string(),
+        '\n' => "newline".to_string(),
+        '\r' => "carriage return".to_string(),
+        _ => ch.to_string(),
+    };
+    AppError::ValidationError(format!(
+        "field_name for {method} contains disallowed character '{display}'"
+    ))
 }
 
 fn clean_optional_string(value: Option<String>) -> Option<String> {
@@ -315,6 +408,51 @@ mod tests {
             .await
             .expect("query pending credential")
             .expect("pending credential exists")
+    }
+
+    fn assert_invalid_field_name(method: InjectionMethod, field_name: &str, expected: &str) {
+        let err = validate_field_name(field_name, &method).expect_err("field name should fail");
+        assert!(
+            matches!(err, AppError::ValidationError(ref message) if message.contains(expected)),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn validates_header_field_name_as_http_token() {
+        validate_field_name("X-API-Key", &InjectionMethod::Header).expect("valid header");
+        validate_field_name("X_Custom!#$%&'*+-.^`|~", &InjectionMethod::Header)
+            .expect("valid token chars");
+
+        assert_invalid_field_name(InjectionMethod::Header, "X API Key", "space");
+        assert_invalid_field_name(InjectionMethod::Header, "X:API-Key", ":");
+        assert_invalid_field_name(InjectionMethod::Header, "X,API-Key", ",");
+        assert_invalid_field_name(InjectionMethod::Header, "X-ÄPI-Key", "Ä");
+    }
+
+    #[test]
+    fn validates_query_param_field_name_as_url_safe() {
+        validate_field_name("api_key", &InjectionMethod::QueryParam).expect("valid param");
+        validate_field_name("api-key.%7E", &InjectionMethod::QueryParam)
+            .expect("valid percent-encoded param");
+
+        assert_invalid_field_name(InjectionMethod::QueryParam, "api key", "space");
+        assert_invalid_field_name(InjectionMethod::QueryParam, "api&key", "&");
+        assert_invalid_field_name(InjectionMethod::QueryParam, "api=key", "=");
+        assert_invalid_field_name(InjectionMethod::QueryParam, "api?key", "?");
+        assert_invalid_field_name(InjectionMethod::QueryParam, "api#key", "#");
+        assert_invalid_field_name(InjectionMethod::QueryParam, "api%key", "percent-encoding");
+    }
+
+    #[test]
+    fn validates_path_prefix_field_name_as_path_component() {
+        validate_field_name("v1/api/%2Ftenant", &InjectionMethod::PathPrefix)
+            .expect("valid path prefix");
+
+        assert_invalid_field_name(InjectionMethod::PathPrefix, "v1/api key", "space");
+        assert_invalid_field_name(InjectionMethod::PathPrefix, "v1/api?key", "?");
+        assert_invalid_field_name(InjectionMethod::PathPrefix, "v1/api#key", "#");
+        assert_invalid_field_name(InjectionMethod::PathPrefix, "v1/%key", "percent-encoding");
     }
 
     #[tokio::test]
