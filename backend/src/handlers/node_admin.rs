@@ -181,7 +181,10 @@ pub async fn create_registration_token(
     if let Some(requested_owner) = body.owner_user_id.as_deref() {
         let access =
             org_service::resolve_owner_access(&state.db, &user_id_str, requested_owner).await?;
-        if !matches!(access, org_service::OwnerAccess::AsOrgAdmin { .. }) {
+        if !matches!(
+            access,
+            org_service::OwnerAccess::Direct | org_service::OwnerAccess::AsOrgAdmin { .. }
+        ) {
             return Err(AppError::Forbidden(
                 "Only org admins can create registration tokens for that owner".to_string(),
             ));
@@ -678,6 +681,41 @@ mod tests {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    #[tokio::test]
+    async fn create_registration_token_accepts_explicit_direct_owner_scope() {
+        let Some(db) = connect_test_database("node_token_direct").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+
+        let actor_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&actor_id, UserType::Person))
+            .await
+            .expect("insert user");
+
+        let state = test_app_state(db.clone());
+        let Json(response) = create_registration_token(
+            State(state),
+            test_auth_user(&actor_id),
+            Json(CreateRegistrationTokenRequest {
+                name: "direct-node".to_string(),
+                owner_user_id: Some(actor_id.clone()),
+            }),
+        )
+        .await
+        .expect("explicit direct owner should be allowed");
+
+        let stored = db
+            .collection::<NodeRegistrationToken>(NODE_REG_TOKENS)
+            .find_one(doc! { "_id": &response.token_id })
+            .await
+            .expect("query token")
+            .expect("token exists");
+        assert_eq!(stored.user_id, actor_id);
+        assert_eq!(stored.name, "direct-node");
     }
 
     #[tokio::test]
