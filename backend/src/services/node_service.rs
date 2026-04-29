@@ -380,8 +380,40 @@ pub async fn transfer_node_owner(
     let now = bson::DateTime::from_chrono(Utc::now());
 
     // This deployment path does not use multi-document transactions elsewhere.
-    // Keep the sequence narrow and idempotent: ownership flips first, then every
-    // dependent route/binding cleanup can safely be retried by node_id.
+    // Cleanup runs first so a partial failure leaves the source owner with
+    // stale-but-recoverable state, never cross-tenant routing through a node
+    // whose owner has already changed.
+    let pending_credential_result = db
+        .collection::<NodePendingCredential>(NODE_PENDING_CREDENTIALS)
+        .update_many(
+            doc! { "node_id": node_id, "is_active": true },
+            doc! { "$set": { "is_active": false } },
+        )
+        .await?;
+
+    let service_result = db
+        .collection::<UserService>(USER_SERVICES)
+        .update_many(
+            doc! {
+                "node_id": node_id,
+                "user_id": { "$ne": new_owner_user_id },
+                "is_active": true,
+            },
+            doc! {
+                "$unset": { "node_id": "" },
+                "$set": { "updated_at": &now },
+            },
+        )
+        .await?;
+
+    let binding_result = db
+        .collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
+        .update_many(
+            doc! { "node_id": node_id, "is_active": true },
+            doc! { "$set": { "is_active": false, "updated_at": &now } },
+        )
+        .await?;
+
     let update_result = db
         .collection::<Node>(NODES)
         .update_one(
@@ -401,37 +433,6 @@ pub async fn transfer_node_owner(
     if update_result.matched_count == 0 {
         return Err(AppError::NodeNotFound("Node not found".to_string()));
     }
-
-    let binding_result = db
-        .collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
-        .update_many(
-            doc! { "node_id": node_id, "is_active": true },
-            doc! { "$set": { "is_active": false, "updated_at": &now } },
-        )
-        .await?;
-
-    let service_result = db
-        .collection::<UserService>(USER_SERVICES)
-        .update_many(
-            doc! {
-                "node_id": node_id,
-                "user_id": { "$ne": new_owner_user_id },
-                "is_active": true,
-            },
-            doc! {
-                "$unset": { "node_id": "" },
-                "$set": { "updated_at": &now },
-            },
-        )
-        .await?;
-
-    let pending_credential_result = db
-        .collection::<NodePendingCredential>(NODE_PENDING_CREDENTIALS)
-        .update_many(
-            doc! { "node_id": node_id, "is_active": true },
-            doc! { "$set": { "is_active": false } },
-        )
-        .await?;
 
     Ok(TransferNodeResult {
         node_id: node_id.to_string(),
