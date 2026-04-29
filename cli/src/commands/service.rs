@@ -7,6 +7,7 @@ use serde_json::Value;
 use crate::api::ApiClient;
 use crate::cli::{OutputFormat, ServiceCommands};
 use crate::commands::lark_permission::print_permission_block;
+use crate::org_resolver::resolve_org_id;
 
 /// Parse one or more `--default-header NAME=VALUE[:overridable]` flag values
 /// into a JSON-shaped list that the backend `validate_headers` helper will
@@ -230,6 +231,14 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                     crate::commands::node::resolve_node_id(&mut api, &raw)
                         .await
                         .with_context(|| format!("Could not resolve node '{raw}'"))?,
+                ),
+                None => None,
+            };
+            let org = match org {
+                Some(raw) => Some(
+                    resolve_org_id(&mut api, &raw)
+                        .await
+                        .with_context(|| format!("Could not resolve org '{raw}'"))?,
                 ),
                 None => None,
             };

@@ -6,11 +6,13 @@ use serde_json::Value;
 
 use crate::api::ApiClient;
 use crate::cli::{ApprovalCommands, OutputFormat};
+use crate::org_resolver::resolve_org_id;
 
 pub async fn run(command: ApprovalCommands) -> Result<()> {
     match command {
         ApprovalCommands::List { org, auth } => {
             let mut api = ApiClient::from_auth(&auth)?;
+            let org = resolve_optional_org(&mut api, org).await?;
             let path = match org {
                 Some(ref id) => {
                     format!("/approvals/requests?org_id={}", urlencoding::encode(id))
@@ -149,6 +151,7 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
 
         ApprovalCommands::Grants { org, auth } => {
             let mut api = ApiClient::from_auth(&auth)?;
+            let org = resolve_optional_org(&mut api, org).await?;
             let path = match org {
                 Some(ref id) => {
                     format!("/approvals/grants?org_id={}", urlencoding::encode(id))
@@ -211,6 +214,7 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
             }
 
             let mut api = ApiClient::from_auth(&auth)?;
+            let org = resolve_optional_org(&mut api, org).await?;
             let path = match org {
                 Some(ref org_id) => format!(
                     "/approvals/grants/{id}?org_id={}",
@@ -280,6 +284,7 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
 
         ApprovalCommands::ServiceConfigs { org, auth } => {
             let mut api = ApiClient::from_auth(&auth)?;
+            let org = resolve_optional_org(&mut api, org).await?;
             let path = match org {
                 Some(ref id) => {
                     format!(
@@ -336,6 +341,7 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
             auth,
         } => {
             let mut api = ApiClient::from_auth(&auth)?;
+            let org = resolve_optional_org(&mut api, org).await?;
             let mut body = serde_json::Map::new();
 
             if let Some(v) = require_approval {
@@ -375,5 +381,12 @@ pub async fn run(command: ApprovalCommands) -> Result<()> {
             }
             Ok(())
         }
+    }
+}
+
+async fn resolve_optional_org(api: &mut ApiClient, org: Option<String>) -> Result<Option<String>> {
+    match org {
+        Some(raw) => Ok(Some(resolve_org_id(api, &raw).await?)),
+        None => Ok(None),
     }
 }

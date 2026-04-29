@@ -181,7 +181,11 @@ pub enum ProviderCommands {
         /// Provider ID
         provider_id: String,
         /// Disconnect the provider token owned by this org (admin required)
-        #[arg(long, value_name = "ORG_ID")]
+        #[arg(
+            long,
+            value_name = "ID|SLUG|NAME",
+            help = "Organization to act on (UUID, slug, or display name)"
+        )]
         org: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
@@ -567,7 +571,11 @@ pub enum ServiceCommands {
         /// Every member of the org will see the resulting service in their
         /// `nyxid service list` and can proxy through it using their own
         /// NyxID account. Omit for a personal key.
-        #[arg(long, value_name = "ORG_ID")]
+        #[arg(
+            long,
+            value_name = "ID|SLUG|NAME",
+            help = "Organization to act on (UUID, slug, or display name)"
+        )]
         org: Option<String>,
         /// Optional OpenAPI spec URL for endpoint discovery. When set, AI
         /// agents (MCP, proxy discovery) surface concrete operations parsed
@@ -788,7 +796,11 @@ pub enum ApiKeyCommands {
         /// Create this key under the given org (you must be an admin of that org).
         /// The key authenticates as the org — proxy calls see org-owned services
         /// directly, and every org admin can rotate / delete it via this same CLI.
-        #[arg(long, value_name = "ORG_ID")]
+        #[arg(
+            long,
+            value_name = "ID|SLUG|NAME",
+            help = "Organization to act on (UUID, slug, or display name)"
+        )]
         org: Option<String>,
         /// Skip the browser wizard and print the new key to the terminal.
         /// The new key is shown ONCE — copy it before scrolling away.
@@ -808,7 +820,11 @@ pub enum ApiKeyCommands {
     List {
         /// List keys owned by the given org instead of your personal scope
         /// (you must be an admin of that org).
-        #[arg(long, value_name = "ORG_ID")]
+        #[arg(
+            long,
+            value_name = "ID|SLUG|NAME",
+            help = "Organization to act on (UUID, slug, or display name)"
+        )]
         org: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
@@ -921,6 +937,9 @@ pub enum OrgCommands {
         /// New display name
         #[arg(long)]
         display_name: Option<String>,
+        /// New org slug
+        #[arg(long)]
+        slug: Option<String>,
         /// New avatar URL. Pass an empty string to clear.
         #[arg(long)]
         avatar_url: Option<String>,
@@ -1145,8 +1164,13 @@ pub enum NodeCommands {
         /// wizard input is provided).
         #[arg(long)]
         name: Option<String>,
-        /// Org owner ID. You must be an admin of the org.
-        #[arg(long, value_name = "ID")]
+        /// Org owner. You must be an admin of the org.
+        #[arg(
+            long,
+            value_name = "ID|SLUG|NAME",
+            aliases = ["owner"],
+            help = "Organization to act on (UUID, slug, or display name)"
+        )]
         org: Option<String>,
         /// Skip the browser wizard and print the new token to the
         /// terminal. The new token is shown ONCE — copy it before
@@ -1602,6 +1626,30 @@ mod tests {
             } => {
                 assert_eq!(name.as_deref(), Some("edge-node"));
                 assert_eq!(org.as_deref(), Some("11111111-2222-3333-4444-555555555555"));
+            }
+            _ => panic!("unexpected parse result"),
+        }
+    }
+
+    #[test]
+    fn node_register_token_accepts_owner_alias_for_org_flag() {
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "node",
+            "register-token",
+            "--name",
+            "edge-node",
+            "--owner",
+            "chrono-ai",
+        ])
+        .expect("node register-token should accept --owner alias");
+
+        match cli.command {
+            Commands::Node {
+                command: NodeCommands::RegisterToken { name, org, .. },
+            } => {
+                assert_eq!(name.as_deref(), Some("edge-node"));
+                assert_eq!(org.as_deref(), Some("chrono-ai"));
             }
             _ => panic!("unexpected parse result"),
         }
@@ -2190,7 +2238,11 @@ pub enum ApprovalCommands {
     List {
         /// List approval history scoped to the given org instead of your
         /// personal scope. You must be an admin of that org.
-        #[arg(long, value_name = "ORG_ID")]
+        #[arg(
+            long,
+            value_name = "ID|SLUG|NAME",
+            help = "Organization to act on (UUID, slug, or display name)"
+        )]
         org: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
@@ -2225,7 +2277,11 @@ pub enum ApprovalCommands {
         /// You must be an admin of that org. Org-policy approvals create
         /// grants under the org's user_id, so this is the only way for org
         /// admins to see / manage them.
-        #[arg(long, value_name = "ORG_ID")]
+        #[arg(
+            long,
+            value_name = "ID|SLUG|NAME",
+            help = "Organization to act on (UUID, slug, or display name)"
+        )]
         org: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
@@ -2236,7 +2292,11 @@ pub enum ApprovalCommands {
         id: String,
         /// Revoke a grant owned by the given org. You must be an admin
         /// of that org.
-        #[arg(long, value_name = "ORG_ID")]
+        #[arg(
+            long,
+            value_name = "ID|SLUG|NAME",
+            help = "Organization to act on (UUID, slug, or display name)"
+        )]
         org: Option<String>,
         /// Skip confirmation
         #[arg(long)]
@@ -2261,7 +2321,11 @@ pub enum ApprovalCommands {
     ServiceConfigs {
         /// List configs for the given org instead of your personal scope.
         /// You must be an admin of that org.
-        #[arg(long, value_name = "ORG_ID")]
+        #[arg(
+            long,
+            value_name = "ID|SLUG|NAME",
+            help = "Organization to act on (UUID, slug, or display name)"
+        )]
         org: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
@@ -2285,7 +2349,11 @@ pub enum ApprovalCommands {
         /// authoritative for org-shared services -- it overrides any
         /// personal policy each member may have set, and notifications
         /// fan out to every active org admin.
-        #[arg(long, value_name = "ORG_ID")]
+        #[arg(
+            long,
+            value_name = "ID|SLUG|NAME",
+            help = "Organization to act on (UUID, slug, or display name)"
+        )]
         org: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
@@ -2380,7 +2448,11 @@ pub enum ServiceAccountCommands {
         role_ids: Option<String>,
         /// Create under the given org (you must be an admin of that org).
         /// Omit to create a global SA (requires global admin).
-        #[arg(long, value_name = "ORG_ID")]
+        #[arg(
+            long,
+            value_name = "ID|SLUG|NAME",
+            help = "Organization to act on (UUID, slug, or display name)"
+        )]
         org: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
@@ -2389,7 +2461,11 @@ pub enum ServiceAccountCommands {
     List {
         /// Scope the listing to a single org (requires admin of that org).
         /// Omit to list the global set (requires global admin).
-        #[arg(long, value_name = "ORG_ID")]
+        #[arg(
+            long,
+            value_name = "ID|SLUG|NAME",
+            help = "Organization to act on (UUID, slug, or display name)"
+        )]
         org: Option<String>,
         /// Optional search filter (matches name / client_id)
         #[arg(long)]
@@ -2480,7 +2556,11 @@ pub enum DeveloperAppCommands {
         broker_capability: Option<bool>,
         /// Create under the given org (you must be an admin of that org).
         /// Omit to create a personal developer app.
-        #[arg(long, value_name = "ORG_ID")]
+        #[arg(
+            long,
+            value_name = "ID|SLUG|NAME",
+            help = "Organization to act on (UUID, slug, or display name)"
+        )]
         org: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
@@ -2489,7 +2569,11 @@ pub enum DeveloperAppCommands {
     List {
         /// Scope the listing to a single org (requires admin of that org).
         /// Omit to list the caller's personal developer apps.
-        #[arg(long, value_name = "ORG_ID")]
+        #[arg(
+            long,
+            value_name = "ID|SLUG|NAME",
+            help = "Organization to act on (UUID, slug, or display name)"
+        )]
         org: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
@@ -2668,7 +2752,11 @@ pub enum ChannelBotCommands {
         public_key: Option<String>,
         /// Create this bot under the given org (you must be an admin of
         /// that org). Omit for a personal bot.
-        #[arg(long, value_name = "ORG_ID")]
+        #[arg(
+            long,
+            value_name = "ID|SLUG|NAME",
+            help = "Organization to act on (UUID, slug, or display name)"
+        )]
         org: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
@@ -2701,7 +2789,11 @@ pub enum ChannelBotCommands {
     List {
         /// List bots owned by the given org (admin-only). Omit for
         /// personal bots.
-        #[arg(long, value_name = "ORG_ID")]
+        #[arg(
+            long,
+            value_name = "ID|SLUG|NAME",
+            help = "Organization to act on (UUID, slug, or display name)"
+        )]
         org: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
@@ -2762,7 +2854,11 @@ pub enum ChannelRouteCommands {
         /// Create this route under the given org (you must be an admin
         /// of that org). The bot and agent key must also belong to the
         /// same org. Omit for a personal route.
-        #[arg(long, value_name = "ORG_ID")]
+        #[arg(
+            long,
+            value_name = "ID|SLUG|NAME",
+            help = "Organization to act on (UUID, slug, or display name)"
+        )]
         org: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
@@ -2774,7 +2870,11 @@ pub enum ChannelRouteCommands {
         bot_id: Option<String>,
         /// List routes owned by the given org (admin-only). Omit for
         /// personal routes.
-        #[arg(long, value_name = "ORG_ID")]
+        #[arg(
+            long,
+            value_name = "ID|SLUG|NAME",
+            help = "Organization to act on (UUID, slug, or display name)"
+        )]
         org: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
@@ -2878,7 +2978,11 @@ pub enum ChannelEventChannelCommands {
         #[arg(long)]
         conversation_type: Option<String>,
         /// Create under the given org (caller must be an admin of that org).
-        #[arg(long, value_name = "ORG_ID")]
+        #[arg(
+            long,
+            value_name = "ID|SLUG|NAME",
+            help = "Organization to act on (UUID, slug, or display name)"
+        )]
         org: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
@@ -2886,7 +2990,11 @@ pub enum ChannelEventChannelCommands {
     /// List device channels (platform = "device").
     List {
         /// List channels owned by the given org (admin-only).
-        #[arg(long, value_name = "ORG_ID")]
+        #[arg(
+            long,
+            value_name = "ID|SLUG|NAME",
+            help = "Organization to act on (UUID, slug, or display name)"
+        )]
         org: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,

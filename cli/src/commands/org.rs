@@ -40,9 +40,19 @@ pub async fn run(command: OrgCommands) -> Result<()> {
         OrgCommands::Update {
             id,
             display_name,
+            slug,
             avatar_url,
             auth,
-        } => update_org(&auth, &id, display_name.as_deref(), avatar_url.as_deref()).await,
+        } => {
+            update_org(
+                &auth,
+                &id,
+                display_name.as_deref(),
+                slug.as_deref(),
+                avatar_url.as_deref(),
+            )
+            .await
+        }
 
         OrgCommands::Delete { id, yes, auth } => delete_org(&auth, &id, yes).await,
 
@@ -232,13 +242,14 @@ async fn list_orgs(auth: &AuthArgs) -> Result<()> {
 
             let mut table = Table::new();
             table.load_preset(UTF8_FULL_CONDENSED);
-            table.set_header(["ID", "Name", "Your role", "Created"]);
+            table.set_header(["ID", "Slug", "Name", "Your role", "Created"]);
             for item in items {
                 let id = item["id"].as_str().unwrap_or("-");
+                let slug = item["slug"].as_str().unwrap_or("-");
                 let name = item["display_name"].as_str().unwrap_or("-");
                 let role = item["your_role"].as_str().unwrap_or("-");
                 let created = item["created_at"].as_str().unwrap_or("-");
-                table.add_row([id, name, role, created]);
+                table.add_row([id, slug, name, role, created]);
             }
             eprintln!("{table}");
         }
@@ -253,12 +264,15 @@ async fn show_org(auth: &AuthArgs, id: &str) -> Result<()> {
     match auth.output {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&org)?),
         OutputFormat::Table => {
+            let org_id = org["id"].as_str().unwrap_or(id);
+            let slug = org["slug"].as_str().unwrap_or("-");
             let name = org["display_name"].as_str().unwrap_or("-");
             let role = org["your_role"].as_str().unwrap_or("-");
             let count = org["member_count"].as_u64().unwrap_or(0);
             let created = org["created_at"].as_str().unwrap_or("-");
 
-            eprintln!("ID:           {id}");
+            eprintln!("ID:           {org_id}");
+            eprintln!("Slug:         {slug}");
             eprintln!("Name:         {name}");
             eprintln!("Your role:    {role}");
             eprintln!("Members:      {count}");
@@ -275,6 +289,7 @@ async fn update_org(
     auth: &AuthArgs,
     id: &str,
     display_name: Option<&str>,
+    slug: Option<&str>,
     avatar_url: Option<&str>,
 ) -> Result<()> {
     let mut api = ApiClient::from_auth(auth)?;
@@ -282,13 +297,16 @@ async fn update_org(
     if let Some(name) = display_name {
         body.insert("display_name".into(), Value::String(name.to_string()));
     }
+    if let Some(slug) = slug {
+        body.insert("slug".into(), Value::String(slug.to_string()));
+    }
     if let Some(url) = avatar_url {
         // Empty string is meaningful: clears the avatar.
         body.insert("avatar_url".into(), Value::String(url.to_string()));
     }
     if body.is_empty() {
         return Err(anyhow!(
-            "Provide at least one of --display-name or --avatar-url"
+            "Provide at least one of --display-name, --slug, or --avatar-url"
         ));
     }
     let updated: Value = api.patch(&format!("/orgs/{id}"), &body).await?;

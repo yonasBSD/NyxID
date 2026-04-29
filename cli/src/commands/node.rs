@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use crate::api::ApiClient;
 use crate::cli::{NodeCommands, NodeDaemonCommands, NodeDockerCommands, OutputFormat};
+use crate::org_resolver::resolve_org_id;
 
 pub async fn run(command: NodeCommands) -> Result<()> {
     match command {
@@ -259,7 +260,10 @@ pub async fn run(command: NodeCommands) -> Result<()> {
             // so existing interactive-but-not-wizardable sessions (SSH)
             // keep working the same way they always did.
             let mut api = ApiClient::from_auth(&auth)?;
-            let owner_user_id = org;
+            let owner_user_id = match org {
+                Some(raw) => Some(resolve_org_id(&mut api, &raw).await?),
+                None => None,
+            };
 
             let node_name = match name {
                 Some(n) if !n.trim().is_empty() => n.trim().to_string(),
