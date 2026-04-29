@@ -4,9 +4,12 @@ import {
   useNode,
   useNodeAdmins,
   useNodeBindings,
+  useNodePendingCredentials,
   useDeleteNode,
   useRotateNodeToken,
   useTransferNode,
+  usePushNodeCredential,
+  useCancelNodePendingCredential,
   useCreateBinding,
   useUpdateBinding,
   useDeleteBinding,
@@ -15,6 +18,7 @@ import { useKeys } from "@/hooks/use-keys";
 import { useServices } from "@/hooks/use-services";
 import { useAuthStore } from "@/stores/auth-store";
 import { ApiError } from "@/lib/api-client";
+import { pushNodeCredentialSchema } from "@/schemas/nodes";
 import {
   buildNodeCredentialCommand,
   getNodeCredentialPromptHint,
@@ -30,6 +34,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   Dialog,
   DialogContent,
@@ -62,13 +68,18 @@ import {
   KeyRound,
   Link2,
   Plus,
+  Send,
   Terminal,
   Trash2,
   Users,
 } from "lucide-react";
 import { toast } from "sonner";
 import { NodeStatusBadge } from "@/components/shared/node-status-badge";
-import type { NodeAdminInfo, NodeInfo } from "@/types/nodes";
+import type {
+  NodeAdminInfo,
+  NodeInfo,
+  NodePendingCredentialInjectionMethod,
+} from "@/types/nodes";
 import type { KeyInfo } from "@/types/keys";
 
 function nodeOwnerLabel(
@@ -110,6 +121,32 @@ function keyOwnerId(key: KeyInfo, currentUserId: string | null): string | null {
   return source.org_id;
 }
 
+function injectionMethodLabel(
+  method: NodePendingCredentialInjectionMethod,
+): string {
+  switch (method) {
+    case "query-param":
+      return "Query param";
+    case "path-prefix":
+      return "Path prefix";
+    case "header":
+      return "Header";
+  }
+}
+
+function defaultFieldNameForMethod(
+  method: NodePendingCredentialInjectionMethod,
+): string {
+  switch (method) {
+    case "query-param":
+      return "api_key";
+    case "path-prefix":
+      return "api";
+    case "header":
+      return "X-API-Key";
+  }
+}
+
 export function NodeDetailPage() {
   const { nodeId } = useParams({ strict: false }) as { nodeId: string };
   const navigate = useNavigate();
@@ -125,6 +162,9 @@ export function NodeDetailPage() {
   const deleteMutation = useDeleteNode();
   const rotateMutation = useRotateNodeToken();
   const transferMutation = useTransferNode();
+  const pushCredentialMutation = usePushNodeCredential(nodeId);
+  const cancelPendingCredentialMutation =
+    useCancelNodePendingCredential(nodeId);
   const createBindingMutation = useCreateBinding();
   const updateBindingMutation = useUpdateBinding();
   const deleteBindingMutation = useDeleteBinding();
@@ -145,6 +185,12 @@ export function NodeDetailPage() {
     readonly name: string;
   } | null>(null);
   const [setupCommandSlug, setSetupCommandSlug] = useState<string | null>(null);
+  const [credentialSlug, setCredentialSlug] = useState("");
+  const [credentialInjectionMethod, setCredentialInjectionMethod] =
+    useState<NodePendingCredentialInjectionMethod>("header");
+  const [credentialFieldName, setCredentialFieldName] = useState("X-API-Key");
+  const [credentialTargetUrl, setCredentialTargetUrl] = useState("");
+  const [credentialLabel, setCredentialLabel] = useState("");
 
   const servicesBySlug = new Map((services ?? []).map((s) => [s.slug, s]));
   const setupService =
@@ -153,6 +199,8 @@ export function NodeDetailPage() {
       : undefined;
   const setupCommandHint = getNodeCredentialPromptHint(setupService);
   const canManage = canManageNode(node, currentUserId, admins);
+  const { data: pendingCredentials, isLoading: pendingCredentialsLoading } =
+    useNodePendingCredentials(nodeId, canManage);
   const transferTargetOwnerId = transferOwnerId ?? currentUserId ?? "";
   const transferIsNoop =
     Boolean(node) && node?.owner.id === transferTargetOwnerId;
@@ -274,6 +322,48 @@ export function NodeDetailPage() {
     } catch (err) {
       toast.error(
         err instanceof ApiError ? err.message : "Failed to update priority",
+      );
+    }
+  }
+
+  async function handlePushCredential() {
+    const parsed = pushNodeCredentialSchema.safeParse({
+      service_slug: credentialSlug,
+      injection_method: credentialInjectionMethod,
+      field_name: credentialFieldName,
+      target_url: credentialTargetUrl,
+      label: credentialLabel,
+    });
+
+    if (!parsed.success) {
+      toast.error(parsed.error.issues[0]?.message ?? "Invalid credential push");
+      return;
+    }
+
+    try {
+      await pushCredentialMutation.mutateAsync(parsed.data);
+      toast.success("Credential push created");
+      setCredentialSlug("");
+      setCredentialInjectionMethod("header");
+      setCredentialFieldName("X-API-Key");
+      setCredentialTargetUrl("");
+      setCredentialLabel("");
+    } catch (err) {
+      toast.error(
+        err instanceof ApiError ? err.message : "Failed to push credential",
+      );
+    }
+  }
+
+  async function handleCancelPendingCredential(pendingCredentialId: string) {
+    try {
+      await cancelPendingCredentialMutation.mutateAsync(pendingCredentialId);
+      toast.success("Pending credential canceled");
+    } catch (err) {
+      toast.error(
+        err instanceof ApiError
+          ? err.message
+          : "Failed to cancel pending credential",
       );
     }
   }
@@ -639,6 +729,191 @@ export function NodeDetailPage() {
           </div>
         )}
       </div>
+
+      {canManage && (
+        <div className="space-y-4">
+          <div>
+            <h3 className="text-lg font-medium">Push Credential to VM Operator</h3>
+            <p className="text-sm text-muted-foreground">
+              The VM operator will be prompted for the secret value when they
+              accept this on the VM. The secret never leaves the VM.
+            </p>
+          </div>
+
+          <div className="rounded-xl border border-border p-4">
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="credential-service-slug">Service slug</Label>
+                <Input
+                  id="credential-service-slug"
+                  value={credentialSlug}
+                  onChange={(event) => setCredentialSlug(event.target.value)}
+                  placeholder="openclaw"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="credential-field-name">Field name</Label>
+                <Input
+                  id="credential-field-name"
+                  value={credentialFieldName}
+                  onChange={(event) =>
+                    setCredentialFieldName(event.target.value)
+                  }
+                  placeholder="X-API-Key"
+                />
+              </div>
+              <div className="space-y-2">
+                <p className="text-sm font-medium text-foreground">
+                  Injection method
+                </p>
+                <div className="grid gap-2 sm:grid-cols-3">
+                  {(
+                    [
+                      "header",
+                      "query-param",
+                      "path-prefix",
+                    ] as const
+                  ).map((method) => (
+                    <label
+                      key={method}
+                      className="flex cursor-pointer items-center gap-2 rounded-md border border-border px-3 py-2 text-sm"
+                    >
+                      <input
+                        type="radio"
+                        name="credential-injection-method"
+                        value={method}
+                        checked={credentialInjectionMethod === method}
+                        onChange={() => {
+                          const previousDefault = defaultFieldNameForMethod(
+                            credentialInjectionMethod,
+                          );
+                          setCredentialInjectionMethod(method);
+                          if (
+                            credentialFieldName.trim() === "" ||
+                            credentialFieldName === previousDefault
+                          ) {
+                            setCredentialFieldName(
+                              defaultFieldNameForMethod(method),
+                            );
+                          }
+                        }}
+                        className="h-4 w-4"
+                      />
+                      {injectionMethodLabel(method)}
+                    </label>
+                  ))}
+                </div>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="credential-target-url">Target URL</Label>
+                <Input
+                  id="credential-target-url"
+                  value={credentialTargetUrl}
+                  onChange={(event) =>
+                    setCredentialTargetUrl(event.target.value)
+                  }
+                  placeholder="https://gateway.example.com/v1"
+                />
+              </div>
+              <div className="space-y-2 md:col-span-2">
+                <Label htmlFor="credential-label">Label</Label>
+                <Input
+                  id="credential-label"
+                  value={credentialLabel}
+                  onChange={(event) => setCredentialLabel(event.target.value)}
+                  placeholder="Production gateway"
+                />
+              </div>
+            </div>
+            <div className="mt-4 flex justify-end">
+              <Button
+                onClick={() => void handlePushCredential()}
+                disabled={!credentialSlug.trim() || !credentialFieldName.trim()}
+                isLoading={pushCredentialMutation.isPending}
+              >
+                <Send className="mr-2 h-4 w-4" />
+                Push
+              </Button>
+            </div>
+          </div>
+
+          <div className="space-y-3">
+            <h4 className="text-sm font-medium text-foreground">
+              Pending Credentials
+            </h4>
+            {pendingCredentialsLoading ? (
+              <div className="space-y-2">
+                <Skeleton className="h-10 w-full" />
+                <Skeleton className="h-10 w-2/3" />
+              </div>
+            ) : !pendingCredentials || pendingCredentials.length === 0 ? (
+              <p className="text-sm text-muted-foreground">
+                No pending credentials are waiting for this node.
+              </p>
+            ) : (
+              <div className="rounded-xl border border-border">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Slug</TableHead>
+                      <TableHead>Method</TableHead>
+                      <TableHead>Field</TableHead>
+                      <TableHead>Age</TableHead>
+                      <TableHead>Target</TableHead>
+                      <TableHead className="w-[96px]" />
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {pendingCredentials.map((credential) => (
+                      <TableRow key={credential.id}>
+                        <TableCell>
+                          <div className="space-y-1">
+                            <code className="text-xs">
+                              {credential.service_slug}
+                            </code>
+                            {credential.label && (
+                              <p className="text-xs text-muted-foreground">
+                                {credential.label}
+                              </p>
+                            )}
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          {injectionMethodLabel(credential.injection_method)}
+                        </TableCell>
+                        <TableCell>
+                          <code className="text-xs text-muted-foreground">
+                            {credential.field_name}
+                          </code>
+                        </TableCell>
+                        <TableCell>
+                          {formatRelativeTime(credential.created_at)}
+                        </TableCell>
+                        <TableCell className="max-w-[240px] truncate text-muted-foreground">
+                          {credential.target_url ?? "-"}
+                        </TableCell>
+                        <TableCell>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="text-muted-foreground hover:text-destructive"
+                            onClick={() =>
+                              void handleCancelPendingCredential(credential.id)
+                            }
+                            isLoading={cancelPendingCredentialMutation.isPending}
+                          >
+                            Cancel
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Transfer Ownership */}
       <Dialog

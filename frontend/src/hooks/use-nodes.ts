@@ -11,10 +11,13 @@ import type {
   RotateNodeTokenResponse,
   CreateBindingResponse,
   TransferNodeResponse,
+  NodePendingCredentialInfo,
+  NodePendingCredentialsResponse,
 } from "@/types/nodes";
 import type {
   CreateRegistrationTokenFormData,
   TransferNodeFormData,
+  PushNodeCredentialFormData,
 } from "@/schemas/nodes";
 
 // --- Query hooks ---
@@ -74,6 +77,19 @@ export function useNodeBindings(nodeId: string) {
       return res.bindings;
     },
     enabled: Boolean(nodeId),
+  });
+}
+
+export function useNodePendingCredentials(nodeId: string, enabled = true) {
+  return useQuery({
+    queryKey: ["nodes", nodeId, "pending-credentials"],
+    queryFn: async (): Promise<readonly NodePendingCredentialInfo[]> => {
+      const res = await api.get<NodePendingCredentialsResponse>(
+        `/nodes/${nodeId}/credentials/pending`,
+      );
+      return res.pending_credentials;
+    },
+    enabled: enabled && Boolean(nodeId),
   });
 }
 
@@ -151,6 +167,43 @@ export function useTransferNode() {
         queryKey: ["nodes", variables.nodeId, "admins"],
       });
       void queryClient.invalidateQueries({ queryKey: ["keys"] });
+    },
+  });
+}
+
+export function usePushNodeCredential(nodeId: string) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (
+      data: PushNodeCredentialFormData,
+    ): Promise<NodePendingCredentialInfo> => {
+      return api.post<NodePendingCredentialInfo>(
+        `/nodes/${nodeId}/credentials/push`,
+        data,
+      );
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        queryKey: ["nodes", nodeId, "pending-credentials"],
+      });
+    },
+  });
+}
+
+export function useCancelNodePendingCredential(nodeId: string) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (pendingCredentialId: string): Promise<void> => {
+      return api.delete<void>(
+        `/nodes/${nodeId}/credentials/pending/${pendingCredentialId}`,
+      );
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        queryKey: ["nodes", nodeId, "pending-credentials"],
+      });
     },
   });
 }

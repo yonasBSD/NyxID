@@ -93,6 +93,32 @@ export interface TransferNodeResponse {
   readonly cleared_user_service_count: number;
 }
 
+export type NodePendingCredentialInjectionMethod =
+  | "header"
+  | "query-param"
+  | "path-prefix";
+
+export interface NodePendingCredentialInfo {
+  readonly id: string;
+  readonly node_id: string;
+  readonly service_slug: string;
+  readonly injection_method: NodePendingCredentialInjectionMethod;
+  readonly field_name: string;
+  readonly target_url?: string;
+  readonly label?: string;
+  readonly created_by_user_id: string;
+  readonly owner_user_id: string;
+  readonly created_at: string;
+  readonly expires_at: string;
+  readonly consumed_at?: string;
+  readonly declined_at?: string;
+  readonly is_active: boolean;
+}
+
+export interface NodePendingCredentialsResponse {
+  readonly pending_credentials: readonly NodePendingCredentialInfo[];
+}
+
 export interface AdminNodeInfo {
   readonly id: string;
   readonly name: string;
