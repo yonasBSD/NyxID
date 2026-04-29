@@ -5,6 +5,7 @@
 - [Node Management](#node-management)
   - [Org-owned nodes](#org-owned-nodes)
   - [Two-machine org-node setup](#two-machine-org-node-setup)
+  - [Remote credential provisioning](#remote-credential-provisioning)
   - [Transferring an existing personal node to an org](#transferring-an-existing-personal-node-to-an-org)
   - [Setting up a new node](#setting-up-a-new-node)
   - [Managing the node service](#managing-the-node-service)
@@ -57,11 +58,28 @@ When an admin leaves the org, rotate the node's auth token (`nyxid node rotate-t
 
 Org membership concepts are in [`organizations.md`](organizations.md). The broader management surface is in [`managing.md`](managing.md).
 
+### Remote credential provisioning
+
+Remote credential provisioning lets an org admin push setup metadata to a node operator without seeing or transmitting the secret value. NyxID stores only the pending credential metadata: node ID, service slug, injection method, field name, optional target URL, label, creator, owner, and expiry. The secret is entered on the VM and stored only in the node's local encrypted credential store.
+
+| Laptop (admin) | VM (operator) |
+|---|---|
+| `nyxid node-credential push <node-id-or-name> --slug <slug> --injection-method header --field-name X-API-Key [--target-url ...] [--label ...]` |  |
+| Relay the slug, injection method, and field name to the operator. Do not send a secret value. | `nyxid node credentials pending` |
+|  | Verify the slug, method, field name, and target URL. |
+|  | `nyxid node credentials accept <slug>` and enter the secret when prompted. For non-interactive provisioning, use `--value-env <ENVVAR>`. |
+| `nyxid node-credential list <node-id-or-name>` |  |
+| `nyxid node-credential cancel <node-id-or-name> <pending-id>` if the push is wrong or stale. | `nyxid node credentials decline <slug> --reason "wrong target"` if the operator refuses it. |
+
+Pending credentials expire automatically. The default TTL is 24 hours (`NODE_PENDING_CREDENTIAL_TTL_SECS`). Expired entries are not returned to admins or nodes; create a fresh push if the operator misses the window.
+
+Decline means the VM operator reviewed the metadata and refused to store a local secret for it. It does not remove or modify existing local credentials. Cancel means an admin withdrew the pending push before acceptance; a later VM-side accept for that pending ID fails.
+
 ### Transferring an existing personal node to an org
 
 Use `nyxid node transfer <node-id-or-name> --to <org-id>` when a node was registered under a person but should become shared org infrastructure. The caller must have write access to the current owner and be an admin of the destination org.
 
-Transfer changes only server-side ownership. The node auth token is per-node, so the existing VM connection keeps working. Active `NodeServiceBinding` rows for the node are deactivated, and any `UserService` with `node_id` set to that node is unrouted unless it already belongs to the new owner. Recreate only the org-owned bindings you still want after the transfer.
+Transfer changes only server-side ownership. The node auth token is per-node, so the existing VM connection keeps working. Active `NodeServiceBinding` rows and pending credential pushes for the node are deactivated, and any `UserService` with `node_id` set to that node is unrouted unless it already belongs to the new owner. Recreate only the org-owned bindings and credential pushes you still want after the transfer.
 
 ### Setting up a new node
 
@@ -143,11 +161,17 @@ nyxid node delete <ID_OR_NAME> --yes                   # delete node
 nyxid node rotate-token <ID_OR_NAME>                   # interactive: opens browser wizard (shows new auth_token + signing_secret)
 nyxid node rotate-token <ID_OR_NAME> --output json     # scripted: prints raw secret to stdout (legacy shape)
 nyxid node transfer <ID_OR_NAME> --to <USER_OR_ORG_ID> # move node ownership, detaches cross-owner routing
+nyxid node-credential push <ID_OR_NAME> --slug <SLUG> --injection-method header --field-name X-API-Key
+nyxid node-credential list <ID_OR_NAME>                # list pending credential pushes
+nyxid node-credential cancel <ID_OR_NAME> <PENDING_ID> # cancel a pending credential push
 
 # nyxid node CLI (run on the node machine)
 nyxid node credentials setup --service <SLUG>          # auto-detect and setup (recommended)
 nyxid node credentials add --service <SLUG> --header Authorization --secret-format bearer
 nyxid node credentials add-oauth --service <SLUG> --from-catalog  # OAuth from node
+nyxid node credentials pending                         # list pushed credentials awaiting local acceptance
+nyxid node credentials accept <SLUG>                   # enter and store the secret locally, then mark consumed
+nyxid node credentials decline <SLUG> --reason "..."   # refuse a pending credential push
 nyxid node credentials list                            # list configured credentials
 nyxid node credentials remove --service <SLUG>         # remove credential
 ```

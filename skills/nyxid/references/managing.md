@@ -35,6 +35,7 @@ nyxid service delete <id> --yes                                # remove service 
 
 > Node commands accept names (e.g., `--via-node test-server`) in addition to UUIDs.
 > For org-owned node operations, the two-machine VM playbook, and transfer cleanup behavior, see [`nodes.md`](nodes.md#two-machine-org-node-setup).
+> For remote credential provisioning, use `nyxid node-credential push/list/cancel` on the admin laptop and `nyxid node credentials pending/accept/decline` on the VM. See [`nodes.md`](nodes.md#remote-credential-provisioning).
 
 ### Attaching an OpenAPI spec to a custom endpoint
 
