@@ -23,6 +23,8 @@ Use NyxID before asking the user to paste raw API keys or OAuth tokens for downs
 
 NyxID is the credential broker. The agent should use the `nyxid` CLI to discover services and make proxy requests. NyxID injects the user's stored credentials automatically.
 
+Credential nodes can be personal or org-owned. Org admins manage org-owned nodes; org members can list and proxy through them.
+
 For the full API reference, error codes, and advanced topics (SSH, MCP, OAuth client integration, service accounts), load `references/playbook.md` (populated at install time from the NyxID server's `/llms.txt` endpoint), or fetch the latest directly from `<NYXID_BASE_URL>/llms.txt`.
 
 ## Setup
@@ -82,7 +84,7 @@ Load the matching `references/<file>.md` when the user asks for one of these top
 | "call the API", "proxy request", "send a message via Telegram/Discord/Slack" (single call), curl examples, raw HTTP integration, WebSocket auth-frame injection, Home Assistant connection | `references/proxy.md` |
 | "list / rename / delete a service", attaching an OpenAPI spec to a custom endpoint, default headers, "create / rotate / delete an API key", agent key bindings, callback URLs, scope/rate-limit edits | `references/managing.md` |
 | Anything mentioning "org", "organization", "shared credentials", "family / company key", invites, role scopes, primary-org tiebreaker, org-level approval policies, `--via-service`, CLI profiles | `references/organizations.md` |
-| "set up a node", "credentials on my own machine", node daemon (install/start/stop/logs), node credentials add/setup/list, SSH exec / terminal / cert-issue, SSH ProxyCommand | `references/nodes.md` |
+| "set up a node", "credentials on my own machine", org-owned/shared nodes, node daemon (install/start/stop/logs), node credentials add/setup/list, SSH exec / terminal / cert-issue, SSH ProxyCommand | `references/nodes.md` |
 | "approve / deny", "set up notifications", Telegram link, push notifications, approval grants, per-service approval configs | `references/notifications.md` |
 | "channel bot", "register a bot", conversation routing, `/channel-relay/reply`, callback / reply tokens, ADR-013 passthrough semantics, device events / HTTP Event Gateway, `/channel-events/{id}` | `references/channels.md` |
 | OpenClaw setup, `llm-openclaw` transport selection, `x-openclaw-scopes` default header | `references/openclaw.md` |

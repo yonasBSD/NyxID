@@ -19,7 +19,7 @@ NyxID supports **organizations** for sharing a single set of credentials across 
 
 ## Mental model
 
-- An **org is just a special user** (`user_type: "org"`) that cannot log in directly. It owns its own services, endpoints, API keys, etc., the same way a person does.
+- An **org is just a special user** (`user_type: "org"`) that cannot log in directly. It owns its own services, endpoints, API keys, nodes, etc., the same way a person does.
 - **Membership** lives in `org_memberships`. Each member has a **role** (`admin` / `member` / `viewer`) and a `scope_source` — either `inherit` (follow the role's default) or `override` (use the membership row's own list). Admins manage everything; members can use org services through the proxy; viewers can see them in `nyxid service list` but cannot proxy through them.
 - **Role-level defaults** live in `org_role_scopes` (one row per `(org_user_id, role)`). Admins pin each role's allowed services via `nyxid org role-scope set`; new members default to `scope_source = inherit` and pick up changes immediately. `override` members are unaffected by role edits until reset back to `inherit`. Missing role-scope rows mean "full access" — nothing is restricted until an admin configures one.
 - **Resolution priority:** when a proxy request comes in, NyxID first looks for a personal `UserService` matching the slug. Only if that misses does it walk the user's active memberships (in `primary_org_id` order, then earliest-joined) and try the org's services. Personal credentials always win.
@@ -41,7 +41,7 @@ nyxid org show <ORG_ID>
 nyxid org update <ORG_ID> --display-name "New Name"
 
 # Delete (admin only). Refuses if the org still owns any shared services,
-# endpoints, API keys, NyxID API keys, or non-revoked provider tokens --
+# endpoints, API keys, NyxID API keys, nodes, or non-revoked provider tokens --
 # transfer or delete those first. Deleting an org service auto-cleans the
 # linked provider token when no other org service uses it; the orphan-token
 # escape hatch for older orgs is `nyxid provider disconnect --org` (below).
@@ -88,6 +88,8 @@ The backend enforces that the caller is an admin of the target org before writin
 > Viewer-role members still see org services in the list (tagged `credential_source.allowed = false`) but cannot click into their detail page or proxy through them. Scoped members only see services within their `allowed_service_ids` scope -- services outside the scope are hidden entirely, not just disabled.
 
 The frontend `/keys` page groups personal vs. each org section, with viewer-role and out-of-scope items rendered read-only. The frontend `/providers` page exposes the same org scope selector for org admins, so an admin can list and disconnect tokens owned by any org they administer.
+
+Orgs can also own credential nodes. See [`nodes.md`](nodes.md#org-owned-nodes) for org-scoped node registration, admin management, member proxy access, and audit attribution.
 
 ## Disconnecting a provider token
 

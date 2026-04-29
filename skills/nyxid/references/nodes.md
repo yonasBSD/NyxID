@@ -3,6 +3,7 @@
 ## Table of contents
 
 - [Node Management](#node-management)
+  - [Org-owned nodes](#org-owned-nodes)
   - [Setting up a new node](#setting-up-a-new-node)
   - [Managing the node service](#managing-the-node-service)
   - [Managing nodes](#managing-nodes)
@@ -11,6 +12,24 @@
 ## Node Management
 
 Nodes are for users who do not want their credentials stored on the NyxID server. Instead, credentials stay encrypted on the user's own machine (the node). When a proxy request comes in, NyxID passes it through to the node agent via WebSocket, the node injects the credential locally and forwards the request to the downstream service. The credential never leaves the node.
+
+`Node.user_id` is a polymorphic owner field, matching `UserService`: it can point to a person user or an org user. Do not add or expect a separate node `org_id`.
+
+### Org-owned nodes
+
+Org admins can mint registration tokens for an org:
+
+```bash
+nyxid node register-token --org <ORG_ID>
+```
+
+The redeemed node belongs to the org. All current org admins can manage it; org members can list it and proxy through org services routed to it. Only org admins can create org-scoped registration tokens, delete org-owned nodes, rotate node auth tokens, or manage node bindings.
+
+`nyxid node list` includes accessible personal and org-owned nodes. `nyxid node show <ID_OR_NAME>` prints owner metadata and the admin list. The API endpoint `GET /api/v1/nodes/{node_id}/admins` returns the users who can manage a node: the personal owner for personal nodes, or all org admins for org-owned nodes.
+
+Audit events for shared node operations include `owner_user_id` when the actor differs from the owner, so org-owned node activity can be attributed to both the actor and owning org.
+
+Registration tokens carry the chosen owner at mint time. Admin role is verified when the token is issued, not when it is redeemed, so a token issued before an admin is revoked can still register a node until the token expires. The default TTL is 1 hour (`NODE_REGISTRATION_TOKEN_TTL_SECS`); delete pending registration tokens for that owner when removing org admins.
 
 ### Setting up a new node
 
@@ -86,6 +105,7 @@ nyxid node daemon uninstall                             # remove service (stops 
 nyxid node list --output json                          # list nodes (includes IDs)
 nyxid node show <ID_OR_NAME> --output json             # show node details + metrics
 nyxid node register-token                              # interactive: opens browser wizard (v3.1)
+nyxid node register-token --org <ORG_ID>               # org-owned node token (admin only)
 nyxid node register-token --name "edge-tokyo" --output json  # scripted: prints raw nyx_nreg_... (legacy shape)
 nyxid node delete <ID_OR_NAME> --yes                   # delete node
 nyxid node rotate-token <ID_OR_NAME>                   # interactive: opens browser wizard (shows new auth_token + signing_secret)
