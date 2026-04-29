@@ -293,6 +293,16 @@ pub(crate) fn test_user(user_id: &str, user_type: UserType) -> User {
             UserType::Person => "Test User".to_string(),
             UserType::Org => "Test Org".to_string(),
         }),
+        // Derive a unique slug from the user_id so tests that create multiple
+        // org fixtures and call `ensure_indexes` (which builds the partial
+        // unique slug index) don't collide on a shared "test-org" value.
+        slug: match user_type {
+            UserType::Person => None,
+            UserType::Org => Some(format!(
+                "test-org-{}",
+                &user_id.replace('-', "").chars().take(8).collect::<String>()
+            )),
+        },
         avatar_url: None,
         email_verified: true,
         email_verification_token: None,

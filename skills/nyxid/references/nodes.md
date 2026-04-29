@@ -23,7 +23,7 @@ Nodes are for users who do not want their credentials stored on the NyxID server
 Org admins can mint registration tokens for an org:
 
 ```bash
-nyxid node register-token --org <ORG_ID>
+nyxid node register-token --org <ID|SLUG|NAME>
 ```
 
 The redeemed node belongs to the org. All current org admins can manage it; org members can list it and proxy through org services routed to it. Only org admins can create org-scoped registration tokens, delete org-owned nodes, rotate node auth tokens, or manage node bindings.
@@ -47,7 +47,7 @@ The node's local credential store is keyed by service slug (`config.toml: creden
 
 Fresh shared-box checklist:
 
-1. Admin on laptop: `nyxid node register-token --org <org-id>` -> copy the `nyx_nreg_...` token.
+1. Admin on laptop: `nyxid node register-token --org <ID|SLUG|NAME>` -> copy the `nyx_nreg_...` token.
 2. Operator on VM: `nyxid node register --token nyx_nreg_... --url wss://...` -> token is consumed, node receives its own `nyx_nauth_...` stored in the OS keychain or local secret backend.
 3. Admin on laptop: `nyxid keys create --service-slug <slug> --node-id <node-id>` -> creates the org-owned `UserService` routing through the node.
 4. Operator on VM: `nyxid node credentials add <slug> --header X-API-Key` (interactive secret prompt) -> credential stored locally, encrypted.
@@ -155,7 +155,7 @@ nyxid node daemon uninstall                             # remove service (stops 
 nyxid node list --output json                          # list nodes (includes IDs)
 nyxid node show <ID_OR_NAME> --output json             # show node details + metrics
 nyxid node register-token                              # interactive: opens browser wizard (v3.1)
-nyxid node register-token --org <ORG_ID>               # org-owned node token (admin only)
+nyxid node register-token --org <ID|SLUG|NAME>         # org-owned node token (admin only)
 nyxid node register-token --name "edge-tokyo" --output json  # scripted: prints raw nyx_nreg_... (legacy shape)
 nyxid node delete <ID_OR_NAME> --yes                   # delete node
 nyxid node rotate-token <ID_OR_NAME>                   # interactive: opens browser wizard (shows new auth_token + signing_secret)

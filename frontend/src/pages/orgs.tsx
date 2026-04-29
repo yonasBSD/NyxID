@@ -93,6 +93,9 @@ export function OrgsPage() {
                         <p className="truncate text-sm font-medium text-foreground">
                           {org.display_name ?? "Untitled org"}
                         </p>
+                        <p className="truncate text-xs text-muted-foreground">
+                          @{org.slug}
+                        </p>
                         {org.contact_email && (
                           <p className="truncate text-xs text-muted-foreground">
                             {org.contact_email}

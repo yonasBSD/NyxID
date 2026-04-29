@@ -521,6 +521,7 @@ export function OrgDetailPage() {
             <SettingsPanel
               orgId={orgId}
               initialDisplayName={org.display_name ?? ""}
+              initialSlug={org.slug}
               initialAvatarUrl={org.avatar_url ?? ""}
               initialContactEmail={org.contact_email ?? ""}
               onDelete={() => setDeleteOpen(true)}
@@ -871,6 +872,7 @@ function scopeSummary(allowedServiceIds: readonly string[] | null): string {
 interface SettingsPanelProps {
   readonly orgId: string;
   readonly initialDisplayName: string;
+  readonly initialSlug: string;
   readonly initialAvatarUrl: string;
   readonly initialContactEmail: string;
   readonly onDelete: () => void;
@@ -879,6 +881,7 @@ interface SettingsPanelProps {
 function SettingsPanel({
   orgId,
   initialDisplayName,
+  initialSlug,
   initialAvatarUrl,
   initialContactEmail,
   onDelete,
@@ -889,6 +892,7 @@ function SettingsPanel({
     resolver: zodResolver(updateOrgRequestSchema),
     defaultValues: {
       display_name: initialDisplayName,
+      slug: initialSlug,
       avatar_url: initialAvatarUrl,
       contact_email: initialContactEmail,
     },
@@ -932,6 +936,25 @@ function SettingsPanel({
                     <FormControl>
                       <Input {...field} />
                     </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+
+              <FormField
+                control={form.control}
+                name="slug"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Slug</FormLabel>
+                    <FormControl>
+                      <Input {...field} />
+                    </FormControl>
+                    <p className="text-xs text-muted-foreground">
+                      URL-friendly identifier. Pass to --org or use in
+                      slug-based API paths. Auto-generated from the display name
+                      on org creation; admins can edit later.
+                    </p>
                     <FormMessage />
                   </FormItem>
                 )}

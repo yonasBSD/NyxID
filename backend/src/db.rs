@@ -82,6 +82,8 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     // rows would not be matched by the new partial-unique filter and a
     // duplicate person email could slip in (the index wouldn't see the legacy row).
     backfill_user_type(db).await?;
+    // Backfill org slugs before creating the partial unique slug index.
+    migrate_backfill_org_slugs(db).await?;
     // Migration: drop legacy non-partial unique index on email so the new
     // partial-unique index (filtered to user_type=person) can be created.
     // Org users do not need a unique email; they often share contact emails
@@ -112,6 +114,23 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .create_index(
             IndexModel::builder()
                 .keys(doc! { "password_reset_token": 1 })
+                .build(),
+        )
+        .await?;
+    users
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "slug": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("users_org_slug_unique".to_string())
+                        .unique(true)
+                        .partial_filter_expression(doc! {
+                            "user_type": "org",
+                            "slug": { "$type": "string" },
+                        })
+                        .build(),
+                )
                 .build(),
         )
         .await?;
@@ -1364,6 +1383,50 @@ async fn backfill_user_type(db: &Database) -> Result<(), mongodb::error::Error> 
             count = result.modified_count,
             "Backfilled missing user_type to 'person'"
         );
+    }
+
+    Ok(())
+}
+
+/// Backfill `slug` on legacy org rows before creating the unique index.
+pub async fn migrate_backfill_org_slugs(db: &Database) -> Result<(), mongodb::error::Error> {
+    let users = db.collection::<Document>("users");
+    let mut cursor = users
+        .find(doc! {
+            "user_type": "org",
+            "$or": [
+                { "slug": { "$exists": false } },
+                { "slug": mongodb::bson::Bson::Null },
+            ],
+        })
+        .await?;
+
+    let mut updated = 0u64;
+    while let Some(row) = cursor.try_next().await? {
+        let Ok(org_id) = row.get_str("_id") else {
+            continue;
+        };
+        let display_name = row
+            .get_str("display_name")
+            .ok()
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or("org");
+        let base = crate::services::org_slug::slugify(display_name);
+        let slug = crate::services::org_slug::reserve_slug_mongo(db, &base, Some(org_id)).await?;
+        let result = users
+            .update_one(
+                doc! { "_id": org_id },
+                doc! { "$set": {
+                    "slug": slug,
+                    "updated_at": mongodb::bson::DateTime::from_chrono(Utc::now()),
+                }},
+            )
+            .await?;
+        updated += result.modified_count;
+    }
+
+    if updated > 0 {
+        tracing::info!(count = updated, "Backfilled missing org slugs");
     }
 
     Ok(())

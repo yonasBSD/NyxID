@@ -26,7 +26,9 @@ use crate::models::org_invite::OrgInvite;
 use crate::models::org_membership::{MemberScopeSource, OrgMembership, OrgRole};
 use crate::models::user::User;
 use crate::mw::auth::AuthUser;
-use crate::services::{audit_service, org_invite_service, org_role_scope_service, org_service};
+use crate::services::{
+    audit_service, org_invite_service, org_role_scope_service, org_service, org_slug,
+};
 
 /// Maximum invite TTL accepted by `POST /orgs/{id}/invites` and the
 /// matching CLI command. Mirrors the 30-day bound the web schema enforces
@@ -53,6 +55,7 @@ pub struct CreateOrgRequest {
 pub struct UpdateOrgRequest {
     #[validate(length(min = 1, max = 128, message = "display_name must be 1-128 characters"))]
     pub display_name: Option<String>,
+    pub slug: Option<String>,
     pub avatar_url: Option<String>,
     /// Update the org's contact email. Pass an empty string to clear back to
     /// the synthetic placeholder used when no contact email was provided at
@@ -125,6 +128,7 @@ pub struct SetPrimaryOrgRequest {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct OrgResponse {
     pub id: String,
+    pub slug: String,
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
     /// User-visible contact email. `None` when the org was created without an
@@ -146,6 +150,7 @@ pub struct OrgListResponse {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct OrgListItem {
     pub id: String,
+    pub slug: String,
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
     /// See [`OrgResponse::contact_email`].
@@ -308,6 +313,12 @@ fn invite_to_response(invite: OrgInvite, redeemer: Option<&User>) -> InviteRespo
         redeemed_at: invite.redeemed_at.map(|d| d.to_rfc3339()),
         created_at: invite.created_at.to_rfc3339(),
     }
+}
+
+fn slug_for_response(org: &User) -> String {
+    org.slug
+        .clone()
+        .unwrap_or_else(|| org_slug::slugify(org.display_name.as_deref().unwrap_or("org")))
 }
 
 fn resolve_scope_source_for_create(
@@ -516,10 +527,12 @@ pub async fn create_org(
     );
 
     let contact_email = org_service::contact_email_for_display(&org);
+    let slug = slug_for_response(&org);
     Ok((
         StatusCode::CREATED,
         Json(OrgResponse {
             id: org.id,
+            slug,
             display_name: org.display_name,
             avatar_url: org.avatar_url,
             contact_email,
@@ -544,8 +557,10 @@ pub async fn list_orgs(
     for m in memberships {
         if let Ok(org) = org_service::get_org_user(&state.db, &m.org_user_id).await {
             let contact_email = org_service::contact_email_for_display(&org);
+            let slug = slug_for_response(&org);
             items.push(OrgListItem {
                 id: org.id,
+                slug,
                 display_name: org.display_name,
                 avatar_url: org.avatar_url,
                 contact_email,
@@ -558,21 +573,24 @@ pub async fn list_orgs(
     Ok(Json(OrgListResponse { orgs: items }))
 }
 
-/// GET /api/v1/orgs/{org_id}
+/// GET /api/v1/orgs/{key}
 pub async fn get_org(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    Path(org_id): Path<String>,
+    Path(key): Path<String>,
 ) -> AppResult<Json<OrgResponse>> {
     let actor = auth_user.user_id.to_string();
+    let org = org_service::find_org_by_key(&state.db, &key).await?;
+    let org_id = org.id.clone();
     let membership = require_org_member(&state.db, &actor, &org_id).await?;
-    let org = org_service::get_org_user(&state.db, &org_id).await?;
 
     let members = org_service::list_members_for_org(&state.db, &org_id, false).await?;
     let contact_email = org_service::contact_email_for_display(&org);
+    let slug = slug_for_response(&org);
 
     Ok(Json(OrgResponse {
         id: org.id,
+        slug,
         display_name: org.display_name,
         avatar_url: org.avatar_url,
         contact_email,
@@ -607,11 +625,24 @@ pub async fn update_org(
             ));
         }
     }
+    if let Some(ref slug) = body.slug {
+        crate::handlers::admin_helpers::validate_slug(slug)?;
+        if org_slug::is_uuid_shaped(slug) {
+            return Err(AppError::ValidationError(
+                "Org slug must not be UUID-shaped".to_string(),
+            ));
+        }
+        let reserved = org_slug::reserve_slug(&state.db, slug, Some(&org_id)).await?;
+        if reserved != *slug {
+            return Err(AppError::OrgSlugTaken(slug.clone()));
+        }
+    }
 
     let org = org_service::update_org_user(
         &state.db,
         &org_id,
         body.display_name.as_deref(),
+        body.slug.as_deref(),
         body.avatar_url.as_deref(),
         body.contact_email.as_deref(),
     )
@@ -620,6 +651,7 @@ pub async fn update_org(
     let membership = require_org_member(&state.db, &actor, &org_id).await?;
     let members = org_service::list_members_for_org(&state.db, &org_id, false).await?;
     let contact_email = org_service::contact_email_for_display(&org);
+    let slug = slug_for_response(&org);
 
     let contact_email_changed = body.contact_email.is_some();
     audit_service::log_async(
@@ -638,6 +670,7 @@ pub async fn update_org(
 
     Ok(Json(OrgResponse {
         id: org.id,
+        slug,
         display_name: org.display_name,
         avatar_url: org.avatar_url,
         contact_email,
@@ -1032,7 +1065,24 @@ pub async fn set_primary_org(
 
 #[cfg(test)]
 mod tests {
-    use super::UpdateMemberRequest;
+    use super::{
+        CreateOrgRequest, UpdateMemberRequest, UpdateOrgRequest, create_org, get_org, list_orgs,
+        update_org,
+    };
+    use crate::db::{ensure_indexes, migrate_backfill_org_slugs};
+    use crate::errors::AppError;
+    use crate::models::org_membership::{
+        COLLECTION_NAME as ORG_MEMBERSHIPS, OrgMembership, OrgRole,
+    };
+    use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+    use crate::test_utils::{
+        connect_test_database, test_app_state, test_auth_user, test_membership, test_user,
+    };
+    use axum::Json;
+    use axum::extract::{Path, State};
+    use bson::doc;
+    use futures::TryStreamExt;
+    use uuid::Uuid;
 
     // Regression tests for ChronoAIProject/NyxID#363: `allowed_service_ids:
     // null` in PATCH /orgs/{id}/members/{id} must clear the scope. With
@@ -1072,5 +1122,169 @@ mod tests {
         let req: UpdateMemberRequest =
             serde_json::from_str(r#"{"role": "member", "allowed_service_ids": []}"#).unwrap();
         assert_eq!(req.allowed_service_ids, Some(Some(vec![])));
+    }
+
+    #[tokio::test]
+    async fn create_fetch_by_slug_and_list_includes_slug() {
+        let Some(db) = connect_test_database("org_slug_handler").await else {
+            eprintln!("Skipping MongoDB-backed test; no test database available");
+            return;
+        };
+
+        let actor_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&actor_id, UserType::Person))
+            .await
+            .expect("insert actor");
+
+        let state = test_app_state(db);
+        let auth = test_auth_user(&actor_id);
+
+        let (status, Json(created)) = create_org(
+            State(state.clone()),
+            auth.clone(),
+            Json(CreateOrgRequest {
+                display_name: "Chrono AI".to_string(),
+                contact_email: None,
+                avatar_url: None,
+            }),
+        )
+        .await
+        .expect("create org");
+        assert_eq!(status, axum::http::StatusCode::CREATED);
+        assert_eq!(created.slug, "chrono-ai");
+
+        let Json(fetched) = get_org(
+            State(state.clone()),
+            auth.clone(),
+            Path(created.slug.clone()),
+        )
+        .await
+        .expect("fetch org by slug");
+        assert_eq!(fetched.id, created.id);
+        assert_eq!(fetched.slug, created.slug);
+
+        let Json(list) = list_orgs(State(state), auth).await.expect("list orgs");
+        assert!(
+            list.orgs
+                .iter()
+                .any(|org| org.id == created.id && org.slug == "chrono-ai")
+        );
+    }
+
+    #[tokio::test]
+    async fn backfill_index_and_duplicate_patch_conflict() {
+        let Some(db) = connect_test_database("org_slug_migration").await else {
+            eprintln!("Skipping MongoDB-backed test; no test database available");
+            return;
+        };
+
+        let actor_id = Uuid::new_v4().to_string();
+        let org_a_id = Uuid::new_v4().to_string();
+        let org_b_id = Uuid::new_v4().to_string();
+
+        let mut actor = test_user(&actor_id, UserType::Person);
+        actor.email = "actor@example.com".to_string();
+
+        let mut org_a = test_user(&org_a_id, UserType::Org);
+        org_a.email = "org-a@example.com".to_string();
+        org_a.display_name = Some("Acme Labs".to_string());
+        org_a.slug = None;
+
+        let mut org_b = test_user(&org_b_id, UserType::Org);
+        org_b.email = "org-b@example.com".to_string();
+        org_b.display_name = Some("Acme Labs".to_string());
+        org_b.slug = None;
+
+        let users = db.collection::<User>(USERS);
+        users.insert_one(actor).await.expect("insert actor");
+        users.insert_one(org_a).await.expect("insert dirty org a");
+
+        let mut org_b_doc = bson::to_document(&org_b).expect("serialize dirty org b");
+        org_b_doc.remove("slug");
+        db.collection::<bson::Document>(USERS)
+            .insert_one(org_b_doc)
+            .await
+            .expect("insert dirty org b without slug field");
+
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_many([
+                test_membership(&org_a_id, &actor_id, OrgRole::Admin, None),
+                test_membership(&org_b_id, &actor_id, OrgRole::Admin, None),
+            ])
+            .await
+            .expect("insert admin memberships");
+
+        migrate_backfill_org_slugs(&db)
+            .await
+            .expect("backfill org slugs");
+
+        let docs: Vec<bson::Document> = db
+            .collection::<bson::Document>(USERS)
+            .find(doc! { "_id": { "$in": [&org_a_id, &org_b_id] } })
+            .await
+            .expect("find backfilled orgs")
+            .try_collect()
+            .await
+            .expect("collect backfilled orgs");
+        let mut slugs: Vec<String> = docs
+            .iter()
+            .map(|doc| doc.get_str("slug").expect("slug set").to_string())
+            .collect();
+        slugs.sort();
+        assert_eq!(slugs, vec!["acme-labs", "acme-labs-2"]);
+
+        ensure_indexes(&db).await.expect("ensure indexes");
+        let indexes = db
+            .run_command(doc! { "listIndexes": USERS })
+            .await
+            .expect("list user indexes");
+        let index_docs = indexes
+            .get_document("cursor")
+            .expect("cursor")
+            .get_array("firstBatch")
+            .expect("first batch");
+        let slug_index = index_docs
+            .iter()
+            .filter_map(|value| value.as_document())
+            .find(|index| index.get_str("name") == Ok("users_org_slug_unique"))
+            .expect("users_org_slug_unique index");
+        assert_eq!(slug_index.get_bool("unique"), Ok(true));
+        assert_eq!(
+            slug_index
+                .get_document("partialFilterExpression")
+                .expect("partial filter")
+                .get_str("user_type"),
+            Ok("org")
+        );
+        assert_eq!(
+            slug_index
+                .get_document("partialFilterExpression")
+                .expect("partial filter")
+                .get_document("slug")
+                .expect("slug filter")
+                .get_str("$type"),
+            Ok("string")
+        );
+
+        let state = test_app_state(db);
+        let result = update_org(
+            State(state),
+            test_auth_user(&actor_id),
+            Path(org_b_id),
+            Json(UpdateOrgRequest {
+                display_name: None,
+                slug: Some("acme-labs".to_string()),
+                avatar_url: None,
+                contact_email: None,
+            }),
+        )
+        .await;
+
+        match result {
+            Err(AppError::OrgSlugTaken(slug)) => assert_eq!(slug, "acme-labs"),
+            Err(other) => panic!("unexpected error: {other}"),
+            Ok(_) => panic!("duplicate slug patch should fail"),
+        }
     }
 }

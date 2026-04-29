@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use crate::api::ApiClient;
 use crate::cli::{ApiKeyCommands, AuthArgs, OutputFormat};
+use crate::org_resolver::resolve_org_id;
 
 pub async fn run(command: ApiKeyCommands) -> Result<()> {
     match command {
@@ -24,6 +25,12 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
             no_wait,
             auth,
         } => {
+            let mut api = ApiClient::from_auth(&auth)?;
+            let org = match org {
+                Some(raw) => Some(resolve_org_id(&mut api, &raw).await?),
+                None => None,
+            };
+
             // Browser-flow gate — opens the local wizard when a
             // browser is available, or the remote pairing transport
             // (code + URL) otherwise. `--terminal` and
@@ -54,8 +61,6 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
                 };
                 return crate::wizard::run_api_key_create_wizard(&auth, prefill, no_wait).await;
             }
-
-            let mut api = ApiClient::from_auth(&auth)?;
 
             let key_name = match name {
                 Some(n) => n,
@@ -139,6 +144,10 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
 
         ApiKeyCommands::List { org, auth } => {
             let mut api = ApiClient::from_auth(&auth)?;
+            let org = match org {
+                Some(raw) => Some(resolve_org_id(&mut api, &raw).await?),
+                None => None,
+            };
             let path = match org {
                 Some(ref id) => format!("/api-keys?org_id={}", urlencoding::encode(id)),
                 None => "/api-keys".to_string(),

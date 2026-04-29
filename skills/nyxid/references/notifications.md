@@ -68,10 +68,10 @@ nyxid approval set-config <SERVICE_ID> --require-approval true --approval-mode g
 # Org-level per-service approval policies (admin only). When set, the
 # policy is dominant over the member's personal gate: every member of
 # the org must get an admin's approval before the proxy call goes through.
-nyxid approval service-configs --org <ORG_ID> --output json
-nyxid approval set-config <SERVICE_ID> --org <ORG_ID> --require-approval true
-nyxid approval set-config <SERVICE_ID> --org <ORG_ID> --require-approval true --approval-mode grant
-nyxid approval list --org <ORG_ID> --output json       # list requests against org services
+nyxid approval service-configs --org <ID|SLUG|NAME> --output json
+nyxid approval set-config <SERVICE_ID> --org <ID|SLUG|NAME> --require-approval true
+nyxid approval set-config <SERVICE_ID> --org <ID|SLUG|NAME> --require-approval true --approval-mode grant
+nyxid approval list --org <ID|SLUG|NAME> --output json # list requests against org services
 
 nyxid notification settings                            # show notification settings
 nyxid notification update --approval-telegram true     # enable telegram notifications

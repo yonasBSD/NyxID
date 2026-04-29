@@ -36,6 +36,10 @@ pub struct User {
     pub email: String,
     pub password_hash: Option<String>,
     pub display_name: Option<String>,
+    /// Stable user-facing org slug. Populated only for `user_type = Org`;
+    /// person users and legacy rows deserialize as `None`.
+    #[serde(default)]
+    pub slug: Option<String>,
     pub avatar_url: Option<String>,
     pub email_verified: bool,
     pub email_verification_token: Option<String>,
@@ -87,6 +91,7 @@ mod tests {
             email: "test@example.com".to_string(),
             password_hash: Some("$argon2id$hash".to_string()),
             display_name: Some("Test User".to_string()),
+            slug: None,
             avatar_url: None,
             email_verified: true,
             email_verification_token: None,
@@ -140,6 +145,7 @@ mod tests {
         let keys: Vec<&str> = doc.keys().map(|k| k.as_str()).collect();
         assert!(keys.contains(&"_id"));
         assert!(keys.contains(&"email"));
+        assert!(keys.contains(&"slug"));
         assert!(keys.contains(&"is_active"));
         assert!(keys.contains(&"is_admin"));
         assert!(keys.contains(&"mfa_enabled"));
@@ -169,10 +175,12 @@ mod tests {
         org.user_type = UserType::Org;
         org.password_hash = None;
         org.display_name = Some("Chrono AI".to_string());
+        org.slug = Some("chrono-ai".to_string());
         let doc = bson::to_document(&org).expect("serialize org");
         let restored: User = bson::from_document(doc).expect("deserialize org");
         assert!(restored.user_type.is_org());
         assert_eq!(restored.password_hash, None);
+        assert_eq!(restored.slug.as_deref(), Some("chrono-ai"));
     }
 
     #[test]
@@ -181,8 +189,10 @@ mod tests {
         let mut doc = bson::to_document(&make_user()).expect("serialize");
         doc.remove("user_type");
         doc.remove("primary_org_id");
+        doc.remove("slug");
         let restored: User = bson::from_document(doc).expect("deserialize legacy");
         assert!(restored.user_type.is_person());
         assert_eq!(restored.primary_org_id, None);
+        assert_eq!(restored.slug, None);
     }
 }

@@ -124,6 +124,7 @@ pub async fn create_user(
         email: normalized,
         password_hash: Some(password_hash),
         display_name: display_name.map(String::from),
+        slug: None,
         avatar_url: None,
         email_verified: true,
         email_verification_token: None,

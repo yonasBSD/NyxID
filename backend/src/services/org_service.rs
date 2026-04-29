@@ -26,6 +26,7 @@ use crate::models::org_membership::{
     COLLECTION_NAME as ORG_MEMBERSHIPS, MemberScopeSource, OrgMembership, OrgRole,
 };
 use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+use crate::services::org_slug;
 
 /// Wall-clock timeout for the proxy fallback membership query.
 ///
@@ -64,6 +65,7 @@ pub async fn create_org_user(
 
     let now = Utc::now();
     let id = Uuid::new_v4().to_string();
+    let slug = org_slug::reserve_slug(db, &org_slug::slugify(trimmed_name), None).await?;
     // Synthetic placeholder when the admin doesn't provide a contact email.
     // The partial-unique index on `users.email` only constrains
     // user_type=person, so collisions across orgs are fine -- but we still
@@ -78,6 +80,7 @@ pub async fn create_org_user(
         email,
         password_hash: None,
         display_name: Some(trimmed_name.to_string()),
+        slug: Some(slug),
         avatar_url: avatar_url.map(|s| s.to_string()),
         email_verified: false,
         email_verification_token: None,
@@ -115,6 +118,18 @@ pub async fn get_org_user(db: &mongodb::Database, org_user_id: &str) -> AppResul
         return Err(AppError::OrgNotFound(org_user_id.to_string()));
     }
     Ok(user)
+}
+
+/// Look up an org by UUID or slug.
+pub async fn find_org_by_key(db: &mongodb::Database, key: &str) -> AppResult<User> {
+    if Uuid::parse_str(key).is_ok() {
+        return get_org_user(db, key).await;
+    }
+
+    db.collection::<User>(USERS)
+        .find_one(doc! { "user_type": "org", "slug": key })
+        .await?
+        .ok_or_else(|| AppError::OrgNotFound(key.to_string()))
 }
 
 /// Suffix used for the synthetic placeholder email generated when an org is
@@ -155,6 +170,7 @@ pub async fn update_org_user(
     db: &mongodb::Database,
     org_user_id: &str,
     display_name: Option<&str>,
+    slug: Option<&str>,
     avatar_url: Option<&str>,
     contact_email: Option<&str>,
 ) -> AppResult<User> {
@@ -170,6 +186,9 @@ pub async fn update_org_user(
             ));
         }
         update.insert("display_name", trimmed);
+    }
+    if let Some(slug) = slug {
+        update.insert("slug", slug);
     }
     if let Some(avatar) = avatar_url {
         let trimmed = avatar.trim();
@@ -1368,6 +1387,7 @@ mod tests {
             email: email.to_string(),
             password_hash: None,
             display_name: Some("Test Org".to_string()),
+            slug: Some("test-org".to_string()),
             avatar_url: None,
             email_verified: false,
             email_verification_token: None,

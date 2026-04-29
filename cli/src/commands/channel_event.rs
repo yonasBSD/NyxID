@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 use crate::api::ApiClient;
 use crate::cli::{ChannelEventChannelCommands, ChannelEventCommands, OutputFormat};
+use crate::org_resolver::resolve_org_id;
 
 pub async fn run(command: ChannelEventCommands) -> Result<()> {
     match command {
@@ -108,6 +109,10 @@ async fn run_channel(command: ChannelEventChannelCommands) -> Result<()> {
             auth,
         } => {
             let mut api = ApiClient::from_auth(&auth)?;
+            let org = match org {
+                Some(raw) => Some(resolve_org_id(&mut api, &raw).await?),
+                None => None,
+            };
 
             let mut body = serde_json::json!({
                 "platform": "device",
@@ -148,6 +153,10 @@ async fn run_channel(command: ChannelEventChannelCommands) -> Result<()> {
 
         ChannelEventChannelCommands::List { org, auth } => {
             let mut api = ApiClient::from_auth(&auth)?;
+            let org = match org {
+                Some(raw) => Some(resolve_org_id(&mut api, &raw).await?),
+                None => None,
+            };
             let path = match &org {
                 Some(o) => format!("/channel-conversations?org_id={}", urlencoding::encode(o)),
                 None => "/channel-conversations".to_string(),

@@ -7,6 +7,7 @@ use serde_json::Value;
 use crate::api::ApiClient;
 use crate::cli::{ChannelBotCommands, ChannelRouteCommands, OutputFormat};
 use crate::commands::lark_permission::print_permission_block;
+use crate::org_resolver::resolve_org_id;
 
 pub async fn run(command: ChannelBotCommands) -> Result<()> {
     match command {
@@ -44,6 +45,10 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
             }
 
             let mut api = ApiClient::from_auth(&auth)?;
+            let org = match org {
+                Some(raw) => Some(resolve_org_id(&mut api, &raw).await?),
+                None => None,
+            };
 
             let mut body = serde_json::json!({
                 "platform": platform,
@@ -193,6 +198,10 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
 
         ChannelBotCommands::List { org, auth } => {
             let mut api = ApiClient::from_auth(&auth)?;
+            let org = match org {
+                Some(raw) => Some(resolve_org_id(&mut api, &raw).await?),
+                None => None,
+            };
             let path = match org.as_deref() {
                 Some(id) => format!("/channel-bots?org_id={}", urlencoding::encode(id)),
                 None => "/channel-bots".to_string(),
@@ -360,6 +369,10 @@ async fn run_route(command: ChannelRouteCommands) -> Result<()> {
             auth,
         } => {
             let mut api = ApiClient::from_auth(&auth)?;
+            let org = match org {
+                Some(raw) => Some(resolve_org_id(&mut api, &raw).await?),
+                None => None,
+            };
 
             let mut body = serde_json::json!({
                 "channel_bot_id": bot_id,
@@ -408,6 +421,10 @@ async fn run_route(command: ChannelRouteCommands) -> Result<()> {
 
         ChannelRouteCommands::List { bot_id, org, auth } => {
             let mut api = ApiClient::from_auth(&auth)?;
+            let org = match org {
+                Some(raw) => Some(resolve_org_id(&mut api, &raw).await?),
+                None => None,
+            };
             let mut params: Vec<String> = Vec::new();
             if let Some(id) = &bot_id {
                 params.push(format!("bot_id={}", urlencoding::encode(id)));

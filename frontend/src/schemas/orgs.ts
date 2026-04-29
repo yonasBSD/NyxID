@@ -18,6 +18,19 @@ export type OrgRole = z.infer<typeof orgRoleSchema>;
 export const scopeSourceSchema = z.enum(["inherit", "override"]);
 export type ScopeSource = z.infer<typeof scopeSourceSchema>;
 
+// Mirror backend validate_slug() in admin_helpers.rs and the UUID-shape
+// rejection in org_slug.rs. 1-80 chars; lowercase a-z, digits, single
+// hyphens; cannot start or end with hyphen; cannot be UUID-shaped.
+const ORG_SLUG_REGEX = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
+const UUID_SHAPE_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+export const orgSlugSchema = z
+  .string()
+  .min(1, "Slug is required")
+  .max(80, "Slug must be 80 characters or fewer")
+  .regex(ORG_SLUG_REGEX, "Use lowercase letters, digits, and single hyphens")
+  .refine((v) => !UUID_SHAPE_REGEX.test(v), "Slug must not be UUID-shaped");
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Response shapes (match backend wire format exactly)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -28,6 +41,7 @@ export type ScopeSource = z.infer<typeof scopeSourceSchema>;
  */
 export const orgListItemSchema = z.object({
   id: z.string(),
+  slug: z.string(),
   display_name: z.string().nullable(),
   avatar_url: z.string().nullable(),
   /**
@@ -51,6 +65,7 @@ export type OrgListResponse = z.infer<typeof orgListResponseSchema>;
  */
 export const orgResponseSchema = z.object({
   id: z.string(),
+  slug: z.string(),
   display_name: z.string().nullable(),
   avatar_url: z.string().nullable(),
   /**
@@ -151,6 +166,7 @@ export const updateOrgRequestSchema = z.object({
     .min(1, "Display name is required")
     .max(128, "Display name must be at most 128 characters")
     .optional(),
+  slug: orgSlugSchema.optional(),
   avatar_url: z.string().trim().url("Avatar URL must be valid").optional().or(
     z.literal(""),
   ),

@@ -14,6 +14,7 @@ use serde_json::{Map, Value};
 
 use crate::api::ApiClient;
 use crate::cli::{DeveloperAppCommands, OutputFormat};
+use crate::org_resolver::resolve_org_id;
 
 pub async fn run(command: DeveloperAppCommands) -> Result<()> {
     match command {
@@ -32,6 +33,10 @@ pub async fn run(command: DeveloperAppCommands) -> Result<()> {
             }
 
             let mut api = ApiClient::from_auth(&auth)?;
+            let org = match org {
+                Some(raw) => Some(resolve_org_id(&mut api, &raw).await?),
+                None => None,
+            };
 
             let mut body = Map::new();
             body.insert("name".to_string(), Value::String(name));
@@ -106,6 +111,10 @@ pub async fn run(command: DeveloperAppCommands) -> Result<()> {
 
         DeveloperAppCommands::List { org, auth } => {
             let mut api = ApiClient::from_auth(&auth)?;
+            let org = match org {
+                Some(raw) => Some(resolve_org_id(&mut api, &raw).await?),
+                None => None,
+            };
             let path = match org {
                 Some(ref id) => {
                     format!(
