@@ -128,6 +128,7 @@ pub struct SetPrimaryOrgRequest {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct OrgResponse {
     pub id: String,
+    pub slug: String,
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
     /// User-visible contact email. `None` when the org was created without an
@@ -149,6 +150,7 @@ pub struct OrgListResponse {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct OrgListItem {
     pub id: String,
+    pub slug: String,
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
     /// See [`OrgResponse::contact_email`].
@@ -311,6 +313,12 @@ fn invite_to_response(invite: OrgInvite, redeemer: Option<&User>) -> InviteRespo
         redeemed_at: invite.redeemed_at.map(|d| d.to_rfc3339()),
         created_at: invite.created_at.to_rfc3339(),
     }
+}
+
+fn slug_for_response(org: &User) -> String {
+    org.slug
+        .clone()
+        .unwrap_or_else(|| org_slug::slugify(org.display_name.as_deref().unwrap_or("org")))
 }
 
 fn resolve_scope_source_for_create(
@@ -519,10 +527,12 @@ pub async fn create_org(
     );
 
     let contact_email = org_service::contact_email_for_display(&org);
+    let slug = slug_for_response(&org);
     Ok((
         StatusCode::CREATED,
         Json(OrgResponse {
             id: org.id,
+            slug,
             display_name: org.display_name,
             avatar_url: org.avatar_url,
             contact_email,
@@ -547,8 +557,10 @@ pub async fn list_orgs(
     for m in memberships {
         if let Ok(org) = org_service::get_org_user(&state.db, &m.org_user_id).await {
             let contact_email = org_service::contact_email_for_display(&org);
+            let slug = slug_for_response(&org);
             items.push(OrgListItem {
                 id: org.id,
+                slug,
                 display_name: org.display_name,
                 avatar_url: org.avatar_url,
                 contact_email,
@@ -561,21 +573,24 @@ pub async fn list_orgs(
     Ok(Json(OrgListResponse { orgs: items }))
 }
 
-/// GET /api/v1/orgs/{org_id}
+/// GET /api/v1/orgs/{key}
 pub async fn get_org(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    Path(org_id): Path<String>,
+    Path(key): Path<String>,
 ) -> AppResult<Json<OrgResponse>> {
     let actor = auth_user.user_id.to_string();
+    let org = org_service::find_org_by_key(&state.db, &key).await?;
+    let org_id = org.id.clone();
     let membership = require_org_member(&state.db, &actor, &org_id).await?;
-    let org = org_service::get_org_user(&state.db, &org_id).await?;
 
     let members = org_service::list_members_for_org(&state.db, &org_id, false).await?;
     let contact_email = org_service::contact_email_for_display(&org);
+    let slug = slug_for_response(&org);
 
     Ok(Json(OrgResponse {
         id: org.id,
+        slug,
         display_name: org.display_name,
         avatar_url: org.avatar_url,
         contact_email,
@@ -636,6 +651,7 @@ pub async fn update_org(
     let membership = require_org_member(&state.db, &actor, &org_id).await?;
     let members = org_service::list_members_for_org(&state.db, &org_id, false).await?;
     let contact_email = org_service::contact_email_for_display(&org);
+    let slug = slug_for_response(&org);
 
     let contact_email_changed = body.contact_email.is_some();
     audit_service::log_async(
@@ -654,6 +670,7 @@ pub async fn update_org(
 
     Ok(Json(OrgResponse {
         id: org.id,
+        slug,
         display_name: org.display_name,
         avatar_url: org.avatar_url,
         contact_email,
@@ -1048,7 +1065,12 @@ pub async fn set_primary_org(
 
 #[cfg(test)]
 mod tests {
-    use super::UpdateMemberRequest;
+    use super::{CreateOrgRequest, UpdateMemberRequest, create_org, get_org, list_orgs};
+    use crate::models::user::{COLLECTION_NAME as USERS, UserType};
+    use crate::test_utils::{connect_test_database, test_app_state, test_auth_user, test_user};
+    use axum::Json;
+    use axum::extract::{Path, State};
+    use uuid::Uuid;
 
     // Regression tests for ChronoAIProject/NyxID#363: `allowed_service_ids:
     // null` in PATCH /orgs/{id}/members/{id} must clear the scope. With
@@ -1088,5 +1110,53 @@ mod tests {
         let req: UpdateMemberRequest =
             serde_json::from_str(r#"{"role": "member", "allowed_service_ids": []}"#).unwrap();
         assert_eq!(req.allowed_service_ids, Some(Some(vec![])));
+    }
+
+    #[tokio::test]
+    async fn create_fetch_by_slug_and_list_includes_slug() {
+        let Some(db) = connect_test_database("org_slug_handler").await else {
+            eprintln!("Skipping MongoDB-backed test; no test database available");
+            return;
+        };
+
+        let actor_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&actor_id, UserType::Person))
+            .await
+            .expect("insert actor");
+
+        let state = test_app_state(db);
+        let auth = test_auth_user(&actor_id);
+
+        let (status, Json(created)) = create_org(
+            State(state.clone()),
+            auth.clone(),
+            Json(CreateOrgRequest {
+                display_name: "Chrono AI".to_string(),
+                contact_email: None,
+                avatar_url: None,
+            }),
+        )
+        .await
+        .expect("create org");
+        assert_eq!(status, axum::http::StatusCode::CREATED);
+        assert_eq!(created.slug, "chrono-ai");
+
+        let Json(fetched) = get_org(
+            State(state.clone()),
+            auth.clone(),
+            Path(created.slug.clone()),
+        )
+        .await
+        .expect("fetch org by slug");
+        assert_eq!(fetched.id, created.id);
+        assert_eq!(fetched.slug, created.slug);
+
+        let Json(list) = list_orgs(State(state), auth).await.expect("list orgs");
+        assert!(
+            list.orgs
+                .iter()
+                .any(|org| org.id == created.id && org.slug == "chrono-ai")
+        );
     }
 }

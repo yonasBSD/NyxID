@@ -120,6 +120,18 @@ pub async fn get_org_user(db: &mongodb::Database, org_user_id: &str) -> AppResul
     Ok(user)
 }
 
+/// Look up an org by UUID or slug.
+pub async fn find_org_by_key(db: &mongodb::Database, key: &str) -> AppResult<User> {
+    if Uuid::parse_str(key).is_ok() {
+        return get_org_user(db, key).await;
+    }
+
+    db.collection::<User>(USERS)
+        .find_one(doc! { "user_type": "org", "slug": key })
+        .await?
+        .ok_or_else(|| AppError::OrgNotFound(key.to_string()))
+}
+
 /// Suffix used for the synthetic placeholder email generated when an org is
 /// created without an explicit contact email. Kept as a const so UI/API
 /// normalizers can hide it behind a single check.
