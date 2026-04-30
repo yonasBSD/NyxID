@@ -301,6 +301,19 @@ fn parse_basic_client_credentials(headers: &HeaderMap) -> AppResult<Option<(Stri
     Ok(Some((client_id, client_secret)))
 }
 
+fn client_credentials_from_basic_or_params(
+    basic: Option<(String, String)>,
+    client_id: Option<String>,
+    client_secret: Option<String>,
+) -> Option<(String, Option<String>)> {
+    match (basic, client_id, client_secret) {
+        (Some((id, _)), Some(query_id), _) if query_id != id => None,
+        (Some((id, secret)), _, _) => Some((id, Some(secret))),
+        (None, Some(id), secret) => Some((id, secret)),
+        _ => None,
+    }
+}
+
 // --- Handlers ---
 
 /// GET /oauth/authorize
@@ -1443,15 +1456,12 @@ async fn token_inner(
                 }))
             } else if subject_token_type == oauth_broker_service::BROKER_SUBJECT_TOKEN_TYPE {
                 // RFC 8693 token exchange against an OauthBrokerBinding.
-                let client_secret = body
-                    .client_secret
-                    .as_deref()
-                    .or(client_secret_for_auth)
-                    .ok_or_else(|| AppError::BadRequest("Missing client_secret".to_string()))?;
-
-                let client =
-                    oauth_service::authenticate_client(&state.db, client_id, Some(client_secret))
-                        .await?;
+                let client = oauth_service::authenticate_client(
+                    &state.db,
+                    client_id,
+                    client_secret_for_auth,
+                )
+                .await?;
                 // Honor BOTH broker-mode triggers: the per-client admin flag
                 // and the urn:nyxid:scope:broker_binding scope. Otherwise a
                 // scope-opted-in client could issue bindings (commit #4 path
@@ -1928,13 +1938,16 @@ pub async fn get_binding(
 ) -> AppResult<Json<GetBindingResponse>> {
     let not_found = || AppError::NotFound("binding not found".to_string());
     let basic = parse_basic_client_credentials(&headers).map_err(|_| not_found())?;
-    let (client_id, client_secret) = match (basic, query.client_id, query.client_secret) {
-        (Some((id, secret)), _, _) => (id, secret),
-        (None, Some(id), Some(secret)) => (id, secret),
-        _ => return Err(not_found()),
+    let (client_id, client_secret) = match client_credentials_from_basic_or_params(
+        basic,
+        query.client_id,
+        query.client_secret,
+    ) {
+        Some(credentials) => credentials,
+        None => return Err(not_found()),
     };
 
-    if oauth_service::authenticate_client(&state.db, &client_id, Some(&client_secret))
+    if oauth_service::authenticate_client(&state.db, &client_id, client_secret.as_deref())
         .await
         .is_err()
     {
@@ -1974,13 +1987,16 @@ pub async fn delete_binding(
     axum::extract::Query(query): axum::extract::Query<GetBindingQuery>,
 ) -> StatusCode {
     let basic = parse_basic_client_credentials(&headers).ok().flatten();
-    let (client_id, client_secret) = match (basic, query.client_id, query.client_secret) {
-        (Some((id, secret)), _, _) => (id, secret),
-        (None, Some(id), Some(secret)) => (id, secret),
-        _ => return StatusCode::NO_CONTENT,
+    let (client_id, client_secret) = match client_credentials_from_basic_or_params(
+        basic,
+        query.client_id,
+        query.client_secret,
+    ) {
+        Some(credentials) => credentials,
+        None => return StatusCode::NO_CONTENT,
     };
 
-    if oauth_service::authenticate_client(&state.db, &client_id, Some(&client_secret))
+    if oauth_service::authenticate_client(&state.db, &client_id, client_secret.as_deref())
         .await
         .is_err()
     {
@@ -2024,21 +2040,26 @@ pub async fn delete_binding(
 ///
 /// RFC 7009 Token Revocation. Authenticates the calling client before
 /// revoking the token. Always returns 200 per the spec.
-pub async fn revoke(State(state): State<AppState>, Form(body): Form<RevokeRequest>) -> StatusCode {
+pub async fn revoke(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(body): Form<RevokeRequest>,
+) -> StatusCode {
     // Authenticate the calling client (RFC 7009 requirement).
     // Per the spec, always return 200 even if authentication fails.
-    let caller_client_id = match body.client_id.as_deref() {
-        Some(id) if !id.is_empty() => id,
+    let basic = parse_basic_client_credentials(&headers).ok().flatten();
+    let (caller_client_id, client_secret) = match client_credentials_from_basic_or_params(
+        basic,
+        body.client_id.clone(),
+        body.client_secret.clone(),
+    ) {
+        Some((id, secret)) if !id.is_empty() => (id, secret),
         _ => return StatusCode::OK,
     };
 
-    if oauth_service::authenticate_client(
-        &state.db,
-        caller_client_id,
-        body.client_secret.as_deref(),
-    )
-    .await
-    .is_err()
+    if oauth_service::authenticate_client(&state.db, &caller_client_id, client_secret.as_deref())
+        .await
+        .is_err()
     {
         return StatusCode::OK;
     }
@@ -2061,7 +2082,7 @@ pub async fn revoke(State(state): State<AppState>, Form(body): Form<RevokeReques
             &state.db,
             state.encryption_keys.clone(),
             &state.http_client,
-            caller_client_id,
+            &caller_client_id,
             &body.token,
             "client_revoked",
         )
@@ -2138,7 +2159,6 @@ pub async fn revoke(State(state): State<AppState>, Form(body): Form<RevokeReques
 // --- Dynamic Client Registration (RFC 7591) ---
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub struct RegisterClientRequest {
     pub client_name: Option<String>,
     pub redirect_uris: Option<Vec<String>>,
@@ -2186,6 +2206,8 @@ pub async fn register_client(
             "Only token_endpoint_auth_method=none (public clients) is supported for dynamic registration".to_string(),
         ));
     }
+    let _requested_grant_types = body.grant_types.as_ref();
+    let _requested_response_types = body.response_types.as_ref();
 
     // Dynamic registration only creates public clients (PKCE-based, no secret).
     // Delegated RFC 8693 token exchange is controlled by `delegation_scopes`;
@@ -2194,6 +2216,11 @@ pub async fn register_client(
     // DCR is used by MCP clients (Cursor, Claude Code, etc.) which need the
     // `proxy` scope to call `/mcp` (enforced in handlers/mcp_transport.rs).
     // Use the MCP scope set so the resulting access tokens pass that check.
+    let allowed_scopes = match body.scope.as_deref().map(str::trim) {
+        Some(scope) if !scope.is_empty() => oauth_client_service::validate_allowed_scopes(scope)?,
+        _ => oauth_client_service::DEFAULT_MCP_ALLOWED_SCOPES.to_string(),
+    };
+
     let (client, _secret) = oauth_client_service::create_client(
         &state.db,
         &client_name,
@@ -2201,7 +2228,7 @@ pub async fn register_client(
         "public",
         "dynamic_registration",
         "",
-        oauth_client_service::DEFAULT_MCP_ALLOWED_SCOPES,
+        &allowed_scopes,
         false,
         None,
         None,
@@ -2230,4 +2257,323 @@ pub async fn register_client(
             client_id_issued_at: client.created_at.timestamp(),
         }),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::extract::Path;
+    use chrono::{Duration, Utc};
+    use mongodb::bson::doc;
+    use uuid::Uuid;
+
+    use crate::crypto::jwt;
+    use crate::models::oauth_broker_binding::{
+        COLLECTION_NAME as OAUTH_BROKER_BINDINGS, OauthBrokerBinding, hash_binding_id,
+    };
+    use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
+    use crate::models::refresh_token::{COLLECTION_NAME as REFRESH_TOKENS, RefreshToken};
+    use crate::services::oauth_broker_service::BROKER_BINDING_SCOPE;
+    use crate::test_utils::{connect_test_database, test_app_state};
+
+    async fn insert_public_client(db: &mongodb::Database, client_id: &str, allowed_scopes: &str) {
+        let now = Utc::now();
+        let client = OauthClient {
+            id: client_id.to_string(),
+            client_name: "Public Broker Test Client".to_string(),
+            client_secret_hash: String::new(),
+            redirect_uris: vec!["http://localhost/callback".to_string()],
+            allowed_scopes: allowed_scopes.to_string(),
+            grant_types: "authorization_code refresh_token".to_string(),
+            client_type: "public".to_string(),
+            is_active: true,
+            delegation_scopes: String::new(),
+            broker_capability_enabled: false,
+            revocation_webhook_url: None,
+            revocation_webhook_secret_encrypted: None,
+            created_by: Some("test".to_string()),
+            created_at: now,
+            updated_at: now,
+        };
+        db.collection::<OauthClient>(OAUTH_CLIENTS)
+            .insert_one(client)
+            .await
+            .expect("insert public client");
+    }
+
+    async fn insert_binding_for_client(
+        state: &AppState,
+        client_id: &str,
+        raw_binding_id: &str,
+        user_id: &str,
+        scopes: Vec<String>,
+    ) {
+        let user_uuid = Uuid::parse_str(user_id).expect("valid user id");
+        let (refresh_jwt, refresh_jti) =
+            jwt::generate_refresh_token(&state.jwt_keys, &state.config, &user_uuid)
+                .expect("generate refresh jwt");
+        let now = Utc::now();
+        let refresh = RefreshToken {
+            id: Uuid::new_v4().to_string(),
+            jti: refresh_jti.clone(),
+            client_id: client_id.to_string(),
+            user_id: user_id.to_string(),
+            session_id: None,
+            expires_at: now + Duration::days(7),
+            revoked: false,
+            replaced_by: None,
+            revoked_at: None,
+            created_at: now,
+        };
+        state
+            .db
+            .collection::<RefreshToken>(REFRESH_TOKENS)
+            .insert_one(refresh)
+            .await
+            .expect("insert refresh token");
+
+        let binding_hash = hash_binding_id(raw_binding_id);
+        let refresh_token_encrypted = state
+            .encryption_keys
+            .encrypt_with_aad(refresh_jwt.as_bytes(), binding_hash.as_bytes())
+            .await
+            .expect("encrypt binding refresh token");
+        let binding = OauthBrokerBinding {
+            id: binding_hash,
+            client_id: client_id.to_string(),
+            user_id: user_id.to_string(),
+            refresh_token_jti: refresh_jti,
+            refresh_token_encrypted: Some(refresh_token_encrypted),
+            scopes,
+            external_subject: None,
+            rotation_version: 0,
+            revoked: false,
+            last_used_at: None,
+            revoked_at: None,
+            revoke_reason: None,
+            created_at: now,
+        };
+        state
+            .db
+            .collection::<OauthBrokerBinding>(OAUTH_BROKER_BINDINGS)
+            .insert_one(binding)
+            .await
+            .expect("insert broker binding");
+    }
+
+    async fn load_binding(db: &mongodb::Database, raw_binding_id: &str) -> OauthBrokerBinding {
+        db.collection::<OauthBrokerBinding>(OAUTH_BROKER_BINDINGS)
+            .find_one(doc! { "_id": hash_binding_id(raw_binding_id) })
+            .await
+            .expect("query binding")
+            .expect("binding exists")
+    }
+
+    #[tokio::test]
+    async fn register_client_persists_requested_broker_scope() {
+        let Some(db) = connect_test_database("oauth_dcr_broker_scope").await else {
+            return;
+        };
+        let state = test_app_state(db.clone());
+
+        let (status, Json(response)) = register_client(
+            State(state),
+            Json(RegisterClientRequest {
+                client_name: Some("Aevatar".to_string()),
+                redirect_uris: Some(vec!["http://localhost/callback".to_string()]),
+                grant_types: None,
+                response_types: None,
+                token_endpoint_auth_method: Some("none".to_string()),
+                scope: Some(format!("openid {BROKER_BINDING_SCOPE}")),
+            }),
+        )
+        .await
+        .expect("register client");
+
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(
+            response
+                .scope
+                .split_whitespace()
+                .any(|s| s == BROKER_BINDING_SCOPE)
+        );
+
+        let client = db
+            .collection::<OauthClient>(OAUTH_CLIENTS)
+            .find_one(doc! { "_id": &response.client_id })
+            .await
+            .expect("query client")
+            .expect("client exists");
+        assert_eq!(client.allowed_scopes, response.scope);
+        assert!(oauth_broker_service::is_broker_client(&client));
+    }
+
+    #[tokio::test]
+    async fn register_client_rejects_unknown_scope() {
+        let Some(db) = connect_test_database("oauth_dcr_unknown_scope").await else {
+            return;
+        };
+        let state = test_app_state(db);
+
+        let result = register_client(
+            State(state),
+            Json(RegisterClientRequest {
+                client_name: Some("Bad Scope".to_string()),
+                redirect_uris: Some(vec!["http://localhost/callback".to_string()]),
+                grant_types: None,
+                response_types: None,
+                token_endpoint_auth_method: Some("none".to_string()),
+                scope: Some("openid unknown_scope".to_string()),
+            }),
+        )
+        .await;
+
+        assert!(matches!(result, Err(AppError::ValidationError(_))));
+    }
+
+    #[tokio::test]
+    async fn register_client_without_scope_uses_default_mcp_scopes() {
+        let Some(db) = connect_test_database("oauth_dcr_default_scope").await else {
+            return;
+        };
+        let state = test_app_state(db);
+
+        let (_status, Json(response)) = register_client(
+            State(state),
+            Json(RegisterClientRequest {
+                client_name: Some("Default Scope".to_string()),
+                redirect_uris: Some(vec!["http://localhost/callback".to_string()]),
+                grant_types: None,
+                response_types: None,
+                token_endpoint_auth_method: Some("none".to_string()),
+                scope: None,
+            }),
+        )
+        .await
+        .expect("register client");
+
+        assert_eq!(
+            response.scope,
+            oauth_client_service::DEFAULT_MCP_ALLOWED_SCOPES
+        );
+    }
+
+    #[tokio::test]
+    async fn broker_token_exchange_accepts_public_client_without_secret() {
+        let Some(db) = connect_test_database("oauth_broker_public_exchange").await else {
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let client_id = "public-broker-exchange";
+        let raw_binding_id = crate::models::oauth_broker_binding::generate_binding_id();
+        let user_id = Uuid::new_v4().to_string();
+        insert_public_client(
+            &db,
+            client_id,
+            &format!("openid profile {BROKER_BINDING_SCOPE}"),
+        )
+        .await;
+        insert_binding_for_client(
+            &state,
+            client_id,
+            &raw_binding_id,
+            &user_id,
+            vec!["openid".to_string(), "profile".to_string()],
+        )
+        .await;
+
+        let Json(response) = token_inner(
+            &state,
+            &TelemetryContext::default(),
+            &HeaderMap::new(),
+            TokenRequest {
+                grant_type: "urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
+                code: None,
+                redirect_uri: None,
+                client_id: Some(client_id.to_string()),
+                client_secret: None,
+                code_verifier: None,
+                refresh_token: None,
+                subject_token: Some(raw_binding_id),
+                subject_token_type: Some(
+                    oauth_broker_service::BROKER_SUBJECT_TOKEN_TYPE.to_string(),
+                ),
+                scope: Some("openid".to_string()),
+                provider: None,
+            },
+        )
+        .await
+        .expect("exchange binding");
+
+        assert_eq!(response.token_type, "Bearer");
+        assert!(!response.access_token.is_empty());
+        assert_eq!(response.scope.as_deref(), Some("openid"));
+    }
+
+    #[tokio::test]
+    async fn delete_binding_accepts_public_client_id_without_secret_and_preserves_ownership() {
+        let Some(db) = connect_test_database("oauth_broker_public_delete").await else {
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let client_id = "public-broker-delete";
+        let other_client_id = "public-broker-delete-other";
+        let raw_binding_id = crate::models::oauth_broker_binding::generate_binding_id();
+        let other_raw_binding_id = crate::models::oauth_broker_binding::generate_binding_id();
+        let user_id = Uuid::new_v4().to_string();
+        insert_public_client(
+            &db,
+            client_id,
+            &format!("openid profile {BROKER_BINDING_SCOPE}"),
+        )
+        .await;
+        insert_public_client(
+            &db,
+            other_client_id,
+            &format!("openid profile {BROKER_BINDING_SCOPE}"),
+        )
+        .await;
+        insert_binding_for_client(
+            &state,
+            client_id,
+            &raw_binding_id,
+            &user_id,
+            vec!["openid".to_string()],
+        )
+        .await;
+        insert_binding_for_client(
+            &state,
+            client_id,
+            &other_raw_binding_id,
+            &user_id,
+            vec!["openid".to_string()],
+        )
+        .await;
+
+        let status = delete_binding(
+            State(state.clone()),
+            HeaderMap::new(),
+            Path(raw_binding_id.clone()),
+            Query(GetBindingQuery {
+                client_id: Some(client_id.to_string()),
+                client_secret: None,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(load_binding(&db, &raw_binding_id).await.revoked);
+
+        let wrong_client_status = delete_binding(
+            State(state),
+            HeaderMap::new(),
+            Path(other_raw_binding_id.clone()),
+            Query(GetBindingQuery {
+                client_id: Some(other_client_id.to_string()),
+                client_secret: None,
+            }),
+        )
+        .await;
+        assert_eq!(wrong_client_status, StatusCode::NO_CONTENT);
+        assert!(!load_binding(&db, &other_raw_binding_id).await.revoked);
+    }
 }
