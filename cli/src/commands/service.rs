@@ -1917,7 +1917,7 @@ mod tests {
 
     #[test]
     fn add_ssh_body_without_org_omits_target_org_id() {
-        let body = build_add_ssh_body(AddSshBody {
+        let body = Value::Object(build_add_ssh_body(AddSshBody {
             label: "prod-bastion",
             host: "bastion.internal",
             port: 22,
@@ -1926,9 +1926,20 @@ mod tests {
             ttl: 30,
             via_node: "node-123",
             target_org_id: None,
-        });
+        }));
 
-        assert!(!body.contains_key("target_org_id"));
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "label": "prod-bastion",
+                "ssh_host": "bastion.internal",
+                "ssh_port": 22,
+                "ssh_certificate_auth": false,
+                "ssh_principals": "",
+                "ssh_certificate_ttl_minutes": 30,
+                "node_id": "node-123",
+            })
+        );
     }
 
     // Regression for issue #327: --direct must send "" so the backend
