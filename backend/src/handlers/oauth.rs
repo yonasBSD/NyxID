@@ -2162,7 +2162,11 @@ pub async fn revoke(
 pub struct RegisterClientRequest {
     pub client_name: Option<String>,
     pub redirect_uris: Option<Vec<String>>,
+    // RFC 7591 fields parsed but not yet acted on. Kept so serde accepts
+    // conformant requests; remove if/when we start branching on them.
+    #[allow(dead_code)]
     pub grant_types: Option<Vec<String>>,
+    #[allow(dead_code)]
     pub response_types: Option<Vec<String>>,
     pub token_endpoint_auth_method: Option<String>,
     pub scope: Option<String>,
@@ -2206,8 +2210,6 @@ pub async fn register_client(
             "Only token_endpoint_auth_method=none (public clients) is supported for dynamic registration".to_string(),
         ));
     }
-    let _requested_grant_types = body.grant_types.as_ref();
-    let _requested_response_types = body.response_types.as_ref();
 
     // Dynamic registration only creates public clients (PKCE-based, no secret).
     // Delegated RFC 8693 token exchange is controlled by `delegation_scopes`;
@@ -2575,5 +2577,63 @@ mod tests {
         .await;
         assert_eq!(wrong_client_status, StatusCode::NO_CONTENT);
         assert!(!load_binding(&db, &other_raw_binding_id).await.revoked);
+    }
+
+    #[tokio::test]
+    async fn get_binding_accepts_public_client_id_without_secret() {
+        let Some(db) = connect_test_database("oauth_broker_public_get").await else {
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let client_id = "public-broker-get";
+        let other_client_id = "public-broker-get-other";
+        let raw_binding_id = crate::models::oauth_broker_binding::generate_binding_id();
+        let user_id = Uuid::new_v4().to_string();
+        insert_public_client(
+            &db,
+            client_id,
+            &format!("openid profile {BROKER_BINDING_SCOPE}"),
+        )
+        .await;
+        insert_public_client(
+            &db,
+            other_client_id,
+            &format!("openid profile {BROKER_BINDING_SCOPE}"),
+        )
+        .await;
+        insert_binding_for_client(
+            &state,
+            client_id,
+            &raw_binding_id,
+            &user_id,
+            vec!["openid".to_string()],
+        )
+        .await;
+
+        let Json(response) = get_binding(
+            State(state.clone()),
+            HeaderMap::new(),
+            Path(raw_binding_id.clone()),
+            Query(GetBindingQuery {
+                client_id: Some(client_id.to_string()),
+                client_secret: None,
+            }),
+        )
+        .await
+        .expect("get binding");
+        assert_eq!(response.client_id, client_id);
+        assert_eq!(response.nyx_subject, user_id);
+
+        let wrong_owner = get_binding(
+            State(state),
+            HeaderMap::new(),
+            Path(raw_binding_id),
+            Query(GetBindingQuery {
+                client_id: Some(other_client_id.to_string()),
+                client_secret: None,
+            }),
+        )
+        .await;
+        assert!(matches!(wrong_owner, Err(AppError::NotFound(_))));
     }
 }
