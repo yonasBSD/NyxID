@@ -82,9 +82,16 @@ nyxid service add --custom --org chrono-ai \
 nyxid service add llm-openai --org chrono-ai --via-node my-laptop-node
 # Then on the node:
 nyxid node credentials setup --service llm-openai
+
+# Shared SSH bastion for the whole org (cert-auth via a node the org owns)
+nyxid service add-ssh --label prod-bastion --host bastion.acme.internal \
+  --via-node acme-shared-node --cert-auth --principals ubuntu \
+  --org acme-corp
 ```
 
 The backend enforces that the caller is an admin of the target org before writing the row (returns `8103 org_role_insufficient` otherwise). Creating or updating an org-owned service respects the admin's **effective** scope (per-member override if set, otherwise the role's default) just like the proxy path — a scoped admin cannot reach a service outside their effective allow-list.
+
+Org-owned SSH services inherit the org's approval policy via `authorize_ssh_access`, so SSH access requests pass through the same per-org approval gate as HTTP proxy calls.
 
 > **How org-OAuth works under the hood.** The CLI resolves `--org <ID|SLUG|NAME>` to the org UUID, creates a placeholder `UserApiKey` under the org's user_id (`POST /keys` with `target_org_id`), then initiates the OAuth / device-code flow with `target_org_id=X` on the query string. The backend stores the resulting `UserProviderToken` with `user_id = org`, and the sync routine matches it to the placeholder because both share the same user_id. The admin's personal scope is untouched -- the grant lives entirely under the org. If you prefer a dedicated identity for the org's OAuth grants (so personal account compromise does not leak the org credential), create a dedicated service account and use its token for the initial `nyxid login` before running `nyxid service add ... --oauth --org <ID|SLUG|NAME>`.
 

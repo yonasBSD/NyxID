@@ -631,6 +631,10 @@ pub enum ServiceCommands {
         /// Node to route through (required for SSH)
         #[arg(long)]
         via_node: String,
+        /// Create the service under an organization (UUID, slug, or display name).
+        /// Members of the org will see and use the SSH service through their own NyxID account.
+        #[arg(long, value_name = "ID|SLUG|NAME")]
+        org: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },
