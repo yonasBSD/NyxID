@@ -183,6 +183,15 @@ nyxid node credentials remove --service <SLUG>         # remove credential
 All SSH commands accept service ID, slug, or name (auto-resolves). SSH slugs are scoped per-user -- two users can each have an SSH service with the same slug without conflict. MCP SSH tools (`ssh_exec`, `ssh_list`) only see the caller's own services.
 
 ```bash
+# Personal SSH service
+nyxid service add-ssh --label prod-bastion --host 10.0.0.5 --via-node my-laptop \
+  --cert-auth --principals ubuntu
+
+# Shared with an org (every member sees this SSH service in their `service list`)
+nyxid service add-ssh --label prod-bastion --host 10.0.0.5 --via-node office-node \
+  --cert-auth --principals ubuntu \
+  --org acme-corp
+
 nyxid ssh exec <SERVICE> --principal ubuntu -- uptime
 nyxid ssh exec <SERVICE> --principal ubuntu -- ls -la /var/log
 nyxid ssh terminal <SERVICE>                           # auto-resolves principal
@@ -193,3 +202,5 @@ nyxid ssh proxy <SERVICE>                              # ProxyCommand for OpenSS
 # List SSH services
 nyxid service list --output json | jq '.keys[] | select(.service_type == "ssh")'
 ```
+
+The SSH `--org` behavior matches `nyxid service add --org`: the service is created under the org owner, and members discover it through their own account. See [`organizations.md`](organizations.md#sharing-a-service-with-the-org) for org-scoped service ownership details.

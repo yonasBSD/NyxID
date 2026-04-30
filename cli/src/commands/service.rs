@@ -96,6 +96,38 @@ fn build_route_body(direct: bool, node: Option<&str>) -> Result<Value> {
     Ok(serde_json::json!({ "node_id": node_value }))
 }
 
+struct AddSshBody<'a> {
+    label: &'a str,
+    host: &'a str,
+    port: u16,
+    cert_auth: bool,
+    principals: &'a str,
+    ttl: u32,
+    via_node: &'a str,
+    target_org_id: Option<&'a str>,
+}
+
+fn build_add_ssh_body(input: AddSshBody<'_>) -> serde_json::Map<String, Value> {
+    let mut body = serde_json::Map::new();
+    body.insert("label".into(), Value::String(input.label.to_string()));
+    body.insert("ssh_host".into(), Value::String(input.host.to_string()));
+    body.insert("ssh_port".into(), serde_json::json!(input.port));
+    body.insert("ssh_certificate_auth".into(), Value::Bool(input.cert_auth));
+    body.insert(
+        "ssh_principals".into(),
+        Value::String(input.principals.to_string()),
+    );
+    body.insert(
+        "ssh_certificate_ttl_minutes".into(),
+        serde_json::json!(input.ttl),
+    );
+    body.insert("node_id".into(), Value::String(input.via_node.to_string()));
+    if let Some(org_id) = input.target_org_id {
+        body.insert("target_org_id".into(), Value::String(org_id.to_string()));
+    }
+    body
+}
+
 fn home_assistant_ws_frame_rules() -> Value {
     serde_json::json!([{
         "trigger": {
@@ -530,6 +562,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             principals,
             ttl,
             via_node,
+            org,
             auth,
         } => {
             let mut api = ApiClient::from_auth(&auth)?;
@@ -539,6 +572,15 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 .await
                 .with_context(|| format!("Could not resolve node '{via_node}'"))?;
 
+            let org = match org {
+                Some(raw) => Some(
+                    resolve_org_id(&mut api, &raw)
+                        .await
+                        .with_context(|| format!("Could not resolve org '{raw}'"))?,
+                ),
+                None => None,
+            };
+
             let principals_str = principals.as_deref().unwrap_or("");
             let principal_list: Vec<&str> = principals_str
                 .split(',')
@@ -546,14 +588,15 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 .filter(|s| !s.is_empty())
                 .collect();
 
-            let body = serde_json::json!({
-                "label": label,
-                "ssh_host": host,
-                "ssh_port": port,
-                "ssh_certificate_auth": cert_auth,
-                "ssh_principals": principals_str,
-                "ssh_certificate_ttl_minutes": ttl,
-                "node_id": via_node,
+            let body = build_add_ssh_body(AddSshBody {
+                label: &label,
+                host: &host,
+                port,
+                cert_auth,
+                principals: principals_str,
+                ttl,
+                via_node: &via_node,
+                target_org_id: org.as_deref(),
             });
 
             let result: Value = api.post("/keys", &body).await?;
@@ -578,6 +621,9 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                     eprintln!("ID:         {svc_id}");
                     eprintln!("Host:       {host}:{port}");
                     eprintln!("Node:       {via_node}");
+                    if let Some(ref org_id) = org {
+                        eprintln!("Org:        {org_id}");
+                    }
                     if cert_auth {
                         eprintln!();
                         eprintln!("SSH Setup Instructions:");
@@ -1839,6 +1885,61 @@ mod tests {
         assert!(parse_token_exchange_fields(&serde_json::Value::Null).is_none());
         assert!(parse_token_exchange_fields(&serde_json::json!([])).is_none());
         assert!(parse_token_exchange_fields(&serde_json::json!("not an array")).is_none());
+    }
+
+    #[test]
+    fn add_ssh_body_with_org_includes_ssh_fields_and_target_org_id() {
+        let body = Value::Object(build_add_ssh_body(AddSshBody {
+            label: "prod-bastion",
+            host: "bastion.internal",
+            port: 2222,
+            cert_auth: true,
+            principals: "ubuntu,admin",
+            ttl: 45,
+            via_node: "node-123",
+            target_org_id: Some("org-user-id"),
+        }));
+
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "label": "prod-bastion",
+                "ssh_host": "bastion.internal",
+                "ssh_port": 2222,
+                "ssh_certificate_auth": true,
+                "ssh_principals": "ubuntu,admin",
+                "ssh_certificate_ttl_minutes": 45,
+                "node_id": "node-123",
+                "target_org_id": "org-user-id",
+            })
+        );
+    }
+
+    #[test]
+    fn add_ssh_body_without_org_omits_target_org_id() {
+        let body = Value::Object(build_add_ssh_body(AddSshBody {
+            label: "prod-bastion",
+            host: "bastion.internal",
+            port: 22,
+            cert_auth: false,
+            principals: "",
+            ttl: 30,
+            via_node: "node-123",
+            target_org_id: None,
+        }));
+
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "label": "prod-bastion",
+                "ssh_host": "bastion.internal",
+                "ssh_port": 22,
+                "ssh_certificate_auth": false,
+                "ssh_principals": "",
+                "ssh_certificate_ttl_minutes": 30,
+                "node_id": "node-123",
+            })
+        );
     }
 
     // Regression for issue #327: --direct must send "" so the backend
