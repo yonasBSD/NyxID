@@ -1,0 +1,27 @@
+# syntax=docker/dockerfile:1.7
+
+# Glama-targeted image for NyxID's MCP server directory listing.
+#
+# Runs `nyxid mcp-demo` over stdio with a curated, hardcoded tool
+# surface so the directory's scoring pipeline can introspect tools/list
+# without provisioning auth, MongoDB, or a real user. The tools
+# returned mirror NyxID's gateway API but are not wired to a backing
+# service — production clients use the authenticated Streamable HTTP
+# transport at /mcp on a real NyxID deployment.
+
+FROM rust:1.93-bookworm AS builder
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY backend backend
+COPY cli cli
+# llms_txt handler bakes the playbook into the binary via include_str!.
+# .dockerignore allow-lists this single file under docs/.
+COPY docs/AI_AGENT_PLAYBOOK.md docs/AI_AGENT_PLAYBOOK.md
+RUN cargo build --release -p nyxid
+
+FROM debian:bookworm-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /src/target/release/nyxid /usr/local/bin/nyxid
+ENTRYPOINT ["nyxid", "mcp-demo"]
