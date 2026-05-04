@@ -354,6 +354,10 @@ interface CustomServiceFormProps {
   readonly onBack: () => void;
 }
 
+function RequiredMarker() {
+  return <span aria-hidden="true" className="text-destructive ml-0.5">*</span>;
+}
+
 function CustomServiceForm({
   prefill,
   pairingId,
@@ -396,6 +400,14 @@ function CustomServiceForm({
     !trimmedLabel ||
     !trimmedEndpoint ||
     (needsCredential && !trimmedCredential);
+  const credentialLabel =
+    authMethod === "bot_bearer"
+      ? "Bot token"
+      : authMethod === "basic"
+        ? "user:pass"
+        : authMethod === "body"
+          ? `${authKeyName.trim() || defaultAuthKeyName(authMethod)} value`
+          : "API key / credential";
 
   async function submit() {
     setLoading(true);
@@ -446,7 +458,10 @@ function CustomServiceForm({
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-3">
         <div className="flex flex-col gap-1.5">
-          <Label htmlFor="pair-custom-label">Label</Label>
+          <div className="flex items-center">
+            <Label htmlFor="pair-custom-label">Label</Label>
+            <RequiredMarker />
+          </div>
           <Input
             id="pair-custom-label"
             value={label}
@@ -455,6 +470,7 @@ function CustomServiceForm({
             }}
             placeholder="e.g. My Self-hosted OpenAI Proxy"
             autoFocus
+            aria-required="true"
           />
           <p className="text-xs text-muted-foreground">
             Shown everywhere in the CLI and web UI.
@@ -462,7 +478,10 @@ function CustomServiceForm({
         </div>
 
         <div className="flex flex-col gap-1.5">
-          <Label htmlFor="pair-custom-endpoint">Endpoint URL</Label>
+          <div className="flex items-center">
+            <Label htmlFor="pair-custom-endpoint">Endpoint URL</Label>
+            <RequiredMarker />
+          </div>
           <Input
             id="pair-custom-endpoint"
             value={endpointUrl}
@@ -470,6 +489,7 @@ function CustomServiceForm({
               setEndpointUrl(e.target.value);
             }}
             placeholder="https://api.example.com"
+            aria-required="true"
           />
           <p className="text-xs text-muted-foreground">
             The base URL NyxID proxies requests to.
@@ -477,7 +497,10 @@ function CustomServiceForm({
         </div>
 
         <div className="flex flex-col gap-1.5">
-          <Label htmlFor="pair-custom-auth-method">Auth method</Label>
+          <div className="flex items-center">
+            <Label htmlFor="pair-custom-auth-method">Auth method</Label>
+            <RequiredMarker />
+          </div>
           <select
             id="pair-custom-auth-method"
             value={authMethod}
@@ -501,6 +524,7 @@ function CustomServiceForm({
               }
             }}
             className="flex h-10 w-full rounded-[10px] border border-input bg-transparent px-[14px] py-2 text-[13px] text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            aria-required="true"
           >
             <option value="bearer">bearer (Authorization: Bearer …)</option>
             <option value="bot_bearer">bot_bearer (Authorization: Bot …)</option>
@@ -518,15 +542,10 @@ function CustomServiceForm({
 
         {needsCredential ? (
           <div className="flex flex-col gap-1.5">
-            <Label htmlFor="pair-custom-credential">
-              {authMethod === "bot_bearer"
-                ? "Bot token"
-                : authMethod === "basic"
-                  ? "user:pass"
-                  : authMethod === "body"
-                    ? `${authKeyName.trim() || defaultAuthKeyName(authMethod)} value`
-                    : "API key / credential"}
-            </Label>
+            <div className="flex items-center">
+              <Label htmlFor="pair-custom-credential">{credentialLabel}</Label>
+              <RequiredMarker />
+            </div>
             <Input
               id="pair-custom-credential"
               type="password"
@@ -538,6 +557,7 @@ function CustomServiceForm({
                 authMethod === "basic" ? "user:pass" : "sk-..."
               }
               autoFocus={Boolean(prefill.custom)}
+              aria-required="true"
             />
             <p className="text-xs text-muted-foreground">
               Pasted once, encrypted at rest.
