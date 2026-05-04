@@ -1304,6 +1304,31 @@ async fn signal_and_shutdown(state: ServerState, outcome: WizardOutcome) {
     state.shutdown.notify_waiters();
 }
 
+/// Resolve a soft-failure outcome (heartbeat watchdog, overall timeout)
+/// preferring a previously-sniffed AiKey create as the implicit completion
+/// ack (#601). Hard-cancel paths (Ctrl+C, explicit cancel button) skip
+/// this helper because the user's gesture is unambiguous.
+///
+/// Always drains placeholder cleanup before returning.
+async fn resolve_soft_failure_outcome(
+    state: &ServerState,
+    completion_message: &str,
+    fallback_message: Option<&str>,
+    fallback_outcome: WizardOutcome,
+) -> WizardOutcome {
+    if let Some(value) = state.completed_ai_key.lock().await.take() {
+        eprintln!("  {completion_message}");
+        drain_pending_keys(state).await;
+        WizardOutcome::AiKeyCompleted(value)
+    } else {
+        if let Some(msg) = fallback_message {
+            eprintln!("  {msg}");
+        }
+        drain_pending_keys(state).await;
+        fallback_outcome
+    }
+}
+
 /// Build the query string for the initial browser URL so prefill values
 /// are present on page load. Only non-empty fields are emitted. Per-flow
 /// shapes — ai-key uses slug/label/via_node/endpoint_url; rotation flows
@@ -1594,28 +1619,20 @@ pub async fn run_flow(
             v.map_err(|_| anyhow!("wizard completion channel closed unexpectedly"))?
         }
         _ = watchdog_rx => {
-            // If a successful create was sniffed before the browser disappeared,
-            // surface that as the implicit ack so we don't report "no service
-            // was created" while the backend already has one (#601).
-            if let Some(value) = state.completed_ai_key.lock().await.take() {
-                eprintln!("  Browser stopped responding (tab closed?) — using last successful create as completion.");
-                drain_pending_keys(&state).await;
-                WizardOutcome::AiKeyCompleted(value)
-            } else {
-                eprintln!("  Browser stopped responding (tab closed?) — cancelling.");
-                drain_pending_keys(&state).await;
-                WizardOutcome::Cancelled
-            }
+            resolve_soft_failure_outcome(
+                &state,
+                "Browser stopped responding (tab closed?) — using last successful create as completion.",
+                Some("Browser stopped responding (tab closed?) — cancelling."),
+                WizardOutcome::Cancelled,
+            ).await
         }
         _ = tokio::time::sleep(WIZARD_MAX_DURATION) => {
-            if let Some(value) = state.completed_ai_key.lock().await.take() {
-                eprintln!("  Browser idle past the wizard's max duration — using last successful create as completion.");
-                drain_pending_keys(&state).await;
-                WizardOutcome::AiKeyCompleted(value)
-            } else {
-                drain_pending_keys(&state).await;
-                WizardOutcome::TimedOut
-            }
+            resolve_soft_failure_outcome(
+                &state,
+                "Browser idle past the wizard's max duration — using last successful create as completion.",
+                None,
+                WizardOutcome::TimedOut,
+            ).await
         }
         _ = tokio::signal::ctrl_c() => {
             // Explicit user gesture: honor the cancel even if a create
@@ -1802,22 +1819,59 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completed_ai_key_takes_precedence_over_watchdog_cancel() {
+    async fn resolve_soft_failure_outcome_prefers_completed_ai_key() {
         let (base_url, _mock) = spawn_mock().await;
         let state = make_state(base_url, vec![]);
         let completed = json!({ "slug": "test" });
         *state.completed_ai_key.lock().await = Some(completed.clone());
 
-        let outcome = if let Some(value) = state.completed_ai_key.lock().await.take() {
-            WizardOutcome::AiKeyCompleted(value)
-        } else {
-            WizardOutcome::Cancelled
-        };
+        let outcome = resolve_soft_failure_outcome(
+            &state,
+            "completion message",
+            Some("fallback message"),
+            WizardOutcome::Cancelled,
+        )
+        .await;
 
         match outcome {
             WizardOutcome::AiKeyCompleted(value) => assert_eq!(value, completed),
             other => panic!("expected AiKeyCompleted, got {other:?}"),
         }
+        // Snapshot was consumed.
+        assert!(state.completed_ai_key.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_soft_failure_outcome_falls_back_when_no_completion() {
+        let (base_url, _mock) = spawn_mock().await;
+        let state = make_state(base_url, vec![]);
+        // completed_ai_key intentionally left None.
+
+        let outcome = resolve_soft_failure_outcome(
+            &state,
+            "completion message",
+            Some("fallback message"),
+            WizardOutcome::Cancelled,
+        )
+        .await;
+
+        assert!(matches!(outcome, WizardOutcome::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn resolve_soft_failure_outcome_supports_timeout_fallback() {
+        let (base_url, _mock) = spawn_mock().await;
+        let state = make_state(base_url, vec![]);
+
+        let outcome = resolve_soft_failure_outcome(
+            &state,
+            "completion message",
+            None,
+            WizardOutcome::TimedOut,
+        )
+        .await;
+
+        assert!(matches!(outcome, WizardOutcome::TimedOut));
     }
 
     #[test]
