@@ -662,6 +662,7 @@ function CatalogConfirmForm({
   const [tokenFields, setTokenFields] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const viaNode = prefill.via_node?.trim() ?? "";
   // Set once the user clicks "Continue" for an OAuth / device-code
   // flow; drops the confirm UI and mounts the sub-flow panel. Reset
   // to `null` if the sub-flow reports cancel so the user can edit
@@ -676,7 +677,7 @@ function CatalogConfirmForm({
         service_slug: entry.slug,
         label,
       };
-      if (shape === "token-exchange") {
+      if (shape === "token-exchange" && !viaNode) {
         // Multi-field credential: validate required-ness and JSON-
         // encode. Mirror wizard.js submit path at wizard.js:723-734.
         const fields = entry.token_exchange_credential_fields ?? [];
@@ -691,7 +692,7 @@ function CatalogConfirmForm({
           creds[f.name] = val;
         }
         body.credential = JSON.stringify(creds);
-      } else if (shape === "api-key" && entry.requires_credential) {
+      } else if (shape === "api-key" && entry.requires_credential && !viaNode) {
         body.credential = credential;
       }
       // `no-auth` / `oauth` / `device-code` skip credential entirely;
@@ -700,8 +701,8 @@ function CatalogConfirmForm({
       if (entry.requires_gateway_url || endpointUrl) {
         body.endpoint_url = endpointUrl;
       }
-      if (prefill.via_node) {
-        body.node_id = prefill.via_node;
+      if (viaNode) {
+        body.node_id = viaNode;
       }
 
       // Reserve the destructive action server-side before creating
@@ -873,6 +874,7 @@ function CatalogConfirmForm({
   const needsCredentialInput = shape === "api-key" && entry.requires_credential;
   const submitLabel = (() => {
     if (loading) return "Creating...";
+    if (viaNode) return "Connect via node";
     if (shape === "oauth") return "Continue with provider sign-in";
     if (shape === "device-code") return "Get device code";
     if (shape === "no-auth") return "Connect";
@@ -889,9 +891,9 @@ function CatalogConfirmForm({
   const submitDisabled =
     loading ||
     !label.trim() ||
-    (needsCredentialInput && !credential.trim()) ||
+    (needsCredentialInput && !viaNode && !credential.trim()) ||
     (entry.requires_gateway_url && !endpointUrl.trim()) ||
-    !tokenExchangeComplete;
+    (!viaNode && !tokenExchangeComplete);
 
   function handleSubmit() {
     if (shape === "oauth" || shape === "device-code") {
@@ -951,7 +953,7 @@ function CatalogConfirmForm({
           </Field>
         ) : null}
 
-        {needsCredentialInput ? (
+        {needsCredentialInput && !viaNode ? (
           <Field label="API key" htmlFor="pair-aikey-credential">
             <Input
               id="pair-aikey-credential"
@@ -977,7 +979,7 @@ function CatalogConfirmForm({
           </Field>
         ) : null}
 
-        {shape === "token-exchange"
+        {shape === "token-exchange" && !viaNode
           ? (entry.token_exchange_credential_fields ?? []).map((f) => (
               <Field
                 key={f.name}
@@ -998,6 +1000,19 @@ function CatalogConfirmForm({
               </Field>
             ))
           : null}
+
+        {viaNode ? (
+          <div className="rounded-[10px] border border-border bg-muted/40 px-3 py-2">
+            <p className="text-xs font-medium text-foreground">Routed via node</p>
+            <code className="font-mono text-[11px] text-muted-foreground">
+              {viaNode}
+            </code>
+            <p className="text-[11px] text-muted-foreground mt-1">
+              Credential will be configured on the node agent. NyxID
+              never sees or stores it.
+            </p>
+          </div>
+        ) : null}
 
         {shape === "no-auth" ? (
           <p className="text-xs text-muted-foreground">
