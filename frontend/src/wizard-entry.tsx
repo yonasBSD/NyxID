@@ -1,3 +1,5 @@
+/* eslint-disable react-refresh/only-export-components -- standalone entry exports a pure helper for focused tests. */
+
 /**
  * Standalone entry for the CLI's locally-served wizard (Mode A).
  *
@@ -105,6 +107,14 @@ const queryClient = new QueryClient({
   },
 })
 
+export function shouldShowDisconnectBanner(
+  phase: ModeAPhase["phase"],
+  disconnected: boolean,
+): boolean {
+  if (!disconnected) return false
+  return phase !== "done" && phase !== "cancelled"
+}
+
 function WizardApp() {
   const [stage, setStage] = useState<ModeAPhase>({ phase: "claimed" })
   const [completeError, setCompleteError] = useState<string | null>(null)
@@ -167,7 +177,7 @@ function WizardApp() {
 
   return (
     <WizardShell context="local" step={step}>
-      {disconnected ? (
+      {shouldShowDisconnectBanner(stage.phase, disconnected) ? (
         <DisconnectBanner state="disconnected" context="local" />
       ) : null}
       {stage.phase === "claimed" ? (
