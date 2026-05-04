@@ -387,3 +387,37 @@ describe("AiKeyConfirm — custom-service required markers", () => {
     ).not.toBeInTheDocument();
   });
 });
+
+describe("AiKeyConfirm — custom-service back reset", () => {
+  beforeEach(() => {
+    mockPost.mockReset();
+    baseProps.onSuccess = vi.fn();
+    baseProps.onSlugPicked = vi.fn();
+  });
+
+  it('notifies with "" when Back resets the custom-service slug', async () => {
+    const user = userEvent.setup();
+    const onSlugPicked = vi.fn();
+
+    render(
+      <AiKeyConfirm
+        {...baseProps}
+        prefill={{ custom: true }}
+        onSlugPicked={onSlugPicked}
+      />,
+      { wrapper: createWrapper() },
+    );
+
+    await waitFor(() => {
+      expect(onSlugPicked).toHaveBeenCalledWith("__custom__");
+    });
+    onSlugPicked.mockClear();
+
+    await user.click(screen.getByRole("button", { name: /Back/i }));
+
+    await waitFor(() => {
+      expect(onSlugPicked).toHaveBeenLastCalledWith("");
+    });
+    expect(onSlugPicked).toHaveBeenCalledTimes(1);
+  });
+});

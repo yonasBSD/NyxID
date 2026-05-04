@@ -182,8 +182,8 @@ function WizardApp() {
             setStage({ phase: "cancelled" })
             void postWizardCancel()
           }}
-          onSlugPicked={() => {
-            setSlugPicked(true)
+          onSlugPicked={(slug) => {
+            setSlugPicked(Boolean(slug))
           }}
         />
       ) : stage.phase === "secret" ? (

@@ -111,11 +111,11 @@ interface AiKeyConfirmProps {
   readonly pairingId: string;
   readonly onSuccess: (result: AiKeyPairingSuccess) => void;
   /**
-   * Fired when the catalog-grid → credential-form transition happens
-   * (slug picked, either from prefill or by clicking a catalog card).
-   * Parent uses it to bump the "Step X of 3" counter in the shell
-   * header from 1 (pick a service) to 2 (enter credential). Purely
-   * cosmetic — the pairing state machine doesn't care.
+   * Fired on selected-slug transitions. A non-empty slug means the user
+   * has entered credential-form territory; an empty string means the slug
+   * was reset and the catalog grid is visible again. Parent uses this to
+   * keep the shell's "Step X of 3" header in sync. Purely cosmetic — the
+   * pairing state machine doesn't care.
    */
   readonly onSlugPicked?: (slug: string) => void;
 }
@@ -179,12 +179,12 @@ export function AiKeyConfirm({
   const [slug, setSlug] = useState(initialSlug);
   const trimmedSlug = slug.trim();
 
-  // Signal up whenever we transition into credential-form territory
-  // (non-empty slug). Fires once on mount if the CLI prefilled the
-  // slug, and once more when the user clicks a catalog card.
-  const lastNotifiedSlug = useRef<string | null>(null);
+  // Signal up whenever the selected slug changes. Fires once on mount
+  // if the CLI prefilled the slug, once more when the user clicks a
+  // catalog card, and with "" when the user returns to the catalog grid.
+  const lastNotifiedSlug = useRef<string | null>(trimmedSlug ? null : "");
   useEffect(() => {
-    if (trimmedSlug && lastNotifiedSlug.current !== trimmedSlug) {
+    if (lastNotifiedSlug.current !== trimmedSlug) {
       lastNotifiedSlug.current = trimmedSlug;
       onSlugPicked?.(trimmedSlug);
     }
