@@ -399,6 +399,15 @@ struct ServerState {
     /// the browser never got a chance to fire a cleanup request
     /// (e.g. tab closed while POST /keys was still in flight).
     pending_keys: Arc<tokio::sync::Mutex<HashSet<String>>>,
+    /// Snapshot of the most recent successful AiKey create response
+    /// (`POST /api/v1/keys` returning `status: "active"`). Captured by
+    /// the proxy sniff and consumed by the soft-failure branches of the
+    /// outcome select so a tab-close that beats `/api/proxy/complete`
+    /// reports the actual created service instead of a misleading
+    /// "wizard cancelled" (#601). Only populated for `FlowKind::AiKey`;
+    /// other flows still require the explicit ack so display-once
+    /// secrets are not accidentally surfaced.
+    completed_ai_key: Arc<tokio::sync::Mutex<Option<serde_json::Value>>>,
     /// JSON-serialized prefill for the flow. Baked into
     /// `window.__WIZARD_BOOTSTRAP__.prefill` so the React bundle can
     /// render the right confirm panel with the right values on mount.
@@ -873,6 +882,56 @@ async fn handle_status(State(state): State<ServerState>, headers: HeaderMap) -> 
     (StatusCode::OK, h, body.to_string()).into_response()
 }
 
+/// Outcome of inspecting a successful proxy response for /api/v1/keys
+/// lifecycle signals. Pure so it can be unit-tested without spinning up
+/// the full proxy.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum KeysResponseSignal {
+    /// `POST /keys` returned a placeholder waiting on OAuth/device-code.
+    /// Caller should track `id` for cleanup if abandoned.
+    PendingPlaceholder { id: String },
+    /// `POST /keys` returned an active service. For AiKey flow only,
+    /// caller should snapshot the full response body as the implicit
+    /// completion ack so a tab-close racing `/api/proxy/complete`
+    /// does not surface as a false "wizard cancelled" outcome (#601).
+    ActiveCreated { id: String },
+    /// `GET /keys/:id` returned a non-pending status. Caller should
+    /// remove `id` from the pending-cleanup tracker.
+    NoLongerPending { id: String },
+    /// Not a keys lifecycle signal we care about.
+    None,
+}
+
+pub(crate) fn classify_keys_response(
+    method: &Method,
+    backend_path: &str,
+    body: &serde_json::Value,
+) -> KeysResponseSignal {
+    let id = body.get("id").and_then(|x| x.as_str());
+    let status = body.get("status").and_then(|x| x.as_str());
+
+    if *method == Method::POST && backend_path == "/api/v1/keys" {
+        match (id, status) {
+            (Some(id), Some("pending_auth")) => {
+                return KeysResponseSignal::PendingPlaceholder { id: id.to_string() };
+            }
+            (Some(id), Some("active")) => {
+                return KeysResponseSignal::ActiveCreated { id: id.to_string() };
+            }
+            _ => {}
+        }
+    } else if *method == Method::GET
+        && backend_path.starts_with("/api/v1/keys/")
+        && !backend_path.contains("/bindings")
+        && let (Some(id), Some(s)) = (id, status)
+        && s != "pending_auth"
+    {
+        return KeysResponseSignal::NoLongerPending { id: id.to_string() };
+    }
+
+    KeysResponseSignal::None
+}
+
 /// Proxy handler. The browser hits `/api/proxy/api/v1/...`; we strip the
 /// `/api/proxy` prefix, check the allowlist, attach the bearer token, and
 /// forward to the NyxID backend. The response body + content-type are
@@ -1085,23 +1144,19 @@ async fn handle_proxy(State(state): State<ServerState>, req: Request<Body>) -> R
         && upstream_ct.starts_with("application/json")
         && let Ok(v) = serde_json::from_slice::<Value>(&body)
     {
-        if method == Method::POST && backend_path == "/api/v1/keys" {
-            if let (Some(id), Some("pending_auth")) = (
-                v.get("id").and_then(|x| x.as_str()),
-                v.get("status").and_then(|x| x.as_str()),
-            ) {
-                state.pending_keys.lock().await.insert(id.to_string());
+        match classify_keys_response(&method, backend_path, &v) {
+            KeysResponseSignal::PendingPlaceholder { id } => {
+                state.pending_keys.lock().await.insert(id);
             }
-        } else if method == Method::GET
-            && backend_path.starts_with("/api/v1/keys/")
-            && !backend_path.contains("/bindings")
-            && let (Some(id), Some(s)) = (
-                v.get("id").and_then(|x| x.as_str()),
-                v.get("status").and_then(|x| x.as_str()),
-            )
-            && s != "pending_auth"
-        {
-            state.pending_keys.lock().await.remove(id);
+            KeysResponseSignal::ActiveCreated { id: _ } => {
+                if matches!(state.flow, FlowKind::AiKey) {
+                    *state.completed_ai_key.lock().await = Some(v.clone());
+                }
+            }
+            KeysResponseSignal::NoLongerPending { id } => {
+                state.pending_keys.lock().await.remove(&id);
+            }
+            KeysResponseSignal::None => {}
         }
     }
 
@@ -1247,6 +1302,31 @@ async fn signal_and_shutdown(state: ServerState, outcome: WizardOutcome) {
         let _ = tx.send(outcome);
     }
     state.shutdown.notify_waiters();
+}
+
+/// Resolve a soft-failure outcome (heartbeat watchdog, overall timeout)
+/// preferring a previously-sniffed AiKey create as the implicit completion
+/// ack (#601). Hard-cancel paths (Ctrl+C, explicit cancel button) skip
+/// this helper because the user's gesture is unambiguous.
+///
+/// Always drains placeholder cleanup before returning.
+async fn resolve_soft_failure_outcome(
+    state: &ServerState,
+    completion_message: &str,
+    fallback_message: Option<&str>,
+    fallback_outcome: WizardOutcome,
+) -> WizardOutcome {
+    if let Some(value) = state.completed_ai_key.lock().await.take() {
+        eprintln!("  {completion_message}");
+        drain_pending_keys(state).await;
+        WizardOutcome::AiKeyCompleted(value)
+    } else {
+        if let Some(msg) = fallback_message {
+            eprintln!("  {msg}");
+        }
+        drain_pending_keys(state).await;
+        fallback_outcome
+    }
 }
 
 /// Build the query string for the initial browser URL so prefill values
@@ -1442,6 +1522,7 @@ pub async fn run_flow(
         in_flight_mutations: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         bound_port: addr.port(),
         pending_keys: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
+        completed_ai_key: Arc::new(tokio::sync::Mutex::new(None)),
         prefill: Arc::new(prefill_json),
     };
 
@@ -1538,15 +1619,24 @@ pub async fn run_flow(
             v.map_err(|_| anyhow!("wizard completion channel closed unexpectedly"))?
         }
         _ = watchdog_rx => {
-            eprintln!("  Browser stopped responding (tab closed?) — cancelling.");
-            drain_pending_keys(&state).await;
-            WizardOutcome::Cancelled
+            resolve_soft_failure_outcome(
+                &state,
+                "Browser stopped responding (tab closed?) — using last successful create as completion.",
+                Some("Browser stopped responding (tab closed?) — cancelling."),
+                WizardOutcome::Cancelled,
+            ).await
         }
         _ = tokio::time::sleep(WIZARD_MAX_DURATION) => {
-            drain_pending_keys(&state).await;
-            WizardOutcome::TimedOut
+            resolve_soft_failure_outcome(
+                &state,
+                "Browser idle past the wizard's max duration — using last successful create as completion.",
+                None,
+                WizardOutcome::TimedOut,
+            ).await
         }
         _ = tokio::signal::ctrl_c() => {
+            // Explicit user gesture: honor the cancel even if a create
+            // succeeded. The user typed Ctrl+C; that is an unambiguous stop.
             drain_pending_keys(&state).await;
             WizardOutcome::Cancelled
         }
@@ -1649,8 +1739,139 @@ mod tests {
             in_flight_mutations: Arc::new(AtomicUsize::new(0)),
             bound_port: 0,
             pending_keys: Arc::new(tokio::sync::Mutex::new(set)),
+            completed_ai_key: Arc::new(tokio::sync::Mutex::new(None)),
             prefill: Arc::new(Value::Null),
         }
+    }
+
+    #[test]
+    fn classify_keys_response_pending_placeholder() {
+        let body = json!({ "id": "abc", "status": "pending_auth" });
+
+        assert_eq!(
+            classify_keys_response(&Method::POST, "/api/v1/keys", &body),
+            KeysResponseSignal::PendingPlaceholder {
+                id: "abc".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn classify_keys_response_active_created() {
+        let body = json!({ "id": "abc", "status": "active" });
+
+        assert_eq!(
+            classify_keys_response(&Method::POST, "/api/v1/keys", &body),
+            KeysResponseSignal::ActiveCreated {
+                id: "abc".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn classify_keys_response_get_no_longer_pending() {
+        let body = json!({ "id": "abc", "status": "active" });
+
+        assert_eq!(
+            classify_keys_response(&Method::GET, "/api/v1/keys/abc", &body),
+            KeysResponseSignal::NoLongerPending {
+                id: "abc".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn classify_keys_response_get_pending_returns_none() {
+        let body = json!({ "id": "abc", "status": "pending_auth" });
+
+        assert_eq!(
+            classify_keys_response(&Method::GET, "/api/v1/keys/abc", &body),
+            KeysResponseSignal::None
+        );
+    }
+
+    #[test]
+    fn classify_keys_response_ignores_bindings_path() {
+        let body = json!({ "id": "abc", "status": "active" });
+
+        assert_eq!(
+            classify_keys_response(&Method::GET, "/api/v1/keys/abc/bindings", &body),
+            KeysResponseSignal::None
+        );
+    }
+
+    #[test]
+    fn classify_keys_response_ignores_non_keys_paths() {
+        let body = json!({ "id": "abc", "status": "active" });
+
+        assert_eq!(
+            classify_keys_response(&Method::POST, "/api/v1/services", &body),
+            KeysResponseSignal::None
+        );
+    }
+
+    #[test]
+    fn classify_keys_response_missing_fields_returns_none() {
+        assert_eq!(
+            classify_keys_response(&Method::POST, "/api/v1/keys", &json!({})),
+            KeysResponseSignal::None
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_soft_failure_outcome_prefers_completed_ai_key() {
+        let (base_url, _mock) = spawn_mock().await;
+        let state = make_state(base_url, vec![]);
+        let completed = json!({ "slug": "test" });
+        *state.completed_ai_key.lock().await = Some(completed.clone());
+
+        let outcome = resolve_soft_failure_outcome(
+            &state,
+            "completion message",
+            Some("fallback message"),
+            WizardOutcome::Cancelled,
+        )
+        .await;
+
+        match outcome {
+            WizardOutcome::AiKeyCompleted(value) => assert_eq!(value, completed),
+            other => panic!("expected AiKeyCompleted, got {other:?}"),
+        }
+        // Snapshot was consumed.
+        assert!(state.completed_ai_key.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_soft_failure_outcome_falls_back_when_no_completion() {
+        let (base_url, _mock) = spawn_mock().await;
+        let state = make_state(base_url, vec![]);
+        // completed_ai_key intentionally left None.
+
+        let outcome = resolve_soft_failure_outcome(
+            &state,
+            "completion message",
+            Some("fallback message"),
+            WizardOutcome::Cancelled,
+        )
+        .await;
+
+        assert!(matches!(outcome, WizardOutcome::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn resolve_soft_failure_outcome_supports_timeout_fallback() {
+        let (base_url, _mock) = spawn_mock().await;
+        let state = make_state(base_url, vec![]);
+
+        let outcome = resolve_soft_failure_outcome(
+            &state,
+            "completion message",
+            None,
+            WizardOutcome::TimedOut,
+        )
+        .await;
+
+        assert!(matches!(outcome, WizardOutcome::TimedOut));
     }
 
     #[test]
