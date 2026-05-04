@@ -21,7 +21,9 @@ use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::models::ws_frame_injection::WsFrameInjection;
 use crate::mw::auth::AuthUser;
 use crate::services::url_validation::{validate_base_url, validate_optional_spec_url};
-use crate::services::{api_docs_service, audit_service, oauth_client_service, ssh_service};
+use crate::services::{
+    api_docs_service, audit_service, oauth_client_service, ssh_service, user_service_service,
+};
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 use super::services_helpers::{
@@ -768,15 +770,11 @@ pub async fn create_service(
             )));
         }
 
-        // `body` auth has no sensible default for the field name -- the
-        // proxy needs to know which key to inject into the JSON payload.
-        // Fail at creation time instead of surfacing as a 500 on the first
-        // proxied request.
-        if auth_method == "body" && auth_key_name.is_empty() {
+        if user_service_service::auth_method_requires_key_name(&auth_method)
+            && auth_key_name.trim().is_empty()
+        {
             return Err(AppError::ValidationError(
-                "auth_key_name is required when auth_method is 'body' \
-                 (e.g. 'app_secret' for custom body-auth services)"
-                    .to_string(),
+                user_service_service::auth_key_name_required_message(&auth_method),
             ));
         }
 

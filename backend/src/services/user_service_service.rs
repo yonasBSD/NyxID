@@ -169,6 +169,17 @@ fn validate_auth_method(method: &str) -> AppResult<()> {
     Ok(())
 }
 
+pub(crate) fn auth_method_requires_key_name(auth_method: &str) -> bool {
+    matches!(auth_method, "header" | "query" | "path" | "body")
+}
+
+pub(crate) fn auth_key_name_required_message(auth_method: &str) -> String {
+    format!(
+        "auth_key_name is required when auth_method is '{auth_method}' \
+         (e.g. 'X-API-Key' for header, 'key' for query, 'app_secret' for body)"
+    )
+}
+
 /// List all active user services for a user.
 pub async fn list_user_services(
     db: &mongodb::Database,
@@ -453,13 +464,10 @@ pub async fn create_user_service(
         ));
     }
 
-    // `body` auth must specify which JSON field to inject into.
-    if auth_method == "body" && auth_key_name.is_empty() {
-        return Err(AppError::ValidationError(
-            "auth_key_name is required when auth_method is 'body' \
-             (e.g. 'app_secret' for custom body-auth services)"
-                .to_string(),
-        ));
+    if auth_method_requires_key_name(auth_method) && auth_key_name.trim().is_empty() {
+        return Err(AppError::ValidationError(auth_key_name_required_message(
+            auth_method,
+        )));
     }
 
     // `body` auth credential injection happens inside the backend proxy's
@@ -624,18 +632,19 @@ pub async fn update_user_service(
         }
     }
 
-    // Cross-field validation for `body` auth method. We check the effective
-    // post-update state: incoming values override current values.
+    // Cross-field validation for credential injection methods. We check the
+    // effective post-update state: incoming values override current values.
     let effective_auth_method = auth_method.unwrap_or(&current.auth_method);
-    if effective_auth_method == "body" {
+    if auth_method_requires_key_name(effective_auth_method) {
         let effective_auth_key_name = auth_key_name.unwrap_or(&current.auth_key_name);
-        if effective_auth_key_name.is_empty() {
-            return Err(AppError::ValidationError(
-                "auth_key_name is required when auth_method is 'body' \
-                 (e.g. 'app_secret' for custom body-auth services)"
-                    .to_string(),
-            ));
+        if effective_auth_key_name.trim().is_empty() {
+            return Err(AppError::ValidationError(auth_key_name_required_message(
+                effective_auth_method,
+            )));
         }
+    }
+
+    if effective_auth_method == "body" {
         // Normalize legacy `current.node_id == Some("")` to `None`.
         // Matches the normalization in `validate_update_inputs` (fifteenth-
         // round Codex P1) and in the `PUT /keys` handler so the
@@ -862,42 +871,20 @@ pub async fn validate_update_inputs(
         None => current.node_id.as_deref().filter(|n| !n.is_empty()),
     };
 
-    if effective_auth_method == "body" {
-        if effective_auth_key_name.is_empty() {
-            return Err(AppError::ValidationError(
-                "auth_key_name is required when auth_method is 'body' \
-                 (e.g. 'app_secret' for custom body-auth services)"
-                    .to_string(),
-            ));
-        }
-        if effective_node_id.is_some() {
-            return Err(AppError::ValidationError(
-                "auth_method 'body' is not supported for node-routed services. \
-                 Credential body injection only works for direct (non-node) routing."
-                    .to_string(),
-            ));
-        }
+    if auth_method_requires_key_name(effective_auth_method)
+        && effective_auth_key_name.trim().is_empty()
+    {
+        return Err(AppError::ValidationError(auth_key_name_required_message(
+            effective_auth_method,
+        )));
     }
 
-    // header / query / path all inject the credential under a caller-
-    // supplied key name; an empty key would produce an unauthenticated
-    // request (blank header, `?=<secret>` query, `/<secret>/` path).
-    // Services originally created with `auth_method: "none"` store an
-    // empty `auth_key_name`, so a PUT that upgrades them without also
-    // sending `auth_key_name` would slip through pre-existing
-    // validation. Reject here so direct routing and node pushes can
-    // both assume a non-empty injection key downstream
-    // (thirty-second-round Codex P2). bearer/basic are intentionally
-    // excluded because the handler synthesizes an `Authorization`
-    // default for them.
-    if matches!(effective_auth_method, "header" | "query" | "path")
-        && effective_auth_key_name.is_empty()
-    {
-        return Err(AppError::ValidationError(format!(
-            "auth_key_name is required when auth_method is '{effective_auth_method}'. \
-             Supply a non-empty key name (e.g. 'X-API-Key' for header, \
-             'api_key' for query, 'bot' for path)."
-        )));
+    if effective_auth_method == "body" && effective_node_id.is_some() {
+        return Err(AppError::ValidationError(
+            "auth_method 'body' is not supported for node-routed services. \
+             Credential body injection only works for direct (non-node) routing."
+                .to_string(),
+        ));
     }
 
     if effective_auth_method == "token_exchange" {
@@ -1446,6 +1433,7 @@ mod tests {
         WsFrameDirection, WsFrameInjection, WsFrameKind, WsFrameTrigger,
     };
     use crate::test_utils::{connect_test_database, test_user_service};
+    use mongodb::bson::doc;
 
     fn sample_identity_config() -> IdentityConfig {
         IdentityConfig {
@@ -1560,6 +1548,153 @@ mod tests {
             consume_trigger: true,
             direction: WsFrameDirection::Downstream,
         }
+    }
+
+    async fn assert_create_user_service_rejects_empty_auth_key_name(method: &str) {
+        let Some(db) = connect_test_database(&format!("user_service_empty_{method}")).await else {
+            eprintln!("skipping user_service_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let err = create_user_service(
+            &db,
+            &user_id,
+            &user_id,
+            &format!("svc-{method}"),
+            "endpoint-1",
+            Some("api-key-1"),
+            method,
+            "",
+            None,
+            None,
+            0,
+            "http",
+            None,
+            None,
+            None,
+            &IdentityConfig::none(),
+            None,
+        )
+        .await
+        .expect_err("empty auth_key_name should be rejected");
+
+        assert!(matches!(
+            err,
+            AppError::ValidationError(message)
+                if message.contains(&format!("auth_method is '{method}'"))
+        ));
+    }
+
+    #[tokio::test]
+    async fn create_user_service_rejects_header_with_empty_auth_key_name() {
+        assert_create_user_service_rejects_empty_auth_key_name("header").await;
+    }
+
+    #[tokio::test]
+    async fn create_user_service_rejects_query_with_empty_auth_key_name() {
+        assert_create_user_service_rejects_empty_auth_key_name("query").await;
+    }
+
+    #[tokio::test]
+    async fn create_user_service_rejects_path_with_empty_auth_key_name() {
+        assert_create_user_service_rejects_empty_auth_key_name("path").await;
+    }
+
+    #[tokio::test]
+    async fn create_user_service_allows_bearer_with_empty_auth_key_name() {
+        let Some(db) = connect_test_database("user_service_bearer_empty_auth_key_name").await
+        else {
+            eprintln!("skipping user_service_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let endpoint_id = uuid::Uuid::new_v4().to_string();
+        let api_key_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<mongodb::bson::Document>(USER_ENDPOINTS)
+            .insert_one(doc! { "_id": &endpoint_id, "user_id": &user_id })
+            .await
+            .unwrap();
+        db.collection::<mongodb::bson::Document>(USER_API_KEYS)
+            .insert_one(doc! { "_id": &api_key_id, "user_id": &user_id })
+            .await
+            .unwrap();
+
+        let service = create_user_service(
+            &db,
+            &user_id,
+            &user_id,
+            "bearer-empty-key-name",
+            &endpoint_id,
+            Some(&api_key_id),
+            "bearer",
+            "",
+            None,
+            None,
+            0,
+            "http",
+            None,
+            None,
+            None,
+            &IdentityConfig::none(),
+            None,
+        )
+        .await
+        .expect("bearer auth should not require auth_key_name");
+
+        assert_eq!(service.auth_method, "bearer");
+        assert_eq!(service.auth_key_name, "");
+    }
+
+    #[tokio::test]
+    async fn update_user_service_rejects_switch_to_header_without_auth_key_name() {
+        let Some(db) =
+            connect_test_database("user_service_update_header_empty_auth_key_name").await
+        else {
+            eprintln!("skipping user_service_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let mut service = test_user_service(
+            &service_id,
+            &user_id,
+            "header-update",
+            "endpoint-1",
+            None,
+            None,
+        );
+        service.api_key_id = Some("api-key-1".to_string());
+        db.collection::<UserService>(COLLECTION_NAME)
+            .insert_one(&service)
+            .await
+            .unwrap();
+
+        let err = update_user_service(
+            &db,
+            &user_id,
+            &user_id,
+            &service_id,
+            Some("header"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("switching to header without auth_key_name should fail");
+
+        assert!(matches!(
+            err,
+            AppError::ValidationError(message)
+                if message.contains("auth_method is 'header'")
+        ));
     }
 
     #[tokio::test]
