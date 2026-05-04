@@ -613,6 +613,7 @@ pub async fn create_key(
         identity,
         openapi_input,
         body.ws_frame_injections.as_deref(),
+        state.config.is_production(),
     )
     .await?;
 
@@ -824,6 +825,25 @@ pub async fn update_key(
     // deferred label write runs — returning an error despite the
     // credential change having already applied.
     validate_optional_label_for_update(body.label.as_deref())?;
+
+    if let Some(endpoint_url) = body.endpoint_url.as_deref() {
+        let effective_node_id = match body.node_id.as_deref() {
+            Some("") => None,
+            Some(node_id) => Some(node_id),
+            None => view
+                .node_id
+                .as_deref()
+                .filter(|node_id| !node_id.is_empty()),
+        };
+        if effective_node_id.is_none() {
+            crate::services::url_validation::validate_user_endpoint_url(
+                endpoint_url,
+                state.config.is_production(),
+                "endpoint_url",
+            )
+            .await?;
+        }
+    }
 
     // NOTE: `body.endpoint_url` is intentionally NOT written to the DB
     // here. For node-routed services we must keep the endpoint URL and

@@ -478,6 +478,7 @@ pub async fn create_key(
     identity: Option<user_service_service::IdentityConfig>,
     openapi_spec_url: OpenApiSpecUrlInput<'_>,
     ws_frame_injections: Option<&[WsFrameInjection]>,
+    hosted_mode: bool,
 ) -> AppResult<CreateKeyResult> {
     let node_id = node_id.filter(|nid| !nid.is_empty());
     if let Some(rules) = ws_frame_injections {
@@ -548,6 +549,15 @@ pub async fn create_key(
         } else {
             svc.base_url.clone()
         };
+
+        if endpoint_url.is_some() && node_id.is_none() {
+            crate::services::url_validation::validate_user_endpoint_url(
+                &ep_url,
+                hosted_mode,
+                "endpoint_url",
+            )
+            .await?;
+        }
 
         // Determine credential type
         let node_managed_credential = node_id.is_some() && credential.is_empty();
@@ -986,6 +996,16 @@ pub async fn create_key(
             return Err(AppError::BadRequest(
                 "endpoint_url is required for custom endpoints without node routing".to_string(),
             ));
+        }
+        // Skip URL validation for node-routed services: the URL is delivered
+        // to the node agent and never used by NyxID's outbound HTTP client.
+        if node_id.is_none() && !ep_url.is_empty() {
+            crate::services::url_validation::validate_user_endpoint_url(
+                ep_url,
+                hosted_mode,
+                "endpoint_url",
+            )
+            .await?;
         }
 
         let requested_slug = match slug_override {
@@ -3141,6 +3161,7 @@ mod tests {
                 None,
                 OpenApiSpecUrlInput::Inherit,
                 None,
+                false,
             ),
             create_key(
                 &db,
@@ -3159,6 +3180,7 @@ mod tests {
                 None,
                 OpenApiSpecUrlInput::Inherit,
                 None,
+                false,
             )
         );
 
@@ -3208,6 +3230,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
         )
         .await
         .expect("user A SSH create should succeed");
@@ -3235,6 +3258,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
         )
         .await
         .expect("user B SSH create should succeed");
@@ -3322,6 +3346,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -3374,6 +3399,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -3414,6 +3440,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -3536,6 +3563,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
         )
         .await
         .err()
