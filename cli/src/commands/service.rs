@@ -1122,6 +1122,26 @@ async fn run_oauth_add(
 
 // ---- Device code add flow (I22) ----
 
+fn parse_device_code_deadline(initiate: &Value) -> std::time::Instant {
+    use chrono::DateTime;
+
+    if let Some(s) = initiate["expires_at"].as_str()
+        && let Ok(at) = DateTime::parse_from_rfc3339(s)
+    {
+        let secs = (at.timestamp() - chrono::Utc::now().timestamp()).max(0) as u64;
+        return std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    }
+
+    if let Some(secs) = initiate["expires_in"]
+        .as_u64()
+        .or_else(|| initiate["expires_in"].as_str().and_then(|s| s.parse().ok()))
+    {
+        return std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    }
+
+    std::time::Instant::now() + std::time::Duration::from_secs(15 * 60)
+}
+
 async fn run_device_code_add(
     api: &mut ApiClient,
     slug: Option<String>,
@@ -1208,6 +1228,7 @@ async fn run_device_code_add(
         .as_u64()
         .or_else(|| initiate["interval"].as_str().and_then(|s| s.parse().ok()))
         .unwrap_or(5);
+    let deadline = parse_device_code_deadline(&initiate);
 
     eprintln!("Device Code Authorization");
     eprintln!();
@@ -1220,13 +1241,15 @@ async fn run_device_code_add(
 
     // Poll for completion
     let poll_body = serde_json::json!({ "state": state });
+    let poll_path = format!("/providers/{provider_id}/connect/device-code/poll");
+    let mut consecutive_poll_errors = 0_u8;
 
-    loop {
+    while std::time::Instant::now() < deadline {
         tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
 
-        let poll_path = format!("/providers/{provider_id}/connect/device-code/poll");
         match api.post::<Value, _>(&poll_path, &poll_body).await {
             Ok(result) => {
+                consecutive_poll_errors = 0;
                 let status = result["status"].as_str().unwrap_or("");
                 if status == "complete"
                     || status == "authorized"
@@ -1263,12 +1286,22 @@ async fn run_device_code_add(
                 std::io::stderr().flush()?;
             }
             Err(_) => {
-                // Treat errors during polling as "still pending"
+                consecutive_poll_errors += 1;
                 eprint!(".");
                 std::io::stderr().flush()?;
+                if consecutive_poll_errors >= 30 {
+                    eprintln!();
+                    bail!("device code polling failed repeatedly — check your network and re-run");
+                }
             }
         }
     }
+
+    eprintln!();
+    bail!(
+        "Device code authorization timed out (the code may have expired or the request was denied).\n\
+         Re-run the command to start a new authorization."
+    );
 }
 
 async fn wait_for_authorized_key(api: &mut ApiClient, key_id: &str) -> Result<Value> {
@@ -1615,6 +1648,31 @@ mod tests {
     fn node_routing_skips_credential_prompt_regardless_of_method() {
         assert!(!requires_credential_prompt("bearer", true));
         assert!(!requires_credential_prompt("none", true));
+    }
+
+    #[test]
+    fn parse_device_code_deadline_uses_expires_at() {
+        let future = chrono::Utc::now() + chrono::Duration::seconds(600);
+        let v = serde_json::json!({ "expires_at": future.to_rfc3339() });
+        let deadline = parse_device_code_deadline(&v);
+        let secs = deadline.duration_since(std::time::Instant::now()).as_secs();
+        assert!((550..=650).contains(&secs), "got {secs}s");
+    }
+
+    #[test]
+    fn parse_device_code_deadline_uses_expires_in() {
+        let v = serde_json::json!({ "expires_in": 600 });
+        let deadline = parse_device_code_deadline(&v);
+        let secs = deadline.duration_since(std::time::Instant::now()).as_secs();
+        assert!((550..=650).contains(&secs), "got {secs}s");
+    }
+
+    #[test]
+    fn parse_device_code_deadline_falls_back_to_default() {
+        let v = serde_json::json!({});
+        let deadline = parse_device_code_deadline(&v);
+        let secs = deadline.duration_since(std::time::Instant::now()).as_secs();
+        assert!((850..=900).contains(&secs), "got {secs}s");
     }
 
     // ── Issue #414: explicit_scripted dispatch nuance ─────────────────

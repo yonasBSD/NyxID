@@ -28,6 +28,7 @@ import {
   reservePairingAction,
   rewindPairingAction,
 } from "@/pages/cli-pair/reserve-action";
+import { pollOAuthKeyUntilActive } from "./auth-flow-polling";
 
 interface FlowProps {
   readonly providerId: string;
@@ -893,27 +894,25 @@ export function OAuthFlow({
   }, [phase]);
 
   async function pollUntilActive(keyId: string) {
-    const deadline = Date.now() + 5 * 60 * 1000;
-    while (Date.now() < deadline) {
-      if (cancelledRef.current) return;
-      await sleep(2000);
-      if (cancelledRef.current) return;
-      try {
-        const key = await api.get<ActiveKeyResponse>(
-          `/keys/${encodeURIComponent(keyId)}`,
+    await pollOAuthKeyUntilActive({
+      keyId,
+      getKey: (id) =>
+        api.get<ActiveKeyResponse>(`/keys/${encodeURIComponent(id)}`),
+      completeWithKey,
+      isCancelled: () => cancelledRef.current,
+      onTerminalFailure: () => {
+        setPhase("error");
+        setError(
+          "Authorization didn't complete (it may have been canceled or denied on the provider page). Cancel and re-run to try again.",
         );
-        if (key.status === "active") {
-          await completeWithKey(keyId);
-          return;
-        }
-      } catch {
-        // Transient; keep polling.
-      }
-    }
-    if (!cancelledRef.current) {
-      setPhase("error");
-      setError("OAuth didn't complete within 5 minutes. Try again.");
-    }
+      },
+      onTimeout: () => {
+        setPhase("error");
+        setError(
+          "We didn't see authorization complete within 5 minutes. If you canceled on the provider page or it's taking longer than expected, cancel and re-run.",
+        );
+      },
+    });
   }
 
   async function completeWithKey(keyId: string) {
