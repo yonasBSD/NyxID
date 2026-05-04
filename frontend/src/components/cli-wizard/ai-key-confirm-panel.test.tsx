@@ -16,14 +16,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 //     point — regression guard for the existing `service add <slug>`
 //     flow.
 
-const { mockPost } = vi.hoisted(() => ({
+const { mockGet, mockPost } = vi.hoisted(() => ({
+  mockGet: vi.fn(),
   mockPost: vi.fn(),
 }));
 
 vi.mock("@/lib/api-client", () => ({
   api: {
     post: mockPost,
-    get: vi.fn(),
+    get: mockGet,
   },
   ApiError: class ApiError extends Error {
     status: number;
@@ -419,5 +420,110 @@ describe("AiKeyConfirm — custom-service back reset", () => {
       expect(onSlugPicked).toHaveBeenLastCalledWith("");
     });
     expect(onSlugPicked).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("AiKeyConfirm — catalog services routed via node", () => {
+  const catalogEntry = {
+    slug: "llm-openai",
+    name: "OpenAI",
+    base_url: "https://api.openai.com",
+    auth_method: "bearer",
+    service_type: "rest",
+    requires_credential: true,
+    requires_gateway_url: false,
+  };
+
+  beforeEach(() => {
+    mockGet.mockReset();
+    mockPost.mockReset();
+    mockGet.mockResolvedValue(catalogEntry);
+    baseProps.onSuccess = vi.fn();
+    baseProps.onSlugPicked = vi.fn();
+  });
+
+  it("hides credential, shows node badge, and omits credential in POST body", async () => {
+    const user = userEvent.setup();
+    mockPost.mockResolvedValue({
+      id: "svc-id-abc",
+      slug: "llm-openai",
+      label: "Test",
+    });
+
+    render(
+      <AiKeyConfirm
+        {...baseProps}
+        prefill={{
+          slug: "llm-openai",
+          via_node: "node-uuid-12345",
+          label: "Test",
+        }}
+      />,
+      { wrapper: createWrapper() },
+    );
+
+    await screen.findByText(/Routed via node/i);
+
+    expect(screen.queryByLabelText(/API key/i)).not.toBeInTheDocument();
+    expect(screen.getByText("node-uuid-12345")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Connect via node/i }));
+
+    await waitFor(() => {
+      expect(mockPost).toHaveBeenCalledWith(
+        "/keys",
+        expect.objectContaining({
+          service_slug: "llm-openai",
+          label: "Test",
+          node_id: "node-uuid-12345",
+        }),
+      );
+    });
+
+    const [, body] = mockPost.mock.calls.find(([path]) => path === "/keys") ?? [];
+    expect(body).not.toHaveProperty("credential");
+  });
+
+  it("enables submit without a credential when via_node is set", async () => {
+    render(
+      <AiKeyConfirm
+        {...baseProps}
+        prefill={{
+          slug: "llm-openai",
+          via_node: "node-uuid-12345",
+          label: "Test",
+        }}
+      />,
+      { wrapper: createWrapper() },
+    );
+
+    await screen.findByText(/Routed via node/i);
+
+    expect(
+      screen.getByRole("button", { name: /Connect via node/i }),
+    ).not.toBeDisabled();
+  });
+
+  it("keeps submit disabled when label is empty", async () => {
+    const user = userEvent.setup();
+    render(
+      <AiKeyConfirm
+        {...baseProps}
+        prefill={{
+          slug: "llm-openai",
+          via_node: "node-uuid-12345",
+          label: "Test",
+        }}
+      />,
+      { wrapper: createWrapper() },
+    );
+
+    await screen.findByText(/Routed via node/i);
+
+    await user.clear(screen.getByLabelText("Label"));
+
+    expect(
+      screen.getByRole("button", { name: /Connect via node/i }),
+    ).toBeDisabled();
   });
 });
