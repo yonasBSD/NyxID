@@ -14,7 +14,6 @@ mod db;
 mod errors;
 mod handlers;
 mod login_cli;
-mod mcp_demo;
 mod models;
 mod mw;
 mod routes;
@@ -126,27 +125,11 @@ enum Commands {
     /// Scan for and hard-delete orphaned user_endpoints and user_api_keys left
     /// over by pre-fix revoke flows. Prints a preview and prompts before deleting.
     CleanupOrphans(cleanup_cli::CleanupArgs),
-    /// Run an MCP stdio server that exposes a curated, hardcoded tool surface
-    /// for directory-listing introspection (Glama). Does not connect to MongoDB,
-    /// does not require auth, and exposes static tool definitions only.
-    McpDemo,
 }
 
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-
-    // mcp-demo runs a stdio JSON-RPC server. tracing's default `fmt::layer`
-    // writes to stdout, which would corrupt the protocol stream — and the
-    // demo doesn't need dotenv or DB init either. Dispatch before any of
-    // that runs.
-    if matches!(cli.command, Some(Commands::McpDemo)) {
-        if let Err(error) = mcp_demo::run().await {
-            eprintln!("mcp-demo failed: {error}");
-            std::process::exit(1);
-        }
-        return;
-    }
 
     // Load environment variables from .env file (if present)
     dotenvy::dotenv().ok();

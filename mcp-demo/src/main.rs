@@ -1,137 +1,108 @@
-//! MCP stdio server with a curated, hardcoded tool surface.
+//! Standalone stdio MCP demo binary for directory-listing introspection.
 //!
-//! Used by directory listings (Glama) to introspect a fixed `tools/list`
-//! response for scoring without provisioning MongoDB, OAuth, or a real
-//! user. The tools mirror NyxID's gateway API but are not wired to any
-//! backing service — production clients use the authenticated
-//! Streamable HTTP transport at `/mcp` on a real NyxID deployment.
+//! Mirrors the curated tool surface of `backend/src/mcp_demo.rs` but
+//! compiles in a fraction of the time because it depends only on
+//! serde_json + std (no tokio, axum, mongodb, …). Use this when a
+//! constrained build pipeline (e.g. Glama's scoring runners) can't
+//! finish a full `cargo build -p nyxid` within its timeout.
 //!
-//! The transport is JSON-RPC 2.0 over newline-delimited stdin/stdout,
-//! per the MCP stdio spec. Stderr is reserved for diagnostics so the
-//! protocol stream stays clean.
+//! Transport: newline-delimited JSON-RPC 2.0 on stdin/stdout, per the
+//! MCP stdio spec. Stderr is reserved for diagnostics.
 
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use std::io::{BufRead, BufReader, Write};
 
 const PROTOCOL_VERSION: &str = "2025-03-26";
 
-#[derive(Debug, Deserialize)]
-struct JsonRpcRequest {
-    #[serde(default)]
-    id: Option<Value>,
-    method: String,
-    #[serde(default)]
-    params: Value,
-}
+fn main() -> std::io::Result<()> {
+    let stdin = std::io::stdin();
+    let mut stdout = std::io::stdout().lock();
+    let reader = BufReader::new(stdin.lock());
 
-#[derive(Debug, Serialize)]
-struct JsonRpcResponse {
-    jsonrpc: &'static str,
-    id: Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    result: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<JsonRpcError>,
-}
-
-#[derive(Debug, Serialize)]
-struct JsonRpcError {
-    code: i32,
-    message: String,
-}
-
-pub async fn run() -> std::io::Result<()> {
-    let stdin = tokio::io::stdin();
-    let mut reader = BufReader::new(stdin).lines();
-    let mut stdout = tokio::io::stdout();
-
-    while let Some(line) = reader.next_line().await? {
+    for line in reader.lines() {
+        let line = line?;
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
 
-        let req: JsonRpcRequest = match serde_json::from_str(trimmed) {
-            Ok(req) => req,
+        let req: Value = match serde_json::from_str(trimmed) {
+            Ok(value) => value,
             Err(err) => {
-                eprintln!("mcp-demo: failed to parse request: {err}");
+                eprintln!("nyxid-mcp-demo: failed to parse request: {err}");
                 continue;
             }
         };
 
         // Notifications (no `id`) get no response per JSON-RPC 2.0.
-        let Some(id) = req.id else {
+        let Some(id) = req.get("id").cloned() else {
             continue;
         };
 
-        let outcome = match req.method.as_str() {
-            "initialize" => Ok(handle_initialize()),
-            "tools/list" => Ok(handle_tools_list()),
-            "tools/call" => Ok(handle_tools_call(&req.params)),
-            "ping" => Ok(json!({})),
-            other => Err(JsonRpcError {
-                code: -32601,
-                message: format!("Method not found: {other}"),
+        let method = req.get("method").and_then(Value::as_str).unwrap_or("");
+        let response = match method {
+            "initialize" => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "capabilities": { "tools": {} },
+                    "serverInfo": {
+                        "name": "nyxid",
+                        "version": env!("CARGO_PKG_VERSION"),
+                    },
+                },
+            }),
+            "tools/list" => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": { "tools": tool_definitions() },
+            }),
+            "tools/call" => {
+                let tool_name = req
+                    .get("params")
+                    .and_then(|p| p.get("name"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("(unknown)");
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "content": [{
+                            "type": "text",
+                            "text": format!(
+                                "This is the NyxID demo image. The '{tool_name}' tool is exposed for \
+                                 directory introspection only and is not wired to a backing service. \
+                                 To use NyxID's full tool surface, run an authenticated NyxID instance \
+                                 and connect over the Streamable HTTP transport at /mcp. See \
+                                 https://github.com/ChronoAIProject/NyxID."
+                            ),
+                        }],
+                    },
+                })
+            }
+            "ping" => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {},
+            }),
+            other => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {
+                    "code": -32601,
+                    "message": format!("Method not found: {other}"),
+                },
             }),
         };
 
-        let resp = match outcome {
-            Ok(result) => JsonRpcResponse {
-                jsonrpc: "2.0",
-                id,
-                result: Some(result),
-                error: None,
-            },
-            Err(error) => JsonRpcResponse {
-                jsonrpc: "2.0",
-                id,
-                result: None,
-                error: Some(error),
-            },
-        };
-
-        let serialized = serde_json::to_string(&resp)?;
-        stdout.write_all(serialized.as_bytes()).await?;
-        stdout.write_all(b"\n").await?;
-        stdout.flush().await?;
+        let serialized = serde_json::to_string(&response)?;
+        stdout.write_all(serialized.as_bytes())?;
+        stdout.write_all(b"\n")?;
+        stdout.flush()?;
     }
 
     Ok(())
-}
-
-fn handle_initialize() -> Value {
-    json!({
-        "protocolVersion": PROTOCOL_VERSION,
-        "capabilities": { "tools": {} },
-        "serverInfo": {
-            "name": "nyxid",
-            "version": env!("CARGO_PKG_VERSION"),
-        },
-    })
-}
-
-fn handle_tools_list() -> Value {
-    json!({ "tools": tool_definitions() })
-}
-
-fn handle_tools_call(params: &Value) -> Value {
-    let name = params
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("(unknown)");
-    json!({
-        "content": [{
-            "type": "text",
-            "text": format!(
-                "This is the NyxID demo image. The '{name}' tool is exposed for \
-                 directory introspection only and is not wired to a backing \
-                 service. To use NyxID's full tool surface, run an authenticated \
-                 NyxID instance and connect over the Streamable HTTP transport at \
-                 /mcp. See https://github.com/ChronoAIProject/NyxID."
-            ),
-        }],
-    })
 }
 
 fn tool_definitions() -> Value {
