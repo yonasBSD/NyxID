@@ -1,6 +1,7 @@
 frontend/src/app.css
 frontend/src/components/cli-wizard/access-scope-card.tsx
 frontend/src/components/cli-wizard/ai-key-confirm-panel.tsx
+frontend/src/components/cli-wizard/auth-flow-polling.ts
 frontend/src/components/cli-wizard/auth-flows.tsx
 frontend/src/components/cli-wizard/catalog-grid.tsx
 frontend/src/components/cli-wizard/client.ts
