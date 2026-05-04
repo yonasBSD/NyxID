@@ -83,6 +83,31 @@ const baseProps = {
   onSlugPicked: vi.fn(),
 };
 
+function getFieldLabel(id: string) {
+  const label = document.querySelector(`label[for="${id}"]`);
+  if (!(label instanceof HTMLElement)) {
+    throw new Error(`Missing label for ${id}`);
+  }
+  return label;
+}
+
+function expectRequiredMarkerFor(id: string) {
+  const marker = getFieldLabel(id).parentElement?.querySelector(
+    'span[aria-hidden="true"]',
+  );
+  if (!(marker instanceof HTMLElement)) {
+    throw new Error(`Missing required marker for ${id}`);
+  }
+  expect(marker).toHaveTextContent("*");
+  expect(marker).toBeVisible();
+}
+
+function expectNoRequiredMarkerFor(id: string) {
+  expect(
+    getFieldLabel(id).parentElement?.querySelector('span[aria-hidden="true"]'),
+  ).toBeNull();
+}
+
 describe("AiKeyConfirm — issue #414 custom-mode entry", () => {
   beforeEach(() => {
     mockPost.mockReset();
@@ -293,4 +318,106 @@ describe("AiKeyConfirm — issue #414 custom-mode entry", () => {
       expect(screen.getByLabelText("Auth method")).toHaveValue(method);
     },
   );
+});
+
+describe("AiKeyConfirm — custom-service required markers", () => {
+  beforeEach(() => {
+    mockPost.mockReset();
+    baseProps.onSuccess = vi.fn();
+    baseProps.onSlugPicked = vi.fn();
+  });
+
+  it("marks required fields in the custom-service form", () => {
+    render(
+      <AiKeyConfirm
+        {...baseProps}
+        prefill={{
+          custom: true,
+          auth_method: "bearer",
+        }}
+      />,
+      { wrapper: createWrapper() },
+    );
+
+    expectRequiredMarkerFor("pair-custom-label");
+    expectRequiredMarkerFor("pair-custom-endpoint");
+    expectRequiredMarkerFor("pair-custom-auth-method");
+    expectRequiredMarkerFor("pair-custom-credential");
+    expectNoRequiredMarkerFor("pair-custom-slug");
+
+    expect(screen.getByLabelText("Label")).toHaveAttribute(
+      "aria-required",
+      "true",
+    );
+    expect(screen.getByLabelText("Endpoint URL")).toHaveAttribute(
+      "aria-required",
+      "true",
+    );
+    expect(screen.getByLabelText("Auth method")).toHaveAttribute(
+      "aria-required",
+      "true",
+    );
+    expect(screen.getByLabelText("API key / credential")).toHaveAttribute(
+      "aria-required",
+      "true",
+    );
+    expect(getFieldLabel("pair-custom-slug")).not.toHaveTextContent("*");
+  });
+
+  it("removes the credential field when auth method is none", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <AiKeyConfirm
+        {...baseProps}
+        prefill={{
+          custom: true,
+          auth_method: "bearer",
+        }}
+      />,
+      { wrapper: createWrapper() },
+    );
+
+    expect(screen.getByLabelText("API key / credential")).toBeInTheDocument();
+
+    await user.selectOptions(screen.getByLabelText("Auth method"), "none");
+
+    expect(
+      screen.queryByLabelText("API key / credential"),
+    ).not.toBeInTheDocument();
+  });
+});
+
+describe("AiKeyConfirm — custom-service back reset", () => {
+  beforeEach(() => {
+    mockPost.mockReset();
+    baseProps.onSuccess = vi.fn();
+    baseProps.onSlugPicked = vi.fn();
+  });
+
+  it('notifies with "" when Back resets the custom-service slug', async () => {
+    const user = userEvent.setup();
+    const onSlugPicked = vi.fn();
+
+    render(
+      <AiKeyConfirm
+        {...baseProps}
+        prefill={{ custom: true }}
+        onSlugPicked={onSlugPicked}
+      />,
+      { wrapper: createWrapper() },
+    );
+
+    await waitFor(() => {
+      expect(onSlugPicked).toHaveBeenCalledWith("__custom__");
+    });
+    onSlugPicked.mockClear();
+
+    await user.click(screen.getByRole("button", { name: /Back/i }));
+
+    await waitFor(() => {
+      expect(onSlugPicked).toHaveBeenLastCalledWith("");
+    });
+    expect(onSlugPicked).toHaveBeenCalledTimes(1);
+  });
 });
