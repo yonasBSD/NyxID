@@ -1802,8 +1802,15 @@ mod tests {
     use crate::crypto::aes::EncryptionKeys;
     use crate::crypto::local_key_provider::LocalKeyProvider;
     use crate::errors::AppError;
+    use crate::models::user_api_key::COLLECTION_NAME as USER_API_KEYS;
     use crate::models::user_api_key::UserApiKey;
+    use crate::models::user_endpoint::COLLECTION_NAME as USER_ENDPOINTS;
+    use crate::models::user_service::COLLECTION_NAME as USER_SERVICES;
+    use crate::telemetry::TelemetryContext;
+    use crate::test_utils::{connect_test_database, test_app_state, test_auth_user};
+    use axum::{Json, extract::State};
     use chrono::Utc;
+    use mongodb::bson::doc;
 
     fn test_encryption_keys() -> EncryptionKeys {
         EncryptionKeys::with_provider(Arc::new(LocalKeyProvider::new([0x22; 32], None)))
@@ -1981,5 +1988,77 @@ mod tests {
         let err = validate_optional_label_for_update(Some(&"x".repeat(201)))
             .expect_err("overlong label should be rejected before any mutation");
         assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn create_key_rejects_empty_header_auth_key_name_before_writes() {
+        let Some(db) = connect_test_database("keys_post_empty_header_auth_key").await else {
+            eprintln!("skipping keys handler integration test: no local MongoDB available");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let body = super::CreateKeyRequest {
+            service_slug: None,
+            credential: Some("secret-token".to_string()),
+            label: "Header Service".to_string(),
+            endpoint_url: Some("https://api.example.com".to_string()),
+            slug: Some("header-service".to_string()),
+            auth_method: Some("header".to_string()),
+            auth_key_name: Some(String::new()),
+            node_id: None,
+            ssh_host: None,
+            ssh_port: None,
+            ssh_certificate_auth: None,
+            ssh_principals: None,
+            ssh_certificate_ttl_minutes: None,
+            identity_propagation_mode: None,
+            identity_include_user_id: None,
+            identity_include_email: None,
+            identity_include_name: None,
+            identity_jwt_audience: None,
+            forward_access_token: None,
+            inject_delegation_token: None,
+            delegation_token_scope: None,
+            target_org_id: None,
+            openapi_spec_url: None,
+            ws_frame_injections: None,
+        };
+
+        let err = super::create_key(
+            State(state),
+            test_auth_user(&user_id),
+            TelemetryContext::default(),
+            Json(body),
+        )
+        .await
+        .expect_err("POST /api/v1/keys should reject empty header auth_key_name");
+
+        assert!(matches!(
+            err,
+            AppError::ValidationError(message)
+                if message.contains("auth_method is 'header'")
+        ));
+
+        let endpoint_count = db
+            .collection::<mongodb::bson::Document>(USER_ENDPOINTS)
+            .count_documents(doc! { "user_id": &user_id })
+            .await
+            .unwrap();
+        let api_key_count = db
+            .collection::<mongodb::bson::Document>(USER_API_KEYS)
+            .count_documents(doc! { "user_id": &user_id })
+            .await
+            .unwrap();
+        let service_count = db
+            .collection::<mongodb::bson::Document>(USER_SERVICES)
+            .count_documents(doc! { "user_id": &user_id })
+            .await
+            .unwrap();
+
+        assert_eq!(endpoint_count, 0);
+        assert_eq!(api_key_count, 0);
+        assert_eq!(service_count, 0);
     }
 }

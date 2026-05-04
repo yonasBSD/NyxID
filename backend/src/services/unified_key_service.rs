@@ -1021,6 +1021,12 @@ pub async fn create_key(
         let akn = auth_key_name.unwrap_or("Authorization").to_string();
         let is_no_auth = am == "none";
 
+        if user_service_service::auth_method_requires_key_name(&am) && akn.trim().is_empty() {
+            return Err(AppError::ValidationError(
+                user_service_service::auth_key_name_required_message(&am),
+            ));
+        }
+
         // Validate: credential required for direct routing unless no-auth
         if credential.is_empty() && node_id.is_none() && !is_no_auth {
             return Err(AppError::BadRequest(
@@ -3573,6 +3579,66 @@ mod tests {
             matches!(err, AppError::NodeNotFound(ref message) if message == "Node not found"),
             "expected NodeNotFound, got {err}"
         );
+
+        let endpoint_count = db
+            .collection::<mongodb::bson::Document>(USER_ENDPOINTS)
+            .count_documents(doc! { "user_id": &user_id })
+            .await
+            .unwrap();
+        let api_key_count = db
+            .collection::<mongodb::bson::Document>(USER_API_KEYS)
+            .count_documents(doc! { "user_id": &user_id })
+            .await
+            .unwrap();
+        let service_count = db
+            .collection::<mongodb::bson::Document>(USER_SERVICES)
+            .count_documents(doc! { "user_id": &user_id })
+            .await
+            .unwrap();
+
+        assert_eq!(endpoint_count, 0);
+        assert_eq!(api_key_count, 0);
+        assert_eq!(service_count, 0);
+    }
+
+    #[tokio::test]
+    async fn create_key_rejects_header_auth_with_empty_auth_key_name_before_writes() {
+        let Some(db) = connect_test_database("unified_key_empty_header_auth_key").await else {
+            eprintln!("skipping unified_key_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let encryption_keys = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let err = create_key(
+            &db,
+            &encryption_keys,
+            &user_id,
+            &user_id,
+            None,
+            Some("https://api.example.com"),
+            "secret-token",
+            "Header Service",
+            Some("header-service"),
+            Some("header"),
+            Some(""),
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            false,
+        )
+        .await
+        .err()
+        .expect("empty header auth_key_name should fail");
+
+        assert!(matches!(
+            err,
+            AppError::ValidationError(message)
+                if message.contains("auth_method is 'header'")
+        ));
 
         let endpoint_count = db
             .collection::<mongodb::bson::Document>(USER_ENDPOINTS)
