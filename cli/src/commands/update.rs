@@ -79,15 +79,24 @@ async fn check_cli_update(args: &UpdateArgs) -> Result<()> {
         }
     );
 
-    if release.tag_name == installed {
-        println!("Status: up to date");
-    } else if asset_available {
-        println!("Status: update available");
-    } else {
-        println!("Status: prebuilt binary unavailable; update will fall back to --from-source");
-    }
+    println!(
+        "Status: {}",
+        cli_update_status(&installed, &release.tag_name, asset_available)
+    );
 
     Ok(())
+}
+
+fn cli_update_status(installed: &str, release_tag: &str, asset_available: bool) -> &'static str {
+    if release_tag == installed && !asset_available {
+        "up to date (no prebuilt asset for this target; future updates will fall back to --from-source)"
+    } else if release_tag == installed {
+        "up to date"
+    } else if asset_available {
+        "update available"
+    } else {
+        "prebuilt binary unavailable; update will fall back to --from-source"
+    }
 }
 
 async fn update_cli(args: &UpdateArgs) -> Result<Option<PathBuf>> {
@@ -562,6 +571,23 @@ mod tests {
         assert!(normalize_release_tag("1.2.3-0123").is_err());
         assert!(normalize_release_tag("1.2.3-").is_err());
         assert!(normalize_release_tag("release-1.2.3").is_err());
+    }
+
+    #[test]
+    fn check_status_mentions_missing_asset_when_installed_release_has_no_binary() {
+        assert_eq!(
+            cli_update_status("v0.4.0", "v0.4.0", false),
+            "up to date (no prebuilt asset for this target; future updates will fall back to --from-source)"
+        );
+        assert_eq!(cli_update_status("v0.4.0", "v0.4.0", true), "up to date");
+        assert_eq!(
+            cli_update_status("v0.4.0", "v0.5.0", true),
+            "update available"
+        );
+        assert_eq!(
+            cli_update_status("v0.4.0", "v0.5.0", false),
+            "prebuilt binary unavailable; update will fall back to --from-source"
+        );
     }
 
     #[test]
