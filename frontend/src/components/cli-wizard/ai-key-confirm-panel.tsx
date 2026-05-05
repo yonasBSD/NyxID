@@ -15,8 +15,10 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
+import { OrgScopeSelect } from "@/components/shared/org-scope-select";
+import { useOrgs } from "@/hooks/use-orgs";
 import { ApiError, api } from "@/lib/api-client";
-import { ExternalLink } from "lucide-react";
+import { Building2, ExternalLink } from "lucide-react";
 import type { AiKeyPrefill } from "@/pages/cli-pair/types";
 import { DeviceCodeFlow, OAuthFlow } from "./auth-flows";
 import {
@@ -177,6 +179,9 @@ export function AiKeyConfirm({
     ? "__custom__"
     : (prefill.slug ?? "");
   const [slug, setSlug] = useState(initialSlug);
+  const [targetOrgId, setTargetOrgId] = useState<string | null>(
+    prefill.org_id ?? null,
+  );
   const trimmedSlug = slug.trim();
 
   // Signal up whenever the selected slug changes. Fires once on mount
@@ -239,6 +244,8 @@ export function AiKeyConfirm({
         <p className="text-sm text-muted-foreground">{subtitle}</p>
       </div>
 
+      <OwnerPicker value={targetOrgId} onChange={setTargetOrgId} />
+
       {onCatalogStep ? (
         <CatalogGrid onSelect={setSlug} />
       ) : onCustomStep ? (
@@ -250,6 +257,7 @@ export function AiKeyConfirm({
         // (cli/src/wizard/assets/wizard.js:~325-400).
         <CustomServiceForm
           prefill={prefill}
+          targetOrgId={targetOrgId}
           pairingId={pairingId}
           onSuccess={onSuccess}
           onBack={() => {
@@ -271,10 +279,40 @@ export function AiKeyConfirm({
         <CatalogConfirmForm
           entry={entry}
           prefill={prefill}
+          targetOrgId={targetOrgId}
           pairingId={pairingId}
           onSuccess={onSuccess}
         />
       ) : null}
+    </div>
+  );
+}
+
+function OwnerPicker({
+  value,
+  onChange,
+}: {
+  readonly value: string | null;
+  readonly onChange: (orgId: string | null) => void;
+}) {
+  const { data: orgs } = useOrgs();
+  const hasAdminOrg = (orgs ?? []).some((o) => o.your_role === "admin");
+  if (!hasAdminOrg) return null;
+  return (
+    <div className="rounded-lg border border-border bg-muted/30 px-3 py-2">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+          <Building2 className="h-3.5 w-3.5" />
+          Owner
+        </div>
+        <div className="w-[220px]">
+          <OrgScopeSelect value={value} onChange={onChange} label="Owner" />
+        </div>
+      </div>
+      <p className="mt-1 text-[11px] text-muted-foreground">
+        Org-owned services are shared with every admin of that organization
+        and can be proxied by its members.
+      </p>
     </div>
   );
 }
@@ -349,6 +387,7 @@ function authMethodNeedsKeyName(method: CustomAuthMethod): boolean {
 
 interface CustomServiceFormProps {
   readonly prefill: AiKeyPrefill;
+  readonly targetOrgId: string | null;
   readonly pairingId: string;
   readonly onSuccess: (result: AiKeyPairingSuccess) => void;
   readonly onBack: () => void;
@@ -360,6 +399,7 @@ function RequiredMarker() {
 
 function CustomServiceForm({
   prefill,
+  targetOrgId,
   pairingId,
   onSuccess,
   onBack,
@@ -434,6 +474,7 @@ function CustomServiceForm({
       // pushes the credential to that node over the existing WS
       // channel. Falls through to direct routing when not set.
       if (viaNode) body.node_id = viaNode;
+      if (targetOrgId) body.target_org_id = targetOrgId;
 
       await reservePairingAction(pairingId);
       const res = await withRewindOnError(pairingId, () =>
@@ -641,6 +682,7 @@ function CustomServiceForm({
 interface CatalogConfirmFormProps {
   readonly entry: CatalogEntryShape;
   readonly prefill: AiKeyPrefill;
+  readonly targetOrgId: string | null;
   readonly pairingId: string;
   readonly onSuccess: (result: AiKeyPairingSuccess) => void;
 }
@@ -648,6 +690,7 @@ interface CatalogConfirmFormProps {
 function CatalogConfirmForm({
   entry,
   prefill,
+  targetOrgId,
   pairingId,
   onSuccess,
 }: CatalogConfirmFormProps) {
@@ -703,6 +746,9 @@ function CatalogConfirmForm({
       }
       if (viaNode) {
         body.node_id = viaNode;
+      }
+      if (targetOrgId) {
+        body.target_org_id = targetOrgId;
       }
 
       // Reserve the destructive action server-side before creating
@@ -843,6 +889,7 @@ function CatalogConfirmForm({
         slug={entry.slug}
         label={label}
         nodeId={prefill.via_node}
+        targetOrgId={targetOrgId}
         endpointUrl={effectiveEndpointUrl}
         pairingId={pairingId}
         credentialMode={entry.credential_mode}
@@ -861,6 +908,7 @@ function CatalogConfirmForm({
         slug={entry.slug}
         label={label}
         nodeId={prefill.via_node}
+        targetOrgId={targetOrgId}
         endpointUrl={effectiveEndpointUrl}
         pairingId={pairingId}
         onSuccess={onSuccess}

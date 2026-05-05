@@ -35,6 +35,7 @@ interface FlowProps {
   readonly slug: string;
   readonly label: string;
   readonly nodeId?: string;
+  readonly targetOrgId?: string | null;
   /**
    * User's `--endpoint-url` override from the CLI prefill (e.g.
    * self-hosted OpenClaw instance URL). Plumbed into the
@@ -132,12 +133,14 @@ async function createPlaceholderKey(
   createSentRef: { current: boolean },
   nodeId?: string,
   endpointUrl?: string,
+  targetOrgId?: string | null,
 ): Promise<PlaceholderKeyResponse> {
   const body: Record<string, unknown> = {
     service_slug: slug,
     label,
   };
   if (nodeId) body.node_id = nodeId;
+  if (targetOrgId) body.target_org_id = targetOrgId;
   // Preserve the user's `--endpoint-url` override. Without this,
   // OAuth/device-code pairings for self-hosted providers (e.g.
   // OpenClaw) would bind the final service to the catalog default
@@ -501,6 +504,7 @@ export function OAuthFlow({
   slug,
   label,
   nodeId,
+  targetOrgId,
   endpointUrl,
   pairingId,
   credentialMode,
@@ -814,6 +818,7 @@ export function OAuthFlow({
             placeholderCreateSentRef,
             nodeId,
             endpointUrl,
+            targetOrgId,
           );
           placeholderCreateInFlightRef.current = createPromise;
           try {
@@ -1060,6 +1065,7 @@ export function DeviceCodeFlow({
   slug,
   label,
   nodeId,
+  targetOrgId,
   endpointUrl,
   pairingId,
   onSuccess,
@@ -1244,6 +1250,7 @@ export function DeviceCodeFlow({
           placeholderCreateSentRef,
           nodeId,
           endpointUrl,
+          targetOrgId,
         );
         placeholderCreateInFlightRef.current = createPromise;
         let placeholder: PlaceholderKeyResponse;

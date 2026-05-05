@@ -16,9 +16,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 //     point — regression guard for the existing `service add <slug>`
 //     flow.
 
-const { mockGet, mockPost } = vi.hoisted(() => ({
+const { mockGet, mockPost, mockUseOrgs } = vi.hoisted(() => ({
   mockGet: vi.fn(),
   mockPost: vi.fn(),
+  mockUseOrgs: vi.fn(),
 }));
 
 vi.mock("@/lib/api-client", () => ({
@@ -38,6 +39,31 @@ vi.mock("@/lib/api-client", () => ({
       this.errorCode = response.error_code;
     }
   },
+}));
+
+vi.mock("@/hooks/use-orgs", () => ({
+  useOrgs: mockUseOrgs,
+}));
+
+vi.mock("@/components/shared/org-scope-select", () => ({
+  OrgScopeSelect: ({
+    value,
+    onChange,
+    label,
+  }: {
+    readonly value: string | null;
+    readonly onChange: (value: string | null) => void;
+    readonly label?: string;
+  }) => (
+    <select
+      aria-label={label ?? "Scope"}
+      value={value ?? ""}
+      onChange={(event) => onChange(event.target.value || null)}
+    >
+      <option value="">Personal</option>
+      <option value="0a130a17-2624-4fbb-a69d-8ba51c99952a">ChronoAI</option>
+    </select>
+  ),
 }));
 
 // The wizard's "reserve action" + "rewind on error" helpers do their
@@ -83,6 +109,10 @@ const baseProps = {
   onSuccess: vi.fn(),
   onSlugPicked: vi.fn(),
 };
+
+beforeEach(() => {
+  mockUseOrgs.mockReturnValue({ data: [] });
+});
 
 function getFieldLabel(id: string) {
   const label = document.querySelector(`label[for="${id}"]`);
@@ -319,6 +349,121 @@ describe("AiKeyConfirm — issue #414 custom-mode entry", () => {
       expect(screen.getByLabelText("Auth method")).toHaveValue(method);
     },
   );
+});
+
+describe("AiKeyConfirm — org-scoped owner picker", () => {
+  beforeEach(() => {
+    mockPost.mockReset();
+    baseProps.onSuccess = vi.fn();
+    baseProps.onSlugPicked = vi.fn();
+  });
+
+  it("hides the owner picker when the user has no admin orgs", () => {
+    mockUseOrgs.mockReturnValue({
+      data: [
+        {
+          id: "0a130a17-2624-4fbb-a69d-8ba51c99952a",
+          display_name: "ChronoAI",
+          your_role: "member",
+        },
+      ],
+    });
+
+    render(
+      <AiKeyConfirm
+        {...baseProps}
+        prefill={{
+          custom: true,
+          label: "Home Assistant",
+          endpoint_url: "http://homeassistant.local:8123",
+          auth_method: "bearer",
+        }}
+      />,
+      { wrapper: createWrapper() },
+    );
+
+    expect(screen.queryByLabelText("Owner")).not.toBeInTheDocument();
+  });
+
+  it("includes target_org_id in POST /keys when an org is selected", async () => {
+    const user = userEvent.setup();
+    mockUseOrgs.mockReturnValue({
+      data: [
+        {
+          id: "0a130a17-2624-4fbb-a69d-8ba51c99952a",
+          display_name: "ChronoAI",
+          your_role: "admin",
+        },
+      ],
+    });
+    mockPost.mockResolvedValue({
+      id: "svc-id-abc",
+      slug: "home-assistant-admin",
+      label: "Home Assistant",
+    });
+
+    render(
+      <AiKeyConfirm
+        {...baseProps}
+        prefill={{
+          custom: true,
+          label: "Home Assistant",
+          endpoint_url: "http://homeassistant.local:8123",
+          auth_method: "bearer",
+        }}
+      />,
+      { wrapper: createWrapper() },
+    );
+
+    await user.selectOptions(
+      screen.getByLabelText("Owner"),
+      "0a130a17-2624-4fbb-a69d-8ba51c99952a",
+    );
+    await user.type(
+      screen.getByLabelText("API key / credential"),
+      "tok_abc123",
+    );
+    await user.click(screen.getByRole("button", { name: /Connect service/i }));
+
+    await waitFor(() => {
+      expect(mockPost).toHaveBeenCalledWith(
+        "/keys",
+        expect.objectContaining({
+          target_org_id: "0a130a17-2624-4fbb-a69d-8ba51c99952a",
+        }),
+      );
+    });
+  });
+
+  it("pre-selects the owner from prefill org_id", () => {
+    mockUseOrgs.mockReturnValue({
+      data: [
+        {
+          id: "0a130a17-2624-4fbb-a69d-8ba51c99952a",
+          display_name: "ChronoAI",
+          your_role: "admin",
+        },
+      ],
+    });
+
+    render(
+      <AiKeyConfirm
+        {...baseProps}
+        prefill={{
+          custom: true,
+          org_id: "0a130a17-2624-4fbb-a69d-8ba51c99952a",
+          label: "Home Assistant",
+          endpoint_url: "http://homeassistant.local:8123",
+          auth_method: "bearer",
+        }}
+      />,
+      { wrapper: createWrapper() },
+    );
+
+    expect(screen.getByLabelText("Owner")).toHaveValue(
+      "0a130a17-2624-4fbb-a69d-8ba51c99952a",
+    );
+  });
 });
 
 describe("AiKeyConfirm — custom-service required markers", () => {

@@ -137,8 +137,9 @@ fn heartbeat_watchdog_dead(
 /// `body_fields` is the whitelist of permitted top-level JSON keys in the
 /// request body. An empty slice means "body must be empty". Any key not
 /// in the whitelist causes a 400 — a second layer on top of CSP/CSRF so
-/// a compromised wizard page can't smuggle extra fields (e.g. `target_org_id`,
-/// `identity_propagation_mode`) through to `POST /keys`.
+/// a compromised wizard page can't smuggle extra fields (e.g.
+/// `forward_access_token` or `identity_propagation_mode`) through to
+/// `POST /keys`.
 #[derive(Debug, Clone)]
 struct ProxyRoute {
     method: Method,
@@ -183,6 +184,11 @@ fn allowlist_for(kind: FlowKind) -> Vec<ProxyRoute> {
         FlowKind::AiKey => vec![
             ProxyRoute {
                 method: Method::GET,
+                path_template: "/api/v1/orgs",
+                body_fields: &[],
+            },
+            ProxyRoute {
+                method: Method::GET,
                 path_template: "/api/v1/catalog",
                 body_fields: &[],
             },
@@ -194,15 +200,22 @@ fn allowlist_for(kind: FlowKind) -> Vec<ProxyRoute> {
             // Unified key creation. Fields are the intersection of what
             // the wizard UI actually sends (see `buildCreateBody` in
             // wizard.js) — NOT the full `CreateKeyRequest` surface. Keeps
-            // privileged fields like `target_org_id`, `identity_*`,
-            // `forward_access_token`, `inject_delegation_token`, and SSH
-            // flags out of reach of a compromised wizard page.
+            // privileged fields like `identity_*`, `forward_access_token`,
+            // `inject_delegation_token`, and SSH flags out of reach of a
+            // compromised wizard page.
             //
             // `node_id` is whitelisted because the shared React confirm
             // panel forwards the CLI's `via_node` prefill to the backend
             // on `nyxid service add --via-node …`. Without it the
             // wizard would create an unbound service, breaking node-only
             // / self-hosted setups.
+            //
+            // `target_org_id` is whitelisted intentionally for
+            // `nyxid service add --org …` parity with the api-key wizard.
+            // The CLI resolves the raw org slug/name to an org user id
+            // before prefill, and the backend still revalidates the actor
+            // has admin access to that owner via
+            // `org_service::resolve_owner_access`.
             ProxyRoute {
                 method: Method::POST,
                 path_template: "/api/v1/keys",
@@ -216,6 +229,7 @@ fn allowlist_for(kind: FlowKind) -> Vec<ProxyRoute> {
                     "auth_key_name",
                     "openapi_spec_url",
                     "node_id",
+                    "target_org_id",
                 ],
             },
             // Needed to poll placeholder key status during OAuth/device-code.
@@ -1352,6 +1366,7 @@ fn prefill_query(prefill: &PrefillData) -> String {
             push_opt(&mut parts, "slug", &p.slug);
             push_opt(&mut parts, "label", &p.label);
             push_opt(&mut parts, "via_node", &p.via_node);
+            push_opt(&mut parts, "org_id", &p.org);
             push_opt(&mut parts, "endpoint_url", &p.endpoint_url);
             // Issue #414 — custom-mode definitional fields. The SPA
             // primarily reads these out of `__WIZARD_BOOTSTRAP__.prefill`
@@ -1423,6 +1438,7 @@ fn prefill_to_json(prefill: &PrefillData) -> serde_json::Value {
             put_opt(&mut obj, "slug", &p.slug);
             put_opt(&mut obj, "label", &p.label);
             put_opt(&mut obj, "via_node", &p.via_node);
+            put_opt(&mut obj, "org_id", &p.org);
             put_opt(&mut obj, "endpoint_url", &p.endpoint_url);
             // Issue #414 — the SPA's `AiKeyConfirm` reads these to
             // skip the catalog grid (`prefill.custom === true`) and
@@ -1787,6 +1803,29 @@ mod tests {
         assert_eq!(
             classify_keys_response(&Method::GET, "/api/v1/keys/abc", &body),
             KeysResponseSignal::None
+        );
+    }
+
+    #[test]
+    fn ai_key_allowlist_permits_org_picker_and_target_org_id() {
+        let routes = allowlist_for(FlowKind::AiKey);
+
+        assert!(
+            routes.iter().any(|route| {
+                route.method == Method::GET
+                    && route.path_template == "/api/v1/orgs"
+                    && route.body_fields.is_empty()
+            }),
+            "ai-key wizard must be able to populate the owner picker",
+        );
+
+        let keys_post = routes
+            .iter()
+            .find(|route| route.method == Method::POST && route.path_template == "/api/v1/keys")
+            .expect("POST /api/v1/keys route");
+        assert!(
+            keys_post.body_fields.contains(&"target_org_id"),
+            "ai-key wizard create route should permit org owner passthrough",
         );
     }
 

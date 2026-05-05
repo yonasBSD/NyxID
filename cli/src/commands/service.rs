@@ -185,12 +185,12 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             // Wizard dispatch (docs/CLI_WIZARD_V2.md §3.1): route to
             // the browser flow when the invocation isn't "scripted-
             // complete". Flags compatible with prefill (slug, label,
-            // via-node, endpoint-url, plus `--custom` definitional
-            // fields per issue #414) just seed the form; flags that
-            // declare a specific scripted flow (--credential,
-            // --credential-env, --oauth, --device-code, --output
-            // json) fall through to the existing non-interactive path
-            // so scripted behavior for existing users is unchanged.
+            // via-node, endpoint-url, `--org`, plus `--custom`
+            // definitional fields per issue #414) just seed the form.
+            // Flags that declare a specific scripted flow (--credential,
+            // --credential-env, --oauth, --device-code, --output json)
+            // fall through to the existing non-interactive path so
+            // scripted behavior for existing users is unchanged.
             //
             // Issue #414 — `--custom` and its companion flags
             // (`--auth-method`, `--auth-key-name`, `--slug` in the
@@ -202,6 +202,11 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             // entry — that's the existing scripted-override use case
             // and stays scripted.
             //
+            // `--org` used to be treated as an advanced scripted-only
+            // flag. It now behaves like the api-key wizard: the CLI
+            // resolves the slug/name to a canonical org owner id before
+            // dispatch and the browser pre-selects that owner.
+            //
             // Headless contexts (SSH sessions, no local display on
             // Linux, AI-agent bash tool) NO LONGER fall through to the
             // stdin-prompt path by default — `run_ai_key_wizard` picks
@@ -209,6 +214,19 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             // URL the user opens on another device). Set
             // `NYXID_NO_WIZARD=1` to restore the pre-wizard stdin
             // prompt path for CI jobs or scripts that rely on it.
+            let mut api = if org.is_some() {
+                Some(ApiClient::from_auth(&auth)?)
+            } else {
+                None
+            };
+            let org = match org {
+                Some(raw) => Some(
+                    resolve_org_id(api.as_mut().expect("api initialized for org"), &raw)
+                        .await
+                        .with_context(|| format!("Could not resolve org '{raw}'"))?,
+                ),
+                None => None,
+            };
             let interactive_output = matches!(auth.output, OutputFormat::Table);
             let explicit_scripted = is_explicit_scripted(
                 credential.is_some(),
@@ -220,7 +238,6 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 auth_method.is_some(),
                 auth_key_name.is_some(),
                 !scopes.is_empty(),
-                org.is_some(),
                 openapi_spec_url.is_some(),
                 ws_frame_preset.is_some(),
                 ws_frame_clear,
@@ -238,6 +255,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                     slug: slug.clone(),
                     label: label.clone(),
                     via_node: via_node.clone(),
+                    org: org.clone(),
                     endpoint_url: endpoint_url.clone(),
                     // Issue #414 — definitional fields for custom mode.
                     // When `--custom` is set, the SPA skips the catalog
@@ -253,7 +271,10 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 return crate::wizard::run_ai_key_wizard(&auth, prefill, no_wait).await;
             }
 
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = match api {
+                Some(api) => api,
+                None => ApiClient::from_auth(&auth)?,
+            };
 
             // Resolve `--via-node <ID_OR_NAME>` to a node ID up-front so that
             // node names shown by `nyxid node list` and in the docs (e.g.
@@ -266,15 +287,6 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 ),
                 None => None,
             };
-            let org = match org {
-                Some(raw) => Some(
-                    resolve_org_id(&mut api, &raw)
-                        .await
-                        .with_context(|| format!("Could not resolve org '{raw}'"))?,
-                ),
-                None => None,
-            };
-
             // Normalize --scope inputs: split each entry on comma/whitespace so
             // users can write `--scope a,b --scope "c d"` or `--scope a --scope b`.
             let additional_scopes: Vec<String> = scopes
@@ -1482,7 +1494,6 @@ fn is_explicit_scripted(
     has_auth_method: bool,
     has_auth_key_name: bool,
     has_scopes: bool,
-    has_org: bool,
     has_openapi_spec_url: bool,
     has_ws_frame_preset: bool,
     ws_frame_clear: bool,
@@ -1495,7 +1506,6 @@ fn is_explicit_scripted(
         || (has_auth_key_name && !custom)
         || (has_custom_slug && !custom)
         || has_scopes
-        || has_org
         || has_openapi_spec_url
         || has_ws_frame_preset
         || ws_frame_clear
@@ -1701,7 +1711,6 @@ mod tests {
             has_auth_method,
             has_auth_key_name,
             false, // has_scopes
-            false, // has_org
             false, // has_openapi_spec_url
             false, // has_ws_frame_preset
             false, // ws_frame_clear
@@ -1803,25 +1812,34 @@ mod tests {
     }
 
     #[test]
+    fn org_scope_alone_routes_to_wizard() {
+        // `--org` is resolved before this heuristic and then carried
+        // as wizard prefill. It no longer forces the legacy scripted
+        // terminal path.
+        assert!(!scripted(
+            false, false, false, false, false, false, false, false
+        ));
+    }
+
+    #[test]
     fn issue_414_advanced_flags_keep_scripted() {
-        // --scope / --org / --openapi-spec-url / --ws-frame-preset /
+        // --scope / --openapi-spec-url / --ws-frame-preset /
         // --ws-frame-clear are advanced flags we don't want to expose
         // in the wizard form. They keep their existing scripted
         // semantics.
-        for (scopes, org, spec_url, ws_preset, ws_clear) in [
-            (true, false, false, false, false),
-            (false, true, false, false, false),
-            (false, false, true, false, false),
-            (false, false, false, true, false),
-            (false, false, false, false, true),
+        for (scopes, spec_url, ws_preset, ws_clear) in [
+            (true, false, false, false),
+            (false, true, false, false),
+            (false, false, true, false),
+            (false, false, false, true),
         ] {
             assert!(
                 is_explicit_scripted(
-                    false, false, false, false, false, false, false, false, scopes, org, spec_url,
+                    false, false, false, false, false, false, false, false, scopes, spec_url,
                     ws_preset, ws_clear,
                 ),
-                "expected scripted with scopes={scopes} org={org} \
-                 spec_url={spec_url} ws_preset={ws_preset} ws_clear={ws_clear}",
+                "expected scripted with scopes={scopes} spec_url={spec_url} \
+                 ws_preset={ws_preset} ws_clear={ws_clear}",
             );
         }
     }

@@ -66,6 +66,9 @@ pub struct WizardPrefill {
     pub slug: Option<String>,
     pub label: Option<String>,
     pub via_node: Option<String>,
+    /// Resolved org owner user id from `--org`, not the raw slug/name
+    /// typed by the user. The frontend sends this as `target_org_id`.
+    pub org: Option<String>,
     pub endpoint_url: Option<String>,
     /// `true` when the user passed `--custom`. The wizard SPA reads
     /// this and skips Step 1 (catalog grid), going straight to the
