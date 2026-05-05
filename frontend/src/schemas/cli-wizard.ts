@@ -74,6 +74,25 @@ export const PLATFORMS = [
 
 export const platformSchema = z.union([z.literal(""), z.enum(PLATFORMS)])
 
+export const aiKeyPrefillSchema = z.object({
+  slug: z.string().optional(),
+  label: z.string().optional(),
+  via_node: z.string().optional(),
+  org_id: z.string().uuid().optional(),
+  endpoint_url: z.string().optional(),
+  custom: z.boolean().optional(),
+  custom_slug: z.string().optional(),
+  auth_method: z.string().optional(),
+  auth_key_name: z.string().optional(),
+})
+
+export type ParsedAiKeyPrefill = z.infer<typeof aiKeyPrefillSchema>
+
+export function parseAiKeyPrefill(input: unknown): ParsedAiKeyPrefill {
+  const parsed = aiKeyPrefillSchema.safeParse(input)
+  return parsed.success ? parsed.data : {}
+}
+
 /**
  * Helper used by live-validation inputs: extracts the first error message
  * from a Zod safeParse result, or returns `null` if the value is valid.

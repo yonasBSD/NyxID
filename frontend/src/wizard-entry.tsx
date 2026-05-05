@@ -68,6 +68,7 @@ import {
 } from "@/components/cli-wizard/client"
 import { DisconnectBanner } from "@/components/cli-wizard/disconnect-banner"
 import { Button } from "@/components/ui/button"
+import { parseAiKeyPrefill } from "@/schemas/cli-wizard"
 
 declare global {
   interface Window {
@@ -265,7 +266,7 @@ function toWizardPhase(phase: ModeAPhase["phase"]): WizardPhase {
   return "done"
 }
 
-function ConfirmDispatcher({
+export function ConfirmDispatcher({
   flow,
   prefill,
   onSuccess,
@@ -333,7 +334,7 @@ function ConfirmDispatcher({
       return (
         <div className="flex flex-col gap-4">
           <AiKeyConfirm
-            prefill={prefill as AiKeyPrefill}
+            prefill={parseAiKeyPrefill(prefill) as AiKeyPrefill}
             pairingId={pairingId}
             onSuccess={onSuccess}
             onSlugPicked={onSlugPicked}
