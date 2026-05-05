@@ -599,6 +599,10 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
             get(handlers::user_services_handler::list_user_services),
         )
         .route(
+            "/{service_id}/ssh-auth-mode",
+            patch(handlers::user_services_handler::patch_user_service_ssh_auth_mode),
+        )
+        .route(
             "/{service_id}",
             put(handlers::user_services_handler::update_user_service)
                 .delete(handlers::user_services_handler::delete_user_service),
