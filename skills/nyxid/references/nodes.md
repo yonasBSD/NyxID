@@ -174,6 +174,14 @@ nyxid node credentials accept <SLUG>                   # enter and store the sec
 nyxid node credentials decline <SLUG> --reason "..."   # refuse a pending credential push
 nyxid node credentials list                            # list configured credentials
 nyxid node credentials remove --service <SLUG>         # remove credential
+
+# SSH node-key credentials (stored only on the node)
+nyxid node ssh-credentials add --service <SLUG> --principal <USER> --key-file ~/.ssh/id_ed25519 --host <HOST> --port 22
+nyxid node ssh-credentials list --service <SLUG>
+nyxid node ssh-credentials show --service <SLUG> --principal <USER>
+nyxid node ssh-credentials test --service <SLUG> --principal <USER>
+nyxid node ssh-credentials remove --service <SLUG> --principal <USER>
+nyxid node ssh-credentials prune --stale
 ```
 
 > `credentials setup` works for **catalog services**: it auto-detects whether the service needs an API key, OAuth, or gateway URL, guides the user through the right flow, and auto-registers the service in the backend with the node's ID. For **custom endpoints**, use `nyxid service add --custom --via-node <node>` first, then `nyxid node credentials add`.
@@ -204,3 +212,30 @@ nyxid service list --output json | jq '.keys[] | select(.service_type == "ssh")'
 ```
 
 The SSH `--org` behavior matches `nyxid service add --org`: the service is created under the org owner, and members discover it through their own account. See [`organizations.md`](organizations.md#sharing-a-service-with-the-org) for org-scoped service ownership details.
+
+### SSH auth modes
+
+SSH services have an `ssh_auth_mode`:
+
+- `cert`: NyxID issues short-lived SSH certificates. Supports `ssh proxy`, `ssh exec`, browser terminal, and `ssh issue-cert`.
+- `node_key`: The node agent authenticates to the target using a node-local private key. Supports `ssh exec` and browser terminal. `ssh proxy` is intentionally unsupported.
+- `proxy_only`: NyxID provides only the SSH-over-WebSocket transport.
+
+Create a node-key service:
+
+```bash
+nyxid service add-ssh routeros --host 10.0.0.1 --port 22 --via-node edge-node --node-key --principals nyxid-ro,nyxid-admin
+nyxid node ssh-credentials add --service routeros --principal nyxid-ro --key-file ~/.ssh/routeros_ro --host 10.0.0.1 --port 22
+```
+
+One service can have multiple node-local credentials keyed by `(service_slug, principal)`. If exactly one principal is registered locally, `nyxid ssh exec <SERVICE> -- <cmd>` selects it automatically. If two or more are registered, pass `--principal`; otherwise the CLI returns `1014 SshPrincipalAmbiguous`. If the selected node-local credential is missing, the backend returns `1011 SshNodeKeyMissing`.
+
+Convert an existing SSH service:
+
+```bash
+nyxid service convert-ssh routeros --to-node-key
+nyxid service convert-ssh routeros --to-cert
+nyxid service convert-ssh routeros --to-proxy-only
+```
+
+After converting away from `node_key`, run `nyxid node ssh-credentials prune --stale` on the node to remove orphaned local SSH keys.
