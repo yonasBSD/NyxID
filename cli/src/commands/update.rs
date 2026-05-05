@@ -416,7 +416,7 @@ fn is_valid_semver_tag(version: &str) -> bool {
 
 fn split_optional_once(input: &str, separator: char) -> Option<(&str, Option<&str>)> {
     match input.split_once(separator) {
-        Some((left, right)) if right.contains(separator) => None,
+        Some((_, right)) if right.contains(separator) => None,
         Some((left, right)) => Some((left, Some(right))),
         None => Some((input, None)),
     }
