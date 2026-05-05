@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 import {
+  aiKeyPrefillSchema,
   apiKeyNameSchema,
   firstError,
   nodeNameSchema,
@@ -9,6 +10,18 @@ import {
 } from "./cli-wizard"
 
 describe("cli-wizard schemas", () => {
+  describe("aiKeyPrefillSchema", () => {
+    it("parses org_id for ai-key wizard prefill", () => {
+      const parsed = aiKeyPrefillSchema.parse({
+        custom: true,
+        label: "ChronoAI PostHog",
+        org_id: "0a130a17-2624-4fbb-a69d-8ba51c99952a",
+      })
+
+      expect(parsed.org_id).toBe("0a130a17-2624-4fbb-a69d-8ba51c99952a")
+    })
+  })
+
   describe("nodeNameSchema", () => {
     it("accepts lowercase kebab-case", () => {
       expect(nodeNameSchema.safeParse("edge-tokyo").success).toBe(true)
