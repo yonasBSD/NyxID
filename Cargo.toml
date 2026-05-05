@@ -25,6 +25,7 @@ cargo-dist-version = "0.30.0"
 allow-dirty = ["ci"]
 ci = "github"
 installers = ["shell", "powershell"]
+unix-archive = ".tar.gz"
 targets = [
     "aarch64-apple-darwin",
     "aarch64-unknown-linux-gnu",

@@ -314,6 +314,18 @@ pub struct UpdateArgs {
     /// Only update installed skills, skip CLI binary update
     #[arg(long)]
     pub skills_only: bool,
+    /// Install a specific release version, e.g. 0.4.0
+    #[arg(long)]
+    pub version: Option<String>,
+    /// Print installed and latest versions without installing anything
+    #[arg(long)]
+    pub check: bool,
+    /// Compile and install from source with cargo install
+    #[arg(long)]
+    pub from_source: bool,
+    /// Continue after release attestation verification fails
+    #[arg(long)]
+    pub insecure_skip_verify: bool,
     /// NyxID base URL for skill content (uses saved URL by default)
     #[arg(long, env = "NYXID_URL")]
     pub base_url: Option<String>,
