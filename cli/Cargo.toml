@@ -10,6 +10,9 @@ repository.workspace = true
 name = "nyxid"
 path = "src/main.rs"
 
+[package.metadata.dist]
+dist = true
+
 [dependencies]
 tokio = { workspace = true }
 serde = { workspace = true }
