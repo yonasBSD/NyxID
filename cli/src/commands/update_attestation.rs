@@ -465,30 +465,10 @@ fn verify_dsse_signature(
         .first()
         .context("Attestation DSSE envelope did not include a signature")?;
 
-    let primary_pae = dsse_pae(&envelope.payload_type, payload);
-    let primary_result = verification_key.verify_signature(
-        Signature::Base64Encoded(signature.sig.as_bytes()),
-        &primary_pae,
-    );
-    if primary_result.is_ok() {
-        return Ok(());
-    }
-
-    // Some older Sigstore tooling verified the JSON base64 payload string. Keep
-    // this compatibility check cryptographic, but only after the DSSE-spec PAE
-    // failed.
-    let compatibility_pae = dsse_pae(&envelope.payload_type, envelope.payload.as_bytes());
+    let pae = dsse_pae(&envelope.payload_type, payload);
     verification_key
-        .verify_signature(
-            Signature::Base64Encoded(signature.sig.as_bytes()),
-            &compatibility_pae,
-        )
-        .with_context(|| {
-            format!(
-                "DSSE signature verification failed: {}; compatibility check also failed",
-                primary_result.expect_err("primary result is known to be an error")
-            )
-        })?;
+        .verify_signature(Signature::Base64Encoded(signature.sig.as_bytes()), &pae)
+        .context("DSSE signature verification failed")?;
 
     Ok(())
 }
