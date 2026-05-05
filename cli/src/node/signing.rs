@@ -111,7 +111,8 @@ pub fn verify_ssh_tunnel_signature(
 }
 
 /// Verify the HMAC-SHA256 signature on an SSH exec request.
-/// Message format: `{timestamp}\n{nonce}\n{request_id}\n{host}\n{port}\n{principal}`
+/// Message format:
+/// `{timestamp}\n{nonce}\n{request_id}\n{host}\n{port}\n{principal}\n{auth_mode}\n{sha256(command)}\n{sha256(certificate_openssh)}`
 pub fn verify_ssh_exec_signature(
     request: &serde_json::Value,
     secret_hex: &str,
@@ -127,8 +128,15 @@ pub fn verify_ssh_exec_signature(
         .map(|value| value.to_string())
         .unwrap_or_default();
     let principal = request["principal"].as_str().unwrap_or("");
+    let auth_mode = request["auth_mode"].as_str().unwrap_or("");
+    let command = request["command"].as_str().unwrap_or("");
+    let certificate_openssh = request["certificate_openssh"].as_str().unwrap_or("");
+    let command_hash = hex::encode(Sha256::digest(command.as_bytes()));
+    let certificate_hash = hex::encode(Sha256::digest(certificate_openssh.as_bytes()));
 
-    let message = format!("{timestamp}\n{nonce}\n{request_id}\n{host}\n{port}\n{principal}");
+    let message = format!(
+        "{timestamp}\n{nonce}\n{request_id}\n{host}\n{port}\n{principal}\n{auth_mode}\n{command_hash}\n{certificate_hash}"
+    );
     verify_signature(secret_hex, expected_signature, &message)
 }
 
@@ -156,6 +164,8 @@ pub fn verify_ssh_node_exec_signature(
 }
 
 /// Verify the HMAC-SHA256 signature on a web terminal open request.
+/// Message format:
+/// `{timestamp}\n{nonce}\n{session_id}\n{host}\n{port}\n{principal}\n{auth_mode}\n{service_slug}\n{sha256(auth_material)}`
 pub fn verify_web_terminal_signature(
     request: &serde_json::Value,
     secret_hex: &str,
@@ -171,8 +181,18 @@ pub fn verify_web_terminal_signature(
         .map(|value| value.to_string())
         .unwrap_or_default();
     let principal = request["principal"].as_str().unwrap_or("");
+    let auth_mode = request["auth_mode"].as_str().unwrap_or("");
+    let service_slug = request["service_slug"].as_str().unwrap_or("");
+    let auth_material = if auth_mode == "cert" {
+        request["certificate_openssh"].as_str().unwrap_or("")
+    } else {
+        ""
+    };
+    let auth_material_hash = hex::encode(Sha256::digest(auth_material.as_bytes()));
 
-    let message = format!("{timestamp}\n{nonce}\n{session_id}\n{host}\n{port}\n{principal}");
+    let message = format!(
+        "{timestamp}\n{nonce}\n{session_id}\n{host}\n{port}\n{principal}\n{auth_mode}\n{service_slug}\n{auth_material_hash}"
+    );
     verify_signature(secret_hex, expected_signature, &message)
 }
 
@@ -378,7 +398,6 @@ mod tests {
     }
 
     fn compute_web_terminal_signature(secret_hex: &str, request: &serde_json::Value) -> String {
-        let secret_bytes = hex::decode(secret_hex).unwrap();
         let timestamp = request["timestamp"].as_str().unwrap_or("");
         let nonce = request["nonce"].as_str().unwrap_or("");
         let session_id = request["session_id"].as_str().unwrap_or("");
@@ -389,12 +408,21 @@ mod tests {
             .map(|value| value.to_string())
             .unwrap_or_default();
         let principal = request["principal"].as_str().unwrap_or("");
+        let auth_mode = request["auth_mode"].as_str().unwrap_or("");
+        let service_slug = request["service_slug"].as_str().unwrap_or("");
+        let auth_material = if auth_mode == "cert" {
+            request["certificate_openssh"].as_str().unwrap_or("")
+        } else {
+            ""
+        };
+        let auth_material_hash = hex::encode(Sha256::digest(auth_material.as_bytes()));
 
-        let message = format!("{timestamp}\n{nonce}\n{session_id}\n{host}\n{port}\n{principal}");
-
-        let mut mac = Hmac::<Sha256>::new_from_slice(&secret_bytes).unwrap();
-        mac.update(message.as_bytes());
-        hex::encode(mac.finalize().into_bytes())
+        compute_signature_for_message(
+            secret_hex,
+            &format!(
+                "{timestamp}\n{nonce}\n{session_id}\n{host}\n{port}\n{principal}\n{auth_mode}\n{service_slug}\n{auth_material_hash}"
+            ),
+        )
     }
 
     #[test]
@@ -407,6 +435,9 @@ mod tests {
             "host": "10.0.0.5",
             "port": 22,
             "principal": "ubuntu",
+            "auth_mode": "cert",
+            "service_slug": "linux-host",
+            "certificate_openssh": "ssh-rsa-cert-v01@openssh.com AAAATEST user-cert",
         });
 
         let sig = compute_web_terminal_signature(&secret, &request);
@@ -423,6 +454,9 @@ mod tests {
             "host": "10.0.0.5",
             "port": 22,
             "principal": "ubuntu",
+            "auth_mode": "cert",
+            "service_slug": "linux-host",
+            "certificate_openssh": "ssh-rsa-cert-v01@openssh.com AAAATEST user-cert",
         });
 
         let sig = compute_web_terminal_signature(&secret, &request);
@@ -433,13 +467,15 @@ mod tests {
             "host": "10.0.0.5",
             "port": 22,
             "principal": "root",
+            "auth_mode": "cert",
+            "service_slug": "linux-host",
+            "certificate_openssh": "ssh-rsa-cert-v01@openssh.com AAAATEST user-cert",
         });
 
         assert!(!verify_web_terminal_signature(&tampered, &secret, &sig));
     }
 
     fn compute_ssh_exec_signature(secret_hex: &str, request: &serde_json::Value) -> String {
-        let secret_bytes = hex::decode(secret_hex).unwrap();
         let timestamp = request["timestamp"].as_str().unwrap_or("");
         let nonce = request["nonce"].as_str().unwrap_or("");
         let request_id = request["request_id"].as_str().unwrap_or("");
@@ -450,12 +486,18 @@ mod tests {
             .map(|value| value.to_string())
             .unwrap_or_default();
         let principal = request["principal"].as_str().unwrap_or("");
+        let auth_mode = request["auth_mode"].as_str().unwrap_or("");
+        let command = request["command"].as_str().unwrap_or("");
+        let certificate_openssh = request["certificate_openssh"].as_str().unwrap_or("");
+        let command_hash = hex::encode(Sha256::digest(command.as_bytes()));
+        let certificate_hash = hex::encode(Sha256::digest(certificate_openssh.as_bytes()));
 
-        let message = format!("{timestamp}\n{nonce}\n{request_id}\n{host}\n{port}\n{principal}");
-
-        let mut mac = Hmac::<Sha256>::new_from_slice(&secret_bytes).unwrap();
-        mac.update(message.as_bytes());
-        hex::encode(mac.finalize().into_bytes())
+        compute_signature_for_message(
+            secret_hex,
+            &format!(
+                "{timestamp}\n{nonce}\n{request_id}\n{host}\n{port}\n{principal}\n{auth_mode}\n{command_hash}\n{certificate_hash}"
+            ),
+        )
     }
 
     fn compute_ssh_node_exec_signature(secret_hex: &str, request: &serde_json::Value) -> String {
@@ -486,6 +528,9 @@ mod tests {
             "host": "10.0.0.5",
             "port": 22,
             "principal": "ubuntu",
+            "auth_mode": "cert",
+            "command": "uptime",
+            "certificate_openssh": "ssh-rsa-cert-v01@openssh.com AAAATEST user-cert",
         });
 
         let sig = compute_ssh_exec_signature(&secret, &request);
@@ -502,6 +547,9 @@ mod tests {
             "host": "10.0.0.5",
             "port": 22,
             "principal": "ubuntu",
+            "auth_mode": "cert",
+            "command": "uptime",
+            "certificate_openssh": "ssh-rsa-cert-v01@openssh.com AAAATEST user-cert",
         });
 
         let sig = compute_ssh_exec_signature(&secret, &request);
@@ -512,6 +560,40 @@ mod tests {
             "host": "10.0.0.5",
             "port": 22,
             "principal": "root",
+            "auth_mode": "cert",
+            "command": "uptime",
+            "certificate_openssh": "ssh-rsa-cert-v01@openssh.com AAAATEST user-cert",
+        });
+
+        assert!(!verify_ssh_exec_signature(&tampered, &secret, &sig));
+    }
+
+    #[test]
+    fn tampered_ssh_exec_command_replay_fails() {
+        let secret = "ab".repeat(32);
+        let request = serde_json::json!({
+            "timestamp": "2026-03-12T10:30:00.000Z",
+            "nonce": "test-nonce",
+            "request_id": "req-exec-1",
+            "host": "10.0.0.5",
+            "port": 22,
+            "principal": "ubuntu",
+            "auth_mode": "cert",
+            "command": "A",
+            "certificate_openssh": "ssh-rsa-cert-v01@openssh.com AAAATEST user-cert",
+        });
+
+        let sig = compute_ssh_exec_signature(&secret, &request);
+        let tampered = serde_json::json!({
+            "timestamp": "2026-03-12T10:30:00.000Z",
+            "nonce": "test-nonce",
+            "request_id": "req-exec-1",
+            "host": "10.0.0.5",
+            "port": 22,
+            "principal": "ubuntu",
+            "auth_mode": "cert",
+            "command": "B",
+            "certificate_openssh": "ssh-rsa-cert-v01@openssh.com AAAATEST user-cert",
         });
 
         assert!(!verify_ssh_exec_signature(&tampered, &secret, &sig));

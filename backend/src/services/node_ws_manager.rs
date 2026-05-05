@@ -438,6 +438,7 @@ struct WsSshExec {
     host: String,
     port: u16,
     principal: String,
+    auth_mode: &'static str,
     private_key_pem: String,
     certificate_openssh: String,
     command: String,
@@ -900,27 +901,38 @@ pub fn compute_ssh_tunnel_hmac_signature(
     hex::encode(mac.finalize().into_bytes())
 }
 
-/// Compute HMAC-SHA256 signature for an SSH exec request.
-/// Message format matches the node agent's `verify_ssh_exec_signature`:
-/// `{timestamp}\n{nonce}\n{request_id}\n{host}\n{port}\n{principal}`
-// INTENTIONAL: cert-path HMAC envelope is unchanged for backward compatibility
-// with deployed node agents <= 0.x. Widening this requires a coordinated
-// server+node release; tracked separately from the node-key feature.
-pub fn compute_ssh_exec_hmac_signature(
-    secret: &[u8],
-    timestamp: &str,
-    nonce: &str,
-    request_id: &str,
-    host: &str,
-    port: u16,
-    principal: &str,
-) -> String {
-    use hmac::{Hmac, Mac};
-    use sha2::Sha256;
+/// Compute HMAC-SHA256 signature for a cert-mode SSH exec request.
+/// Message format:
+/// `{timestamp}\n{nonce}\n{request_id}\n{host}\n{port}\n{principal}\n{auth_mode}\n{sha256(command)}\n{sha256(certificate_openssh)}`.
+pub struct SshExecHmacEnvelope<'a> {
+    pub timestamp: &'a str,
+    pub nonce: &'a str,
+    pub request_id: &'a str,
+    pub host: &'a str,
+    pub port: u16,
+    pub principal: &'a str,
+    pub auth_mode: &'a str,
+    pub command: &'a str,
+    pub certificate_openssh: &'a str,
+}
 
+pub fn compute_ssh_exec_hmac_signature(secret: &[u8], envelope: SshExecHmacEnvelope<'_>) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::{Digest, Sha256};
+
+    let command_hash = hex::encode(Sha256::digest(envelope.command.as_bytes()));
+    let certificate_hash = hex::encode(Sha256::digest(envelope.certificate_openssh.as_bytes()));
     let message = format!(
-        "{}\n{}\n{}\n{}\n{}\n{}",
-        timestamp, nonce, request_id, host, port, principal
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        envelope.timestamp,
+        envelope.nonce,
+        envelope.request_id,
+        envelope.host,
+        envelope.port,
+        envelope.principal,
+        envelope.auth_mode,
+        command_hash,
+        certificate_hash,
     );
 
     let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key size");
@@ -966,26 +978,42 @@ pub fn compute_ssh_node_exec_hmac_signature(
 }
 
 /// Compute HMAC-SHA256 signature for a web terminal open request.
-/// Message format matches the node agent's `verify_web_terminal_signature`:
-/// `{timestamp}\n{nonce}\n{session_id}\n{host}\n{port}\n{principal}`
-// INTENTIONAL: web-terminal HMAC envelope is unchanged for backward compatibility
-// with deployed node agents <= 0.x. Widening this requires a coordinated
-// server+node release; tracked separately from the node-key feature.
+/// Message format:
+/// `{timestamp}\n{nonce}\n{session_id}\n{host}\n{port}\n{principal}\n{auth_mode}\n{service_slug}\n{sha256(auth_material)}`.
+/// For cert terminals, `auth_material` is the OpenSSH user certificate. For
+/// node-key terminals, the frame carries no private key, certificate, or host
+/// key pin, so `auth_material` is the empty string.
+pub struct WebTerminalHmacEnvelope<'a> {
+    pub timestamp: &'a str,
+    pub nonce: &'a str,
+    pub session_id: &'a str,
+    pub host: &'a str,
+    pub port: u16,
+    pub principal: &'a str,
+    pub auth_mode: &'a str,
+    pub service_slug: &'a str,
+    pub auth_material: &'a str,
+}
+
 pub fn compute_web_terminal_hmac_signature(
     secret: &[u8],
-    timestamp: &str,
-    nonce: &str,
-    session_id: &str,
-    host: &str,
-    port: u16,
-    principal: &str,
+    envelope: WebTerminalHmacEnvelope<'_>,
 ) -> String {
     use hmac::{Hmac, Mac};
-    use sha2::Sha256;
+    use sha2::{Digest, Sha256};
 
+    let auth_material_hash = hex::encode(Sha256::digest(envelope.auth_material.as_bytes()));
     let message = format!(
-        "{}\n{}\n{}\n{}\n{}\n{}",
-        timestamp, nonce, session_id, host, port, principal
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        envelope.timestamp,
+        envelope.nonce,
+        envelope.session_id,
+        envelope.host,
+        envelope.port,
+        envelope.principal,
+        envelope.auth_mode,
+        envelope.service_slug,
+        auth_material_hash,
     );
 
     let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key size");
@@ -2080,12 +2108,17 @@ impl NodeWsManager {
             let n = uuid::Uuid::new_v4().to_string();
             let sig = compute_ssh_exec_hmac_signature(
                 secret,
-                &ts,
-                &n,
-                &request.request_id,
-                &request.host,
-                request.port,
-                &request.principal,
+                SshExecHmacEnvelope {
+                    timestamp: &ts,
+                    nonce: &n,
+                    request_id: &request.request_id,
+                    host: &request.host,
+                    port: request.port,
+                    principal: &request.principal,
+                    auth_mode: "cert",
+                    command: &request.command,
+                    certificate_openssh: &request.certificate_openssh,
+                },
             );
             (Some(ts), Some(n), Some(sig))
         } else {
@@ -2098,6 +2131,7 @@ impl NodeWsManager {
             host: request.host,
             port: request.port,
             principal: request.principal,
+            auth_mode: "cert",
             private_key_pem: request.private_key_pem,
             certificate_openssh: request.certificate_openssh,
             command: request.command,
@@ -2375,29 +2409,35 @@ impl NodeWsManager {
         conn.web_terminals
             .insert(session_id.clone(), PendingWebTerminal::Awaiting(ready_tx));
 
-        let (timestamp, nonce, signature) = if let Some(secret) = signing_secret {
-            let ts = chrono::Utc::now().to_rfc3339();
-            let n = uuid::Uuid::new_v4().to_string();
-            let sig = compute_web_terminal_hmac_signature(
-                secret,
-                &ts,
-                &n,
-                &request.session_id,
-                &request.host,
-                request.port,
-                &request.principal,
-            );
-            (Some(ts), Some(n), Some(sig))
-        } else {
-            (None, None, None)
-        };
-
         let (auth_mode, private_key_pem, certificate_openssh) = match request.auth_mode {
             NodeWebTerminalAuthMode::Cert {
                 private_key_pem,
                 certificate_openssh,
             } => ("cert", Some(private_key_pem), Some(certificate_openssh)),
             NodeWebTerminalAuthMode::NodeKey => ("node_key", None, None),
+        };
+
+        let (timestamp, nonce, signature) = if let Some(secret) = signing_secret {
+            let ts = chrono::Utc::now().to_rfc3339();
+            let n = uuid::Uuid::new_v4().to_string();
+            let auth_material = certificate_openssh.as_deref().unwrap_or("");
+            let sig = compute_web_terminal_hmac_signature(
+                secret,
+                WebTerminalHmacEnvelope {
+                    timestamp: &ts,
+                    nonce: &n,
+                    session_id: &request.session_id,
+                    host: &request.host,
+                    port: request.port,
+                    principal: &request.principal,
+                    auth_mode,
+                    service_slug: &request.service_slug,
+                    auth_material,
+                },
+            );
+            (Some(ts), Some(n), Some(sig))
+        } else {
+            (None, None, None)
         };
 
         let msg = serde_json::to_string(&WsWebTerminalOpen {
@@ -3114,6 +3154,51 @@ mod tests {
     }
 
     #[test]
+    fn ssh_exec_hmac_covers_command_certificate_and_auth_mode() {
+        let secret = b"test-secret-key-bytes-here-32byt";
+        let base = SshExecHmacEnvelope {
+            timestamp: "2026-03-12T10:00:00Z",
+            nonce: "nonce-123",
+            request_id: "req-1",
+            host: "10.0.0.5",
+            port: 22,
+            principal: "ubuntu",
+            auth_mode: "cert",
+            command: "uptime",
+            certificate_openssh: "ssh-rsa-cert-v01@openssh.com AAAATEST user-cert",
+        };
+        let sig1 = compute_ssh_exec_hmac_signature(secret, SshExecHmacEnvelope { ..base });
+        let sig2 = compute_ssh_exec_hmac_signature(secret, SshExecHmacEnvelope { ..base });
+        assert_eq!(sig1, sig2);
+
+        let different_command = compute_ssh_exec_hmac_signature(
+            secret,
+            SshExecHmacEnvelope {
+                command: "whoami",
+                ..base
+            },
+        );
+        let different_cert = compute_ssh_exec_hmac_signature(
+            secret,
+            SshExecHmacEnvelope {
+                certificate_openssh: "ssh-rsa-cert-v01@openssh.com AAAAOTHER user-cert",
+                ..base
+            },
+        );
+        let different_auth_mode = compute_ssh_exec_hmac_signature(
+            secret,
+            SshExecHmacEnvelope {
+                auth_mode: "node_key",
+                ..base
+            },
+        );
+
+        assert_ne!(sig1, different_command);
+        assert_ne!(sig1, different_cert);
+        assert_ne!(sig1, different_auth_mode);
+    }
+
+    #[test]
     fn ssh_node_exec_hmac_covers_request_id_auth_mode_and_command() {
         let secret = b"test-secret-key-bytes-here-32byt";
         let base = compute_ssh_node_exec_hmac_signature(
@@ -3168,6 +3253,52 @@ mod tests {
         assert_ne!(base, different_auth_mode);
         assert_ne!(base, different_request_id);
         assert_ne!(base, different_command);
+    }
+
+    #[test]
+    fn web_terminal_hmac_covers_auth_mode_service_slug_and_auth_material() {
+        let secret = b"test-secret-key-bytes-here-32byt";
+        let base = WebTerminalHmacEnvelope {
+            timestamp: "2026-03-12T10:00:00Z",
+            nonce: "nonce-123",
+            session_id: "term-1",
+            host: "10.0.0.5",
+            port: 22,
+            principal: "ubuntu",
+            auth_mode: "cert",
+            service_slug: "linux-host",
+            auth_material: "ssh-rsa-cert-v01@openssh.com AAAATEST user-cert",
+        };
+        let sig1 = compute_web_terminal_hmac_signature(secret, WebTerminalHmacEnvelope { ..base });
+        let sig2 = compute_web_terminal_hmac_signature(secret, WebTerminalHmacEnvelope { ..base });
+        assert_eq!(sig1, sig2);
+
+        let different_auth_mode = compute_web_terminal_hmac_signature(
+            secret,
+            WebTerminalHmacEnvelope {
+                auth_mode: "node_key",
+                auth_material: "",
+                ..base
+            },
+        );
+        let different_service_slug = compute_web_terminal_hmac_signature(
+            secret,
+            WebTerminalHmacEnvelope {
+                service_slug: "routeros",
+                ..base
+            },
+        );
+        let different_auth_material = compute_web_terminal_hmac_signature(
+            secret,
+            WebTerminalHmacEnvelope {
+                auth_material: "ssh-rsa-cert-v01@openssh.com AAAAOTHER user-cert",
+                ..base
+            },
+        );
+
+        assert_ne!(sig1, different_auth_mode);
+        assert_ne!(sig1, different_service_slug);
+        assert_ne!(sig1, different_auth_material);
     }
 
     #[test]

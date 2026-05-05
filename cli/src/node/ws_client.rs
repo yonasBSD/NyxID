@@ -1785,7 +1785,10 @@ async fn verify_signed_ssh_exec(
     };
 
     if !signing::verify_ssh_exec_signature(parsed, signing_secret, signature) {
-        tracing::warn!(request_id = %request_id, "ssh_exec HMAC verification failed");
+        tracing::warn!(
+            request_id = %request_id,
+            "HMAC verification failed for ssh_exec; this node may be running an older protocol version than the backend. Run 'nyxid node daemon stop' and upgrade the node binary, then 'nyxid node daemon start'."
+        );
         return Err("invalid_hmac_signature");
     }
 
@@ -2767,7 +2770,10 @@ async fn verify_signed_web_terminal_open(
     };
 
     if !signing::verify_web_terminal_signature(parsed, signing_secret, signature) {
-        tracing::warn!(session_id = %session_id, "web_terminal_open HMAC verification failed");
+        tracing::warn!(
+            session_id = %session_id,
+            "HMAC verification failed for web_terminal_open; this node may be running an older protocol version than the backend. Run 'nyxid node daemon stop' and upgrade the node binary, then 'nyxid node daemon start'."
+        );
         return Err("invalid_hmac_signature");
     }
 

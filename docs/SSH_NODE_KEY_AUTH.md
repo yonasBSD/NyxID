@@ -10,6 +10,18 @@ NyxID SSH services support three auth modes:
 
 `node_key` keeps the target SSH private key on the node host. The NyxID server forwards only the service slug, SSH principal, command or shell request, and signed routing metadata over the node WebSocket. The node agent looks up a local encrypted entry keyed by `(service_slug, principal)` and authenticates to the downstream SSH target with `russh`.
 
+## Breaking Change for Node Operators
+
+This feature branch widens the HMAC envelopes for cert-mode `ssh exec` and SSH browser terminal open frames. After deploying a backend that includes this change, node operators must upgrade the node binary before cert-mode `ssh exec` and SSH web terminal sessions will work:
+
+```bash
+nyxid node daemon stop
+# reinstall or replace the nyxid binary with the matching release
+nyxid node daemon start
+```
+
+`ssh proxy`, HTTP and WebSocket proxying, node-key SSH exec (`ssh_node_exec_open`), and node heartbeat frames are unaffected by this HMAC cutover. SSH browser terminals use the widened `web_terminal_open` HMAC envelope in every auth mode.
+
 ## Create a Node-Key SSH Service
 
 Create or convert the service from a logged-in operator/admin machine:
