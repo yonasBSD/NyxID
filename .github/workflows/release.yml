@@ -58,7 +58,8 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      # Bumped from @v4 by hand to match repo convention; reapply if dist init regenerates.
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -119,7 +120,8 @@ jobs:
       - name: enable windows longpaths
         run: |
           git config --global core.longpaths true
-      - uses: actions/checkout@v4
+      # Bumped from @v4 by hand to match repo convention; reapply if dist init regenerates.
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
           submodules: recursive
@@ -178,7 +180,8 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BUILD_MANIFEST_NAME: target/distrib/global-dist-manifest.json
     steps:
-      - uses: actions/checkout@v4
+      # Bumped from @v4 by hand to match repo convention; reapply if dist init regenerates.
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
           submodules: recursive
@@ -228,7 +231,8 @@ jobs:
     outputs:
       val: ${{ steps.host.outputs.manifest }}
     steps:
-      - uses: actions/checkout@v4
+      # Bumped from @v4 by hand to match repo convention; reapply if dist init regenerates.
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -321,7 +325,8 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      # Bumped from @v4 by hand to match repo convention; reapply if dist init regenerates.
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
           submodules: recursive
