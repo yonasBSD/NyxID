@@ -101,6 +101,7 @@ struct AddSshBody<'a> {
     host: &'a str,
     port: u16,
     cert_auth: bool,
+    ssh_auth_mode: &'a str,
     principals: &'a str,
     ttl: u32,
     via_node: &'a str,
@@ -114,6 +115,10 @@ fn build_add_ssh_body(input: AddSshBody<'_>) -> serde_json::Map<String, Value> {
     body.insert("ssh_port".into(), serde_json::json!(input.port));
     body.insert("ssh_certificate_auth".into(), Value::Bool(input.cert_auth));
     body.insert(
+        "ssh_auth_mode".into(),
+        Value::String(input.ssh_auth_mode.to_string()),
+    );
+    body.insert(
         "ssh_principals".into(),
         Value::String(input.principals.to_string()),
     );
@@ -126,6 +131,60 @@ fn build_add_ssh_body(input: AddSshBody<'_>) -> serde_json::Map<String, Value> {
         body.insert("target_org_id".into(), Value::String(org_id.to_string()));
     }
     body
+}
+
+async fn resolve_user_service_for_ssh_mode(
+    api: &mut ApiClient,
+    id_or_slug: &str,
+) -> Result<(String, String, Option<String>, Option<String>, Option<u16>)> {
+    let direct = api.get_value(&format!("/keys/{id_or_slug}")).await.ok();
+    let service = match direct {
+        Some(value) => value,
+        None => {
+            let resp: Value = api.get("/keys").await?;
+            resp.get("keys")
+                .and_then(|v| v.as_array())
+                .and_then(|items| {
+                    items.iter().find(|item| {
+                        item.get("id").and_then(|v| v.as_str()) == Some(id_or_slug)
+                            || item.get("_id").and_then(|v| v.as_str()) == Some(id_or_slug)
+                            || item.get("slug").and_then(|v| v.as_str()) == Some(id_or_slug)
+                            || item.get("service_slug").and_then(|v| v.as_str()) == Some(id_or_slug)
+                    })
+                })
+                .cloned()
+                .with_context(|| format!("Could not find SSH service '{id_or_slug}'"))?
+        }
+    };
+
+    let id = service
+        .get("id")
+        .or_else(|| service.get("_id"))
+        .and_then(|v| v.as_str())
+        .with_context(|| format!("Service '{id_or_slug}' response did not include an id"))?
+        .to_string();
+    let slug = service
+        .get("slug")
+        .or_else(|| service.get("service_slug"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(id_or_slug)
+        .to_string();
+    let principal_hint = service
+        .get("ssh_allowed_principals")
+        .and_then(|v| v.as_array())
+        .and_then(|items| items.first())
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let host = service
+        .get("ssh_host")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let port = service
+        .get("ssh_port")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u16::try_from(v).ok());
+
+    Ok((id, slug, principal_hint, host, port))
 }
 
 fn home_assistant_ws_frame_rules() -> Value {
@@ -571,6 +630,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             host,
             port,
             cert_auth,
+            node_key,
             principals,
             ttl,
             via_node,
@@ -605,6 +665,13 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 host: &host,
                 port,
                 cert_auth,
+                ssh_auth_mode: if node_key {
+                    "node_key"
+                } else if cert_auth {
+                    "cert"
+                } else {
+                    "proxy_only"
+                },
                 principals: principals_str,
                 ttl,
                 via_node: &via_node,
@@ -636,7 +703,15 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                     if let Some(ref org_id) = org {
                         eprintln!("Org:        {org_id}");
                     }
-                    if cert_auth {
+                    if node_key {
+                        eprintln!();
+                        eprintln!("SSH node-key setup:");
+                        eprintln!(
+                            "  nyxid node ssh-credentials add --service {slug} --principal {} \\",
+                            principal_list.first().unwrap_or(&"ubuntu")
+                        );
+                        eprintln!("    --key-file ~/.ssh/id_ed25519 --host {host} --port {port}");
+                    } else if cert_auth {
                         eprintln!();
                         eprintln!("SSH Setup Instructions:");
                         eprintln!("  1. Download the CA public key:");
@@ -656,6 +731,60 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                         eprintln!("     scp /tmp/nyxid_ca.pub {host}:/etc/ssh/nyxid_ca.pub");
                         eprintln!();
                         eprintln!("  4. Restart sshd on the target server");
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        ServiceCommands::ConvertSsh {
+            slug,
+            to_node_key,
+            to_cert,
+            to_proxy_only,
+            auth,
+        } => {
+            let mut api = ApiClient::from_auth(&auth)?;
+            let mode = match (to_node_key, to_cert, to_proxy_only) {
+                (true, false, false) => "node_key",
+                (false, true, false) => "cert",
+                (false, false, true) => "proxy_only",
+                _ => bail!("Specify exactly one of --to-node-key, --to-cert, or --to-proxy-only"),
+            };
+            let (service_id, service_slug, principal_hint, host, port) =
+                resolve_user_service_for_ssh_mode(&mut api, &slug).await?;
+            let body = serde_json::json!({ "mode": mode });
+            let result: Value = api
+                .patch(&format!("/user-services/{service_id}/ssh-auth-mode"), &body)
+                .await?;
+
+            match auth.output {
+                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&result)?),
+                OutputFormat::Table => {
+                    eprintln!("SSH auth mode updated.");
+                    eprintln!("Service: {service_slug}");
+                    eprintln!("Mode:    {mode}");
+                    match mode {
+                        "node_key" => {
+                            eprintln!();
+                            eprintln!("Next step on the node:");
+                            eprintln!(
+                                "  nyxid node ssh-credentials add --service {service_slug} --principal {} \\",
+                                principal_hint.as_deref().unwrap_or("<principal>")
+                            );
+                            eprintln!(
+                                "    --key-file ~/.ssh/id_ed25519 --host {} --port {}",
+                                host.as_deref().unwrap_or("<host>"),
+                                port.unwrap_or(22)
+                            );
+                        }
+                        "cert" | "proxy_only" => {
+                            eprintln!();
+                            eprintln!("Node-local SSH keys for this service are now stale.");
+                            eprintln!("Prune them on the node with:");
+                            eprintln!("  nyxid node ssh-credentials prune --stale");
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -1970,6 +2099,7 @@ mod tests {
             host: "bastion.internal",
             port: 2222,
             cert_auth: true,
+            ssh_auth_mode: "cert",
             principals: "ubuntu,admin",
             ttl: 45,
             via_node: "node-123",
@@ -1983,6 +2113,7 @@ mod tests {
                 "ssh_host": "bastion.internal",
                 "ssh_port": 2222,
                 "ssh_certificate_auth": true,
+                "ssh_auth_mode": "cert",
                 "ssh_principals": "ubuntu,admin",
                 "ssh_certificate_ttl_minutes": 45,
                 "node_id": "node-123",
@@ -1998,6 +2129,7 @@ mod tests {
             host: "bastion.internal",
             port: 22,
             cert_auth: false,
+            ssh_auth_mode: "proxy_only",
             principals: "",
             ttl: 30,
             via_node: "node-123",
@@ -2011,6 +2143,7 @@ mod tests {
                 "ssh_host": "bastion.internal",
                 "ssh_port": 22,
                 "ssh_certificate_auth": false,
+                "ssh_auth_mode": "proxy_only",
                 "ssh_principals": "",
                 "ssh_certificate_ttl_minutes": 30,
                 "node_id": "node-123",

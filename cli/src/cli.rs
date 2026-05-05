@@ -624,8 +624,11 @@ pub enum ServiceCommands {
         #[arg(long, default_value = "22")]
         port: u16,
         /// Enable certificate authentication
-        #[arg(long)]
+        #[arg(long, conflicts_with = "node_key")]
         cert_auth: bool,
+        /// Use node-local SSH private keys instead of NyxID-issued SSH certificates
+        #[arg(long)]
+        node_key: bool,
         /// SSH principals (comma-separated)
         #[arg(long)]
         principals: Option<String>,
@@ -639,6 +642,22 @@ pub enum ServiceCommands {
         /// Members of the org will see and use the SSH service through their own NyxID account.
         #[arg(long, value_name = "ID|SLUG|NAME")]
         org: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Convert an SSH service between cert, node-key, and proxy-only modes
+    ConvertSsh {
+        /// Service slug or ID
+        slug: String,
+        /// Convert to node-local SSH private-key auth
+        #[arg(long, conflicts_with_all = ["to_cert", "to_proxy_only"])]
+        to_node_key: bool,
+        /// Convert to NyxID-issued SSH certificate auth
+        #[arg(long, conflicts_with_all = ["to_node_key", "to_proxy_only"])]
+        to_cert: bool,
+        /// Convert to proxy-only mode
+        #[arg(long, conflicts_with_all = ["to_node_key", "to_cert"])]
+        to_proxy_only: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -1296,6 +1315,18 @@ pub enum NodeCommands {
     Credentials {
         #[command(subcommand)]
         command: NodeCredentialCommands,
+        /// Path to config directory
+        #[arg(long)]
+        config: Option<String>,
+        /// Agent profile name
+        #[arg(long, env = "NYXID_PROFILE")]
+        profile: Option<String>,
+    },
+    /// Manage local SSH node-key credentials
+    #[command(name = "ssh-credentials")]
+    SshCredentials {
+        #[command(subcommand)]
+        command: NodeSshCredentialCommands,
         /// Path to config directory
         #[arg(long)]
         config: Option<String>,
@@ -2007,6 +2038,75 @@ pub enum NodeCredentialCommands {
     },
 }
 
+#[derive(Subcommand)]
+pub enum NodeSshCredentialCommands {
+    /// Add a per-principal SSH private key
+    Add {
+        /// Service slug
+        #[arg(long)]
+        service: String,
+        /// SSH principal this key authenticates as
+        #[arg(long)]
+        principal: String,
+        /// Private key PEM file
+        #[arg(long)]
+        key_file: PathBuf,
+        /// Target host reached by this node
+        #[arg(long)]
+        host: String,
+        /// Target SSH port
+        #[arg(long, default_value = "22")]
+        port: u16,
+        /// Environment variable containing the private-key passphrase
+        #[arg(long)]
+        passphrase_env: Option<String>,
+        /// Do not pin the target SSH host key
+        #[arg(long)]
+        no_pin_host_key: bool,
+    },
+    /// List configured SSH private keys
+    List {
+        /// Filter by service slug
+        #[arg(long)]
+        service: Option<String>,
+    },
+    /// Show one configured SSH private key entry
+    Show {
+        /// Service slug
+        #[arg(long)]
+        service: String,
+        /// SSH principal
+        #[arg(long)]
+        principal: String,
+    },
+    /// Remove one configured SSH private key entry
+    Remove {
+        /// Service slug
+        #[arg(long)]
+        service: String,
+        /// SSH principal
+        #[arg(long)]
+        principal: String,
+    },
+    /// Test a configured SSH private key with a no-op command
+    Test {
+        /// Service slug
+        #[arg(long)]
+        service: String,
+        /// SSH principal
+        #[arg(long)]
+        principal: String,
+    },
+    /// Prune stale SSH private keys
+    Prune {
+        /// Remove entries for services that are no longer in node-key mode
+        #[arg(long)]
+        stale: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
 // ---- Node OpenClaw subcommands ----
 
 #[derive(Subcommand)]
@@ -2153,7 +2253,7 @@ pub enum SshCommand {
         service_id: String,
         /// SSH principal (username)
         #[arg(long)]
-        principal: String,
+        principal: Option<String>,
         /// Command to execute
         #[arg(trailing_var_arg = true, required = true)]
         command: Vec<String>,

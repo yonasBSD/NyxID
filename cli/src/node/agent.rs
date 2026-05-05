@@ -11,12 +11,15 @@ use serde::Deserialize;
 
 use super::config::{self, NodeConfig};
 use super::credential_store::{CredentialStore, SharedCredentials, SharedCredentialsSender};
+use super::credentials::ssh_keys::{self, NewSshKeyEntry};
 use super::error::Result;
 use super::oauth;
 use super::secret_backend::SecretBackend;
+use super::ssh_node_exec;
 use super::ws_client;
 
 use crate::cli::CredentialSecretFormat;
+use zeroize::Zeroizing;
 
 #[derive(Clone, Debug, Deserialize)]
 struct PendingCredentialMetadata {
@@ -562,6 +565,222 @@ pub async fn cmd_credentials(
             node_config.remove_credential_via(&service, &backend)?;
             node_config.save(&config_file)?;
             println!("Credential removed for service '{service}'.");
+            Ok(())
+        }
+    }
+}
+
+pub async fn cmd_ssh_credentials(
+    command: crate::cli::NodeSshCredentialCommands,
+    config_path: Option<&str>,
+) -> Result<()> {
+    use crate::cli::NodeSshCredentialCommands;
+
+    let config_dir = config::resolve_config_dir(config_path);
+    let config_file = config_dir.join("config.toml");
+
+    match command {
+        NodeSshCredentialCommands::Add {
+            service,
+            principal,
+            key_file,
+            host,
+            port,
+            passphrase_env,
+            no_pin_host_key,
+        } => {
+            let service = service.to_lowercase();
+            let mut private_key_pem =
+                Zeroizing::new(std::fs::read_to_string(&key_file).map_err(|error| {
+                    super::error::Error::Config(format!(
+                        "Failed to read key file {}: {error}",
+                        key_file.display()
+                    ))
+                })?);
+            if private_key_pem.trim().is_empty() {
+                return Err(super::error::Error::Validation(
+                    "Private key file is empty".to_string(),
+                ));
+            }
+            if !private_key_pem.ends_with('\n') {
+                private_key_pem.push('\n');
+            }
+
+            let passphrase = match passphrase_env {
+                Some(env) => {
+                    let value = std::env::var(&env).map_err(|_| {
+                        super::error::Error::Validation(format!(
+                            "Environment variable '{env}' is not set"
+                        ))
+                    })?;
+                    if value.is_empty() {
+                        return Err(super::error::Error::Validation(format!(
+                            "Environment variable '{env}' is empty"
+                        )));
+                    }
+                    Some(Zeroizing::new(value))
+                }
+                None => None,
+            };
+
+            let host_key_sha256 = if no_pin_host_key {
+                None
+            } else {
+                let fingerprint = ssh_node_exec::scan_host_key_sha256(&host, port, 10)
+                    .await
+                    .map_err(|error| super::error::Error::Config(error.message))?;
+                Some(fingerprint)
+            };
+
+            let mut node_config = NodeConfig::load(&config_file)?;
+            let backend = SecretBackend::from_config(&node_config, &config_dir)?;
+            ssh_keys::add_entry(
+                &mut node_config,
+                &backend,
+                NewSshKeyEntry {
+                    service_slug: service.clone(),
+                    principal: principal.clone(),
+                    private_key_pem,
+                    passphrase,
+                    target_host: host.clone(),
+                    target_port: port,
+                    host_key_sha256: host_key_sha256.clone(),
+                },
+            )?;
+            node_config.save(&config_file)?;
+
+            println!("SSH key added for service '{service}' principal '{principal}'.");
+            if let Some(fingerprint) = host_key_sha256 {
+                println!("Pinned host key: {fingerprint}");
+            } else {
+                println!("Host key pinning disabled for this entry.");
+            }
+            Ok(())
+        }
+        NodeSshCredentialCommands::List { service } => {
+            let node_config = NodeConfig::load(&config_file)?;
+            let mut entries = node_config.ssh_keys.clone();
+            if let Some(service) = service.as_deref() {
+                entries.retain(|entry| entry.service_slug == service);
+            }
+            entries.sort_by(|a, b| {
+                (&a.service_slug, &a.principal).cmp(&(&b.service_slug, &b.principal))
+            });
+            if entries.is_empty() {
+                println!("No SSH node-key credentials configured.");
+            } else {
+                println!("SSH node-key credentials:");
+                for entry in entries {
+                    let pin = entry.host_key_sha256.as_deref().unwrap_or("unpinned");
+                    println!(
+                        "  {} / {} -> {}:{} ({})",
+                        entry.service_slug,
+                        entry.principal,
+                        entry.target_host,
+                        entry.target_port,
+                        pin
+                    );
+                }
+            }
+            Ok(())
+        }
+        NodeSshCredentialCommands::Show { service, principal } => {
+            let node_config = NodeConfig::load(&config_file)?;
+            let entry =
+                ssh_keys::config_find(&node_config, &service, &principal).ok_or_else(|| {
+                    super::error::Error::Config(format!(
+                        "No SSH key found for service '{service}' principal '{principal}'"
+                    ))
+                })?;
+            println!("Service:    {}", entry.service_slug);
+            println!("Principal:  {}", entry.principal);
+            println!("Target:     {}:{}", entry.target_host, entry.target_port);
+            println!(
+                "Host key:   {}",
+                entry.host_key_sha256.as_deref().unwrap_or("unpinned")
+            );
+            println!("Created at: {}", entry.created_at);
+            println!("Key:        <redacted>");
+            println!(
+                "Passphrase: {}",
+                if entry.passphrase_encrypted.is_some() {
+                    "<redacted>"
+                } else {
+                    "none"
+                }
+            );
+            Ok(())
+        }
+        NodeSshCredentialCommands::Remove { service, principal } => {
+            let mut node_config = NodeConfig::load(&config_file)?;
+            let backend = SecretBackend::from_config(&node_config, &config_dir)?;
+            ssh_keys::remove_entry(&mut node_config, &backend, &service, &principal)?;
+            node_config.save(&config_file)?;
+            println!("SSH key removed for service '{service}' principal '{principal}'.");
+            Ok(())
+        }
+        NodeSshCredentialCommands::Test { service, principal } => {
+            let node_config = NodeConfig::load(&config_file)?;
+            let backend = SecretBackend::from_config(&node_config, &config_dir)?;
+            let stored =
+                ssh_keys::config_find(&node_config, &service, &principal).ok_or_else(|| {
+                    super::error::Error::Config(format!(
+                        "No SSH key found for service '{service}' principal '{principal}'"
+                    ))
+                })?;
+            let entry = ssh_keys::load_entry(stored, &backend)?;
+            let result = ssh_node_exec::test_connection(entry, 10).await;
+            match result {
+                Ok(()) => {
+                    println!(
+                        "SSH key test succeeded for service '{service}' principal '{principal}'."
+                    );
+                    Ok(())
+                }
+                Err(error) => Err(super::error::Error::Config(error.message)),
+            }
+        }
+        NodeSshCredentialCommands::Prune { stale, auth } => {
+            if !stale {
+                return Err(super::error::Error::Validation(
+                    "Only --stale pruning is supported".to_string(),
+                ));
+            }
+            let mut node_config = NodeConfig::load(&config_file)?;
+            let backend = SecretBackend::from_config(&node_config, &config_dir)?;
+            let mut api = crate::api::ApiClient::from_auth(&auth)
+                .map_err(|error| super::error::Error::Config(error.to_string()))?;
+            let resp: serde_json::Value = api
+                .get("/keys")
+                .await
+                .map_err(|error| super::error::Error::Config(error.to_string()))?;
+            let node_key_slugs = resp
+                .get("keys")
+                .and_then(|v| v.as_array())
+                .into_iter()
+                .flatten()
+                .filter(|item| {
+                    item.get("ssh_auth_mode").and_then(|v| v.as_str()) == Some("node_key")
+                })
+                .filter_map(|item| {
+                    item.get("slug")
+                        .or_else(|| item.get("service_slug"))
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                })
+                .collect::<std::collections::BTreeSet<_>>();
+
+            let stale_entries = node_config
+                .ssh_keys
+                .iter()
+                .filter(|entry| !node_key_slugs.contains(&entry.service_slug))
+                .map(|entry| (entry.service_slug.clone(), entry.principal.clone()))
+                .collect::<Vec<_>>();
+            for (service, principal) in &stale_entries {
+                let _ = ssh_keys::remove_entry(&mut node_config, &backend, service, principal)?;
+            }
+            node_config.save(&config_file)?;
+            println!("Pruned {} stale SSH key entries.", stale_entries.len());
             Ok(())
         }
     }
