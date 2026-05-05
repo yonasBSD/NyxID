@@ -180,6 +180,19 @@ pub struct NodeSshExecRequest {
     pub timeout_secs: u32,
 }
 
+/// Request sent to a node to execute an SSH command using a node-local key.
+#[derive(Clone)]
+pub struct NodeSshNodeKeyExecRequest {
+    pub request_id: String,
+    pub service_slug: String,
+    pub principal: String,
+    pub command: String,
+    pub timeout_secs: u32,
+    pub target_host: Option<String>,
+    pub target_port: Option<u16>,
+    pub host_key_sha256: Option<String>,
+}
+
 /// Result received from a node after SSH command execution.
 #[derive(Debug)]
 pub struct NodeSshExecResult {
@@ -190,6 +203,7 @@ pub struct NodeSshExecResult {
     pub duration_ms: u64,
     pub timed_out: bool,
     pub error: Option<String>,
+    pub error_code: Option<u32>,
 }
 
 /// Request sent to a node to open a web terminal session.
@@ -417,6 +431,29 @@ struct WsSshExec {
 }
 
 #[derive(Debug, Serialize)]
+struct WsSshNodeExecOpen {
+    #[serde(rename = "type")]
+    msg_type: &'static str,
+    request_id: String,
+    service_slug: String,
+    principal: String,
+    command: String,
+    timeout_secs: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    host_key_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timestamp: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nonce: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hmac: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
 struct WsWebTerminalOpen {
     #[serde(rename = "type")]
     msg_type: &'static str,
@@ -597,6 +634,8 @@ pub struct WsSshExecResultMsg {
     pub timed_out: bool,
     #[serde(default)]
     pub error: Option<String>,
+    #[serde(default)]
+    pub error_code: Option<u32>,
 }
 
 /// JSON web_terminal_started from node.
@@ -721,6 +760,19 @@ pub(crate) fn map_retryable_node_failure(message: String, reason: Option<&str>) 
     }
 }
 
+fn map_ssh_exec_result_error(message: String, code: Option<u32>, node_key: bool) -> AppError {
+    match code {
+        Some(1011) => AppError::SshNodeKeyMissing(message),
+        Some(1012) => AppError::SshHostKeyMismatch(message),
+        Some(1013) => AppError::SshNodeExecChannelClosed(message),
+        Some(1014) => AppError::SshPrincipalAmbiguous(message),
+        Some(1015) => AppError::SshAuthModeUnsupportedForOperation(message),
+        Some(_) => AppError::SshNodeExecChannelClosed(message),
+        None if node_key => AppError::SshNodeExecChannelClosed(message),
+        None => AppError::Internal(format!("Node SSH exec error: {message}")),
+    }
+}
+
 /// Compute HMAC-SHA256 signature for a proxy request.
 pub fn compute_hmac_signature(
     secret: &[u8],
@@ -798,6 +850,26 @@ pub fn compute_ssh_exec_hmac_signature(
         "{}\n{}\n{}\n{}\n{}\n{}",
         timestamp, nonce, request_id, host, port, principal
     );
+
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key size");
+    mac.update(message.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
+/// Compute HMAC-SHA256 signature for a node-key SSH exec request.
+/// Message format: `{timestamp}\n{nonce}\n{request_id}\n{service_slug}\n{principal}`.
+pub fn compute_ssh_node_exec_hmac_signature(
+    secret: &[u8],
+    timestamp: &str,
+    nonce: &str,
+    request_id: &str,
+    service_slug: &str,
+    principal: &str,
+) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    let message = format!("{timestamp}\n{nonce}\n{request_id}\n{service_slug}\n{principal}");
 
     let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key size");
     mac.update(message.as_bytes());
@@ -1967,13 +2039,115 @@ impl NodeWsManager {
         match tokio::time::timeout(total_timeout, resp_rx).await {
             Ok(Ok(result)) => {
                 if let Some(ref error) = result.error {
-                    Err(AppError::Internal(format!("Node SSH exec error: {error}")))
+                    Err(map_ssh_exec_result_error(
+                        error.clone(),
+                        result.error_code,
+                        false,
+                    ))
                 } else {
                     Ok(result)
                 }
             }
             Ok(Err(_)) => Err(AppError::NodeOffline(format!(
                 "Node {node_id} disconnected during SSH exec"
+            ))),
+            Err(_) => {
+                if let Some(conn) = self.connections.get(node_id) {
+                    conn.ssh_exec_requests.remove(&request_id);
+                }
+                Err(AppError::NodeProxyTimeout)
+            }
+        }
+    }
+
+    /// Execute an SSH command on a connected node using a node-local SSH key.
+    /// If `signing_secret` is provided, the request is HMAC-signed.
+    pub async fn exec_ssh_node_key_command(
+        &self,
+        node_id: &str,
+        request: NodeSshNodeKeyExecRequest,
+        signing_secret: Option<&[u8]>,
+    ) -> AppResult<NodeSshExecResult> {
+        let conn = self
+            .connections
+            .get(node_id)
+            .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
+        let request_id = request.request_id.clone();
+
+        let (resp_tx, resp_rx) = oneshot::channel();
+        conn.ssh_exec_requests.insert(request_id.clone(), resp_tx);
+
+        let (timestamp, nonce, hmac) = if let Some(secret) = signing_secret {
+            let ts = chrono::Utc::now().to_rfc3339();
+            let n = uuid::Uuid::new_v4().to_string();
+            let sig = compute_ssh_node_exec_hmac_signature(
+                secret,
+                &ts,
+                &n,
+                &request.request_id,
+                &request.service_slug,
+                &request.principal,
+            );
+            (Some(ts), Some(n), Some(sig))
+        } else {
+            (None, None, None)
+        };
+
+        let msg = serde_json::to_string(&WsSshNodeExecOpen {
+            msg_type: "ssh_node_exec_open",
+            request_id: request.request_id,
+            service_slug: request.service_slug,
+            principal: request.principal,
+            command: request.command,
+            timeout_secs: request.timeout_secs,
+            target_host: request.target_host,
+            target_port: request.target_port,
+            host_key_sha256: request.host_key_sha256,
+            timestamp,
+            nonce,
+            hmac,
+        })
+        .map_err(|e| {
+            conn.ssh_exec_requests.remove(&request_id);
+            AppError::Internal(format!(
+                "Failed to serialize SSH node-key exec request: {e}"
+            ))
+        })?;
+
+        match conn.tx.try_send(NodeOutboundMessage::Text(msg)) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                conn.ssh_exec_requests.remove(&request_id);
+                return Err(AppError::NodeOffline(format!(
+                    "Node {node_id} write buffer full"
+                )));
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                conn.ssh_exec_requests.remove(&request_id);
+                return Err(AppError::NodeOffline(format!(
+                    "Node {node_id} connection closed"
+                )));
+            }
+        }
+
+        drop(conn);
+
+        let total_timeout =
+            std::time::Duration::from_secs(self.proxy_timeout_secs + request.timeout_secs as u64);
+        match tokio::time::timeout(total_timeout, resp_rx).await {
+            Ok(Ok(result)) => {
+                if let Some(ref error) = result.error {
+                    Err(map_ssh_exec_result_error(
+                        error.clone(),
+                        result.error_code,
+                        true,
+                    ))
+                } else {
+                    Ok(result)
+                }
+            }
+            Ok(Err(_)) => Err(AppError::NodeOffline(format!(
+                "Node {node_id} disconnected during SSH node-key exec"
             ))),
             Err(_) => {
                 if let Some(conn) = self.connections.get(node_id) {

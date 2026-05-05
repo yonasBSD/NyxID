@@ -5,12 +5,15 @@ use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
 use crate::models::org_membership::OrgRole;
+use crate::models::ssh_auth_mode::SshAuthMode;
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::models::user_api_key::COLLECTION_NAME as USER_API_KEYS;
 use crate::models::user_endpoint::COLLECTION_NAME as USER_ENDPOINTS;
 use crate::models::user_service::{COLLECTION_NAME, UserService};
 use crate::models::ws_frame_injection::WsFrameInjection;
-use crate::services::{agent_binding_service, node_service, org_service, ws_frame_injector};
+use crate::services::{
+    agent_binding_service, audit_service, node_service, org_service, ws_frame_injector,
+};
 
 /// Valid auth methods for user services.
 ///
@@ -438,6 +441,7 @@ pub async fn create_user_service(
     node_id: Option<&str>,
     node_priority: i32,
     service_type: &str,
+    ssh_auth_mode: SshAuthMode,
     source: Option<&str>,
     source_id: Option<&str>,
     source_app_id: Option<&str>,
@@ -553,6 +557,8 @@ pub async fn create_user_service(
         node_id: node_id.map(|s| s.to_string()),
         node_priority,
         service_type: service_type.to_string(),
+        ssh_auth_mode,
+        ssh_node_keys_stale: false,
         identity_propagation_mode: identity.identity_propagation_mode,
         identity_include_user_id: identity.identity_include_user_id,
         identity_include_email: identity.identity_include_email,
@@ -1288,6 +1294,71 @@ pub async fn link_api_key(
     Ok(())
 }
 
+pub(crate) fn ssh_node_keys_stale_after_transition(
+    current_stale: bool,
+    from: SshAuthMode,
+    to: SshAuthMode,
+) -> bool {
+    current_stale || (from == SshAuthMode::NodeKey && to != SshAuthMode::NodeKey)
+}
+
+/// Update only the SSH auth mode on a user service. All v1 transitions are
+/// accepted; switching away from NodeKey marks node-side keys stale so
+/// `nyxid node ssh-credentials prune --stale` can clean orphaned entries.
+pub async fn update_ssh_auth_mode(
+    db: &mongodb::Database,
+    user_id: &str,
+    actor_user_id: &str,
+    service_id: &str,
+    mode: SshAuthMode,
+) -> AppResult<UserService> {
+    let current = get_user_service(db, user_id, service_id).await?;
+    if current.service_type != "ssh" {
+        return Err(AppError::ValidationError(
+            "SSH auth mode can only be changed for SSH services".to_string(),
+        ));
+    }
+
+    let from = current.ssh_auth_mode;
+    let ssh_node_keys_stale =
+        ssh_node_keys_stale_after_transition(current.ssh_node_keys_stale, from, mode);
+    let now = Utc::now();
+
+    db.collection::<UserService>(COLLECTION_NAME)
+        .update_one(
+            doc! { "_id": service_id, "user_id": user_id },
+            doc! {
+                "$set": {
+                    "ssh_auth_mode": mode.as_str(),
+                    "ssh_node_keys_stale": ssh_node_keys_stale,
+                    "updated_at": bson::DateTime::from_chrono(now),
+                }
+            },
+        )
+        .await?;
+
+    if from != mode {
+        audit_service::log_async(
+            db.clone(),
+            Some(actor_user_id.to_string()),
+            "service.ssh_auth_mode_changed".to_string(),
+            Some(serde_json::json!({
+                "service_id": service_id,
+                "owner_user_id": user_id,
+                "from": from.as_str(),
+                "to": mode.as_str(),
+                "actor": actor_user_id,
+            })),
+            None,
+            None,
+            None,
+            None,
+        );
+    }
+
+    get_user_service(db, user_id, service_id).await
+}
+
 /// Deactivate a user service (soft delete).
 ///
 /// `actor_user_id` is the human/API key making the request -- forwarded to
@@ -1494,6 +1565,30 @@ mod tests {
     }
 
     #[test]
+    fn ssh_auth_mode_state_machine_marks_orphans_only_when_leaving_node_key() {
+        let modes = [
+            SshAuthMode::Cert,
+            SshAuthMode::NodeKey,
+            SshAuthMode::ProxyOnly,
+        ];
+
+        for from in modes {
+            for to in modes {
+                let expected = from == SshAuthMode::NodeKey && to != SshAuthMode::NodeKey;
+                assert_eq!(
+                    ssh_node_keys_stale_after_transition(false, from, to),
+                    expected,
+                    "unexpected stale transition from {from} to {to}",
+                );
+                assert!(
+                    ssh_node_keys_stale_after_transition(true, from, to),
+                    "already-stale services must stay stale from {from} to {to}",
+                );
+            }
+        }
+    }
+
+    #[test]
     fn validate_auth_method_accepts_token_exchange() {
         // Regression: token_exchange was missing from VALID_AUTH_METHODS
         // which made every api-lark-bot / api-feishu-bot key creation
@@ -1570,6 +1665,7 @@ mod tests {
             None,
             0,
             "http",
+            SshAuthMode::ProxyOnly,
             None,
             None,
             None,
@@ -1634,6 +1730,7 @@ mod tests {
             None,
             0,
             "http",
+            SshAuthMode::ProxyOnly,
             None,
             None,
             None,

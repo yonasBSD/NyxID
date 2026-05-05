@@ -8,6 +8,7 @@ use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
+use crate::models::ssh_auth_mode::SshAuthMode;
 use crate::models::user_api_key::UserApiKey;
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::models::ws_frame_injection::WsFrameInjection;
@@ -164,6 +165,8 @@ pub struct CreateKeyRequest {
     pub ssh_port: Option<u16>,
     /// Enable SSH certificate auth (default: true)
     pub ssh_certificate_auth: Option<bool>,
+    /// SSH auth mode: "cert", "node_key", or "proxy_only"
+    pub ssh_auth_mode: Option<SshAuthMode>,
     /// Comma-separated allowed principals
     pub ssh_principals: Option<String>,
     /// Certificate TTL in minutes (default: 30)
@@ -218,6 +221,7 @@ impl std::fmt::Debug for CreateKeyRequest {
             .field("ssh_host", &self.ssh_host)
             .field("ssh_port", &self.ssh_port)
             .field("ssh_certificate_auth", &self.ssh_certificate_auth)
+            .field("ssh_auth_mode", &self.ssh_auth_mode)
             .field("ssh_principals", &self.ssh_principals)
             .field(
                 "ssh_certificate_ttl_minutes",
@@ -254,6 +258,8 @@ pub struct KeyResponse {
     pub node_id: Option<String>,
     pub node_priority: i32,
     pub service_type: String,
+    pub ssh_auth_mode: SshAuthMode,
+    pub ssh_node_keys_stale: bool,
     pub is_active: bool,
     pub identity_propagation_mode: String,
     pub identity_include_user_id: bool,
@@ -551,10 +557,15 @@ pub async fn create_key(
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
+        let certificate_auth = body.ssh_certificate_auth.unwrap_or(true);
+        let ssh_auth_mode = body
+            .ssh_auth_mode
+            .unwrap_or_else(|| SshAuthMode::from_certificate_auth_enabled(certificate_auth));
         unified_key_service::SshCreateParams {
             host,
             port: body.ssh_port.unwrap_or(22),
-            certificate_auth: body.ssh_certificate_auth.unwrap_or(true),
+            certificate_auth,
+            ssh_auth_mode,
             principals,
             certificate_ttl_minutes: body.ssh_certificate_ttl_minutes.unwrap_or(30),
         }
@@ -1699,6 +1710,8 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
         node_id: result.service.node_id.clone(),
         node_priority: result.service.node_priority,
         service_type: result.service.service_type.clone(),
+        ssh_auth_mode: result.service.ssh_auth_mode,
+        ssh_node_keys_stale: result.service.ssh_node_keys_stale,
         is_active: result.service.is_active,
         identity_propagation_mode: result.service.identity_propagation_mode.clone(),
         identity_include_user_id: result.service.identity_include_user_id,
@@ -1758,6 +1771,8 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         node_id: view.node_id,
         node_priority: view.node_priority,
         service_type: view.service_type,
+        ssh_auth_mode: view.ssh_auth_mode,
+        ssh_node_keys_stale: view.ssh_node_keys_stale,
         is_active: view.is_active,
         identity_propagation_mode: view.identity_propagation_mode,
         identity_include_user_id: view.identity_include_user_id,
@@ -2011,6 +2026,7 @@ mod tests {
             ssh_host: None,
             ssh_port: None,
             ssh_certificate_auth: None,
+            ssh_auth_mode: None,
             ssh_principals: None,
             ssh_certificate_ttl_minutes: None,
             identity_propagation_mode: None,

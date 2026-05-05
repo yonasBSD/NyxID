@@ -728,6 +728,7 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
                         duration_ms: result.duration_ms,
                         timed_out: result.timed_out,
                         error: result.error,
+                        error_code: result.error_code,
                     },
                 );
             }

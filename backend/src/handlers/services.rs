@@ -17,6 +17,7 @@ use crate::models::downstream_service::{
     TokenExchangeConfig,
 };
 use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
+use crate::models::ssh_auth_mode::SshAuthMode;
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::models::ws_frame_injection::WsFrameInjection;
 use crate::mw::auth::AuthUser;
@@ -108,6 +109,7 @@ impl std::fmt::Debug for CreateServiceRequest {
 pub struct SshServiceConfigRequest {
     pub host: String,
     pub port: u16,
+    pub ssh_auth_mode: Option<SshAuthMode>,
     #[serde(default)]
     pub certificate_auth_enabled: bool,
     #[serde(default = "default_certificate_ttl_minutes")]
@@ -120,6 +122,7 @@ pub struct SshServiceConfigRequest {
 pub struct SshServiceConfigResponse {
     pub host: String,
     pub port: u16,
+    pub ssh_auth_mode: SshAuthMode,
     pub certificate_auth_enabled: bool,
     pub certificate_ttl_minutes: u32,
     pub allowed_principals: Vec<String>,
@@ -880,6 +883,7 @@ pub async fn create_service(
                 host: ssh_config.host.as_str(),
                 port: ssh_config.port,
                 certificate_auth_enabled: ssh_config.certificate_auth_enabled,
+                ssh_auth_mode: ssh_config.ssh_auth_mode,
                 certificate_ttl_minutes: ssh_config.certificate_ttl_minutes,
                 allowed_principals: &ssh_config.allowed_principals,
             },
@@ -1455,6 +1459,7 @@ pub async fn update_service(
                         host: ssh_config.host.as_str(),
                         port: ssh_config.port,
                         certificate_auth_enabled: ssh_config.certificate_auth_enabled,
+                        ssh_auth_mode: ssh_config.ssh_auth_mode,
                         certificate_ttl_minutes: ssh_config.certificate_ttl_minutes,
                         allowed_principals: &ssh_config.allowed_principals,
                     },

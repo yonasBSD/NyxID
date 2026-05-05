@@ -12,6 +12,7 @@ use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
+use crate::models::ssh_auth_mode::SshAuthMode;
 use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
 use crate::models::user_endpoint::UserEndpoint;
 use crate::models::user_provider_token::{
@@ -204,6 +205,7 @@ pub struct SshCreateParams<'a> {
     pub host: &'a str,
     pub port: u16,
     pub certificate_auth: bool,
+    pub ssh_auth_mode: crate::models::ssh_auth_mode::SshAuthMode,
     pub principals: Vec<String>,
     pub certificate_ttl_minutes: u32,
 }
@@ -273,6 +275,8 @@ pub struct KeyView {
     pub node_id: Option<String>,
     pub node_priority: i32,
     pub service_type: String,
+    pub ssh_auth_mode: SshAuthMode,
+    pub ssh_node_keys_stale: bool,
     pub is_active: bool,
     pub identity_propagation_mode: String,
     pub identity_include_user_id: bool,
@@ -718,6 +722,14 @@ pub async fn create_key(
         let api_key_id = api_key.as_ref().map(|k| k.id.clone());
         let catalog_service_id = svc.id.clone();
         let service_type = svc.service_type.clone();
+        let ssh_auth_mode = if service_type == "ssh" {
+            svc.ssh_config
+                .as_ref()
+                .map(|ssh| ssh.ssh_auth_mode)
+                .unwrap_or_default()
+        } else {
+            SshAuthMode::ProxyOnly
+        };
         let base_slug = requested_slug.0.to_string();
         let strategy = requested_slug.1;
         let retry_node_id = node_id.map(str::to_string);
@@ -737,6 +749,7 @@ pub async fn create_key(
                 retry_node_id.as_deref(),
                 0,
                 &service_type,
+                ssh_auth_mode,
                 None,
                 None,
                 None,
@@ -832,6 +845,7 @@ pub async fn create_key(
                 host: ssh.host,
                 port: ssh.port,
                 certificate_auth_enabled: ssh.certificate_auth,
+                ssh_auth_mode: Some(ssh.ssh_auth_mode),
                 certificate_ttl_minutes: ssh.certificate_ttl_minutes,
                 allowed_principals: &ssh.principals,
             },
@@ -947,6 +961,7 @@ pub async fn create_key(
                 retry_node_id.as_deref(),
                 0,
                 "ssh",
+                built_ssh_config.ssh_auth_mode,
                 None,
                 None,
                 None,
@@ -1102,6 +1117,7 @@ pub async fn create_key(
                 retry_node_id.as_deref(),
                 0,
                 "http",
+                SshAuthMode::ProxyOnly,
                 None,
                 None,
                 None,
@@ -1358,6 +1374,7 @@ pub async fn auto_provision_no_auth_services(
             None,
             0,
             "http",
+            SshAuthMode::ProxyOnly,
             Some(AUTO_PROVISION_SOURCE),
             Some(&source_id),
             *source_app_id,
@@ -2597,6 +2614,8 @@ fn build_key_view(
         node_id: svc.node_id.clone(),
         node_priority: svc.node_priority,
         service_type: svc.service_type.clone(),
+        ssh_auth_mode: svc.ssh_auth_mode,
+        ssh_node_keys_stale: svc.ssh_node_keys_stale,
         is_active: svc.is_active,
         identity_propagation_mode: svc.identity_propagation_mode.clone(),
         identity_include_user_id: svc.identity_include_user_id,
@@ -2648,6 +2667,7 @@ mod tests {
     };
     use crate::models::node::{COLLECTION_NAME as NODES, Node, NodeMetrics, NodeStatus};
     use crate::models::service_provider_requirement::ServiceProviderRequirement;
+    use crate::models::ssh_auth_mode::SshAuthMode;
     use crate::models::user_api_key::COLLECTION_NAME as USER_API_KEYS;
     use crate::models::user_api_key::UserApiKey;
     use crate::models::user_endpoint::COLLECTION_NAME as USER_ENDPOINTS;
@@ -2697,6 +2717,8 @@ mod tests {
             node_id: None,
             node_priority: 0,
             service_type: "http".to_string(),
+            ssh_auth_mode: SshAuthMode::ProxyOnly,
+            ssh_node_keys_stale: false,
             identity_propagation_mode: "none".to_string(),
             identity_include_user_id: false,
             identity_include_email: false,
@@ -3230,6 +3252,7 @@ mod tests {
                 host: "server-a.example.com",
                 port: 22,
                 certificate_auth: true,
+                ssh_auth_mode: crate::models::ssh_auth_mode::SshAuthMode::Cert,
                 principals: vec!["ubuntu".to_string()],
                 certificate_ttl_minutes: 60,
             }),
@@ -3258,6 +3281,7 @@ mod tests {
                 host: "server-b.example.com",
                 port: 22,
                 certificate_auth: true,
+                ssh_auth_mode: crate::models::ssh_auth_mode::SshAuthMode::Cert,
                 principals: vec!["ubuntu".to_string()],
                 certificate_ttl_minutes: 60,
             }),
