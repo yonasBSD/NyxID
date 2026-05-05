@@ -2,16 +2,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use base64::Engine;
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
 use serde::Deserialize;
-use serde_json::Value;
 use sha2::{Digest, Sha256};
-use sigstore::crypto::{CosignVerificationKey, Signature};
-use sigstore::trust::sigstore::SigstoreTrustRoot;
-use sigstore_verification::{Attestation, AttestationClient, FetchParams};
 use tokio::io::AsyncWriteExt;
-use x509_cert::{Certificate, der::Decode};
 
 use crate::cli::UpdateArgs;
 use crate::commands::repo::REPO_URL;
@@ -128,7 +122,7 @@ async fn update_cli(args: &UpdateArgs) -> Result<Option<PathBuf>> {
     eprintln!("Downloading {}...", asset.name);
     download_asset(&client, asset, &archive_path).await?;
 
-    match verify_release_attestation(&archive_path, &release.tag_name).await {
+    match verify_release_attestation(&client, &archive_path, &release.tag_name).await {
         Ok(()) => eprintln!("Release attestation verified."),
         Err(err) if args.insecure_skip_verify => {
             eprintln!();
@@ -310,200 +304,25 @@ async fn download_asset(
     Ok(())
 }
 
-async fn verify_release_attestation(archive_path: &Path, tag: &str) -> Result<()> {
+async fn verify_release_attestation(
+    client: &reqwest::Client,
+    archive_path: &Path,
+    tag: &str,
+) -> Result<()> {
     eprintln!("Verifying GitHub artifact attestation...");
-
-    // Force loading the public-good Sigstore trust root. The GitHub verifier
-    // below uses sigstore-rs primitives too, but this keeps trust-root failures
-    // as hard failures instead of letting any downstream fallback continue.
-    SigstoreTrustRoot::new(None)
-        .await
-        .context("Failed to load Sigstore public-good trust root")?;
 
     let digest = sha256_file_hex(archive_path)
         .with_context(|| format!("Failed to hash {}", archive_path.display()))?;
-    let mut client_builder = AttestationClient::builder();
-    if let Some(token) = github_token() {
-        client_builder = client_builder.github_token(&token);
-    }
-    let client = client_builder
-        .build()
-        .context("Failed to build GitHub attestation client")?;
-    let attestations = client
-        .fetch_attestations(FetchParams {
-            owner: GITHUB_OWNER.to_string(),
-            repo: Some(format!("{GITHUB_OWNER}/{GITHUB_REPO}")),
-            digest: format!("sha256:{digest}"),
-            limit: 30,
-            predicate_type: None,
-        })
-        .await
-        .with_context(|| format!("Failed to fetch GitHub attestations for sha256:{digest}"))?;
-
-    if attestations.is_empty() {
-        anyhow::bail!("No GitHub artifact attestations found for sha256:{digest}");
-    }
-
     let expected_identity = expected_workflow_identity(tag);
-    let mut failures = Vec::new();
-
-    for attestation in &attestations {
-        match verify_single_release_attestation(
-            attestation,
-            archive_path,
-            &digest,
-            &expected_identity,
-        )
-        .await
-        {
-            Ok(()) => return Ok(()),
-            Err(err) => failures.push(format!("{err:#}")),
-        }
-    }
-
-    anyhow::bail!(
-        "No valid release attestation matched expected workflow identity {expected_identity}. Verification failures: {}",
-        failures.join(" | ")
-    );
-}
-
-async fn verify_single_release_attestation(
-    attestation: &Attestation,
-    archive_path: &Path,
-    expected_digest: &str,
-    expected_identity: &str,
-) -> Result<()> {
-    let parsed = sigstore_verification::bundle::parse_bundle(attestation)
-        .context("Failed to parse Sigstore bundle")?;
-    let certificate = parsed
-        .certificate
-        .as_deref()
-        .context("Attestation bundle did not include a signing certificate")?;
-    let envelope = parsed
-        .dsse_envelope
-        .as_ref()
-        .context("Attestation bundle did not include a DSSE envelope")?;
-
-    verify_attestation_identity(certificate, expected_identity)?;
-    verify_payload_subject_digest(&parsed.payload, expected_digest)?;
-    verify_dsse_signature(certificate, envelope, &parsed.payload)?;
-
-    sigstore_verification::verify::verify_attestations(
-        std::slice::from_ref(attestation),
-        archive_path,
-        Some(expected_identity),
+    super::update_attestation::verify_release_attestation(
+        client,
+        GITHUB_OWNER,
+        GITHUB_REPO,
+        &digest,
+        &expected_identity,
     )
     .await
-    .context("Sigstore bundle verification failed")?;
-
-    Ok(())
-}
-
-fn verify_attestation_identity(certificate: &str, expected_identity: &str) -> Result<()> {
-    let cert_info = sigstore_verification::verify::verify_certificate(certificate)
-        .context("Failed to parse attestation signing certificate")?;
-    let actual_identity = cert_info
-        .workflow_ref
-        .as_deref()
-        .context("Attestation certificate did not contain a GitHub workflow identity")?;
-
-    if actual_identity != expected_identity {
-        anyhow::bail!(
-            "Attestation workflow identity mismatch: expected {expected_identity}, got {actual_identity}"
-        );
-    }
-
-    if !is_fulcio_issuer(&cert_info.issuer) {
-        anyhow::bail!(
-            "Attestation certificate issuer mismatch: expected Sigstore Fulcio, got {}",
-            cert_info.issuer
-        );
-    }
-
-    Ok(())
-}
-
-fn verify_payload_subject_digest(payload: &[u8], expected_digest: &str) -> Result<()> {
-    let statement: Value =
-        serde_json::from_slice(payload).context("Failed to parse attestation payload")?;
-    let subjects = statement
-        .get("subject")
-        .and_then(Value::as_array)
-        .context("Attestation payload did not include subject entries")?;
-
-    let found = subjects.iter().any(|subject| {
-        subject
-            .get("digest")
-            .and_then(|digest| digest.get("sha256"))
-            .and_then(Value::as_str)
-            == Some(expected_digest)
-    });
-
-    if !found {
-        anyhow::bail!("Attestation subject digest mismatch: expected sha256:{expected_digest}");
-    }
-
-    Ok(())
-}
-
-fn verify_dsse_signature(
-    certificate: &str,
-    envelope: &sigstore_verification::api::DsseEnvelope,
-    payload: &[u8],
-) -> Result<()> {
-    let cert_bytes = base64::engine::general_purpose::STANDARD
-        .decode(certificate)
-        .context("Failed to decode attestation certificate")?;
-    let certificate = Certificate::from_der(&cert_bytes)
-        .context("Failed to parse attestation certificate DER")?;
-    let verification_key =
-        CosignVerificationKey::try_from(&certificate.tbs_certificate.subject_public_key_info)
-            .context("Failed to extract attestation certificate public key")?;
-    let signature = envelope
-        .signatures
-        .first()
-        .context("Attestation DSSE envelope did not include a signature")?;
-
-    let primary_pae = dsse_pae(&envelope.payload_type, payload);
-    let primary_result = verification_key.verify_signature(
-        Signature::Base64Encoded(signature.sig.as_bytes()),
-        &primary_pae,
-    );
-    if primary_result.is_ok() {
-        return Ok(());
-    }
-
-    // Some older Sigstore tooling verified the JSON base64 payload string. Keep
-    // this compatibility check cryptographic, but only after the DSSE-spec PAE
-    // failed.
-    let compatibility_pae = dsse_pae(&envelope.payload_type, envelope.payload.as_bytes());
-    verification_key
-        .verify_signature(
-            Signature::Base64Encoded(signature.sig.as_bytes()),
-            &compatibility_pae,
-        )
-        .with_context(|| {
-            format!(
-                "DSSE signature verification failed: {}; compatibility check also failed",
-                primary_result.expect_err("primary result is known to be an error")
-            )
-        })?;
-
-    Ok(())
-}
-
-fn dsse_pae(payload_type: &str, payload: &[u8]) -> Vec<u8> {
-    let mut pae = Vec::new();
-    pae.extend_from_slice(b"DSSEv1");
-    pae.push(b' ');
-    pae.extend_from_slice(payload_type.len().to_string().as_bytes());
-    pae.push(b' ');
-    pae.extend_from_slice(payload_type.as_bytes());
-    pae.push(b' ');
-    pae.extend_from_slice(payload.len().to_string().as_bytes());
-    pae.push(b' ');
-    pae.extend_from_slice(payload);
-    pae
+    .context("Sigstore bundle verification failed")
 }
 
 fn extract_binary(archive_path: &Path, extract_dir: &Path) -> Result<PathBuf> {
@@ -589,13 +408,6 @@ fn current_target() -> &'static str {
 
 fn archive_binary_name() -> &'static str {
     if cfg!(windows) { "nyxid.exe" } else { "nyxid" }
-}
-
-fn is_fulcio_issuer(issuer: &str) -> bool {
-    let issuer = issuer.to_lowercase();
-    issuer.contains("sigstore")
-        || issuer == "fulcio root ca"
-        || issuer.starts_with("fulcio intermediate ")
 }
 
 /// Locate the freshly-installed `nyxid` binary.
@@ -703,18 +515,21 @@ mod tests {
     fn verifies_fixture_attestation_subject_digest() {
         let payload =
             include_bytes!("../../tests/fixtures/update-attestation-statement.json").as_slice();
-        verify_payload_subject_digest(
+        super::super::update_attestation::verify_payload_subject_digest(
             payload,
             "8c5b8a213a6d3d0c74a1f3a1c9dbd9ed93094b2b2ca8c7a4d00365bd7a9a6a6b",
         )
         .unwrap();
-        assert!(verify_payload_subject_digest(payload, "0000").is_err());
+        assert!(
+            super::super::update_attestation::verify_payload_subject_digest(payload, "0000")
+                .is_err()
+        );
     }
 
     #[test]
     fn creates_dsse_pae() {
         assert_eq!(
-            dsse_pae("application/vnd.in-toto+json", b"hello"),
+            super::super::update_attestation::dsse_pae("application/vnd.in-toto+json", b"hello"),
             b"DSSEv1 28 application/vnd.in-toto+json 5 hello"
         );
     }

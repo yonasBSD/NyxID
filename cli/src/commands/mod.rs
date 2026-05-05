@@ -30,4 +30,5 @@ pub mod ssh;
 pub mod status;
 pub mod telemetry;
 pub mod update;
+pub(crate) mod update_attestation;
 pub mod whoami;
