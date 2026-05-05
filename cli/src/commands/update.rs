@@ -376,17 +376,68 @@ fn normalize_release_tag(version: &str) -> Result<String> {
     let version = version.trim();
     let version = version.strip_prefix('v').unwrap_or(version);
 
-    let parts = version.split('.').collect::<Vec<_>>();
-    let valid = parts.len() == 3
-        && parts
-            .iter()
-            .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()));
-
-    if !valid {
-        anyhow::bail!("Invalid release version `{version}`; expected X.Y.Z");
+    if !is_valid_semver_tag(version) {
+        anyhow::bail!(
+            "Invalid release version `{version}`; expected SemVer X.Y.Z with optional pre-release/build metadata"
+        );
     }
 
     Ok(format!("v{version}"))
+}
+
+fn is_valid_semver_tag(version: &str) -> bool {
+    let Some((without_build, build_metadata)) = split_optional_once(version, '+') else {
+        return false;
+    };
+    if let Some(build_metadata) = build_metadata
+        && !valid_semver_identifiers(build_metadata, false)
+    {
+        return false;
+    }
+
+    let (core, pre_release) = match without_build.split_once('-') {
+        Some((core, pre_release)) => (core, Some(pre_release)),
+        None => (without_build, None),
+    };
+    valid_semver_core(core)
+        && pre_release
+            .map(|pre_release| valid_semver_identifiers(pre_release, true))
+            .unwrap_or(true)
+}
+
+fn split_optional_once(input: &str, separator: char) -> Option<(&str, Option<&str>)> {
+    match input.split_once(separator) {
+        Some((left, right)) if right.contains(separator) => None,
+        Some((left, right)) => Some((left, Some(right))),
+        None => Some((input, None)),
+    }
+}
+
+fn valid_semver_core(core: &str) -> bool {
+    let parts = core.split('.').collect::<Vec<_>>();
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|part| valid_numeric_identifier(part, true))
+}
+
+fn valid_semver_identifiers(identifiers: &str, reject_numeric_leading_zero: bool) -> bool {
+    !identifiers.is_empty()
+        && identifiers.split('.').all(|identifier| {
+            !identifier.is_empty()
+                && identifier
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+                && (!reject_numeric_leading_zero
+                    || !identifier.chars().all(|ch| ch.is_ascii_digit())
+                    || valid_numeric_identifier(identifier, true))
+        })
+}
+
+fn valid_numeric_identifier(identifier: &str, reject_leading_zero: bool) -> bool {
+    !identifier.is_empty()
+        && identifier.chars().all(|ch| ch.is_ascii_digit())
+        && (!reject_leading_zero || identifier.len() == 1 || !identifier.starts_with('0'))
 }
 
 fn asset_name_for_target(target: &str) -> Result<String> {
@@ -498,8 +549,18 @@ mod tests {
     fn parses_release_version_tags() {
         assert_eq!(normalize_release_tag("0.4.0").unwrap(), "v0.4.0");
         assert_eq!(normalize_release_tag("v1.2.3").unwrap(), "v1.2.3");
+        assert_eq!(
+            normalize_release_tag("0.4.0-beta.1").unwrap(),
+            "v0.4.0-beta.1"
+        );
+        assert_eq!(
+            normalize_release_tag("1.2.3-rc.1+build.42").unwrap(),
+            "v1.2.3-rc.1+build.42"
+        );
         assert!(normalize_release_tag("1.2").is_err());
         assert!(normalize_release_tag("1.2.x").is_err());
+        assert!(normalize_release_tag("1.2.3-0123").is_err());
+        assert!(normalize_release_tag("1.2.3-").is_err());
         assert!(normalize_release_tag("release-1.2.3").is_err());
     }
 
