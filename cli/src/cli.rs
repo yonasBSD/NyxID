@@ -330,7 +330,11 @@ pub enum OutputFormat {
 #[derive(Args)]
 pub struct LoginArgs {
     /// NyxID base URL, e.g. https://auth.nyxid.dev
-    #[arg(long, env = "NYXID_URL")]
+    #[arg(
+        long,
+        env = "NYXID_URL",
+        default_value = "https://nyx-api.chrono-ai.fun"
+    )]
     pub base_url: String,
     /// Use email/password login instead of opening the browser
     #[arg(long)]
