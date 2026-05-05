@@ -1,3 +1,4 @@
+use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -74,8 +75,36 @@ struct HostKeyVerifier {
     observed_sha256: Arc<Mutex<Option<String>>>,
 }
 
+#[derive(Debug)]
+enum SshClientError {
+    Russh(russh::Error),
+    HostKeyMismatch { expected: String, observed: String },
+}
+
+impl From<russh::Error> for SshClientError {
+    fn from(error: russh::Error) -> Self {
+        Self::Russh(error)
+    }
+}
+
+impl fmt::Display for SshClientError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Russh(error) => write!(f, "{error}"),
+            Self::HostKeyMismatch { expected, observed } => {
+                write!(
+                    f,
+                    "SSH host key mismatch: expected {expected}, got {observed}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for SshClientError {}
+
 impl client::Handler for HostKeyVerifier {
-    type Error = russh::Error;
+    type Error = SshClientError;
 
     async fn check_server_key(
         &mut self,
@@ -89,7 +118,14 @@ impl client::Handler for HostKeyVerifier {
             return Ok(true);
         };
 
-        Ok(normalize_sha256_fingerprint(expected) == normalize_sha256_fingerprint(&fingerprint))
+        if normalize_sha256_fingerprint(expected) == normalize_sha256_fingerprint(&fingerprint) {
+            Ok(true)
+        } else {
+            Err(SshClientError::HostKeyMismatch {
+                expected: format_sha256_fingerprint(expected),
+                observed: fingerprint,
+            })
+        }
     }
 }
 
@@ -351,21 +387,10 @@ async fn connect_authenticated(
     let addr = (entry.target_host.as_str(), entry.target_port);
     let mut session = match client::connect(config, addr, handler).await {
         Ok(session) => session,
+        Err(SshClientError::HostKeyMismatch { expected, observed }) => {
+            return Err(SshNodeExecError::host_key_mismatch(&expected, &observed));
+        }
         Err(error) => {
-            if let (Some(expected), Some(actual)) = (
-                entry.host_key_sha256.as_deref(),
-                observed_sha256
-                    .lock()
-                    .expect("host key lock poisoned")
-                    .as_deref(),
-            ) && normalize_sha256_fingerprint(expected) != normalize_sha256_fingerprint(actual)
-            {
-                return Err(SshNodeExecError::host_key_mismatch(
-                    &format_sha256_fingerprint(expected),
-                    actual,
-                ));
-            }
-
             return Err(SshNodeExecError::channel_closed(format!(
                 "ssh connect failed: {error}"
             )));

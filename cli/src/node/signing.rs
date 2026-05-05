@@ -1,5 +1,5 @@
 use hmac::{Hmac, Mac};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 
 /// Maximum allowed timestamp skew in seconds.
 /// Requests older than this are rejected for replay protection.
@@ -133,7 +133,8 @@ pub fn verify_ssh_exec_signature(
 }
 
 /// Verify the HMAC-SHA256 signature on an SSH node-key exec request.
-/// Message format: `{timestamp}\n{nonce}\n{request_id}\n{service_slug}\n{principal}`
+/// Message format:
+/// `{timestamp}\n{nonce}\n{request_id}\n{service_slug}\n{principal}\n{auth_mode}\n{sha256(command)}`
 pub fn verify_ssh_node_exec_signature(
     request: &serde_json::Value,
     secret_hex: &str,
@@ -144,8 +145,13 @@ pub fn verify_ssh_node_exec_signature(
     let request_id = request["request_id"].as_str().unwrap_or("");
     let service_slug = request["service_slug"].as_str().unwrap_or("");
     let principal = request["principal"].as_str().unwrap_or("");
+    let auth_mode = request["auth_mode"].as_str().unwrap_or("");
+    let command = request["command"].as_str().unwrap_or("");
+    let command_hash = hex::encode(Sha256::digest(command.as_bytes()));
 
-    let message = format!("{timestamp}\n{nonce}\n{request_id}\n{service_slug}\n{principal}");
+    let message = format!(
+        "{timestamp}\n{nonce}\n{request_id}\n{service_slug}\n{principal}\n{auth_mode}\n{command_hash}"
+    );
     verify_signature(secret_hex, expected_signature, &message)
 }
 
@@ -458,10 +464,15 @@ mod tests {
         let request_id = request["request_id"].as_str().unwrap_or("");
         let service_slug = request["service_slug"].as_str().unwrap_or("");
         let principal = request["principal"].as_str().unwrap_or("");
+        let auth_mode = request["auth_mode"].as_str().unwrap_or("");
+        let command = request["command"].as_str().unwrap_or("");
+        let command_hash = hex::encode(Sha256::digest(command.as_bytes()));
 
         compute_signature_for_message(
             secret_hex,
-            &format!("{timestamp}\n{nonce}\n{request_id}\n{service_slug}\n{principal}"),
+            &format!(
+                "{timestamp}\n{nonce}\n{request_id}\n{service_slug}\n{principal}\n{auth_mode}\n{command_hash}"
+            ),
         )
     }
 
@@ -515,6 +526,8 @@ mod tests {
             "request_id": "req-exec-1",
             "service_slug": "routeros",
             "principal": "nyxid-ro",
+            "auth_mode": "node_key",
+            "command": "/system identity print",
         });
 
         let sig = compute_ssh_node_exec_signature(&secret, &request);
@@ -530,6 +543,8 @@ mod tests {
             "request_id": "req-exec-1",
             "service_slug": "routeros",
             "principal": "nyxid-ro",
+            "auth_mode": "node_key",
+            "command": "/system identity print",
         });
 
         let sig = compute_ssh_node_exec_signature(&secret, &request);
@@ -539,6 +554,35 @@ mod tests {
             "request_id": "req-exec-1",
             "service_slug": "routeros",
             "principal": "nyxid-admin",
+            "auth_mode": "node_key",
+            "command": "/system identity print",
+        });
+
+        assert!(!verify_ssh_node_exec_signature(&tampered, &secret, &sig));
+    }
+
+    #[test]
+    fn tampered_ssh_node_exec_command_fails() {
+        let secret = "ab".repeat(32);
+        let request = serde_json::json!({
+            "timestamp": "2026-03-12T10:30:00.000Z",
+            "nonce": "test-nonce",
+            "request_id": "req-exec-1",
+            "service_slug": "routeros",
+            "principal": "nyxid-ro",
+            "auth_mode": "node_key",
+            "command": "/system identity print",
+        });
+
+        let sig = compute_ssh_node_exec_signature(&secret, &request);
+        let tampered = serde_json::json!({
+            "timestamp": "2026-03-12T10:30:00.000Z",
+            "nonce": "test-nonce",
+            "request_id": "req-exec-1",
+            "service_slug": "routeros",
+            "principal": "nyxid-ro",
+            "auth_mode": "node_key",
+            "command": "/system reboot",
         });
 
         assert!(!verify_ssh_node_exec_signature(&tampered, &secret, &sig));

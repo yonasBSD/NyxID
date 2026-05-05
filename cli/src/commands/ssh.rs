@@ -270,7 +270,7 @@ fn resolve_exec_principal(
         .map_err(anyhow::Error::from)?;
     let config_file = config_dir.join("config.toml");
     let node_config = crate::node::config::NodeConfig::load(&config_file)
-        .map_err(|_| anyhow::anyhow!("No --principal specified and no local node profile was found for service '{service_slug}'. Use --principal <username>."))?;
+        .map_err(|_| anyhow::anyhow!("No --principal specified and no local node profile was found for service '{service_slug}'. Pass --principal explicitly when running ssh exec from a host that is not the credential node."))?;
     let principals =
         crate::node::credentials::ssh_keys::principals_for_service(&node_config, service_slug);
     match principals.as_slice() {

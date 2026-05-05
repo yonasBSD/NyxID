@@ -68,7 +68,6 @@ pub async fn create_connection(config: &AppConfig) -> Result<DbHandle, mongodb::
 
     backfill_downstream_service_types(&db).await?;
     migrate_legacy_api_spec_url(&db).await?;
-    migrate_legacy_ssh_auth_mode(&db).await?;
 
     Ok(db)
 }
@@ -1477,18 +1476,27 @@ async fn migrate_legacy_ssh_auth_mode(db: &Database) -> Result<(), mongodb::erro
         .await?;
 
     let user_services = db.collection::<Document>(USER_SERVICES);
-    let non_ssh = user_services
+    let non_ssh_mode = user_services
         .update_many(
             doc! {
                 "service_type": { "$ne": "ssh" },
-                "$or": [
-                    { "ssh_auth_mode": { "$exists": false } },
-                    { "ssh_node_keys_stale": { "$exists": false } },
-                ],
+                "ssh_auth_mode": { "$exists": false },
             },
             doc! {
                 "$set": {
                     "ssh_auth_mode": SshAuthMode::ProxyOnly.as_str(),
+                }
+            },
+        )
+        .await?;
+    let non_ssh_stale = user_services
+        .update_many(
+            doc! {
+                "service_type": { "$ne": "ssh" },
+                "ssh_node_keys_stale": { "$exists": false },
+            },
+            doc! {
+                "$set": {
                     "ssh_node_keys_stale": false,
                 }
             },
@@ -1534,13 +1542,15 @@ async fn migrate_legacy_ssh_auth_mode(db: &Database) -> Result<(), mongodb::erro
 
     let modified = cert.modified_count
         + proxy_only.modified_count
-        + non_ssh.modified_count
+        + non_ssh_mode.modified_count
+        + non_ssh_stale.modified_count
         + ssh_user_services;
     if modified > 0 {
         tracing::info!(
             downstream_cert = cert.modified_count,
             downstream_proxy_only = proxy_only.modified_count,
-            user_services_non_ssh = non_ssh.modified_count,
+            user_services_non_ssh_mode = non_ssh_mode.modified_count,
+            user_services_non_ssh_stale = non_ssh_stale.modified_count,
             user_services_ssh = ssh_user_services,
             "Migrated legacy SSH auth-mode fields"
         );

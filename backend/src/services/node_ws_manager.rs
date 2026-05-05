@@ -457,6 +457,7 @@ struct WsSshNodeExecOpen {
     request_id: String,
     service_slug: String,
     principal: String,
+    auth_mode: &'static str,
     command: String,
     timeout_secs: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -902,6 +903,9 @@ pub fn compute_ssh_tunnel_hmac_signature(
 /// Compute HMAC-SHA256 signature for an SSH exec request.
 /// Message format matches the node agent's `verify_ssh_exec_signature`:
 /// `{timestamp}\n{nonce}\n{request_id}\n{host}\n{port}\n{principal}`
+// INTENTIONAL: cert-path HMAC envelope is unchanged for backward compatibility
+// with deployed node agents <= 0.x. Widening this requires a coordinated
+// server+node release; tracked separately from the node-key feature.
 pub fn compute_ssh_exec_hmac_signature(
     secret: &[u8],
     timestamp: &str,
@@ -925,19 +929,36 @@ pub fn compute_ssh_exec_hmac_signature(
 }
 
 /// Compute HMAC-SHA256 signature for a node-key SSH exec request.
-/// Message format: `{timestamp}\n{nonce}\n{request_id}\n{service_slug}\n{principal}`.
+/// Message format:
+/// `{timestamp}\n{nonce}\n{request_id}\n{service_slug}\n{principal}\n{auth_mode}\n{sha256(command)}`.
+pub struct SshNodeExecHmacEnvelope<'a> {
+    pub timestamp: &'a str,
+    pub nonce: &'a str,
+    pub request_id: &'a str,
+    pub service_slug: &'a str,
+    pub principal: &'a str,
+    pub auth_mode: &'a str,
+    pub command: &'a str,
+}
+
 pub fn compute_ssh_node_exec_hmac_signature(
     secret: &[u8],
-    timestamp: &str,
-    nonce: &str,
-    request_id: &str,
-    service_slug: &str,
-    principal: &str,
+    envelope: SshNodeExecHmacEnvelope<'_>,
 ) -> String {
     use hmac::{Hmac, Mac};
-    use sha2::Sha256;
+    use sha2::{Digest, Sha256};
 
-    let message = format!("{timestamp}\n{nonce}\n{request_id}\n{service_slug}\n{principal}");
+    let command_hash = hex::encode(Sha256::digest(envelope.command.as_bytes()));
+    let message = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        envelope.timestamp,
+        envelope.nonce,
+        envelope.request_id,
+        envelope.service_slug,
+        envelope.principal,
+        envelope.auth_mode,
+        command_hash,
+    );
 
     let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key size");
     mac.update(message.as_bytes());
@@ -947,6 +968,9 @@ pub fn compute_ssh_node_exec_hmac_signature(
 /// Compute HMAC-SHA256 signature for a web terminal open request.
 /// Message format matches the node agent's `verify_web_terminal_signature`:
 /// `{timestamp}\n{nonce}\n{session_id}\n{host}\n{port}\n{principal}`
+// INTENTIONAL: web-terminal HMAC envelope is unchanged for backward compatibility
+// with deployed node agents <= 0.x. Widening this requires a coordinated
+// server+node release; tracked separately from the node-key feature.
 pub fn compute_web_terminal_hmac_signature(
     secret: &[u8],
     timestamp: &str,
@@ -2156,11 +2180,15 @@ impl NodeWsManager {
             let n = uuid::Uuid::new_v4().to_string();
             let sig = compute_ssh_node_exec_hmac_signature(
                 secret,
-                &ts,
-                &n,
-                &request.request_id,
-                &request.service_slug,
-                &request.principal,
+                SshNodeExecHmacEnvelope {
+                    timestamp: &ts,
+                    nonce: &n,
+                    request_id: &request.request_id,
+                    service_slug: &request.service_slug,
+                    principal: &request.principal,
+                    auth_mode: "node_key",
+                    command: &request.command,
+                },
             );
             (Some(ts), Some(n), Some(sig))
         } else {
@@ -2172,6 +2200,7 @@ impl NodeWsManager {
             request_id: request.request_id,
             service_slug: request.service_slug,
             principal: request.principal,
+            auth_mode: "node_key",
             command: request.command,
             timeout_secs: request.timeout_secs,
             target_host: request.target_host,
@@ -3082,6 +3111,63 @@ mod tests {
             None,
         );
         assert_ne!(sig1, sig2);
+    }
+
+    #[test]
+    fn ssh_node_exec_hmac_covers_request_id_auth_mode_and_command() {
+        let secret = b"test-secret-key-bytes-here-32byt";
+        let base = compute_ssh_node_exec_hmac_signature(
+            secret,
+            SshNodeExecHmacEnvelope {
+                timestamp: "2026-03-12T10:00:00Z",
+                nonce: "nonce-123",
+                request_id: "req-1",
+                service_slug: "routeros",
+                principal: "nyxid-ro",
+                auth_mode: "node_key",
+                command: "/system identity print",
+            },
+        );
+        let different_auth_mode = compute_ssh_node_exec_hmac_signature(
+            secret,
+            SshNodeExecHmacEnvelope {
+                timestamp: "2026-03-12T10:00:00Z",
+                nonce: "nonce-123",
+                request_id: "req-1",
+                service_slug: "routeros",
+                principal: "nyxid-ro",
+                auth_mode: "cert",
+                command: "/system identity print",
+            },
+        );
+        let different_request_id = compute_ssh_node_exec_hmac_signature(
+            secret,
+            SshNodeExecHmacEnvelope {
+                timestamp: "2026-03-12T10:00:00Z",
+                nonce: "nonce-123",
+                request_id: "req-2",
+                service_slug: "routeros",
+                principal: "nyxid-ro",
+                auth_mode: "node_key",
+                command: "/system identity print",
+            },
+        );
+        let different_command = compute_ssh_node_exec_hmac_signature(
+            secret,
+            SshNodeExecHmacEnvelope {
+                timestamp: "2026-03-12T10:00:00Z",
+                nonce: "nonce-123",
+                request_id: "req-1",
+                service_slug: "routeros",
+                principal: "nyxid-ro",
+                auth_mode: "node_key",
+                command: "/system reboot",
+            },
+        );
+
+        assert_ne!(base, different_auth_mode);
+        assert_ne!(base, different_request_id);
+        assert_ne!(base, different_command);
     }
 
     #[test]

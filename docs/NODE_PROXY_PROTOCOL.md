@@ -419,6 +419,7 @@ Sent by NyxID when an SSH service uses `ssh_auth_mode: "node_key"` and the node 
   "request_id": "<uuid>",
   "service_slug": "routeros",
   "principal": "nyxid-ro",
+  "auth_mode": "node_key",
   "command": "/system/resource/print",
   "timeout_secs": 30,
   "target_host": "10.0.0.1",
@@ -431,6 +432,8 @@ Sent by NyxID when an SSH service uses `ssh_auth_mode: "node_key"` and the node 
 ```
 
 `principal` is required. The node MUST look up the exact `(service_slug, principal)` pair in its local SSH credential store. `target_host`, `target_port`, and `host_key_sha256` are hints from the backend; the node-local credential entry remains authoritative for the actual connection target and host-key pin.
+
+For signed frames, the HMAC covers `timestamp`, `nonce`, and the node-key request envelope: `request_id\nservice_slug\nprincipal\nauth_mode\nsha256(command)`. `auth_mode` is the literal string `node_key`.
 
 ### ssh_node_exec_data / ssh_node_exec_close / ssh_node_exec_error
 

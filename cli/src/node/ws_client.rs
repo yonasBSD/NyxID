@@ -1987,8 +1987,10 @@ async fn handle_ssh_node_exec_open(
         .filter(|host| !host.is_empty())
         && server_host != entry.target_host
     {
-        // TODO(node-key-ssh): decide whether backend target hints should be rejected
-        // when they differ from the operator-provisioned node-local SSH key entry.
+        // SECURITY: operator-provisioned (service_slug, principal) credentials
+        // are authoritative for host/port/host_key. Backend hints differing
+        // from the local store are logged and ignored to prevent a compromised
+        // backend from redirecting node SSH sessions to attacker-controlled hosts.
         tracing::warn!(
             request_id = %request_id,
             service_slug = %service_slug,

@@ -1319,6 +1319,8 @@ pub async fn update_ssh_auth_mode(
         ));
     }
 
+    validate_ssh_auth_mode_transition(db, &current, mode).await?;
+
     let from = current.ssh_auth_mode;
     let ssh_node_keys_stale =
         ssh_node_keys_stale_after_transition(current.ssh_node_keys_stale, from, mode);
@@ -1357,6 +1359,44 @@ pub async fn update_ssh_auth_mode(
     }
 
     get_user_service(db, user_id, service_id).await
+}
+
+async fn validate_ssh_auth_mode_transition(
+    db: &mongodb::Database,
+    current: &UserService,
+    mode: SshAuthMode,
+) -> AppResult<()> {
+    if mode == SshAuthMode::ProxyOnly {
+        return Ok(());
+    }
+
+    let Some(ref catalog_service_id) = current.catalog_service_id else {
+        return Err(AppError::ValidationError(
+            "SSH auth mode cert or node_key requires a catalog-backed SSH service".to_string(),
+        ));
+    };
+    let catalog = db
+        .collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .find_one(doc! { "_id": catalog_service_id })
+        .await?
+        .ok_or_else(|| {
+            AppError::ValidationError(
+                "Catalog service for SSH auth mode no longer exists".to_string(),
+            )
+        })?;
+    let ssh_config = catalog.ssh_config.as_ref().ok_or_else(|| {
+        AppError::ValidationError(
+            "Catalog service for SSH auth mode is missing ssh_config".to_string(),
+        )
+    })?;
+
+    crate::services::ssh_service::validate_ssh_auth_mode_settings(
+        mode,
+        ssh_config.certificate_ttl_minutes,
+        &ssh_config.allowed_principals,
+    )
 }
 
 /// Deactivate a user service (soft delete).
@@ -1500,6 +1540,9 @@ pub async fn backfill_stale_catalog_auth_snapshots(db: &mongodb::Database) -> Ap
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::downstream_service::{
+        COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, SshServiceConfig,
+    };
     use crate::models::ws_frame_injection::{
         WsFrameDirection, WsFrameInjection, WsFrameKind, WsFrameTrigger,
     };
@@ -1516,6 +1559,70 @@ mod tests {
             forward_access_token: false,
             inject_delegation_token: true,
             delegation_token_scope: "llm:proxy".to_string(),
+        }
+    }
+
+    fn test_downstream_ssh_service(
+        service_id: &str,
+        slug: &str,
+        allowed_principals: Vec<String>,
+    ) -> DownstreamService {
+        let now = Utc::now();
+        DownstreamService {
+            id: service_id.to_string(),
+            name: slug.to_string(),
+            slug: slug.to_string(),
+            description: None,
+            base_url: "ssh://10.0.0.1:22".to_string(),
+            service_type: "ssh".to_string(),
+            visibility: "private".to_string(),
+            auth_method: "none".to_string(),
+            auth_key_name: String::new(),
+            credential_encrypted: Vec::new(),
+            auth_type: Some("ssh".to_string()),
+            openapi_spec_url: None,
+            asyncapi_spec_url: None,
+            streaming_supported: false,
+            ssh_config: Some(SshServiceConfig {
+                host: "10.0.0.1".to_string(),
+                port: 22,
+                ssh_auth_mode: SshAuthMode::ProxyOnly,
+                certificate_auth_enabled: false,
+                certificate_ttl_minutes: 30,
+                allowed_principals,
+                ca_private_key_encrypted: None,
+                ca_public_key: None,
+            }),
+            oauth_client_id: None,
+            service_category: "connection".to_string(),
+            requires_user_credential: false,
+            is_active: true,
+            created_by: "test".to_string(),
+            identity_propagation_mode: "none".to_string(),
+            identity_include_user_id: false,
+            identity_include_email: false,
+            identity_include_name: false,
+            identity_jwt_audience: None,
+            forward_access_token: false,
+            inject_delegation_token: false,
+            delegation_token_scope: "llm:proxy".to_string(),
+            provider_config_id: None,
+            homepage_url: None,
+            repository_url: None,
+            issues_url: None,
+            capabilities: None,
+            auth_notes: None,
+            known_limitations: None,
+            required_permissions: None,
+            examples_url: None,
+            recommended_skills: None,
+            custom_user_agent: None,
+            default_request_headers: None,
+            ws_frame_injections: Vec::new(),
+            developer_app_ids: None,
+            token_exchange_config: None,
+            created_at: now,
+            updated_at: now,
         }
     }
 
@@ -1586,6 +1693,80 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn update_ssh_auth_mode_revalidates_catalog_principals() {
+        let Some(db) = connect_test_database("user_service_ssh_auth_mode_validation").await else {
+            eprintln!("skipping user_service_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let catalog_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(test_downstream_ssh_service(
+                &catalog_id,
+                "router-empty-principals",
+                Vec::new(),
+            ))
+            .await
+            .unwrap();
+
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let mut service = test_user_service(
+            &service_id,
+            &user_id,
+            "router-empty-principals",
+            "endpoint-1",
+            Some(&catalog_id),
+            Some("node-1"),
+        );
+        service.service_type = "ssh".to_string();
+        service.ssh_auth_mode = SshAuthMode::ProxyOnly;
+        db.collection::<UserService>(COLLECTION_NAME)
+            .insert_one(&service)
+            .await
+            .unwrap();
+
+        let err = update_ssh_auth_mode(&db, &user_id, &user_id, &service_id, SshAuthMode::NodeKey)
+            .await
+            .expect_err("node_key should require catalog principals");
+        assert!(matches!(
+            err,
+            AppError::ValidationError(message)
+                if message.contains("allowed_principals is required")
+        ));
+        let unchanged = get_user_service(&db, &user_id, &service_id).await.unwrap();
+        assert_eq!(unchanged.ssh_auth_mode, SshAuthMode::ProxyOnly);
+
+        let proxy_service_id = uuid::Uuid::new_v4().to_string();
+        let mut proxy_service = test_user_service(
+            &proxy_service_id,
+            &user_id,
+            "router-proxy-only",
+            "endpoint-1",
+            Some(&catalog_id),
+            Some("node-1"),
+        );
+        proxy_service.service_type = "ssh".to_string();
+        proxy_service.ssh_auth_mode = SshAuthMode::NodeKey;
+        db.collection::<UserService>(COLLECTION_NAME)
+            .insert_one(&proxy_service)
+            .await
+            .unwrap();
+
+        let updated = update_ssh_auth_mode(
+            &db,
+            &user_id,
+            &user_id,
+            &proxy_service_id,
+            SshAuthMode::ProxyOnly,
+        )
+        .await
+        .expect("proxy_only should not require catalog principals");
+        assert_eq!(updated.ssh_auth_mode, SshAuthMode::ProxyOnly);
+        assert!(updated.ssh_node_keys_stale);
     }
 
     #[test]
