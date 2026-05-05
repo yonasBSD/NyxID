@@ -177,6 +177,18 @@ nyxid node credentials remove --service <SLUG>         # remove credential
 
 # SSH node-key credentials (stored only on the node)
 nyxid node ssh-credentials add --service <SLUG> --principal <USER> --key-file ~/.ssh/id_ed25519 --host <HOST> --port 22
+
+# Encrypted private key: pass the passphrase via env var (never as a flag value)
+PRIVKEY_PASS=... nyxid node ssh-credentials add --service <SLUG> --principal <USER> \
+  --key-file ~/.ssh/id_ed25519 --host <HOST> --port 22 --passphrase-env PRIVKEY_PASS
+
+# Skip host-key pinning (TOFU off) -- only when the operator cannot capture the
+# fingerprint upfront. Default is to pin; pinning prevents 1012 SshHostKeyMismatch
+# regressions when targets rotate keys legitimately, but a missing pin trades that
+# safety for first-connect convenience.
+nyxid node ssh-credentials add --service <SLUG> --principal <USER> \
+  --key-file ~/.ssh/id_ed25519 --host <HOST> --port 22 --no-pin-host-key
+
 nyxid node ssh-credentials list --service <SLUG>
 nyxid node ssh-credentials show --service <SLUG> --principal <USER>
 nyxid node ssh-credentials test --service <SLUG> --principal <USER>
@@ -239,3 +251,13 @@ nyxid service convert-ssh routeros --to-proxy-only
 ```
 
 After converting away from `node_key`, run `nyxid node ssh-credentials prune --stale` on the node to remove orphaned local SSH keys.
+
+SSH error codes (1011-1015 are reserved for SSH; surface the code and the suggested fix to the user):
+
+| Code | Name | What it means | What to do |
+|------|------|---------------|------------|
+| 1011 | `SshNodeKeyMissing` | Service is `node_key` but no credential exists for `(service_slug, principal)` on the node | Run `nyxid node ssh-credentials add --service <SLUG> --principal <USER> ...` |
+| 1012 | `SshHostKeyMismatch` | Pinned host-key sha256 doesn't match what the target presented | Investigate first (could be a real MITM); if the target legitimately rotated keys, `remove` and re-`add` the credential |
+| 1013 | `SshNodeExecChannelClosed` | russh channel error (auth, network, kex) | Check target reachability and the principal's authorized_keys |
+| 1014 | `SshPrincipalAmbiguous` | Multiple principals registered locally and `--principal` was not passed | Pass `--principal <USER>` explicitly |
+| 1015 | `SshAuthModeUnsupportedForOperation` | e.g. `ssh proxy` against a `node_key` service, or `ssh exec` against `proxy_only` | Use `ssh exec` / browser terminal for `node_key`; convert with `service convert-ssh` if the service should support a different operation set |
