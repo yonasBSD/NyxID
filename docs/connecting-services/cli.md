@@ -14,7 +14,7 @@ source ~/.cargo/env
 nyxid login --base-url <BASE_URL>
 ```
 
-`<BASE_URL>` is `https://nyx.chrono-ai.fun` for hosted, `http://localhost:3001` for self-host.
+`<BASE_URL>` is `https://nyx-api.chrono-ai.fun` for hosted, `http://localhost:3001` for self-host.
 
 `nyxid login` opens your browser and stores a session locally. The next two commands reuse it.
 

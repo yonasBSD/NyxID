@@ -18,7 +18,7 @@ Set it in your shell:
 
 ```bash
 export NYX_API_KEY=nyx_...
-export NYXID_BASE=<BASE_URL>   # https://nyx.chrono-ai.fun or http://localhost:3001
+export NYXID_BASE=<BASE_URL>   # https://nyx-api.chrono-ai.fun or http://localhost:3001
 ```
 
 ## Connect and verify
