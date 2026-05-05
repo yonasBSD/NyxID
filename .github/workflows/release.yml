@@ -269,7 +269,7 @@ jobs:
       - name: Cleanup
         run: |
           # Remove the granular manifests
-          rm -f artifacts/*-dist-manifest.json
+          rm -f artifacts/*-dist-manifest.json artifacts/dist-manifest.json
       - name: Attest release artifacts
         uses: actions/attest-build-provenance@v1
         with:
@@ -289,13 +289,12 @@ jobs:
             echo "$CHANGES"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
-      - name: Create GitHub Release
+      - name: Update GitHub Release Notes
         env:
           PRERELEASE_FLAG: "${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease && '--prerelease' || '' }}"
           ANNOUNCEMENT_TITLE: "${{ fromJson(steps.host.outputs.manifest).announcement_title }}"
           ANNOUNCEMENT_BODY: "${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}"
           CHANGELOG: "${{ steps.changelog.outputs.changes }}"
-          RELEASE_COMMIT: "${{ github.sha }}"
         run: |
           # Write and read notes from a file to avoid quoting breaking things
           {
@@ -308,7 +307,7 @@ jobs:
             printf -- '- `ghcr.io/chronoaiproject/nyxid/node-agent:%s`\n' "${{ github.ref_name }}"
           } > $RUNNER_TEMP/notes.txt
 
-          gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
+          gh release edit "${{ needs.plan.outputs.tag }}" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt"
 
   announce:
     needs:
