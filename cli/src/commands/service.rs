@@ -186,12 +186,11 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             // the browser flow when the invocation isn't "scripted-
             // complete". Flags compatible with prefill (slug, label,
             // via-node, endpoint-url, `--org`, plus `--custom`
-            // definitional fields per issue #414) just seed the form;
-            // flags that
-            // declare a specific scripted flow (--credential,
-            // --credential-env, --oauth, --device-code, --output
-            // json) fall through to the existing non-interactive path
-            // so scripted behavior for existing users is unchanged.
+            // definitional fields per issue #414) just seed the form.
+            // Flags that declare a specific scripted flow (--credential,
+            // --credential-env, --oauth, --device-code, --output json)
+            // fall through to the existing non-interactive path so
+            // scripted behavior for existing users is unchanged.
             //
             // Issue #414 — `--custom` and its companion flags
             // (`--auth-method`, `--auth-key-name`, `--slug` in the
@@ -215,15 +214,17 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             // URL the user opens on another device). Set
             // `NYXID_NO_WIZARD=1` to restore the pre-wizard stdin
             // prompt path for CI jobs or scripts that rely on it.
+            let mut api = if org.is_some() {
+                Some(ApiClient::from_auth(&auth)?)
+            } else {
+                None
+            };
             let org = match org {
-                Some(raw) => {
-                    let mut api = ApiClient::from_auth(&auth)?;
-                    Some(
-                        resolve_org_id(&mut api, &raw)
-                            .await
-                            .with_context(|| format!("Could not resolve org '{raw}'"))?,
-                    )
-                }
+                Some(raw) => Some(
+                    resolve_org_id(api.as_mut().expect("api initialized for org"), &raw)
+                        .await
+                        .with_context(|| format!("Could not resolve org '{raw}'"))?,
+                ),
                 None => None,
             };
             let interactive_output = matches!(auth.output, OutputFormat::Table);
@@ -270,7 +271,10 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 return crate::wizard::run_ai_key_wizard(&auth, prefill, no_wait).await;
             }
 
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = match api {
+                Some(api) => api,
+                None => ApiClient::from_auth(&auth)?,
+            };
 
             // Resolve `--via-node <ID_OR_NAME>` to a node ID up-front so that
             // node names shown by `nyxid node list` and in the docs (e.g.

@@ -138,7 +138,8 @@ fn heartbeat_watchdog_dead(
 /// request body. An empty slice means "body must be empty". Any key not
 /// in the whitelist causes a 400 — a second layer on top of CSP/CSRF so
 /// a compromised wizard page can't smuggle extra fields (e.g.
-/// `identity_propagation_mode`) through to `POST /keys`.
+/// `forward_access_token` or `identity_propagation_mode`) through to
+/// `POST /keys`.
 #[derive(Debug, Clone)]
 struct ProxyRoute {
     method: Method,

@@ -74,7 +74,7 @@ export const PLATFORMS = [
 
 export const platformSchema = z.union([z.literal(""), z.enum(PLATFORMS)])
 
-export const aiKeyPrefillSchema = z.object({
+const aiKeyPrefillShape = {
   slug: z.string().optional(),
   label: z.string().optional(),
   via_node: z.string().optional(),
@@ -84,13 +84,27 @@ export const aiKeyPrefillSchema = z.object({
   custom_slug: z.string().optional(),
   auth_method: z.string().optional(),
   auth_key_name: z.string().optional(),
-})
+} as const
+
+export const aiKeyPrefillSchema = z.object(aiKeyPrefillShape)
 
 export type ParsedAiKeyPrefill = z.infer<typeof aiKeyPrefillSchema>
 
 export function parseAiKeyPrefill(input: unknown): ParsedAiKeyPrefill {
-  const parsed = aiKeyPrefillSchema.safeParse(input)
-  return parsed.success ? parsed.data : {}
+  if (!input || typeof input !== "object" || Array.isArray(input)) return {}
+
+  const source = input as Record<string, unknown>
+  const output: Partial<Record<keyof typeof aiKeyPrefillShape, unknown>> = {}
+  for (const key of Object.keys(aiKeyPrefillShape) as Array<
+    keyof typeof aiKeyPrefillShape
+  >) {
+    if (!Object.prototype.hasOwnProperty.call(source, key)) continue
+    const parsed = aiKeyPrefillShape[key].safeParse(source[key])
+    if (parsed.success && parsed.data !== undefined) {
+      output[key] = parsed.data
+    }
+  }
+  return output as ParsedAiKeyPrefill
 }
 
 /**
