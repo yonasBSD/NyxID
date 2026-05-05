@@ -132,6 +132,23 @@ pub fn verify_ssh_exec_signature(
     verify_signature(secret_hex, expected_signature, &message)
 }
 
+/// Verify the HMAC-SHA256 signature on an SSH node-key exec request.
+/// Message format: `{timestamp}\n{nonce}\n{request_id}\n{service_slug}\n{principal}`
+pub fn verify_ssh_node_exec_signature(
+    request: &serde_json::Value,
+    secret_hex: &str,
+    expected_signature: &str,
+) -> bool {
+    let timestamp = request["timestamp"].as_str().unwrap_or("");
+    let nonce = request["nonce"].as_str().unwrap_or("");
+    let request_id = request["request_id"].as_str().unwrap_or("");
+    let service_slug = request["service_slug"].as_str().unwrap_or("");
+    let principal = request["principal"].as_str().unwrap_or("");
+
+    let message = format!("{timestamp}\n{nonce}\n{request_id}\n{service_slug}\n{principal}");
+    verify_signature(secret_hex, expected_signature, &message)
+}
+
 /// Verify the HMAC-SHA256 signature on a web terminal open request.
 pub fn verify_web_terminal_signature(
     request: &serde_json::Value,
@@ -435,6 +452,19 @@ mod tests {
         hex::encode(mac.finalize().into_bytes())
     }
 
+    fn compute_ssh_node_exec_signature(secret_hex: &str, request: &serde_json::Value) -> String {
+        let timestamp = request["timestamp"].as_str().unwrap_or("");
+        let nonce = request["nonce"].as_str().unwrap_or("");
+        let request_id = request["request_id"].as_str().unwrap_or("");
+        let service_slug = request["service_slug"].as_str().unwrap_or("");
+        let principal = request["principal"].as_str().unwrap_or("");
+
+        compute_signature_for_message(
+            secret_hex,
+            &format!("{timestamp}\n{nonce}\n{request_id}\n{service_slug}\n{principal}"),
+        )
+    }
+
     #[test]
     fn valid_ssh_exec_signature_passes() {
         let secret = "ab".repeat(32);
@@ -474,6 +504,44 @@ mod tests {
         });
 
         assert!(!verify_ssh_exec_signature(&tampered, &secret, &sig));
+    }
+
+    #[test]
+    fn valid_ssh_node_exec_signature_passes() {
+        let secret = "ab".repeat(32);
+        let request = serde_json::json!({
+            "timestamp": "2026-03-12T10:30:00.000Z",
+            "nonce": "test-nonce",
+            "request_id": "req-exec-1",
+            "service_slug": "routeros",
+            "principal": "nyxid-ro",
+        });
+
+        let sig = compute_ssh_node_exec_signature(&secret, &request);
+        assert!(verify_ssh_node_exec_signature(&request, &secret, &sig));
+    }
+
+    #[test]
+    fn tampered_ssh_node_exec_signature_fails() {
+        let secret = "ab".repeat(32);
+        let request = serde_json::json!({
+            "timestamp": "2026-03-12T10:30:00.000Z",
+            "nonce": "test-nonce",
+            "request_id": "req-exec-1",
+            "service_slug": "routeros",
+            "principal": "nyxid-ro",
+        });
+
+        let sig = compute_ssh_node_exec_signature(&secret, &request);
+        let tampered = serde_json::json!({
+            "timestamp": "2026-03-12T10:30:00.000Z",
+            "nonce": "test-nonce",
+            "request_id": "req-exec-1",
+            "service_slug": "routeros",
+            "principal": "nyxid-admin",
+        });
+
+        assert!(!verify_ssh_node_exec_signature(&tampered, &secret, &sig));
     }
 
     #[test]

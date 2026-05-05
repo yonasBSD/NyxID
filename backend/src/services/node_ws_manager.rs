@@ -167,6 +167,14 @@ pub(crate) enum PendingWebTerminal {
 
 pub(crate) type PendingSshExec = oneshot::Sender<NodeSshExecResult>;
 
+const SSH_NODE_EXEC_MAX_OUTPUT_BYTES: usize = 1_048_576;
+
+#[derive(Default)]
+struct PendingSshNodeExecStream {
+    stdout: String,
+    stderr: String,
+}
+
 /// Request sent to a node to execute an SSH command.
 #[derive(Clone)]
 pub struct NodeSshExecRequest {
@@ -211,13 +219,23 @@ pub struct NodeSshExecResult {
 pub struct NodeWebTerminalRequest {
     pub session_id: String,
     pub service_id: String,
+    pub service_slug: String,
+    pub auth_mode: NodeWebTerminalAuthMode,
     pub host: String,
     pub port: u16,
     pub principal: String,
-    pub private_key_pem: String,
-    pub certificate_openssh: String,
     pub cols: u32,
     pub rows: u32,
+}
+
+/// SSH credential mode for a node-backed web terminal.
+#[derive(Clone)]
+pub enum NodeWebTerminalAuthMode {
+    Cert {
+        private_key_pem: String,
+        certificate_openssh: String,
+    },
+    NodeKey,
 }
 
 /// Outbound command for a node connection writer task.
@@ -240,6 +258,8 @@ struct NodeConnection {
     web_terminals: Arc<DashMap<String, PendingWebTerminal>>,
     /// Pending SSH exec requests keyed by request_id
     ssh_exec_requests: Arc<DashMap<String, PendingSshExec>>,
+    /// Accumulated node-key SSH exec chunks keyed by request_id
+    ssh_node_exec_streams: Arc<DashMap<String, PendingSshNodeExecStream>>,
     /// Pending and active WS proxy sessions keyed by session_id
     ws_proxies: Arc<DashMap<String, PendingWsProxy>>,
     /// Pending `credential_update` / `credential_remove` acks keyed by
@@ -459,13 +479,18 @@ struct WsWebTerminalOpen {
     msg_type: &'static str,
     session_id: String,
     service_id: String,
+    service_slug: String,
+    auth_mode: &'static str,
     host: String,
     port: u16,
     principal: String,
-    private_key_pem: String,
-    certificate_openssh: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    private_key_pem: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    certificate_openssh: Option<String>,
     cols: u32,
     rows: u32,
+    term: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     timestamp: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -638,6 +663,39 @@ pub struct WsSshExecResultMsg {
     pub error_code: Option<u32>,
 }
 
+/// JSON ssh_node_exec_data from node.
+#[derive(Debug, Deserialize)]
+pub struct WsSshNodeExecDataMsg {
+    pub request_id: String,
+    #[serde(default)]
+    pub stream: Option<String>,
+    #[serde(default)]
+    pub data: Option<String>,
+}
+
+/// JSON ssh_node_exec_close from node.
+#[derive(Debug, Deserialize)]
+pub struct WsSshNodeExecCloseMsg {
+    pub request_id: String,
+    #[serde(default)]
+    pub exit_code: i32,
+    #[serde(default)]
+    pub duration_ms: u64,
+    #[serde(default)]
+    pub timed_out: bool,
+}
+
+/// JSON ssh_node_exec_error from node.
+#[derive(Debug, Deserialize)]
+pub struct WsSshNodeExecErrorMsg {
+    pub request_id: String,
+    pub error: String,
+    #[serde(default)]
+    pub error_code: Option<u32>,
+    #[serde(default)]
+    pub duration_ms: u64,
+}
+
 /// JSON web_terminal_started from node.
 #[derive(Debug, Deserialize)]
 pub struct WsWebTerminalStartedMsg {
@@ -771,6 +829,16 @@ fn map_ssh_exec_result_error(message: String, code: Option<u32>, node_key: bool)
         None if node_key => AppError::SshNodeExecChannelClosed(message),
         None => AppError::Internal(format!("Node SSH exec error: {message}")),
     }
+}
+
+fn append_lossy_capped(target: &mut String, chunk: &str) {
+    let remaining = SSH_NODE_EXEC_MAX_OUTPUT_BYTES.saturating_sub(target.len());
+    if remaining == 0 {
+        return;
+    }
+    let take = chunk.len().min(remaining);
+    let boundary = chunk.floor_char_boundary(take);
+    target.push_str(&chunk[..boundary]);
 }
 
 /// Compute HMAC-SHA256 signature for a proxy request.
@@ -964,6 +1032,7 @@ impl NodeWsManager {
         let ssh_tunnels = Arc::new(DashMap::new());
         let web_terminals = Arc::new(DashMap::new());
         let ssh_exec_requests = Arc::new(DashMap::new());
+        let ssh_node_exec_streams = Arc::new(DashMap::new());
         let ws_proxies = Arc::new(DashMap::new());
         let return_pending = pending.clone();
 
@@ -975,6 +1044,7 @@ impl NodeWsManager {
                 ssh_tunnels,
                 web_terminals,
                 ssh_exec_requests,
+                ssh_node_exec_streams,
                 ws_proxies,
                 credential_acks: Arc::new(DashMap::new()),
                 capabilities: Arc::new(std::sync::Mutex::new(NodeCapabilitiesFlags::default())),
@@ -994,6 +1064,7 @@ impl NodeWsManager {
             conn.ssh_tunnels.clear();
             conn.web_terminals.clear();
             conn.ssh_exec_requests.clear();
+            conn.ssh_node_exec_streams.clear();
             conn.ws_proxies.clear();
             // Drop pending credential-ack waiters so any in-flight
             // `send_credential_update_and_wait` / `_remove_and_wait`
@@ -1015,6 +1086,7 @@ impl NodeWsManager {
             conn.ssh_tunnels.clear();
             conn.web_terminals.clear();
             conn.ssh_exec_requests.clear();
+            conn.ssh_node_exec_streams.clear();
             conn.ws_proxies.clear();
             conn.credential_acks.clear();
             let close_msg = NodeOutboundMessage::Close {
@@ -1976,6 +2048,8 @@ impl NodeWsManager {
 
         let (resp_tx, resp_rx) = oneshot::channel();
         conn.ssh_exec_requests.insert(request_id.clone(), resp_tx);
+        conn.ssh_node_exec_streams
+            .insert(request_id.clone(), PendingSshNodeExecStream::default());
 
         let (timestamp, nonce, hmac) = if let Some(secret) = signing_secret {
             let ts = chrono::Utc::now().to_rfc3339();
@@ -2109,6 +2183,7 @@ impl NodeWsManager {
         })
         .map_err(|e| {
             conn.ssh_exec_requests.remove(&request_id);
+            conn.ssh_node_exec_streams.remove(&request_id);
             AppError::Internal(format!(
                 "Failed to serialize SSH node-key exec request: {e}"
             ))
@@ -2118,12 +2193,14 @@ impl NodeWsManager {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(_)) => {
                 conn.ssh_exec_requests.remove(&request_id);
+                conn.ssh_node_exec_streams.remove(&request_id);
                 return Err(AppError::NodeOffline(format!(
                     "Node {node_id} write buffer full"
                 )));
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 conn.ssh_exec_requests.remove(&request_id);
+                conn.ssh_node_exec_streams.remove(&request_id);
                 return Err(AppError::NodeOffline(format!(
                     "Node {node_id} connection closed"
                 )));
@@ -2152,8 +2229,91 @@ impl NodeWsManager {
             Err(_) => {
                 if let Some(conn) = self.connections.get(node_id) {
                     conn.ssh_exec_requests.remove(&request_id);
+                    conn.ssh_node_exec_streams.remove(&request_id);
                 }
                 Err(AppError::NodeProxyTimeout)
+            }
+        }
+    }
+
+    /// Append a node-key SSH exec data chunk. Called by the WS reader task.
+    pub fn deliver_ssh_node_exec_data(
+        &self,
+        node_id: &str,
+        request_id: &str,
+        stream: Option<&str>,
+        data: Vec<u8>,
+    ) {
+        let Some(conn) = self.connections.get(node_id) else {
+            return;
+        };
+        let Some(mut pending) = conn.ssh_node_exec_streams.get_mut(request_id) else {
+            tracing::debug!(
+                node_id = %node_id,
+                request_id = %request_id,
+                "Received SSH node-key data for unknown request"
+            );
+            return;
+        };
+        let chunk = String::from_utf8_lossy(&data);
+        match stream.unwrap_or("stdout") {
+            "stderr" => append_lossy_capped(&mut pending.stderr, &chunk),
+            _ => append_lossy_capped(&mut pending.stdout, &chunk),
+        }
+    }
+
+    /// Complete a node-key SSH exec from streamed chunks. Called by the WS reader task.
+    pub fn deliver_ssh_node_exec_close(
+        &self,
+        node_id: &str,
+        request_id: String,
+        exit_code: i32,
+        duration_ms: u64,
+        timed_out: bool,
+    ) {
+        if let Some(conn) = self.connections.get(node_id) {
+            let stream = conn
+                .ssh_node_exec_streams
+                .remove(&request_id)
+                .map(|(_, stream)| stream)
+                .unwrap_or_default();
+            if let Some((_, sender)) = conn.ssh_exec_requests.remove(&request_id) {
+                let _ = sender.send(NodeSshExecResult {
+                    request_id,
+                    exit_code,
+                    stdout: stream.stdout,
+                    stderr: stream.stderr,
+                    duration_ms,
+                    timed_out,
+                    error: None,
+                    error_code: None,
+                });
+            }
+        }
+    }
+
+    /// Fail a node-key SSH exec from an explicit error frame. Called by the WS reader task.
+    pub fn deliver_ssh_node_exec_error(
+        &self,
+        node_id: &str,
+        request_id: String,
+        error: String,
+        error_code: Option<u32>,
+        duration_ms: u64,
+    ) {
+        if let Some(conn) = self.connections.get(node_id) {
+            conn.ssh_node_exec_streams.remove(&request_id);
+            if let Some((_, sender)) = conn.ssh_exec_requests.remove(&request_id) {
+                let _ = sender.send(NodeSshExecResult {
+                    request_id,
+                    exit_code: -1,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    duration_ms,
+                    timed_out: false,
+                    error: Some(error),
+                    error_code,
+                });
             }
         }
     }
@@ -2163,6 +2323,7 @@ impl NodeWsManager {
         if let Some(conn) = self.connections.get(node_id)
             && let Some((_, sender)) = conn.ssh_exec_requests.remove(&result.request_id)
         {
+            conn.ssh_node_exec_streams.remove(&result.request_id);
             let _ = sender.send(result);
         }
     }
@@ -2202,17 +2363,28 @@ impl NodeWsManager {
             (None, None, None)
         };
 
+        let (auth_mode, private_key_pem, certificate_openssh) = match request.auth_mode {
+            NodeWebTerminalAuthMode::Cert {
+                private_key_pem,
+                certificate_openssh,
+            } => ("cert", Some(private_key_pem), Some(certificate_openssh)),
+            NodeWebTerminalAuthMode::NodeKey => ("node_key", None, None),
+        };
+
         let msg = serde_json::to_string(&WsWebTerminalOpen {
             msg_type: "web_terminal_open",
             session_id: request.session_id,
             service_id: request.service_id,
+            service_slug: request.service_slug,
+            auth_mode,
             host: request.host,
             port: request.port,
             principal: request.principal,
-            private_key_pem: request.private_key_pem,
-            certificate_openssh: request.certificate_openssh,
+            private_key_pem,
+            certificate_openssh,
             cols: request.cols,
             rows: request.rows,
+            term: "xterm-256color".to_string(),
             timestamp,
             nonce,
             hmac: signature,

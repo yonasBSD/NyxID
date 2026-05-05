@@ -3439,6 +3439,7 @@ dependencies = [
  "rand 0.8.5",
  "reqwest",
  "rpassword",
+ "russh",
  "rust-embed",
  "serde",
  "serde_json",
