@@ -123,9 +123,10 @@ Start using NyxID in under a minute — no Docker, no setup.
 1. Go to **[nyx.chrono-ai.fun/register](https://nyx.chrono-ai.fun/register)**
 2. Enter invite code: **`NYX-FGNY85AF`**
 3. Sign in with Google, GitHub, or Apple
-4. **[Add your first AI Service](docs/connecting-services/web-ui.md)**
+4. Open **AI Services**, add and connect your first external service, and run the API Usage verification curl
+5. After the service is verified, wire your AI tool to NyxID's MCP endpoint
 
-Early access — limited to 20 users.
+The full click-through flow is in **[Add your first AI Service](docs/connecting-services/web-ui.md)**. Early access is limited to 20 users.
 
 ### Option B: Self-Host
 
@@ -174,18 +175,25 @@ The Quick Start above (Hosted and Self-Host) sends you to the **Web UI** walkthr
 
 ## Reach Local Services (Optional)
 
-Services behind a firewall? Deploy a credential node to punch through NAT and expose them as MCP tools:
+Services behind a firewall? Deploy a credential node to punch through NAT and expose them as MCP tools.
+
+Register and start a node. The node connects outbound over WebSocket, so it does not need port forwarding or a VPN:
 
 ```bash
-# Register and start a node (outbound WebSocket — no port forwarding, no VPN)
 nyxid node register --token <reg-token> --url wss://<your-server>/api/v1/nodes/ws
 nyxid node credentials add --service my-local-api --header Authorization --secret-format bearer
 nyxid node start
+```
 
-# Register the service and link it to the node
+Register the service and link it to the node:
+
+```bash
 nyxid node credentials setup --service my-local-api --api-url http://localhost:8080
+```
 
-# Import endpoints as MCP tools (if the service has an OpenAPI spec)
+If the service has an OpenAPI spec, import endpoints as MCP tools:
+
+```bash
 nyxid catalog endpoints my-local-api
 ```
 
