@@ -650,14 +650,6 @@ async fn serve_asset(axum::extract::Path(name): axum::extract::Path<String>) -> 
     embedded_asset_response(&name)
 }
 
-async fn serve_wordmark_asset() -> Response {
-    embedded_asset_response("nyxid-wordmark.svg")
-}
-
-async fn serve_favicon_asset() -> Response {
-    embedded_asset_response("favicon.ico")
-}
-
 /// Validate the `Origin` header. When present it must point at *this*
 /// server's exact loopback origin — not just any `127.0.0.1:*`. A
 /// compromised neighbouring local process on a different port should
@@ -1626,8 +1618,14 @@ pub async fn run_flow(
         .route("/wizard", get(serve_index))
         .route("/", get(serve_index))
         .route("/assets/{*name}", get(serve_asset))
-        .route("/nyxid-wordmark.svg", get(serve_wordmark_asset))
-        .route("/favicon.ico", get(serve_favicon_asset))
+        .route(
+            "/nyxid-wordmark.svg",
+            get(|| async { embedded_asset_response("nyxid-wordmark.svg") }),
+        )
+        .route(
+            "/favicon.ico",
+            get(|| async { embedded_asset_response("favicon.ico") }),
+        )
         .route("/api/proxy/complete", post(handle_complete))
         .route("/api/proxy/cancel", post(handle_cancel))
         .route("/api/proxy/cancel-unload", post(handle_cancel_unload))
@@ -1844,7 +1842,7 @@ mod tests {
 
     #[tokio::test]
     async fn root_brand_assets_are_embedded_and_typed() {
-        let wordmark = serve_wordmark_asset().await;
+        let wordmark = embedded_asset_response("nyxid-wordmark.svg");
         assert_eq!(wordmark.status(), StatusCode::OK);
         assert_eq!(
             wordmark
@@ -1854,7 +1852,7 @@ mod tests {
             Some("image/svg+xml")
         );
 
-        let favicon = serve_favicon_asset().await;
+        let favicon = embedded_asset_response("favicon.ico");
         assert_eq!(favicon.status(), StatusCode::OK);
         assert_eq!(
             favicon

@@ -324,7 +324,7 @@ pub async fn fail_pending_placeholders_for_provider(
             doc! {
                 "user_id": user_id,
                 "provider_config_id": provider_config_id,
-                "status": { "$in": ["pending_auth", "pending-auth"] },
+                "status": { "$in": ["pending_auth"] },
                 "credential_type": { "$ne": "node_managed" },
             },
             doc! {
@@ -674,7 +674,7 @@ pub async fn revoke_api_key_if_pending(
             doc! {
                 "_id": key_id,
                 "user_id": user_id,
-                "status": { "$in": ["pending_auth", "pending-auth"] },
+                "status": { "$in": ["pending_auth"] },
             },
             doc! {
                 "$set": {

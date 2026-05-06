@@ -381,7 +381,7 @@ async fn generic_oauth_callback_impl(
 
     // Handle OAuth provider errors
     if let Some(ref error) = query.error {
-        let msg = query.error_description.as_deref().unwrap_or(error.as_str());
+        let msg = safe_provider_error_message(error, query.error_description.as_deref());
 
         let mut failed_placeholders = 0_u64;
         let mut state_lookup_error: Option<String> = None;
@@ -396,7 +396,7 @@ async fn generic_oauth_callback_impl(
                         &state.db,
                         owner_id,
                         &oauth_state.provider_config_id,
-                        msg,
+                        &msg,
                     )
                     .await
                     {
@@ -423,7 +423,7 @@ async fn generic_oauth_callback_impl(
             None,
             None,
         );
-        return redirect_callback(frontend_url, "error", Some(msg));
+        return redirect_callback(frontend_url, "error", Some(&msg));
     }
 
     let code = match query.code.as_deref() {
@@ -933,6 +933,11 @@ fn safe_error_message(e: &AppError) -> String {
     }
 }
 
+fn safe_provider_error_message(error: &str, error_description: Option<&str>) -> String {
+    let message = error_description.unwrap_or(error);
+    safe_error_message(&AppError::BadRequest(message.to_string()))
+}
+
 async fn sync_provider_credentials_to_unified_keys(
     state: &AppState,
     user_id: &str,
@@ -1145,6 +1150,33 @@ mod tests {
             .to_string()
     }
 
+    fn redirect_query_param(location: &str, key: &str) -> Option<String> {
+        url::Url::parse(location)
+            .expect("valid redirect URL")
+            .query_pairs()
+            .find_map(|(name, value)| (name == key).then(|| value.into_owned()))
+    }
+
+    async fn spawn_oauth_token_server() -> (String, tokio::task::JoinHandle<()>) {
+        let app = axum::Router::new().route(
+            "/token",
+            axum::routing::post(|| async {
+                axum::Json(serde_json::json!({
+                    "access_token": "test-access-token",
+                    "refresh_token": "test-refresh-token",
+                    "expires_in": 3600,
+                    "scope": "read:user",
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}/token"), handle)
+    }
+
     #[test]
     fn callback_state_allows_missing_session_cookie() {
         assert!(ensure_callback_user_matches_state(None, "user-123").is_ok());
@@ -1321,6 +1353,94 @@ mod tests {
         let api_key = get_api_key(&db, &key_id).await;
         assert_eq!(api_key.status, "failed");
         assert_eq!(api_key.error_message.as_deref(), Some("access_denied"));
+    }
+
+    #[tokio::test]
+    async fn generic_oauth_callback_sync_failure_marks_placeholder_failed() {
+        let Some(db) =
+            connect_test_database("oauth_callback_sync_failure_marks_placeholder_failed").await
+        else {
+            eprintln!(
+                "skipping provider token handler integration test: no local MongoDB available"
+            );
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_id = Uuid::new_v4().to_string();
+        let provider_id = Uuid::new_v4().to_string();
+        let state_id = Uuid::new_v4().to_string();
+        let key_id = Uuid::new_v4().to_string();
+        let malformed_key_id = Uuid::new_v4().to_string();
+        let (token_url, token_server) = spawn_oauth_token_server().await;
+
+        let mut provider = test_provider_config(&provider_id);
+        provider.token_url = Some(token_url);
+        provider.client_id_encrypted = Some(
+            state
+                .encryption_keys
+                .encrypt(b"test-client-id")
+                .await
+                .unwrap(),
+        );
+        provider.client_secret_encrypted = Some(
+            state
+                .encryption_keys
+                .encrypt(b"test-client-secret")
+                .await
+                .unwrap(),
+        );
+
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(provider)
+            .await
+            .unwrap();
+        db.collection::<OAuthState>(OAUTH_STATES)
+            .insert_one(test_oauth_state(&state_id, &user_id, &provider_id))
+            .await
+            .unwrap();
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(test_pending_oauth_api_key(&key_id, &user_id, &provider_id))
+            .await
+            .unwrap();
+        db.collection::<mongodb::bson::Document>(USER_API_KEYS)
+            .insert_one(mongodb::bson::doc! {
+                "_id": malformed_key_id,
+                "user_id": &user_id,
+                "provider_config_id": &provider_id,
+                "status": "pending_auth",
+                "credential_type": "oauth2",
+            })
+            .await
+            .unwrap();
+
+        let redirect = generic_oauth_callback_impl(
+            state,
+            None,
+            GenericOAuthCallbackQuery {
+                code: Some("oauth-code".to_string()),
+                state: Some(state_id),
+                error: None,
+                error_description: None,
+            },
+        )
+        .await;
+        token_server.abort();
+
+        let location = redirect_location(redirect);
+        assert_eq!(
+            redirect_query_param(&location, "status").as_deref(),
+            Some("error")
+        );
+        assert_eq!(
+            redirect_query_param(&location, "message").as_deref(),
+            Some("An internal error occurred")
+        );
+        let api_key = get_api_key(&db, &key_id).await;
+        assert_eq!(api_key.status, "failed");
+        assert_eq!(
+            api_key.error_message.as_deref(),
+            Some("An internal error occurred")
+        );
     }
 
     #[tokio::test]
