@@ -155,13 +155,14 @@ pub async fn scan_host_key_sha256(
     host: &str,
     port: u16,
     timeout_secs: u64,
+    algorithms: Option<&SshAlgorithmPreferences>,
 ) -> Result<String, SshNodeExecError> {
     let observed_sha256 = Arc::new(Mutex::new(None));
     let handler = HostKeyVerifier {
         expected_sha256: None,
         observed_sha256: observed_sha256.clone(),
     };
-    let config = build_client_config(Duration::from_secs(timeout_secs.clamp(1, 300)), None)?;
+    let config = build_client_config(Duration::from_secs(timeout_secs.clamp(1, 300)), algorithms)?;
     let addr = (host, port);
     let session = tokio::time::timeout(
         Duration::from_secs(timeout_secs.clamp(1, 300)),
@@ -474,6 +475,40 @@ fn append_capped(target: &mut Vec<u8>, chunk: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn client_config_uses_custom_algorithm_preferences() {
+        let algorithms = SshAlgorithmPreferences {
+            kex: Some(vec!["diffie-hellman-group-exchange-sha256".to_string()]),
+            host_key: Some(vec!["ssh-rsa".to_string()]),
+            cipher: Some(vec!["aes128-ctr".to_string()]),
+            mac: Some(vec!["hmac-sha2-256".to_string()]),
+        };
+
+        let config = build_client_config(Duration::from_secs(10), Some(&algorithms)).unwrap();
+
+        assert_eq!(config.inactivity_timeout, Some(Duration::from_secs(10)));
+        assert_eq!(
+            config.preferred.kex.first().map(|name| name.as_ref()),
+            Some("diffie-hellman-group-exchange-sha256")
+        );
+        assert_eq!(
+            config
+                .preferred
+                .key
+                .first()
+                .map(|algorithm| algorithm.as_str()),
+            Some("ssh-rsa")
+        );
+        assert_eq!(
+            config.preferred.cipher.first().map(|name| name.as_ref()),
+            Some("aes128-ctr")
+        );
+        assert_eq!(
+            config.preferred.mac.first().map(|name| name.as_ref()),
+            Some("hmac-sha2-256")
+        );
+    }
 
     #[test]
     fn normalizes_sha256_fingerprint_prefix_and_padding() {

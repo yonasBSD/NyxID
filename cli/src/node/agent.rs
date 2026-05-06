@@ -631,9 +631,10 @@ pub async fn cmd_ssh_credentials(
             let host_key_sha256 = if no_pin_host_key {
                 None
             } else {
-                let fingerprint = ssh_node_exec::scan_host_key_sha256(&host, port, 10)
-                    .await
-                    .map_err(|error| super::error::Error::Config(error.message))?;
+                let fingerprint =
+                    ssh_node_exec::scan_host_key_sha256(&host, port, 10, algorithms.as_ref())
+                        .await
+                        .map_err(|error| super::error::Error::Config(error.message))?;
                 Some(fingerprint)
             };
 
