@@ -14,6 +14,7 @@ frontend/src/components/cli-wizard/shell.tsx
 frontend/src/components/cli-wizard/step-label.tsx
 frontend/src/components/cli-wizard/wizard-footer.tsx
 frontend/src/components/shared/org-scope-select.tsx
+frontend/src/components/shared/twitter-oauth-guidance.tsx
 frontend/src/components/ui/button.tsx
 frontend/src/components/ui/checkbox.tsx
 frontend/src/components/ui/input.tsx
