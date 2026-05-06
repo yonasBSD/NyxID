@@ -31,7 +31,7 @@ async fn find_user_service_for_actor(
     if let Some(svc) = state
         .db
         .collection::<UserService>(USER_SERVICES)
-        .find_one(doc! { "_id": id_or_slug })
+        .find_one(doc! { "_id": id_or_slug, "is_active": true })
         .await?
     {
         return Ok(Some(svc));
@@ -1885,7 +1885,7 @@ mod tests {
     use crate::models::user_api_key::COLLECTION_NAME as USER_API_KEYS;
     use crate::models::user_api_key::UserApiKey;
     use crate::models::user_endpoint::COLLECTION_NAME as USER_ENDPOINTS;
-    use crate::models::user_service::COLLECTION_NAME as USER_SERVICES;
+    use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
     use crate::telemetry::TelemetryContext;
     use crate::test_utils::{
         connect_test_database, test_app_state, test_auth_user, test_membership, test_user,
@@ -2320,6 +2320,39 @@ mod tests {
 
         assert_eq!(response.id, service_id);
         assert_eq!(response.slug, "routeros");
+    }
+
+    #[tokio::test]
+    async fn get_key_by_uuid_returns_not_found_for_inactive_service() {
+        let Some(db) = connect_test_database("keys_get_uuid_inactive").await else {
+            eprintln!("skipping keys handler integration test: no local MongoDB available");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &actor_id, UserType::Person).await;
+        insert_key_fixture(&db, &actor_id, &service_id, "routeros", "Personal RouterOS").await;
+        db.collection::<UserService>(USER_SERVICES)
+            .update_one(
+                doc! { "_id": &service_id },
+                doc! { "$set": { "is_active": false } },
+            )
+            .await
+            .unwrap();
+
+        let err = super::get_key(
+            State(state),
+            test_auth_user(&actor_id),
+            Path(service_id.clone()),
+        )
+        .await
+        .expect_err("inactive service should not resolve by uuid");
+
+        assert!(matches!(
+            err,
+            AppError::NotFound(message) if message == "Key not found"
+        ));
     }
 
     #[tokio::test]
