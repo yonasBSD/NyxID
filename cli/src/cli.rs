@@ -2063,6 +2063,54 @@ pub enum NodeSshCredentialCommands {
         /// Do not pin the target SSH host key
         #[arg(long)]
         no_pin_host_key: bool,
+        /// SSH KEX algorithm allowlist (repeatable or comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        kex: Vec<String>,
+        /// SSH host-key algorithm allowlist
+        #[arg(long = "host-key", value_delimiter = ',')]
+        host_key: Vec<String>,
+        /// SSH cipher allowlist
+        #[arg(long, value_delimiter = ',')]
+        cipher: Vec<String>,
+        /// SSH MAC allowlist
+        #[arg(long, value_delimiter = ',')]
+        mac: Vec<String>,
+    },
+    /// Set or reset SSH algorithm allowlists for one credential
+    SetAlgos {
+        /// Service slug
+        #[arg(long)]
+        service: String,
+        /// SSH principal
+        #[arg(long)]
+        principal: String,
+        /// SSH KEX algorithm allowlist (repeatable or comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        kex: Vec<String>,
+        /// SSH host-key algorithm allowlist
+        #[arg(long = "host-key", value_delimiter = ',')]
+        host_key: Vec<String>,
+        /// SSH cipher allowlist
+        #[arg(long, value_delimiter = ',')]
+        cipher: Vec<String>,
+        /// SSH MAC allowlist
+        #[arg(long, value_delimiter = ',')]
+        mac: Vec<String>,
+        /// Reset the SSH KEX allowlist to russh defaults
+        #[arg(long)]
+        reset_kex: bool,
+        /// Reset the SSH host-key allowlist to russh defaults
+        #[arg(long)]
+        reset_host_key: bool,
+        /// Reset the SSH cipher allowlist to russh defaults
+        #[arg(long)]
+        reset_cipher: bool,
+        /// Reset the SSH MAC allowlist to russh defaults
+        #[arg(long)]
+        reset_mac: bool,
+        /// Reset all SSH algorithm allowlists to russh defaults
+        #[arg(long)]
+        reset_all: bool,
     },
     /// List configured SSH private keys
     List {

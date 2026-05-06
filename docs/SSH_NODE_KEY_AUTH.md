@@ -103,6 +103,51 @@ Use `--no-pin-host-key` only when the operator accepts the risk of trusting any 
 nyxid node ssh-credentials add --service routeros --principal nyxid-ro --key-file ~/.ssh/routeros_ro --host 10.0.0.1 --no-pin-host-key
 ```
 
+## Per-Credential Algorithm Allowlist
+
+Each credential can pin its own ordered KEX, host-key, cipher, and MAC allowlists. When unset, russh defaults are used; when set, only the listed algorithms are proposed for that credential's connections. The lists apply to `ssh exec`, browser terminal, and the `ssh-credentials test` no-op handshake.
+
+Use this when russh's default negotiation does not converge against a legacy appliance (e.g. MikroTik RouterOS strong-crypto, older OOB management cards). Pinning gives a deterministic set so `1013 SshNodeExecChannelClosed` is no longer ambiguous between "no algorithm overlap" and "auth or network failure".
+
+```bash
+nyxid node ssh-credentials add \
+  --service routeros --principal nyxid-admin \
+  --key-file ~/.ssh/routeros_admin --host 10.0.0.1 --port 22 \
+  --kex diffie-hellman-group-exchange-sha256 \
+  --host-key rsa-sha2-256,ssh-rsa \
+  --cipher aes256-ctr \
+  --mac hmac-sha2-256
+```
+
+Update or reset an existing credential without re-importing the key:
+
+```bash
+# Replace just the cipher list
+nyxid node ssh-credentials set-algos --service routeros --principal nyxid-admin \
+  --cipher aes256-ctr,aes192-ctr
+
+# Drop one category back to russh defaults
+nyxid node ssh-credentials set-algos --service routeros --principal nyxid-admin --reset-mac
+
+# Drop everything back to russh defaults
+nyxid node ssh-credentials set-algos --service routeros --principal nyxid-admin --reset-all
+```
+
+Validation rules enforced at write time and at connect time:
+
+- Each flag accepts comma-separated values or can be repeated.
+- Empty lists are rejected — omit the flag instead.
+- `none` is rejected for kex/cipher/mac (cleartext transport is not configurable).
+- Host-key entries must resolve to the Ed25519, RSA, or ECDSA family. DSA and security-key (`sk-*`) algorithms are rejected.
+- The OpenSSH `kex-strict-c-v00@openssh.com` and `ext-info-c` markers are auto-appended after resolution; an operator cannot disable them via the allowlist and cannot pass them as input.
+- The pinned host-key SHA-256 fingerprint (set by `--no-pin-host-key`'s default) is enforced independently of the algorithm list, so a weakened algorithm allowlist does not weaken MITM protection.
+
+The `show` subcommand prints the current allowlist per category, or `default` when unset:
+
+```bash
+nyxid node ssh-credentials show --service routeros --principal nyxid-admin
+```
+
 ## Node WebSocket Frames
 
 Node-key command execution uses:

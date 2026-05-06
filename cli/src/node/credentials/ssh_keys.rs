@@ -3,7 +3,7 @@ use std::fmt;
 use chrono::{DateTime, Utc};
 use zeroize::Zeroizing;
 
-use crate::node::config::{NodeConfig, SshKeyConfig};
+use crate::node::config::{NodeConfig, SshAlgorithmPreferences, SshKeyConfig};
 use crate::node::error::{Error, Result};
 use crate::node::secret_backend::SecretBackend;
 
@@ -18,6 +18,7 @@ pub struct SshKeyEntry {
     pub target_host: String,
     pub target_port: u16,
     pub host_key_sha256: Option<String>,
+    pub algorithms: Option<SshAlgorithmPreferences>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -29,6 +30,7 @@ pub struct NewSshKeyEntry {
     pub target_host: String,
     pub target_port: u16,
     pub host_key_sha256: Option<String>,
+    pub algorithms: Option<SshAlgorithmPreferences>,
 }
 
 impl fmt::Debug for SshKeyEntry {
@@ -44,6 +46,7 @@ impl fmt::Debug for SshKeyEntry {
             .field("target_host", &self.target_host)
             .field("target_port", &self.target_port)
             .field("host_key_sha256", &self.host_key_sha256)
+            .field("algorithms", &self.algorithms)
             .field("created_at", &self.created_at)
             .finish()
     }
@@ -62,6 +65,7 @@ impl fmt::Debug for NewSshKeyEntry {
             .field("target_host", &self.target_host)
             .field("target_port", &self.target_port)
             .field("host_key_sha256", &self.host_key_sha256)
+            .field("algorithms", &self.algorithms)
             .finish()
     }
 }
@@ -141,6 +145,7 @@ pub fn load_entry(config: &SshKeyConfig, backend: &SecretBackend) -> Result<SshK
         target_host: config.target_host.clone(),
         target_port: config.target_port,
         host_key_sha256: config.host_key_sha256.clone(),
+        algorithms: config.algorithms.clone(),
         created_at,
     })
 }
@@ -152,6 +157,10 @@ pub fn add_entry(
 ) -> Result<()> {
     validate_key_selector(&entry.service_slug, &entry.principal)?;
     validate_target(&entry.target_host, entry.target_port)?;
+    let algorithms = entry.algorithms.filter(|prefs| !prefs.is_empty());
+    if let Some(prefs) = &algorithms {
+        prefs.validate()?;
+    }
 
     if config_find(config, &entry.service_slug, &entry.principal).is_some() {
         return Err(Error::Validation(format!(
@@ -186,6 +195,7 @@ pub fn add_entry(
         target_host: entry.target_host,
         target_port: entry.target_port,
         host_key_sha256: entry.host_key_sha256,
+        algorithms,
         created_at: Utc::now().to_rfc3339(),
     });
     config
@@ -272,6 +282,7 @@ mod tests {
             target_host: "10.0.0.1".to_string(),
             target_port: 22,
             host_key_sha256: None,
+            algorithms: None,
         }
     }
 
@@ -286,6 +297,7 @@ mod tests {
                 target_host: "10.0.0.1".to_string(),
                 target_port: 22,
                 host_key_sha256: None,
+                algorithms: None,
                 created_at: Utc::now(),
             },
             SshKeyEntry {
@@ -296,6 +308,7 @@ mod tests {
                 target_host: "10.0.0.1".to_string(),
                 target_port: 22,
                 host_key_sha256: None,
+                algorithms: None,
                 created_at: Utc::now(),
             },
         ];
@@ -338,5 +351,53 @@ mod tests {
             principals_for_service(&config, "routeros"),
             vec!["nyxid-admin".to_string(), "nyxid-ro".to_string()]
         );
+    }
+
+    #[test]
+    fn ssh_key_toml_roundtrip_without_algorithms_keeps_config_clean() {
+        let config = SshKeyConfig {
+            service_slug: "routeros".to_string(),
+            principal: "admin".to_string(),
+            private_key_pem_encrypted: Some("encrypted-key".to_string()),
+            passphrase_encrypted: None,
+            target_host: "10.0.0.1".to_string(),
+            target_port: 22,
+            host_key_sha256: None,
+            algorithms: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+
+        let encoded = toml::to_string(&config).unwrap();
+        assert!(!encoded.contains("algorithms"));
+
+        let decoded: SshKeyConfig = toml::from_str(&encoded).unwrap();
+        assert!(decoded.algorithms.is_none());
+    }
+
+    #[test]
+    fn ssh_key_toml_roundtrip_with_algorithms_preserves_lists() {
+        let algorithms = SshAlgorithmPreferences {
+            kex: Some(vec!["diffie-hellman-group-exchange-sha256".to_string()]),
+            host_key: Some(vec!["rsa-sha2-256".to_string(), "ssh-rsa".to_string()]),
+            cipher: Some(vec!["aes256-ctr".to_string()]),
+            mac: Some(vec!["hmac-sha2-256".to_string()]),
+        };
+        let config = SshKeyConfig {
+            service_slug: "routeros".to_string(),
+            principal: "admin".to_string(),
+            private_key_pem_encrypted: Some("encrypted-key".to_string()),
+            passphrase_encrypted: None,
+            target_host: "10.0.0.1".to_string(),
+            target_port: 22,
+            host_key_sha256: Some("SHA256:abc123".to_string()),
+            algorithms: Some(algorithms.clone()),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+
+        let encoded = toml::to_string(&config).unwrap();
+        assert!(encoded.contains("[algorithms]"));
+
+        let decoded: SshKeyConfig = toml::from_str(&encoded).unwrap();
+        assert_eq!(decoded.algorithms, Some(algorithms));
     }
 }

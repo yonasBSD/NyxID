@@ -7,7 +7,10 @@ use russh::keys::{PrivateKeyWithHashAlg, decode_secret_key};
 use russh::{ChannelMsg, Disconnect};
 use tokio::sync::mpsc;
 
+use super::config::SshAlgorithmPreferences;
 use super::credentials::ssh_keys::SshKeyEntry;
+use super::error::Error;
+use super::ssh_algos;
 
 pub const SSH_NODE_KEY_MISSING_CODE: u32 = 1011;
 pub const SSH_HOST_KEY_MISMATCH_CODE: u32 = 1012;
@@ -158,10 +161,7 @@ pub async fn scan_host_key_sha256(
         expected_sha256: None,
         observed_sha256: observed_sha256.clone(),
     };
-    let config = Arc::new(client::Config {
-        inactivity_timeout: Some(Duration::from_secs(timeout_secs.clamp(1, 300))),
-        ..Default::default()
-    });
+    let config = build_client_config(Duration::from_secs(timeout_secs.clamp(1, 300)), None)?;
     let addr = (host, port);
     let session = tokio::time::timeout(
         Duration::from_secs(timeout_secs.clamp(1, 300)),
@@ -379,10 +379,7 @@ async fn connect_authenticated(
         observed_sha256: observed_sha256.clone(),
     };
 
-    let config = Arc::new(client::Config {
-        inactivity_timeout: Some(Duration::from_secs(30)),
-        ..Default::default()
-    });
+    let config = build_client_config(Duration::from_secs(30), entry.algorithms.as_ref())?;
 
     let addr = (entry.target_host.as_str(), entry.target_port);
     let mut session = match client::connect(config, addr, handler).await {
@@ -423,6 +420,29 @@ async fn connect_authenticated(
     }
 
     Ok(session)
+}
+
+fn build_client_config(
+    inactivity_timeout: Duration,
+    algorithms: Option<&SshAlgorithmPreferences>,
+) -> Result<Arc<client::Config>, SshNodeExecError> {
+    let default_algorithms = SshAlgorithmPreferences::default();
+    let preferred = ssh_algos::build_preferred(algorithms.unwrap_or(&default_algorithms))
+        .map_err(map_ssh_algorithm_error)?;
+    Ok(Arc::new(client::Config {
+        inactivity_timeout: Some(inactivity_timeout),
+        preferred,
+        ..Default::default()
+    }))
+}
+
+fn map_ssh_algorithm_error(error: Error) -> SshNodeExecError {
+    match error {
+        Error::Validation(message) => {
+            SshNodeExecError::channel_closed(format!("ssh algorithm config invalid: {message}"))
+        }
+        other => SshNodeExecError::channel_closed(format!("ssh algorithm config invalid: {other}")),
+    }
 }
 
 pub fn host_key_sha256(public_key: &russh::keys::ssh_key::PublicKey) -> String {

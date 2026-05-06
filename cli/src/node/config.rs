@@ -155,8 +155,22 @@ pub struct SshKeyConfig {
     pub target_port: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_key_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub algorithms: Option<SshAlgorithmPreferences>,
     #[serde(default = "default_created_at")]
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SshAlgorithmPreferences {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kex: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_key: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cipher: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mac: Option<Vec<String>>,
 }
 
 fn default_ssh_port() -> u16 {

@@ -9,10 +9,10 @@ use std::time::Duration;
 use base64::Engine as _;
 use serde::Deserialize;
 
-use super::config::{self, NodeConfig};
+use super::config::{self, NodeConfig, SshAlgorithmPreferences};
 use super::credential_store::{CredentialStore, SharedCredentials, SharedCredentialsSender};
 use super::credentials::ssh_keys::{self, NewSshKeyEntry};
-use super::error::Result;
+use super::error::{Error, Result};
 use super::oauth;
 use super::secret_backend::SecretBackend;
 use super::ssh_node_exec;
@@ -588,8 +588,13 @@ pub async fn cmd_ssh_credentials(
             port,
             passphrase_env,
             no_pin_host_key,
+            kex,
+            host_key,
+            cipher,
+            mac,
         } => {
             let service = service.to_lowercase();
+            let algorithms = algorithm_preferences_from_cli(kex, host_key, cipher, mac)?;
             let mut private_key_pem =
                 Zeroizing::new(std::fs::read_to_string(&key_file).map_err(|error| {
                     super::error::Error::Config(format!(
@@ -645,6 +650,7 @@ pub async fn cmd_ssh_credentials(
                     target_host: host.clone(),
                     target_port: port,
                     host_key_sha256: host_key_sha256.clone(),
+                    algorithms,
                 },
             )?;
             node_config.save(&config_file)?;
@@ -655,6 +661,82 @@ pub async fn cmd_ssh_credentials(
             } else {
                 println!("Host key pinning disabled for this entry.");
             }
+            Ok(())
+        }
+        NodeSshCredentialCommands::SetAlgos {
+            service,
+            principal,
+            kex,
+            host_key,
+            cipher,
+            mac,
+            reset_kex,
+            reset_host_key,
+            reset_cipher,
+            reset_mac,
+            reset_all,
+        } => {
+            validate_algorithm_reset_args(AlgorithmResetArgs {
+                kex: &kex,
+                host_key: &host_key,
+                cipher: &cipher,
+                mac: &mac,
+                reset_kex,
+                reset_host_key,
+                reset_cipher,
+                reset_mac,
+                reset_all,
+            })?;
+
+            let service = service.to_lowercase();
+            let mut node_config = NodeConfig::load(&config_file)?;
+            let entry = node_config
+                .ssh_keys
+                .iter_mut()
+                .find(|entry| entry.service_slug == service && entry.principal == principal)
+                .ok_or_else(|| {
+                    Error::Config(format!(
+                        "No SSH key found for service '{service}' principal '{principal}'"
+                    ))
+                })?;
+
+            if reset_all {
+                entry.algorithms = None;
+            } else {
+                let mut algorithms = entry.algorithms.clone().unwrap_or_default();
+                if reset_kex {
+                    algorithms.kex = None;
+                }
+                if reset_host_key {
+                    algorithms.host_key = None;
+                }
+                if reset_cipher {
+                    algorithms.cipher = None;
+                }
+                if reset_mac {
+                    algorithms.mac = None;
+                }
+                if !kex.is_empty() {
+                    algorithms.kex = Some(kex);
+                }
+                if !host_key.is_empty() {
+                    algorithms.host_key = Some(host_key);
+                }
+                if !cipher.is_empty() {
+                    algorithms.cipher = Some(cipher);
+                }
+                if !mac.is_empty() {
+                    algorithms.mac = Some(mac);
+                }
+                entry.algorithms = normalize_algorithm_preferences(algorithms)?;
+            }
+
+            let algorithms = entry.algorithms.clone();
+            node_config.save(&config_file)?;
+            println!(
+                "SSH algorithm allowlists updated for service '{service}' principal '{principal}'."
+            );
+            print_algorithm_allowlists(algorithms.as_ref());
             Ok(())
         }
         NodeSshCredentialCommands::List { service } => {
@@ -699,6 +781,7 @@ pub async fn cmd_ssh_credentials(
                 "Host key:   {}",
                 entry.host_key_sha256.as_deref().unwrap_or("unpinned")
             );
+            print_algorithm_allowlists(entry.algorithms.as_ref());
             println!("Created at: {}", entry.created_at);
             println!("Key:        <redacted>");
             println!(
@@ -783,6 +866,123 @@ pub async fn cmd_ssh_credentials(
             println!("Pruned {} stale SSH key entries.", stale_entries.len());
             Ok(())
         }
+    }
+}
+
+fn algorithm_preferences_from_cli(
+    kex: Vec<String>,
+    host_key: Vec<String>,
+    cipher: Vec<String>,
+    mac: Vec<String>,
+) -> Result<Option<SshAlgorithmPreferences>> {
+    normalize_algorithm_preferences(SshAlgorithmPreferences {
+        kex: non_empty_algorithm_list(kex),
+        host_key: non_empty_algorithm_list(host_key),
+        cipher: non_empty_algorithm_list(cipher),
+        mac: non_empty_algorithm_list(mac),
+    })
+}
+
+fn normalize_algorithm_preferences(
+    algorithms: SshAlgorithmPreferences,
+) -> Result<Option<SshAlgorithmPreferences>> {
+    if algorithms.is_empty() {
+        return Ok(None);
+    }
+    algorithms.validate()?;
+    Ok(Some(algorithms))
+}
+
+fn non_empty_algorithm_list(values: Vec<String>) -> Option<Vec<String>> {
+    if values.is_empty() {
+        None
+    } else {
+        Some(values)
+    }
+}
+
+struct AlgorithmResetArgs<'a> {
+    kex: &'a [String],
+    host_key: &'a [String],
+    cipher: &'a [String],
+    mac: &'a [String],
+    reset_kex: bool,
+    reset_host_key: bool,
+    reset_cipher: bool,
+    reset_mac: bool,
+    reset_all: bool,
+}
+
+fn validate_algorithm_reset_args(args: AlgorithmResetArgs<'_>) -> Result<()> {
+    let any_list = !args.kex.is_empty()
+        || !args.host_key.is_empty()
+        || !args.cipher.is_empty()
+        || !args.mac.is_empty();
+    let any_reset = args.reset_kex
+        || args.reset_host_key
+        || args.reset_cipher
+        || args.reset_mac
+        || args.reset_all;
+    if !any_list && !any_reset {
+        return Err(Error::Validation(
+            "set-algos requires at least one of --kex, --host-key, --cipher, --mac, \
+             --reset-kex, --reset-host-key, --reset-cipher, --reset-mac, or --reset-all"
+                .to_string(),
+        ));
+    }
+    if args.reset_all && any_list {
+        return Err(Error::Validation(
+            "--reset-all cannot be combined with algorithm allowlists".to_string(),
+        ));
+    }
+    if args.reset_kex && !args.kex.is_empty() {
+        return Err(Error::Validation(
+            "--kex cannot be combined with --reset-kex".to_string(),
+        ));
+    }
+    if args.reset_host_key && !args.host_key.is_empty() {
+        return Err(Error::Validation(
+            "--host-key cannot be combined with --reset-host-key".to_string(),
+        ));
+    }
+    if args.reset_cipher && !args.cipher.is_empty() {
+        return Err(Error::Validation(
+            "--cipher cannot be combined with --reset-cipher".to_string(),
+        ));
+    }
+    if args.reset_mac && !args.mac.is_empty() {
+        return Err(Error::Validation(
+            "--mac cannot be combined with --reset-mac".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn print_algorithm_allowlists(algorithms: Option<&SshAlgorithmPreferences>) {
+    println!("Algorithms:");
+    println!(
+        "  KEX:       {}",
+        format_algorithm_allowlist(algorithms.and_then(|prefs| prefs.kex.as_deref()))
+    );
+    println!(
+        "  Host key:  {}",
+        format_algorithm_allowlist(algorithms.and_then(|prefs| prefs.host_key.as_deref()))
+    );
+    println!(
+        "  Cipher:    {}",
+        format_algorithm_allowlist(algorithms.and_then(|prefs| prefs.cipher.as_deref()))
+    );
+    println!(
+        "  MAC:       {}",
+        format_algorithm_allowlist(algorithms.and_then(|prefs| prefs.mac.as_deref()))
+    );
+}
+
+fn format_algorithm_allowlist(list: Option<&[String]>) -> String {
+    match list {
+        Some(values) if !values.is_empty() => values.join(", "),
+        Some(_) => "<empty>".to_string(),
+        None => "default".to_string(),
     }
 }
 
