@@ -2519,7 +2519,7 @@ async fn revoke_provider_token_if_unused(
         .count_documents(doc! {
             "user_id": user_id,
             "provider_config_id": provider_config_id,
-            "status": { "$ne": "revoked" },
+            "status": { "$nin": ["revoked", "failed"] },
             "credential_type": { "$ne": "node_managed" },
         })
         .await?;

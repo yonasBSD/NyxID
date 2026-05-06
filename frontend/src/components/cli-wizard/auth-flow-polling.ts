@@ -40,11 +40,8 @@ export async function pollOAuthKeyUntilActive({
         await completeWithKey(keyId);
         return;
       }
-      // Terminal failure statuses: when the backend eventually marks
-      // placeholders as `revoked` / `failed` on OAuth callback errors
-      // (e.g. user denial), this exits the poll immediately instead of
-      // waiting for the deadline. Today the backend leaves placeholders
-      // in `pending_auth` on deny so this branch is forward-compat.
+      // Terminal failure statuses let provider denials and callback errors
+      // exit immediately instead of waiting for the 5-minute deadline.
       if (isTerminalAuthFailureStatus(key.status)) {
         if (!isCancelled()) {
           onTerminalFailure(key.status);

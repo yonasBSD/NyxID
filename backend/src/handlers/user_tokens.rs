@@ -383,7 +383,7 @@ async fn generic_oauth_callback_impl(
     if let Some(ref error) = query.error {
         let msg = query.error_description.as_deref().unwrap_or(error.as_str());
 
-        let mut revoked_placeholders = 0_u64;
+        let mut failed_placeholders = 0_u64;
         let mut state_lookup_error: Option<String> = None;
         if let Some(state_param) = query.state.as_deref().filter(|s| !s.is_empty()) {
             match user_token_service::peek_oauth_state(&state.db, state_param).await {
@@ -392,14 +392,15 @@ async fn generic_oauth_callback_impl(
                         .target_user_id
                         .as_deref()
                         .unwrap_or(&oauth_state.user_id);
-                    match user_api_key_service::revoke_pending_placeholders_for_provider(
+                    match user_api_key_service::fail_pending_placeholders_for_provider(
                         &state.db,
                         owner_id,
                         &oauth_state.provider_config_id,
+                        msg,
                     )
                     .await
                     {
-                        Ok(count) => revoked_placeholders = count,
+                        Ok(count) => failed_placeholders = count,
                         Err(e) => state_lookup_error = Some(e.to_string()),
                     }
                 }
@@ -414,7 +415,7 @@ async fn generic_oauth_callback_impl(
             Some(serde_json::json!({
                 "error": error,
                 "error_description": &query.error_description,
-                "revoked_placeholders": revoked_placeholders,
+                "failed_placeholders": failed_placeholders,
                 "state_lookup_error": state_lookup_error,
             })),
             None,
@@ -507,6 +508,27 @@ async fn generic_oauth_callback_impl(
                 sync_provider_credentials_to_unified_keys(&state, &token.user_id, provider_id, true)
                     .await
             {
+                let user_msg = safe_error_message(&error);
+                let failed_placeholders =
+                    match user_api_key_service::fail_pending_placeholders_for_provider(
+                        &state.db,
+                        &token.user_id,
+                        provider_id,
+                        &user_msg,
+                    )
+                    .await
+                    {
+                        Ok(count) => Some(count),
+                        Err(e) => {
+                            tracing::warn!(
+                                user_id = %token.user_id,
+                                provider_id = %provider_id,
+                                error = %e,
+                                "failed to mark OAuth placeholders as failed after sync error"
+                            );
+                            None
+                        }
+                    };
                 audit_service::log_async(
                     state.db.clone(),
                     Some(token.user_id.clone()),
@@ -515,13 +537,13 @@ async fn generic_oauth_callback_impl(
                         "provider_id": provider_id,
                         "error": error.to_string(),
                         "reason": "failed_to_sync_unified_keys",
+                        "failed_placeholders": failed_placeholders,
                     })),
                     None,
                     None,
                     None,
                     None,
                 );
-                let user_msg = safe_error_message(&error);
                 if let Some(ref path) = redirect_path {
                     return redirect_to_path(frontend_url, path, "error", Some(&user_msg));
                 }
@@ -535,6 +557,31 @@ async fn generic_oauth_callback_impl(
             }
         }
         Err(e) => {
+            let owner_id = oauth_state
+                .target_user_id
+                .as_deref()
+                .unwrap_or(&oauth_state.user_id);
+            let user_msg = safe_error_message(&e);
+            let failed_placeholders =
+                match user_api_key_service::fail_pending_placeholders_for_provider(
+                    &state.db,
+                    owner_id,
+                    provider_id,
+                    &user_msg,
+                )
+                .await
+                {
+                    Ok(count) => Some(count),
+                    Err(error) => {
+                        tracing::warn!(
+                            user_id = %owner_id,
+                            provider_id = %provider_id,
+                            error = %error,
+                            "failed to mark OAuth placeholders as failed"
+                        );
+                        None
+                    }
+                };
             audit_service::log_async(
                 state.db.clone(),
                 Some(oauth_state.user_id.clone()),
@@ -543,6 +590,7 @@ async fn generic_oauth_callback_impl(
                     "provider_id": provider_id,
                     "error": e.to_string(),
                     "on_behalf_of": &oauth_state.target_user_id,
+                    "failed_placeholders": failed_placeholders,
                 })),
                 None,
                 None,
@@ -550,7 +598,6 @@ async fn generic_oauth_callback_impl(
                 None,
             );
             // Sanitize error for user-facing redirect -- never leak internal details
-            let user_msg = safe_error_message(&e);
             if let Some(ref path) = redirect_path {
                 redirect_to_path(frontend_url, path, "error", Some(&user_msg))
             } else {
@@ -1231,8 +1278,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generic_oauth_callback_denial_revokes_placeholder() {
-        let Some(db) = connect_test_database("oauth_callback_denial_revokes_placeholder").await
+    async fn generic_oauth_callback_denial_marks_placeholder_failed() {
+        let Some(db) =
+            connect_test_database("oauth_callback_denial_marks_placeholder_failed").await
         else {
             eprintln!(
                 "skipping provider token handler integration test: no local MongoDB available"
@@ -1270,7 +1318,9 @@ mod tests {
         assert!(location.contains("/providers/callback"));
         assert!(location.contains("status=error"));
         assert!(location.contains("message=access_denied"));
-        assert_eq!(get_api_key(&db, &key_id).await.status, "revoked");
+        let api_key = get_api_key(&db, &key_id).await;
+        assert_eq!(api_key.status, "failed");
+        assert_eq!(api_key.error_message.as_deref(), Some("access_denied"));
     }
 
     #[tokio::test]
