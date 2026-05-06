@@ -128,11 +128,11 @@ describe("cli wizard auth flows", () => {
     expect(isTerminalAuthFailureStatus(undefined)).toBe(false);
   });
 
-  it("stops OAuth polling when the placeholder reaches a terminal failure", async () => {
+  it("stops OAuth polling when provider denial marks the placeholder failed", async () => {
     const getKey = vi
       .fn()
       .mockResolvedValueOnce({ status: "pending_auth" })
-      .mockResolvedValueOnce({ status: "revoked" });
+      .mockResolvedValueOnce({ status: "failed" });
     const completeWithKey = vi.fn();
     const onTerminalFailure = vi.fn();
     const onTimeout = vi.fn();
@@ -150,7 +150,7 @@ describe("cli wizard auth flows", () => {
 
     expect(getKey).toHaveBeenCalledTimes(2);
     expect(completeWithKey).not.toHaveBeenCalled();
-    expect(onTerminalFailure).toHaveBeenCalledWith("revoked");
+    expect(onTerminalFailure).toHaveBeenCalledWith("failed");
     expect(onTimeout).not.toHaveBeenCalled();
   });
 

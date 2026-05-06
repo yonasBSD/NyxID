@@ -80,6 +80,7 @@ function statusVariant(
     case "expired":
       return "secondary";
     case "revoked":
+    case "failed":
     case "refresh_failed":
       return "destructive";
     default:
@@ -503,7 +504,7 @@ function ServiceSection({
   readonly authKeyName: string;
   readonly isActive: boolean;
   /** API key status ("active" | "pending_auth" | "expired" | "revoked" |
-   *  "refresh_failed"). When the service has no credential (e.g. auto-connected
+   *  "failed" | "refresh_failed"). When the service has no credential (e.g. auto-connected
    *  downstreams) this is ignored. */
   readonly credentialStatus: string;
   /** Whether this service has an associated credential. Services without a

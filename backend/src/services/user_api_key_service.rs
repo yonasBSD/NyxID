@@ -26,9 +26,11 @@ const VALID_STATUSES: &[&str] = &[
     "active",
     "expired",
     "revoked",
+    "failed",
     "refresh_failed",
     "pending_auth",
 ];
+const MAX_ERROR_MESSAGE_LENGTH: usize = 512;
 
 pub struct CreateApiKeyParams<'a> {
     pub label: &'a str,
@@ -228,21 +230,21 @@ pub async fn sync_provider_token_to_api_keys(
     user_id: &str,
     provider_config_id: &str,
 ) -> AppResult<()> {
-    // Exclude `revoked` keys from provider-token sync. Without
+    // Exclude terminal failure keys from provider-token sync. Without
     // this filter, a placeholder that was revoked via the
     // `only_if_pending` cleanup path (e.g. the cli-pair flow's
     // unload/cancel race against the OAuth callback) would be
     // resurrected as the callback's `sync_provider_token_to_api_keys`
     // blindly rewrites every key for the provider back to the
-    // token's status. `revoked` is terminal by design — once the
-    // user's explicit cleanup took effect, a late-arriving
-    // provider callback must not flip it back to `active`.
+    // token's status. `revoked` and `failed` are terminal by design:
+    // once explicit cleanup or provider denial took effect, a later
+    // provider callback must not flip that row back to `active`.
     let keys: Vec<UserApiKey> = db
         .collection::<UserApiKey>(COLLECTION_NAME)
         .find(doc! {
             "user_id": user_id,
             "provider_config_id": provider_config_id,
-            "status": { "$ne": "revoked" },
+            "status": { "$nin": ["revoked", "failed"] },
         })
         .await?
         .try_collect()
@@ -302,37 +304,45 @@ pub async fn sync_provider_token_to_api_keys(
     Ok(())
 }
 
-/// Revoke any placeholder UserApiKey rows tied to a denied or failed OAuth
+/// Mark placeholder UserApiKey rows tied to a denied or failed OAuth
 /// flow so the wizard's polling can exit immediately instead of waiting for
 /// the 5-minute deadline.
 ///
-/// Each match is revoked through `revoke_api_key_if_pending` so a callback or
-/// activation race cannot flip a non-pending key back to revoked.
-pub async fn revoke_pending_placeholders_for_provider(
+/// The status filter keeps this race-safe: an OAuth callback that already
+/// activated a credential is no longer `pending_auth`, so it will not be
+/// overwritten by a late provider error callback.
+pub async fn fail_pending_placeholders_for_provider(
     db: &mongodb::Database,
     user_id: &str,
     provider_config_id: &str,
+    error_message: &str,
 ) -> AppResult<u64> {
-    let placeholders: Vec<UserApiKey> = db
+    let message = normalize_error_message(error_message);
+    let result = db
         .collection::<UserApiKey>(COLLECTION_NAME)
-        .find(doc! {
-            "user_id": user_id,
-            "provider_config_id": provider_config_id,
-            "status": "pending_auth",
-            "credential_type": { "$ne": "node_managed" },
-        })
-        .await?
-        .try_collect()
+        .update_many(
+            doc! {
+                "user_id": user_id,
+                "provider_config_id": provider_config_id,
+                "status": { "$in": ["pending_auth"] },
+                "credential_type": { "$ne": "node_managed" },
+            },
+            doc! {
+                "$set": {
+                    "status": "failed",
+                    "error_message": message,
+                    "credential_encrypted": bson::Bson::Null,
+                    "access_token_encrypted": bson::Bson::Null,
+                    "refresh_token_encrypted": bson::Bson::Null,
+                    "token_scopes": bson::Bson::Null,
+                    "expires_at": bson::Bson::Null,
+                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                }
+            },
+        )
         .await?;
 
-    let mut revoked = 0_u64;
-    for key in placeholders {
-        if revoke_api_key_if_pending(db, user_id, &key.id).await? {
-            revoked += 1;
-        }
-    }
-
-    Ok(revoked)
+    Ok(result.modified_count)
 }
 
 pub async fn activate_node_managed_api_key(
@@ -518,6 +528,16 @@ fn provider_token_type_to_api_key_type(token_type: &str) -> AppResult<&'static s
     }
 }
 
+fn normalize_error_message(message: &str) -> String {
+    let trimmed = message.trim();
+    let message = if trimmed.is_empty() {
+        "OAuth authorization failed"
+    } else {
+        trimmed
+    };
+    message.chars().take(MAX_ERROR_MESSAGE_LENGTH).collect()
+}
+
 fn optional_binary_bson(bytes: Option<&Vec<u8>>) -> bson::Bson {
     match bytes {
         Some(value) => bson::Bson::Binary(bson::Binary {
@@ -654,7 +674,7 @@ pub async fn revoke_api_key_if_pending(
             doc! {
                 "_id": key_id,
                 "user_id": user_id,
-                "status": { "$in": ["pending_auth", "pending-auth"] },
+                "status": { "$in": ["pending_auth"] },
             },
             doc! {
                 "$set": {
@@ -732,7 +752,7 @@ mod tests {
     use mongodb::bson::doc;
 
     use super::{
-        USER_PROVIDER_TOKENS, has_server_credential, revoke_pending_placeholders_for_provider,
+        USER_PROVIDER_TOKENS, fail_pending_placeholders_for_provider, has_server_credential,
         sync_provider_token_to_api_keys,
     };
     use crate::models::user_api_key::UserApiKey;
@@ -898,8 +918,65 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn revoke_pending_placeholders_for_provider_revokes_pending_match() {
-        let Some(db) = connect_test_database("user_api_key_revoke_provider_pending_matches").await
+    async fn sync_provider_token_does_not_reactivate_failed_key() {
+        let Some(db) = connect_test_database("user_api_key_sync_skips_failed").await else {
+            eprintln!("skipping user_api_key_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let now = Utc::now();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        let key_id = uuid::Uuid::new_v4().to_string();
+
+        let mut key = provider_key(&key_id, &user_id, &provider_id, "failed", "oauth2");
+        key.error_message = Some("access_denied".to_string());
+        db.collection::<UserApiKey>(super::COLLECTION_NAME)
+            .insert_one(key)
+            .await
+            .unwrap();
+
+        db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+            .insert_one(UserProviderToken {
+                id: uuid::Uuid::new_v4().to_string(),
+                user_id: user_id.clone(),
+                provider_config_id: provider_id.clone(),
+                credential_user_id: None,
+                token_type: "oauth2".to_string(),
+                access_token_encrypted: Some(vec![1, 2, 3]),
+                refresh_token_encrypted: Some(vec![4, 5, 6]),
+                token_scopes: Some("openid profile".to_string()),
+                expires_at: None,
+                api_key_encrypted: None,
+                status: "active".to_string(),
+                last_refreshed_at: None,
+                last_used_at: None,
+                error_message: None,
+                label: None,
+                metadata: None,
+                gateway_url: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        sync_provider_token_to_api_keys(&db, &user_id, &provider_id)
+            .await
+            .unwrap();
+
+        let key_after_sync = get_key(&db, &key_id).await;
+        assert_eq!(key_after_sync.status, "failed");
+        assert_eq!(
+            key_after_sync.error_message.as_deref(),
+            Some("access_denied")
+        );
+        assert!(key_after_sync.access_token_encrypted.is_none());
+    }
+
+    #[tokio::test]
+    async fn fail_pending_placeholders_for_provider_marks_pending_match_failed() {
+        let Some(db) = connect_test_database("user_api_key_fail_provider_pending_matches").await
         else {
             eprintln!("skipping user_api_key_service integration test: no local MongoDB available");
             return;
@@ -918,18 +995,23 @@ mod tests {
             .await
             .unwrap();
 
-        let revoked = revoke_pending_placeholders_for_provider(&db, &user_id, &provider_id)
-            .await
-            .unwrap();
+        let failed =
+            fail_pending_placeholders_for_provider(&db, &user_id, &provider_id, "access_denied")
+                .await
+                .unwrap();
 
-        assert_eq!(revoked, 2);
-        assert_eq!(get_key(&db, &key_1).await.status, "revoked");
-        assert_eq!(get_key(&db, &key_2).await.status, "revoked");
+        assert_eq!(failed, 2);
+        let key_1 = get_key(&db, &key_1).await;
+        let key_2 = get_key(&db, &key_2).await;
+        assert_eq!(key_1.status, "failed");
+        assert_eq!(key_1.error_message.as_deref(), Some("access_denied"));
+        assert_eq!(key_2.status, "failed");
+        assert_eq!(key_2.error_message.as_deref(), Some("access_denied"));
     }
 
     #[tokio::test]
-    async fn revoke_pending_placeholders_for_provider_skips_active() {
-        let Some(db) = connect_test_database("user_api_key_revoke_provider_skips_active").await
+    async fn fail_pending_placeholders_for_provider_skips_active() {
+        let Some(db) = connect_test_database("user_api_key_fail_provider_skips_active").await
         else {
             eprintln!("skipping user_api_key_service integration test: no local MongoDB available");
             return;
@@ -954,19 +1036,19 @@ mod tests {
             .await
             .unwrap();
 
-        let revoked = revoke_pending_placeholders_for_provider(&db, &user_id, &provider_id)
-            .await
-            .unwrap();
+        let failed =
+            fail_pending_placeholders_for_provider(&db, &user_id, &provider_id, "access_denied")
+                .await
+                .unwrap();
 
-        assert_eq!(revoked, 1);
+        assert_eq!(failed, 1);
         assert_eq!(get_key(&db, &active_key).await.status, "active");
-        assert_eq!(get_key(&db, &pending_key).await.status, "revoked");
+        assert_eq!(get_key(&db, &pending_key).await.status, "failed");
     }
 
     #[tokio::test]
-    async fn revoke_pending_placeholders_for_provider_skips_node_managed() {
-        let Some(db) =
-            connect_test_database("user_api_key_revoke_provider_skips_node_managed").await
+    async fn fail_pending_placeholders_for_provider_skips_node_managed() {
+        let Some(db) = connect_test_database("user_api_key_fail_provider_skips_node_managed").await
         else {
             eprintln!("skipping user_api_key_service integration test: no local MongoDB available");
             return;
@@ -991,19 +1073,19 @@ mod tests {
             .await
             .unwrap();
 
-        let revoked = revoke_pending_placeholders_for_provider(&db, &user_id, &provider_id)
-            .await
-            .unwrap();
+        let failed =
+            fail_pending_placeholders_for_provider(&db, &user_id, &provider_id, "access_denied")
+                .await
+                .unwrap();
 
-        assert_eq!(revoked, 1);
+        assert_eq!(failed, 1);
         assert_eq!(get_key(&db, &node_key).await.status, "pending_auth");
-        assert_eq!(get_key(&db, &oauth_key).await.status, "revoked");
+        assert_eq!(get_key(&db, &oauth_key).await.status, "failed");
     }
 
     #[tokio::test]
-    async fn revoke_pending_placeholders_for_provider_no_matches_returns_zero() {
-        let Some(db) = connect_test_database("user_api_key_revoke_provider_no_matches").await
-        else {
+    async fn fail_pending_placeholders_for_provider_no_matches_returns_zero() {
+        let Some(db) = connect_test_database("user_api_key_fail_provider_no_matches").await else {
             eprintln!("skipping user_api_key_service integration test: no local MongoDB available");
             return;
         };
@@ -1011,16 +1093,17 @@ mod tests {
         let user_id = uuid::Uuid::new_v4().to_string();
         let provider_id = uuid::Uuid::new_v4().to_string();
 
-        let revoked = revoke_pending_placeholders_for_provider(&db, &user_id, &provider_id)
-            .await
-            .unwrap();
+        let failed =
+            fail_pending_placeholders_for_provider(&db, &user_id, &provider_id, "access_denied")
+                .await
+                .unwrap();
 
-        assert_eq!(revoked, 0);
+        assert_eq!(failed, 0);
     }
 
     #[tokio::test]
-    async fn revoke_pending_placeholders_for_provider_scopes_by_provider() {
-        let Some(db) = connect_test_database("user_api_key_revoke_provider_scopes").await else {
+    async fn fail_pending_placeholders_for_provider_scopes_by_provider() {
+        let Some(db) = connect_test_database("user_api_key_fail_provider_scopes").await else {
             eprintln!("skipping user_api_key_service integration test: no local MongoDB available");
             return;
         };
@@ -1051,12 +1134,13 @@ mod tests {
             .await
             .unwrap();
 
-        let revoked = revoke_pending_placeholders_for_provider(&db, &user_id, &provider_id)
-            .await
-            .unwrap();
+        let failed =
+            fail_pending_placeholders_for_provider(&db, &user_id, &provider_id, "access_denied")
+                .await
+                .unwrap();
 
-        assert_eq!(revoked, 1);
-        assert_eq!(get_key(&db, &matching_key).await.status, "revoked");
+        assert_eq!(failed, 1);
+        assert_eq!(get_key(&db, &matching_key).await.status, "failed");
         assert_eq!(get_key(&db, &other_key).await.status, "pending_auth");
     }
 }
