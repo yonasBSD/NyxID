@@ -430,9 +430,16 @@ fn build_client_config(
     let default_algorithms = SshAlgorithmPreferences::default();
     let preferred = ssh_algos::build_preferred(algorithms.unwrap_or(&default_algorithms))
         .map_err(map_ssh_algorithm_error)?;
+    // russh defaults to min_group_size=3072 for DH-GEX, which rejects servers
+    // (e.g. RouterOS) that only ship a 2048-bit modulus. OpenSSH's default is
+    // min=2048; matching that keeps us interoperable with legacy appliances
+    // without weakening modern KEX paths (curve25519 / ECDH ignore gex).
+    let gex = client::GexParams::new(2048, 8192, 8192)
+        .expect("static GexParams bounds satisfy russh validation");
     Ok(Arc::new(client::Config {
         inactivity_timeout: Some(inactivity_timeout),
         preferred,
+        gex,
         ..Default::default()
     }))
 }
@@ -508,6 +515,14 @@ mod tests {
             config.preferred.mac.first().map(|name| name.as_ref()),
             Some("hmac-sha2-256")
         );
+    }
+
+    #[test]
+    fn client_config_relaxes_dh_gex_min_to_match_openssh() {
+        let config = build_client_config(Duration::from_secs(10), None).unwrap();
+        assert_eq!(config.gex.min_group_size(), 2048);
+        assert_eq!(config.gex.preferred_group_size(), 8192);
+        assert_eq!(config.gex.max_group_size(), 8192);
     }
 
     #[test]
