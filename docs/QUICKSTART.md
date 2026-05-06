@@ -147,7 +147,7 @@ source ~/.cargo/env 2>/dev/null || export PATH="$HOME/.cargo/bin:$PATH"
 nyxid --version
 ```
 
-> Already have Rust? You can also install with: `cargo install --git https://github.com/ChronoAIProject/NyxID.git nyxid-cli`
+> Already have Rust? You can also install with: `cargo install --git https://github.com/ChronoAIProject/NyxID.git nyxid-cli --locked`
 
 ---
 

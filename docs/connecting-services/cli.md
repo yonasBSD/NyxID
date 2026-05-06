@@ -10,7 +10,7 @@ The `nyxid` CLI installed and logged in. If you don't have it yet:
 
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/scripts/install.sh)"
-source ~/.cargo/env
+source ~/.cargo/env 2>/dev/null || export PATH="$HOME/.cargo/bin:$PATH"
 nyxid login --base-url <BASE_URL>
 ```
 
