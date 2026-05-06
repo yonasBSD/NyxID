@@ -116,6 +116,12 @@ const HEARTBEAT_DEAD_AFTER_ROTATION: Duration = Duration::from_secs(60);
 /// tight enough that a watchdog-triggered exit fires promptly after the
 /// current timeout window expires.
 const HEARTBEAT_CHECK_INTERVAL: Duration = Duration::from_millis(500);
+/// When the browser heartbeat dies while a mutating proxy request is still
+/// in flight, wait for that request to resolve before deciding the wizard
+/// was cancelled. The upstream reqwest client has a 60s total timeout, so
+/// this covers one slow in-flight create plus a small scheduling buffer.
+const SOFT_FAILURE_IN_FLIGHT_GRACE: Duration = Duration::from_secs(65);
+const SOFT_FAILURE_IN_FLIGHT_CHECK_INTERVAL: Duration = Duration::from_millis(25);
 
 fn heartbeat_watchdog_dead(
     started_at: Instant,
@@ -1350,16 +1356,70 @@ async fn resolve_soft_failure_outcome(
     fallback_message: Option<&str>,
     fallback_outcome: WizardOutcome,
 ) -> WizardOutcome {
+    resolve_soft_failure_outcome_with_grace(
+        state,
+        completion_message,
+        fallback_message,
+        fallback_outcome,
+        SOFT_FAILURE_IN_FLIGHT_GRACE,
+    )
+    .await
+}
+
+async fn resolve_soft_failure_outcome_with_grace(
+    state: &ServerState,
+    completion_message: &str,
+    fallback_message: Option<&str>,
+    fallback_outcome: WizardOutcome,
+    in_flight_grace: Duration,
+) -> WizardOutcome {
     if let Some(value) = state.completed_ai_key.lock().await.take() {
         eprintln!("  {completion_message}");
         drain_pending_keys(state).await;
         WizardOutcome::AiKeyCompleted(value)
     } else {
+        wait_for_in_flight_completion(state, in_flight_grace).await;
+        if let Some(value) = state.completed_ai_key.lock().await.take() {
+            eprintln!("  {completion_message}");
+            drain_pending_keys(state).await;
+            return WizardOutcome::AiKeyCompleted(value);
+        }
         if let Some(msg) = fallback_message {
             eprintln!("  {msg}");
         }
         drain_pending_keys(state).await;
         fallback_outcome
+    }
+}
+
+async fn wait_for_in_flight_completion(state: &ServerState, grace: Duration) {
+    if state
+        .in_flight_mutations
+        .load(std::sync::atomic::Ordering::Acquire)
+        == 0
+    {
+        return;
+    }
+
+    let deadline = Instant::now() + grace;
+    loop {
+        if state.completed_ai_key.lock().await.is_some() {
+            return;
+        }
+        if state
+            .in_flight_mutations
+            .load(std::sync::atomic::Ordering::Acquire)
+            == 0
+        {
+            return;
+        }
+
+        let now = Instant::now();
+        if now >= deadline {
+            return;
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        tokio::time::sleep(remaining.min(SOFT_FAILURE_IN_FLIGHT_CHECK_INTERVAL)).await;
     }
 }
 
@@ -1660,7 +1720,7 @@ pub async fn run_flow(
             resolve_soft_failure_outcome(
                 &state,
                 "Browser stopped responding (tab closed?) — using last successful create as completion.",
-                Some("Browser stopped responding (tab closed?) — cancelling."),
+                Some("Browser stopped responding (tab closed?). If a request was still in flight, it may have completed on the server; run `nyxid service list` to check."),
                 WizardOutcome::Cancelled,
             ).await
         }
@@ -1922,6 +1982,39 @@ mod tests {
             other => panic!("expected AiKeyCompleted, got {other:?}"),
         }
         // Snapshot was consumed.
+        assert!(state.completed_ai_key.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_soft_failure_outcome_waits_for_in_flight_create_completion() {
+        let (base_url, _mock) = spawn_mock().await;
+        let state = make_state(base_url, vec![]);
+        state.in_flight_mutations.fetch_add(1, Ordering::AcqRel);
+
+        let expected = json!({ "slug": "race-won" });
+        let completed_ai_key = state.completed_ai_key.clone();
+        let in_flight_mutations = state.in_flight_mutations.clone();
+        let completed_for_task = expected.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            *completed_ai_key.lock().await = Some(completed_for_task);
+            in_flight_mutations.fetch_sub(1, Ordering::Release);
+        });
+
+        let outcome = resolve_soft_failure_outcome_with_grace(
+            &state,
+            "completion message",
+            Some("fallback message"),
+            WizardOutcome::Cancelled,
+            Duration::from_secs(1),
+        )
+        .await;
+
+        match outcome {
+            WizardOutcome::AiKeyCompleted(value) => assert_eq!(value, expected),
+            other => panic!("expected AiKeyCompleted, got {other:?}"),
+        }
+        assert_eq!(state.in_flight_mutations.load(Ordering::Acquire), 0);
         assert!(state.completed_ai_key.lock().await.is_none());
     }
 

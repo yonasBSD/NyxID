@@ -312,7 +312,10 @@ pub async fn run_ai_key_wizard(
         }
         WizardOutcome::Cancelled => {
             attract_terminal("NyxID wizard cancelled");
-            eprintln!("✗ Wizard cancelled. No service was created.");
+            eprintln!("✗ Wizard cancelled before the CLI received a completed service.");
+            eprintln!(
+                "  If you clicked Connect service before closing the window, run `nyxid service list` to check whether it was created."
+            );
             // The remote-pairing path may have been cancelled by the
             // web UI bouncing to the main Keys page for an
             // unsupported flow (OAuth/device-code in split-origin,
