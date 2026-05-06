@@ -931,6 +931,19 @@ function isLlmService(text: string): boolean {
   );
 }
 
+function genericEndpointPathFor(metadataText: string): string | null {
+  if (metadataText.includes("telegram")) {
+    return "/getMe";
+  }
+  if (metadataText.includes("discord")) {
+    return "/users/@me";
+  }
+  if (metadataText.includes("lark") || metadataText.includes("feishu")) {
+    return "/open-apis/bot/v3/info";
+  }
+  return null;
+}
+
 function exampleModelForSlug(slugText: string): {
   readonly model: string;
   readonly needsProviderModelNote: boolean;
@@ -1004,36 +1017,47 @@ function ApiUsageSection({
   const showGenericEndpointExample = isBotOrWebhookService(metadataText);
   const llmDetected = isLlmService(metadataText);
   const llmExamplePath = chatCompletionsPath(endpointUrl);
-  const examplePath = showGenericEndpointExample ? "/<path>" : llmExamplePath;
-  const exampleUrl = `${proxyUrl}${examplePath}`;
+  const genericExamplePath = showGenericEndpointExample
+    ? genericEndpointPathFor(metadataText)
+    : null;
+  const examplePath = showGenericEndpointExample
+    ? genericExamplePath
+    : llmExamplePath;
+  const exampleUrl = examplePath ? `${proxyUrl}${examplePath}` : null;
   const modelExample = llmDetected
     ? exampleModelForSlug(slugText)
     : { model: "gpt-4o", needsProviderModelNote: false };
-  const requestBody = showGenericEndpointExample
-    ? null
-    : JSON.stringify({
-        model: modelExample.model,
-        messages: [{ role: "user", content: "hello" }],
-      });
+  const requestBody =
+    showGenericEndpointExample || !exampleUrl
+      ? null
+      : JSON.stringify({
+          model: modelExample.model,
+          messages: [{ role: "user", content: "hello" }],
+        });
+  const method = requestBody ? "POST" : "GET";
 
   const authNote =
     authMethod === "none"
       ? "This service requires no upstream credentials, but you still need to authenticate with NyxID."
       : "NyxID injects your stored credentials automatically when proxying.";
 
-  const bearerTokenExample = buildCurlExample({
-    method: requestBody ? "POST" : "GET",
-    url: exampleUrl,
-    authHeader: "Authorization: Bearer <NYXID_ACCESS_TOKEN>",
-    body: requestBody,
-  });
+  const bearerTokenExample = exampleUrl
+    ? buildCurlExample({
+        method,
+        url: exampleUrl,
+        authHeader: "Authorization: Bearer <NYXID_ACCESS_TOKEN>",
+        body: requestBody,
+      })
+    : null;
 
-  const apiKeyExample = buildCurlExample({
-    method: requestBody ? "POST" : "GET",
-    url: exampleUrl,
-    authHeader: "X-API-Key: nyx_...",
-    body: requestBody,
-  });
+  const apiKeyExample = exampleUrl
+    ? buildCurlExample({
+        method,
+        url: exampleUrl,
+        authHeader: "X-API-Key: nyx_...",
+        body: requestBody,
+      })
+    : null;
 
   function handleCopyUrl() {
     void copyToClipboard(proxyUrl).then(() => {
@@ -1077,62 +1101,21 @@ function ApiUsageSection({
             </Button>
           </div>
           <p className="mt-1.5 text-[11px] text-muted-foreground">
-            Append the downstream API path after this URL (e.g.{" "}
-            <code className="rounded bg-background px-1">
-              {examplePath}
-            </code>
-            ). {authNote}
-          </p>
-        </div>
-
-        <div>
-          <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">
-            Authentication
-          </p>
-          <div className="space-y-2 text-xs text-muted-foreground">
-            <p>
-              Authenticate with NyxID using one of these methods:
-            </p>
-            <ul className="list-disc list-inside space-y-1 pl-1">
-              <li>
-                <span className="font-medium text-foreground">API Key:</span>{" "}
+            Append the downstream API path after this URL
+            {examplePath ? (
+              <>
+                {" "}
+                (e.g.{" "}
                 <code className="rounded bg-background px-1">
-                  X-API-Key: nyx_...
-                </code>{" "}
-                header (create one in the{" "}
-                <Link
-                  to="/keys"
-                  search={{ tab: "nyxid" }}
-                  className="font-medium text-primary underline-offset-4 hover:underline"
-                >
-                  Agent Keys
-                </Link>{" "}
-                tab on AI Services)
-              </li>
-              <li>
-                <span className="font-medium text-foreground">
-                  Bearer Token:
-                </span>{" "}
-                <code className="rounded bg-background px-1">
-                  Authorization: Bearer &lt;access_token&gt;
+                  {examplePath}
                 </code>
-              </li>
-            </ul>
-          </div>
-        </div>
-
-        <div>
-          <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">
-            Example (with API key)
+                )
+              </>
+            ) : null}
+            . {authNote}
           </p>
-          {modelExample.needsProviderModelNote && requestBody && (
-            <p className="mb-1.5 text-[11px] text-muted-foreground">
-              Replace <code className="rounded bg-background px-1">gpt-4o</code>{" "}
-              with your provider&apos;s model.
-            </p>
-          )}
           {showGenericEndpointExample && (
-            <p className="mb-1.5 text-[11px] text-muted-foreground">
+            <p className="mt-1.5 text-[11px] text-muted-foreground">
               Run{" "}
               <code className="rounded bg-background px-1">
                 nyxid catalog endpoints {catalogSlug}
@@ -1140,46 +1123,99 @@ function ApiUsageSection({
               to discover available endpoints for this service.
             </p>
           )}
-          <div className="relative">
-            <pre className="overflow-x-auto rounded-lg bg-muted p-3 pr-10 font-mono text-xs leading-relaxed">
-              {apiKeyExample}
-            </pre>
-            <Button
-              size="icon"
-              variant="ghost"
-              className="absolute right-2 top-2 h-7 w-7"
-              onClick={() => handleCopyExample(apiKeyExample)}
-            >
-              <Copy className="h-3.5 w-3.5" />
-            </Button>
-          </div>
         </div>
 
-        <details className="rounded-lg border border-border bg-muted/20 p-3">
-          <summary className="cursor-pointer text-xs font-medium text-muted-foreground">
-            Advanced: Bearer token example
-          </summary>
-          <div className="mt-3 space-y-2">
-            <p className="text-[11px] text-muted-foreground">
-              Bearer auth is intended for self-hosted deployments or
-              environments where you already have a NyxID access token. For
-              most users, prefer the API Key example above.
+        {apiKeyExample && (
+          <div>
+            <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">
+              Authentication
             </p>
+            <div className="space-y-2 text-xs text-muted-foreground">
+              <p>Authenticate with NyxID using one of these methods:</p>
+              <ul className="list-disc list-inside space-y-1 pl-1">
+                <li>
+                  <span className="font-medium text-foreground">API Key:</span>{" "}
+                  <code className="rounded bg-background px-1">
+                    X-API-Key: nyx_...
+                  </code>{" "}
+                  header (create one in the{" "}
+                  <Link
+                    to="/keys"
+                    search={{ tab: "nyxid" }}
+                    className="font-medium text-primary underline-offset-4 hover:underline"
+                  >
+                    Agent Keys
+                  </Link>{" "}
+                  tab on AI Services)
+                </li>
+                <li>
+                  <span className="font-medium text-foreground">
+                    Bearer Token:
+                  </span>{" "}
+                  <code className="rounded bg-background px-1">
+                    Authorization: Bearer &lt;access_token&gt;
+                  </code>
+                </li>
+              </ul>
+            </div>
+          </div>
+        )}
+
+        {apiKeyExample && (
+          <div>
+            <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">
+              Example (with API key)
+            </p>
+            {modelExample.needsProviderModelNote && requestBody && (
+              <p className="mb-1.5 text-[11px] text-muted-foreground">
+                Replace{" "}
+                <code className="rounded bg-background px-1">gpt-4o</code>{" "}
+                with your provider&apos;s model.
+              </p>
+            )}
             <div className="relative">
               <pre className="overflow-x-auto rounded-lg bg-muted p-3 pr-10 font-mono text-xs leading-relaxed">
-                {bearerTokenExample}
+                {apiKeyExample}
               </pre>
               <Button
                 size="icon"
                 variant="ghost"
                 className="absolute right-2 top-2 h-7 w-7"
-                onClick={() => handleCopyExample(bearerTokenExample)}
+                onClick={() => handleCopyExample(apiKeyExample)}
               >
                 <Copy className="h-3.5 w-3.5" />
               </Button>
             </div>
           </div>
-        </details>
+        )}
+
+        {bearerTokenExample && (
+          <details className="rounded-lg border border-border bg-muted/20 p-3">
+            <summary className="cursor-pointer text-xs font-medium text-muted-foreground">
+              Advanced: Bearer token example
+            </summary>
+            <div className="mt-3 space-y-2">
+              <p className="text-[11px] text-muted-foreground">
+                Bearer auth is intended for self-hosted deployments or
+                environments where you already have a NyxID access token. For
+                most users, prefer the API Key example above.
+              </p>
+              <div className="relative">
+                <pre className="overflow-x-auto rounded-lg bg-muted p-3 pr-10 font-mono text-xs leading-relaxed">
+                  {bearerTokenExample}
+                </pre>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className="absolute right-2 top-2 h-7 w-7"
+                  onClick={() => handleCopyExample(bearerTokenExample)}
+                >
+                  <Copy className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            </div>
+          </details>
+        )}
       </CardContent>
     </Card>
   );

@@ -7,22 +7,25 @@ function isTwitterOAuthSlug(slug: string): boolean {
   return slug === "twitter" || slug === "api-twitter";
 }
 
-function getApiOrigin(): string {
-  const configured =
-    (import.meta.env.VITE_BACKEND_URL as string | undefined) ??
-    (import.meta.env.VITE_API_URL as string | undefined) ??
-    "";
+function getConfiguredApiOrigin(): string | null {
+  const configured = [
+    import.meta.env.VITE_BACKEND_URL as string | undefined,
+    import.meta.env.VITE_API_URL as string | undefined,
+  ].find((value) => value?.trim());
+
+  if (!configured) return null;
 
   const url = new URL(
-    configured.trim() || window.location.origin,
+    configured.trim(),
     window.location.origin,
   );
   const path = url.pathname.replace(/\/api\/v1\/?$/, "").replace(/\/+$/, "");
   return `${url.origin}${path}`;
 }
 
-function providerCallbackUrl(): string {
-  return `${getApiOrigin()}/api/v1/providers/callback`;
+function providerCallbackUrl(): string | null {
+  const apiOrigin = getConfiguredApiOrigin();
+  return apiOrigin ? `${apiOrigin}/api/v1/providers/callback` : null;
 }
 
 export function TwitterOAuthGuidance({
@@ -35,6 +38,7 @@ export function TwitterOAuthGuidance({
   const callbackUrl = providerCallbackUrl();
 
   function handleCopy() {
+    if (!callbackUrl) return;
     void copyToClipboard(callbackUrl).then(() => {
       toast.success("Callback URL copied");
     });
@@ -49,30 +53,40 @@ export function TwitterOAuthGuidance({
         <p className="text-xs text-muted-foreground">
           This integration requires an X app with OAuth 2.0 enabled in{" "}
           <strong>User authentication settings</strong> in X Developer Console.
-          Configure the callback URL below as one of your app&apos;s redirect
-          URIs.
+          {callbackUrl
+            ? " Configure the callback URL below as one of your app's redirect URIs."
+            : " Configure the callback URL from your NyxID admin as one of your app's redirect URIs."}
         </p>
       </div>
 
-      <div className="space-y-1.5">
-        <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-          Callback URL
-        </p>
-        <div className="relative">
-          <pre className="overflow-x-auto rounded-md bg-background p-2 pr-10 font-mono text-[11px] leading-relaxed">
-            {callbackUrl}
-          </pre>
-          <Button
-            type="button"
-            size="icon"
-            variant="ghost"
-            className="absolute right-1.5 top-1.5 h-7 w-7"
-            onClick={handleCopy}
-          >
-            <Copy className="h-3.5 w-3.5" />
-          </Button>
+      {callbackUrl ? (
+        <div className="space-y-1.5">
+          <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+            Callback URL
+          </p>
+          <div className="relative">
+            <pre className="overflow-x-auto rounded-md bg-background p-2 pr-10 font-mono text-[11px] leading-relaxed">
+              {callbackUrl}
+            </pre>
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              className="absolute right-1.5 top-1.5 h-7 w-7"
+              onClick={handleCopy}
+            >
+              <Copy className="h-3.5 w-3.5" />
+            </Button>
+          </div>
         </div>
-      </div>
+      ) : (
+        <p className="rounded-md border border-warning/30 bg-warning/10 p-2 text-xs text-warning">
+          API base URL is not configured (set{" "}
+          <code className="rounded bg-background px-1">VITE_BACKEND_URL</code>
+          ). Ask your NyxID admin for the exact callback URL to register in X
+          Developer Console.
+        </p>
+      )}
 
       <a
         href="https://developer.x.com/en/portal/dashboard"
