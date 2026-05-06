@@ -25,6 +25,7 @@ frontend/src/components/ui/tooltip.tsx
 frontend/src/hooks/use-keys.ts
 frontend/src/hooks/use-nodes.ts
 frontend/src/hooks/use-orgs.ts
+frontend/src/hooks/use-runtime-config.ts
 frontend/src/lib/api-client.ts
 frontend/src/lib/navigation.ts
 frontend/src/lib/telemetry.ts
@@ -32,6 +33,7 @@ frontend/src/lib/utils.ts
 frontend/src/pages/cli-pair/reserve-action.ts
 frontend/src/schemas/api-keys.ts
 frontend/src/schemas/cli-wizard.ts
+frontend/src/schemas/runtime-config.ts
 frontend/src/stores/auth-store.ts
 frontend/src/wizard-entry.tsx
 frontend/wizard.html

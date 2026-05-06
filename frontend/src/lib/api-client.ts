@@ -4,23 +4,7 @@ import { isTelemetryActive } from "@/lib/telemetry";
 
 const API_ORIGIN = "";
 
-const API_PATH = "/api/v1";
-const BASE_URL = `${API_ORIGIN}${API_PATH}`;
-
-export function getApiBaseUrl(): string | null {
-  const baseUrl = BASE_URL.trim();
-  if (!baseUrl) return null;
-
-  if (typeof window === "undefined") {
-    return baseUrl;
-  }
-
-  try {
-    return new URL(baseUrl, window.location.origin).href.replace(/\/+$/, "");
-  } catch {
-    return null;
-  }
-}
+const BASE_URL = `${API_ORIGIN}/api/v1`;
 
 export class ApiError extends Error {
   readonly status: number;

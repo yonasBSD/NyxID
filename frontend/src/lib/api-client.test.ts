@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { apiClient, ApiError, api, getApiBaseUrl } from "./api-client";
+import { apiClient, ApiError, api } from "./api-client";
 
 const mockFetch = vi.fn();
 const { mockSetUser } = vi.hoisted(() => ({
@@ -28,14 +28,6 @@ function jsonResponse(body: unknown, status = 200): Response {
 beforeEach(() => {
   mockFetch.mockReset();
   mockSetUser.mockReset();
-});
-
-describe("getApiBaseUrl", () => {
-  it("returns the resolved browser API base URL", () => {
-    window.history.replaceState({}, "", "/app");
-
-    expect(getApiBaseUrl()).toBe(`${window.location.origin}/api/v1`);
-  });
 });
 
 describe("apiClient", () => {

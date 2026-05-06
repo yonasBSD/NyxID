@@ -1,5 +1,5 @@
 import { Button } from "@/components/ui/button";
-import { getApiBaseUrl } from "@/lib/api-client";
+import { useRuntimeConfig } from "@/hooks/use-runtime-config";
 import { copyToClipboard } from "@/lib/utils";
 import { Copy, ExternalLink } from "lucide-react";
 import { toast } from "sonner";
@@ -8,22 +8,8 @@ function isTwitterOAuthSlug(slug: string): boolean {
   return slug === "twitter" || slug === "api-twitter";
 }
 
-function getRuntimeApiOrigin(): string | null {
-  const apiBaseUrl = getApiBaseUrl();
-  if (!apiBaseUrl) return null;
-
-  try {
-    const url = new URL(apiBaseUrl, window.location.origin);
-    const path = url.pathname.replace(/\/api\/v1\/?$/, "").replace(/\/+$/, "");
-    return `${url.origin}${path}`;
-  } catch {
-    return null;
-  }
-}
-
-function providerCallbackUrl(): string | null {
-  const apiOrigin = getRuntimeApiOrigin();
-  return apiOrigin ? `${apiOrigin}/api/v1/providers/callback` : null;
+function providerCallbackUrl(apiBaseUrl: string | undefined): string | null {
+  return apiBaseUrl ? `${apiBaseUrl}/api/v1/providers/callback` : null;
 }
 
 export function TwitterOAuthGuidance({
@@ -33,7 +19,16 @@ export function TwitterOAuthGuidance({
 }) {
   if (!isTwitterOAuthSlug(slug)) return null;
 
-  const callbackUrl = providerCallbackUrl();
+  return <TwitterOAuthGuidanceContent />;
+}
+
+function TwitterOAuthGuidanceContent() {
+  const {
+    data: runtimeConfig,
+    isError,
+    isLoading,
+  } = useRuntimeConfig();
+  const callbackUrl = providerCallbackUrl(runtimeConfig?.api_base_url);
 
   function handleCopy() {
     if (!callbackUrl) return;
@@ -53,7 +48,7 @@ export function TwitterOAuthGuidance({
           <strong>User authentication settings</strong> in X Developer Console.
           {callbackUrl
             ? " Configure the callback URL below as one of your app's redirect URIs."
-            : " Configure the callback URL from your NyxID admin as one of your app's redirect URIs."}
+            : " The exact callback URL is loaded from your NyxID backend and will appear below."}
         </p>
       </div>
 
@@ -78,10 +73,15 @@ export function TwitterOAuthGuidance({
             </Button>
           </div>
         </div>
+      ) : isLoading ? (
+        <p className="rounded-md border border-border bg-background/60 p-2 text-xs text-muted-foreground">
+          Loading callback URL...
+        </p>
       ) : (
         <p className="rounded-md border border-warning/30 bg-warning/10 p-2 text-xs text-warning">
-          Callback URL not yet available. Please contact your NyxID admin for
-          the exact callback URL to register in X Developer Console.
+          {isError
+            ? "Couldn't load callback URL. Please retry. If this persists, contact support."
+            : "Callback URL not yet available. Please retry. If this persists, contact support."}
         </p>
       )}
 
