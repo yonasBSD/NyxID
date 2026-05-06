@@ -1,4 +1,5 @@
 import { Button } from "@/components/ui/button";
+import { getApiBaseUrl } from "@/lib/api-client";
 import { copyToClipboard } from "@/lib/utils";
 import { Copy, ExternalLink } from "lucide-react";
 import { toast } from "sonner";
@@ -7,24 +8,21 @@ function isTwitterOAuthSlug(slug: string): boolean {
   return slug === "twitter" || slug === "api-twitter";
 }
 
-function getConfiguredApiOrigin(): string | null {
-  const configured = [
-    import.meta.env.VITE_BACKEND_URL as string | undefined,
-    import.meta.env.VITE_API_URL as string | undefined,
-  ].find((value) => value?.trim());
+function getRuntimeApiOrigin(): string | null {
+  const apiBaseUrl = getApiBaseUrl();
+  if (!apiBaseUrl) return null;
 
-  if (!configured) return null;
-
-  const url = new URL(
-    configured.trim(),
-    window.location.origin,
-  );
-  const path = url.pathname.replace(/\/api\/v1\/?$/, "").replace(/\/+$/, "");
-  return `${url.origin}${path}`;
+  try {
+    const url = new URL(apiBaseUrl, window.location.origin);
+    const path = url.pathname.replace(/\/api\/v1\/?$/, "").replace(/\/+$/, "");
+    return `${url.origin}${path}`;
+  } catch {
+    return null;
+  }
 }
 
 function providerCallbackUrl(): string | null {
-  const apiOrigin = getConfiguredApiOrigin();
+  const apiOrigin = getRuntimeApiOrigin();
   return apiOrigin ? `${apiOrigin}/api/v1/providers/callback` : null;
 }
 
@@ -74,17 +72,16 @@ export function TwitterOAuthGuidance({
               variant="ghost"
               className="absolute right-1.5 top-1.5 h-7 w-7"
               onClick={handleCopy}
+              aria-label="Copy callback URL"
             >
-              <Copy className="h-3.5 w-3.5" />
+              <Copy className="h-3.5 w-3.5" aria-hidden="true" />
             </Button>
           </div>
         </div>
       ) : (
         <p className="rounded-md border border-warning/30 bg-warning/10 p-2 text-xs text-warning">
-          API base URL is not configured (set{" "}
-          <code className="rounded bg-background px-1">VITE_BACKEND_URL</code>
-          ). Ask your NyxID admin for the exact callback URL to register in X
-          Developer Console.
+          Callback URL not yet available. Please contact your NyxID admin for
+          the exact callback URL to register in X Developer Console.
         </p>
       )}
 
