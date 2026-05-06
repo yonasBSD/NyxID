@@ -189,6 +189,27 @@ PRIVKEY_PASS=... nyxid node ssh-credentials add --service <SLUG> --principal <US
 nyxid node ssh-credentials add --service <SLUG> --principal <USER> \
   --key-file ~/.ssh/id_ed25519 --host <HOST> --port 22 --no-pin-host-key
 
+# Per-credential SSH algorithm allowlist (for legacy appliances like RouterOS,
+# old MikroTik, or OOB management gear that only offer a narrow algorithm set).
+# When unset, russh defaults are used. When set, only the listed algorithms are
+# proposed for that credential. Each flag accepts a comma-separated list or
+# can be repeated. `none` is rejected for kex/cipher/mac; only Ed25519, RSA,
+# and ECDSA host-key families are accepted.
+nyxid node ssh-credentials add --service routeros --principal admin \
+  --key-file ~/.ssh/routeros_admin --host 10.0.0.1 --port 22 \
+  --kex diffie-hellman-group-exchange-sha256 \
+  --host-key rsa-sha2-256,ssh-rsa \
+  --cipher aes256-ctr \
+  --mac hmac-sha2-256
+
+# Update or reset the allowlist on an existing credential without re-importing
+# the key. `--reset-all` clears every category back to russh defaults; the
+# per-category `--reset-<kex|host-key|cipher|mac>` flags clear one at a time.
+# Setting a list and resetting the same category in one call is rejected.
+nyxid node ssh-credentials set-algos --service routeros --principal admin \
+  --cipher aes256-ctr,aes192-ctr
+nyxid node ssh-credentials set-algos --service routeros --principal admin --reset-all
+
 nyxid node ssh-credentials list --service <SLUG>
 nyxid node ssh-credentials show --service <SLUG> --principal <USER>
 nyxid node ssh-credentials test --service <SLUG> --principal <USER>
@@ -258,6 +279,6 @@ SSH error codes (1011-1015 are reserved for SSH; surface the code and the sugges
 |------|------|---------------|------------|
 | 1011 | `SshNodeKeyMissing` | Service is `node_key` but no credential exists for `(service_slug, principal)` on the node | Run `nyxid node ssh-credentials add --service <SLUG> --principal <USER> ...` |
 | 1012 | `SshHostKeyMismatch` | Pinned host-key sha256 doesn't match what the target presented | Investigate first (could be a real MITM); if the target legitimately rotated keys, `remove` and re-`add` the credential |
-| 1013 | `SshNodeExecChannelClosed` | russh channel error (auth, network, kex) | Check target reachability and the principal's authorized_keys |
+| 1013 | `SshNodeExecChannelClosed` | russh channel error (auth, network, kex, or invalid algorithm config) | Check target reachability and the principal's authorized_keys. For "Key exchange init failed" against legacy appliances (RouterOS, old MikroTik), pin the algorithms with `ssh-credentials add --kex/--host-key/--cipher/--mac` or `set-algos`. Capture `RUST_LOG=russh=trace` if needed. |
 | 1014 | `SshPrincipalAmbiguous` | Multiple principals registered locally and `--principal` was not passed | Pass `--principal <USER>` explicitly |
 | 1015 | `SshAuthModeUnsupportedForOperation` | e.g. `ssh proxy` against a `node_key` service, or `ssh exec` against `proxy_only` | Use `ssh exec` / browser terminal for `node_key`; convert with `service convert-ssh` if the service should support a different operation set |
