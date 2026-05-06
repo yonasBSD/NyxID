@@ -23,6 +23,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ApiError, api } from "@/lib/api-client";
 import { Copy, ExternalLink, Loader2 } from "lucide-react";
+import { TwitterOAuthGuidance } from "@/components/shared/twitter-oauth-guidance";
 import type { AiKeyPairingSuccess } from "./ai-key-confirm-panel";
 import {
   reservePairingAction,
@@ -960,6 +961,8 @@ export function OAuthFlow({
             </a>
           ) : null}
         </div>
+
+        <TwitterOAuthGuidance slug={slug} />
 
         <div className="flex flex-col gap-3">
           <div className="flex flex-col gap-1.5">

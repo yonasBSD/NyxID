@@ -9,13 +9,14 @@ import {
   usePollDeviceCode,
   useSetProviderCredentials,
 } from "@/hooks/use-providers";
-import { ApiError } from "@/lib/api-client";
+import { ApiError, api } from "@/lib/api-client";
 import { hardRedirect } from "@/lib/navigation";
 import { copyToClipboard } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { OrgScopeSelect } from "@/components/shared/org-scope-select";
+import { TwitterOAuthGuidance } from "@/components/shared/twitter-oauth-guidance";
 import {
   Dialog,
   DialogContent,
@@ -1045,11 +1046,24 @@ function OAuthStep({
   const [error, setError] = useState<string | null>(null);
   const [scopeInput, setScopeInput] = useState("");
 
+  async function cleanupPendingAuthKey(key: KeyInfo | null) {
+    if (key?.status !== "pending_auth") return;
+    try {
+      await api.delete<void>(
+        `/keys/${encodeURIComponent(key.id)}?only_if_pending=true`,
+      );
+    } catch {
+      // Best effort only. The detail page still exposes Delete Service
+      // for any pending placeholder that survives this cleanup.
+    }
+  }
+
   async function handleConnect() {
     if (!catalogEntry.provider_config_id) return;
     setError(null);
+    let key: KeyInfo | null = null;
     try {
-      const key = await ensureKey();
+      key = await ensureKey();
       const additionalScopes = parseAdditionalScopes(scopeInput);
       const response = await initiateOAuth.mutateAsync({
         providerId: catalogEntry.provider_config_id,
@@ -1059,6 +1073,7 @@ function OAuthStep({
       });
       hardRedirect(response.authorization_url);
     } catch (err) {
+      await cleanupPendingAuthKey(key);
       const message =
         err instanceof ApiError ? err.message : "Failed to start OAuth flow";
       setError(message);
@@ -1621,6 +1636,8 @@ function OAuthCredentialsStep({
           <ExternalLink className="h-3 w-3" />
         </a>
       )}
+
+      <TwitterOAuthGuidance slug={catalogEntry.slug} />
 
       {error && (
         <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
