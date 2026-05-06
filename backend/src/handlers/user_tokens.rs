@@ -1370,7 +1370,6 @@ mod tests {
         let provider_id = Uuid::new_v4().to_string();
         let state_id = Uuid::new_v4().to_string();
         let key_id = Uuid::new_v4().to_string();
-        let malformed_key_id = Uuid::new_v4().to_string();
         let (token_url, token_server) = spawn_oauth_token_server().await;
 
         let mut provider = test_provider_config(&provider_id);
@@ -1402,16 +1401,16 @@ mod tests {
             .insert_one(test_pending_oauth_api_key(&key_id, &user_id, &provider_id))
             .await
             .unwrap();
-        db.collection::<mongodb::bson::Document>(USER_API_KEYS)
-            .insert_one(mongodb::bson::doc! {
-                "_id": malformed_key_id,
-                "user_id": &user_id,
-                "provider_config_id": &provider_id,
-                "status": "pending_auth",
-                "credential_type": "oauth2",
-            })
-            .await
-            .unwrap();
+        // Simulate a production MongoDB write rejection during sync:
+        // token exchange succeeds, then the UserApiKey active-state update fails.
+        db.run_command(mongodb::bson::doc! {
+            "collMod": USER_API_KEYS,
+            "validator": { "status": { "$ne": "active" } },
+            "validationLevel": "strict",
+            "validationAction": "error",
+        })
+        .await
+        .unwrap();
 
         let redirect = generic_oauth_callback_impl(
             state,
