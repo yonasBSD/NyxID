@@ -1125,41 +1125,39 @@ function ApiUsageSection({
           )}
         </div>
 
-        {apiKeyExample && (
-          <div>
-            <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">
-              Authentication
-            </p>
-            <div className="space-y-2 text-xs text-muted-foreground">
-              <p>Authenticate with NyxID using one of these methods:</p>
-              <ul className="list-disc list-inside space-y-1 pl-1">
-                <li>
-                  <span className="font-medium text-foreground">API Key:</span>{" "}
-                  <code className="rounded bg-background px-1">
-                    X-API-Key: nyx_...
-                  </code>{" "}
-                  header (create one in the{" "}
-                  <Link
-                    to="/keys"
-                    search={{ tab: "nyxid" }}
-                    className="font-medium text-primary underline-offset-4 hover:underline"
-                  >
-                    Agent Keys
-                  </Link>{" "}
-                  tab on AI Services)
-                </li>
-                <li>
-                  <span className="font-medium text-foreground">
-                    Bearer Token:
-                  </span>{" "}
-                  <code className="rounded bg-background px-1">
-                    Authorization: Bearer &lt;access_token&gt;
-                  </code>
-                </li>
-              </ul>
-            </div>
+        <div>
+          <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">
+            Authentication
+          </p>
+          <div className="space-y-2 text-xs text-muted-foreground">
+            <p>Authenticate with NyxID using one of these methods:</p>
+            <ul className="list-disc list-inside space-y-1 pl-1">
+              <li>
+                <span className="font-medium text-foreground">API Key:</span>{" "}
+                <code className="rounded bg-background px-1">
+                  X-API-Key: nyx_...
+                </code>{" "}
+                header (create one in the{" "}
+                <Link
+                  to="/keys"
+                  search={{ tab: "nyxid" }}
+                  className="font-medium text-primary underline-offset-4 hover:underline"
+                >
+                  Agent Keys
+                </Link>{" "}
+                tab on AI Services)
+              </li>
+              <li>
+                <span className="font-medium text-foreground">
+                  Bearer Token:
+                </span>{" "}
+                <code className="rounded bg-background px-1">
+                  Authorization: Bearer &lt;access_token&gt;
+                </code>
+              </li>
+            </ul>
           </div>
-        )}
+        </div>
 
         {apiKeyExample && (
           <div>
