@@ -226,30 +226,52 @@ async fn exec_command_inner(
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
 
+    // russh's CHANNEL_CLOSE handler removes the channel from its map without
+    // emitting a ChannelMsg::Close, so the loop terminates via wait() == None
+    // after the queued Data / ExtendedData / ExitStatus messages are drained.
     loop {
         let Some(message) = channel.wait().await else {
+            tracing::debug!("ssh_node_exec: channel.wait() returned None");
             break;
         };
 
         match message {
-            ChannelMsg::Data { data } => append_capped(&mut stdout, data.as_ref()),
-            ChannelMsg::ExtendedData { data, ext: 1 } => {
-                append_capped(&mut stderr, data.as_ref());
+            ChannelMsg::Data { data } => {
+                tracing::debug!("ssh_node_exec: Data ({} bytes)", data.len());
+                append_capped(&mut stdout, data.as_ref());
             }
-            ChannelMsg::ExtendedData { data, .. } => {
+            ChannelMsg::ExtendedData { data, ext } => {
+                tracing::debug!(
+                    "ssh_node_exec: ExtendedData ext={} ({} bytes)",
+                    ext,
+                    data.len()
+                );
                 append_capped(&mut stderr, data.as_ref());
             }
             ChannelMsg::ExitStatus { exit_status } => {
+                tracing::debug!("ssh_node_exec: ExitStatus({exit_status})");
                 exit_code = Some(i32::try_from(exit_status).unwrap_or(-1));
             }
             ChannelMsg::ExitSignal { error_message, .. } => {
+                tracing::debug!("ssh_node_exec: ExitSignal({error_message})");
                 append_capped(&mut stderr, error_message.as_bytes());
                 exit_code = Some(-1);
             }
-            ChannelMsg::Close => break,
-            _ => {}
+            ChannelMsg::Eof => {
+                tracing::debug!("ssh_node_exec: Eof");
+            }
+            other => {
+                tracing::debug!("ssh_node_exec: other ChannelMsg: {other:?}");
+            }
         }
     }
+
+    tracing::debug!(
+        "ssh_node_exec: loop exited, stdout={} bytes, stderr={} bytes, exit_code={:?}",
+        stdout.len(),
+        stderr.len(),
+        exit_code
+    );
 
     let _ = session
         .disconnect(Disconnect::ByApplication, "", "English")
