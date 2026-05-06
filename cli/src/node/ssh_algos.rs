@@ -38,8 +38,7 @@ pub fn build_preferred(prefs: &SshAlgorithmPreferences) -> Result<Preferred> {
 }
 
 pub fn resolve_kex_list(list: &[String]) -> Result<Vec<kex::Name>> {
-    let supported = kex_supported_names();
-    let mut resolved = resolve_name_list("kex", list, &supported)?;
+    let mut resolved = resolve_name_list("kex", list, kex::ALL_KEX_ALGORITHMS)?;
     // Strict-kex and ext-info-c preserve safer negotiation even with a custom allowlist.
     push_if_missing(&mut resolved, kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT);
     push_if_missing(&mut resolved, kex::EXTENSION_SUPPORT_AS_CLIENT);
@@ -67,7 +66,7 @@ pub fn resolve_host_key_list(list: &[String]) -> Result<Vec<Algorithm>> {
                 Ok(algorithm)
             } else {
                 Err(Error::Validation(format!(
-                    "unknown ssh host-key algorithm '{}' (supported: {})",
+                    "ssh host-key algorithm '{}' is not allowed (supported: {})",
                     algorithm.as_str(),
                     HOST_KEY_SUPPORTED
                 )))
@@ -95,6 +94,7 @@ where
     let supported_names = supported
         .iter()
         .map(|name| name.as_ref())
+        .filter(|name| !name.eq_ignore_ascii_case("none"))
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -120,13 +120,6 @@ where
                 })
         })
         .collect()
-}
-
-fn kex_supported_names() -> Vec<&'static kex::Name> {
-    let mut names = kex::ALL_KEX_ALGORITHMS.to_vec();
-    names.push(&kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT);
-    names.push(&kex::EXTENSION_SUPPORT_AS_CLIENT);
-    names
 }
 
 fn push_if_missing<T>(target: &mut Vec<T>, value: T)
@@ -244,5 +237,43 @@ mod tests {
 
         assert!(resolved.contains(&kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT));
         assert!(resolved.contains(&kex::EXTENSION_SUPPORT_AS_CLIENT));
+    }
+
+    #[test]
+    fn unknown_kex_error_omits_internal_marker_and_none() {
+        let Err(Error::Validation(message)) = resolve_kex_list(&strings(&["bad-kex"])) else {
+            panic!("expected validation error");
+        };
+        assert!(!message.contains("ext-info-c"), "got: {message}");
+        assert!(
+            !message.contains("kex-strict-c-v00@openssh.com"),
+            "got: {message}"
+        );
+        assert!(!message.contains("none"), "got: {message}");
+    }
+
+    #[test]
+    fn unknown_cipher_error_omits_none() {
+        let Err(Error::Validation(message)) = resolve_cipher_list(&strings(&["bad-cipher"])) else {
+            panic!("expected validation error");
+        };
+        assert!(!message.contains("none"), "got: {message}");
+    }
+
+    #[test]
+    fn host_key_disallowed_uses_disallowed_wording() {
+        assert_validation_contains(
+            resolve_host_key_list(&strings(&["ssh-dss"])),
+            "is not allowed",
+        );
+    }
+
+    #[test]
+    fn kex_extension_marker_input_is_rejected_as_unknown() {
+        assert_validation_contains(resolve_kex_list(&strings(&["ext-info-c"])), "ext-info-c");
+        assert_validation_contains(
+            resolve_kex_list(&strings(&["kex-strict-c-v00@openssh.com"])),
+            "kex-strict-c-v00@openssh.com",
+        );
     }
 }

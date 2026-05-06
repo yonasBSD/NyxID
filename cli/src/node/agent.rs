@@ -914,12 +914,23 @@ struct AlgorithmResetArgs<'a> {
 }
 
 fn validate_algorithm_reset_args(args: AlgorithmResetArgs<'_>) -> Result<()> {
-    if args.reset_all
-        && (!args.kex.is_empty()
-            || !args.host_key.is_empty()
-            || !args.cipher.is_empty()
-            || !args.mac.is_empty())
-    {
+    let any_list = !args.kex.is_empty()
+        || !args.host_key.is_empty()
+        || !args.cipher.is_empty()
+        || !args.mac.is_empty();
+    let any_reset = args.reset_kex
+        || args.reset_host_key
+        || args.reset_cipher
+        || args.reset_mac
+        || args.reset_all;
+    if !any_list && !any_reset {
+        return Err(Error::Validation(
+            "set-algos requires at least one of --kex, --host-key, --cipher, --mac, \
+             --reset-kex, --reset-host-key, --reset-cipher, --reset-mac, or --reset-all"
+                .to_string(),
+        ));
+    }
+    if args.reset_all && any_list {
         return Err(Error::Validation(
             "--reset-all cannot be combined with algorithm allowlists".to_string(),
         ));
