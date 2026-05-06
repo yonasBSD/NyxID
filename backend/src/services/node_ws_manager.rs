@@ -2208,6 +2208,16 @@ impl NodeWsManager {
 
         let (resp_tx, resp_rx) = oneshot::channel();
         conn.ssh_exec_requests.insert(request_id.clone(), resp_tx);
+        // Mirror the cert-mode handler: pre-create the stream buffer so
+        // ssh_node_exec_data frames have somewhere to land. Without this,
+        // every chunk arrives at deliver_ssh_node_exec_data, finds no
+        // entry, logs "Received SSH node-key data for unknown request",
+        // and is dropped. Then ssh_node_exec_close resolves the oneshot
+        // with an empty stream, and the follow-up ssh_exec_result frame
+        // (which contains the real bytes) finds the oneshot already
+        // consumed and is silently discarded.
+        conn.ssh_node_exec_streams
+            .insert(request_id.clone(), PendingSshNodeExecStream::default());
 
         let (timestamp, nonce, hmac) = if let Some(secret) = signing_secret {
             let ts = chrono::Utc::now().to_rfc3339();
