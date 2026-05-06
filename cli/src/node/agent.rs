@@ -576,6 +576,8 @@ pub async fn cmd_ssh_credentials(
 ) -> Result<()> {
     use crate::cli::NodeSshCredentialCommands;
 
+    init_cli_tracing();
+
     let config_dir = config::resolve_config_dir(config_path);
     let config_file = config_dir.join("config.toml");
 
@@ -1036,6 +1038,18 @@ fn init_tracing(log_level: Option<&str>) {
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level)),
         )
+        .try_init();
+}
+
+fn init_cli_tracing() {
+    use tracing_subscriber::EnvFilter;
+
+    if std::env::var_os("RUST_LOG").is_none() {
+        return;
+    }
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(EnvFilter::from_default_env())
         .try_init();
 }
 
