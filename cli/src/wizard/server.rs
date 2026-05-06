@@ -603,16 +603,8 @@ async fn serve_index(State(state): State<ServerState>) -> Response {
     (StatusCode::OK, headers, html).into_response()
 }
 
-async fn serve_asset(axum::extract::Path(name): axum::extract::Path<String>) -> Response {
-    // Block path traversal but allow subdirectories (e.g. fonts/x.woff2).
-    if name.split('/').any(|seg| seg == ".." || seg.is_empty()) {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    let asset = match Assets::get(&name) {
-        Some(a) => a,
-        None => return StatusCode::NOT_FOUND.into_response(),
-    };
-    let ct = if name.ends_with(".css") {
+fn asset_content_type(name: &str) -> &'static str {
+    if name.ends_with(".css") {
         "text/css; charset=utf-8"
     } else if name.ends_with(".js") {
         "application/javascript; charset=utf-8"
@@ -620,16 +612,44 @@ async fn serve_asset(axum::extract::Path(name): axum::extract::Path<String>) -> 
         "text/html; charset=utf-8"
     } else if name.ends_with(".svg") {
         "image/svg+xml"
+    } else if name.ends_with(".ico") {
+        "image/x-icon"
     } else if name.ends_with(".woff2") {
         "font/woff2"
     } else if name.ends_with(".woff") {
         "font/woff"
     } else {
         "application/octet-stream"
+    }
+}
+
+fn embedded_asset_response(name: &str) -> Response {
+    // Block path traversal but allow subdirectories (e.g. fonts/x.woff2).
+    if name.split('/').any(|seg| seg == ".." || seg.is_empty()) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let asset = match Assets::get(name) {
+        Some(a) => a,
+        None => return StatusCode::NOT_FOUND.into_response(),
     };
     let mut headers = base_security_headers();
-    headers.insert(header::CONTENT_TYPE, HeaderValue::from_str(ct).unwrap());
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(asset_content_type(name)),
+    );
     (StatusCode::OK, headers, asset.data.into_owned()).into_response()
+}
+
+async fn serve_asset(axum::extract::Path(name): axum::extract::Path<String>) -> Response {
+    embedded_asset_response(&name)
+}
+
+async fn serve_wordmark_asset() -> Response {
+    embedded_asset_response("nyxid-wordmark.svg")
+}
+
+async fn serve_favicon_asset() -> Response {
+    embedded_asset_response("favicon.ico")
 }
 
 /// Validate the `Origin` header. When present it must point at *this*
@@ -1546,6 +1566,8 @@ pub async fn run_flow(
         .route("/wizard", get(serve_index))
         .route("/", get(serve_index))
         .route("/assets/{*name}", get(serve_asset))
+        .route("/nyxid-wordmark.svg", get(serve_wordmark_asset))
+        .route("/favicon.ico", get(serve_favicon_asset))
         .route("/api/proxy/complete", post(handle_complete))
         .route("/api/proxy/cancel", post(handle_cancel))
         .route("/api/proxy/cancel-unload", post(handle_cancel_unload))
@@ -1758,6 +1780,29 @@ mod tests {
             completed_ai_key: Arc::new(tokio::sync::Mutex::new(None)),
             prefill: Arc::new(Value::Null),
         }
+    }
+
+    #[tokio::test]
+    async fn root_brand_assets_are_embedded_and_typed() {
+        let wordmark = serve_wordmark_asset().await;
+        assert_eq!(wordmark.status(), StatusCode::OK);
+        assert_eq!(
+            wordmark
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("image/svg+xml")
+        );
+
+        let favicon = serve_favicon_asset().await;
+        assert_eq!(favicon.status(), StatusCode::OK);
+        assert_eq!(
+            favicon
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("image/x-icon")
+        );
     }
 
     #[test]
