@@ -291,10 +291,10 @@ pub async fn llm_proxy_request(
         .await?
     };
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id_str),
-        "llm_proxy_request".to_string(),
+        &auth_user,
+        "llm_proxy_request",
         Some(serde_json::json!({
             "provider_slug": &provider_slug,
             "method": method.as_str(),
@@ -303,10 +303,6 @@ pub async fn llm_proxy_request(
             "api_key_id": &auth_user.api_key_id,
             "api_key_name": &auth_user.api_key_name,
         })),
-        None,
-        None,
-        auth_user.api_key_id.clone(),
-        auth_user.api_key_name.clone(),
     );
 
     Ok(response)
@@ -416,10 +412,10 @@ pub async fn gateway_request(
                 // see who is using shared credentials. Mirrors the pattern
                 // in handlers/proxy.rs.
                 if let Some(routing) = &resolution.org_routing {
-                    audit_service::log_async(
+                    audit_service::log_for_user(
                         state.db.clone(),
-                        Some(auth_user.user_id.to_string()),
-                        "llm_gateway_routed_via_org".to_string(),
+                        &auth_user,
+                        "llm_gateway_routed_via_org",
                         Some(serde_json::json!({
                             "routed_via": "org",
                             "service_id": service_id,
@@ -428,25 +424,17 @@ pub async fn gateway_request(
                             "member_user_id": routing.member_user_id,
                             "membership_id": routing.membership_id,
                         })),
-                        None,
-                        None,
-                        auth_user.api_key_id.clone(),
-                        auth_user.api_key_name.clone(),
                     );
                 } else {
-                    audit_service::log_async(
+                    audit_service::log_for_user(
                         state.db.clone(),
-                        Some(auth_user.user_id.to_string()),
-                        "llm_gateway_routed_via_personal".to_string(),
+                        &auth_user,
+                        "llm_gateway_routed_via_personal",
                         Some(serde_json::json!({
                             "routed_via": "personal",
                             "service_id": service_id,
                             "user_service_id": resolution.user_service_id,
                         })),
-                        None,
-                        None,
-                        auth_user.api_key_id.clone(),
-                        auth_user.api_key_name.clone(),
                     );
                 }
                 (resolution.target, true)
@@ -464,19 +452,15 @@ pub async fn gateway_request(
                 // `user_service_id` is null because the legacy path resolves
                 // straight from the catalog + provider-token store, with no
                 // `UserService` record to point at. See NyxID#423.
-                audit_service::log_async(
+                audit_service::log_for_user(
                     state.db.clone(),
-                    Some(auth_user.user_id.to_string()),
-                    "llm_gateway_routed_via_personal".to_string(),
+                    &auth_user,
+                    "llm_gateway_routed_via_personal",
                     Some(serde_json::json!({
                         "routed_via": "personal",
                         "service_id": service_id,
                         "user_service_id": serde_json::Value::Null,
                     })),
-                    None,
-                    None,
-                    auth_user.api_key_id.clone(),
-                    auth_user.api_key_name.clone(),
                 );
                 (legacy, false)
             }
@@ -669,10 +653,10 @@ pub async fn gateway_request(
         }
     };
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id_str),
-        "llm_gateway_request".to_string(),
+        &auth_user,
+        "llm_gateway_request",
         Some(serde_json::json!({
             "model": model,
             "provider_slug": &provider_slug,
@@ -682,10 +666,6 @@ pub async fn gateway_request(
             "api_key_id": &auth_user.api_key_id,
             "api_key_name": &auth_user.api_key_name,
         })),
-        None,
-        None,
-        auth_user.api_key_id.clone(),
-        auth_user.api_key_name.clone(),
     );
 
     Ok(response)

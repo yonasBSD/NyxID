@@ -106,20 +106,16 @@ pub async fn revoke_my_broker_binding(
     )
     .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id),
-        "oauth_broker_binding_revoked".to_string(),
+        &auth_user,
+        "oauth_broker_binding_revoked",
         Some(serde_json::json!({
             "revoke_source": "user",
             "client_id": binding.client_id,
             "binding_hash": oauth_broker_service::binding_hash_prefix(&binding_hash),
             "reason": "user_revoked",
         })),
-        None,
-        None,
-        None,
-        None,
     );
 
     Ok(axum::http::StatusCode::NO_CONTENT)

@@ -163,8 +163,8 @@ pub async fn handle_channel_message(
             "agent_id": &message.agent_id,
             "direction": &message.direction,
         })),
-        None,
-        None,
+        crate::handlers::admin_helpers::extract_ip(&headers),
+        crate::handlers::admin_helpers::extract_user_agent(&headers),
         None,
         None,
     );
@@ -231,18 +231,14 @@ pub async fn create_mapping(
         },
     );
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id_str),
-        "openclaw_channel_mapping_created".to_string(),
+        &auth_user,
+        "openclaw_channel_mapping_created",
         Some(serde_json::json!({
             "channel": &body.channel,
             "channel_user_id": &body.channel_user_id,
         })),
-        None,
-        None,
-        None,
-        None,
     );
 
     Ok(Json(MappingResponse {

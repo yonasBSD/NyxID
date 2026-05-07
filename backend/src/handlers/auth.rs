@@ -639,10 +639,10 @@ pub async fn login(
 /// Revoke the current session and clear all auth cookies.
 pub async fn logout(
     State(state): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ConnectInfo(_peer): ConnectInfo<SocketAddr>,
     auth_user: AuthUser,
     tele: TelemetryContext,
-    headers: HeaderMap,
+    _headers: HeaderMap,
 ) -> AppResult<(HeaderMap, Json<LogoutResponse>)> {
     if let Some(session_id) = auth_user.session_id {
         token_service::revoke_session(
@@ -661,16 +661,7 @@ pub async fn logout(
         TelemetryEvent::AuthLoggedOut,
     );
 
-    audit_service::log_async(
-        state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "logout".to_string(),
-        None,
-        extract_ip(&headers, Some(peer)),
-        extract_user_agent(&headers),
-        None,
-        None,
-    );
+    audit_service::log_for_user(state.db.clone(), &auth_user, "logout", None);
 
     let secure = state.config.use_secure_cookies();
     let domain = state.config.cookie_domain();

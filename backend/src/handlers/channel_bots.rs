@@ -522,10 +522,10 @@ pub async fn create_bot(
         },
     );
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(actor),
-        "channel_bot_created".to_string(),
+        &auth_user,
+        "channel_bot_created",
         Some(serde_json::json!({
             "bot_id": &bot_id,
             "platform": &body.platform,
@@ -533,10 +533,6 @@ pub async fn create_bot(
             "owner_user_id": &owner_id,
             "target_org_id": body.target_org_id,
         })),
-        None,
-        None,
-        auth_user.api_key_id.clone(),
-        auth_user.api_key_name.clone(),
     );
 
     let (permission_setup_url, permission_setup_scopes) =
@@ -679,19 +675,15 @@ pub async fn update_bot(
         })
         .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(actor),
-        "channel_bot_updated".to_string(),
+        &auth_user,
+        "channel_bot_updated",
         Some(serde_json::json!({
             "bot_id": &updated.id,
             "platform": &updated.platform,
             "owner_user_id": &owner_id,
         })),
-        None,
-        None,
-        auth_user.api_key_id.clone(),
-        auth_user.api_key_name.clone(),
     );
 
     let (permission_setup_url, permission_setup_scopes) = lark_permission_payload(&updated);
@@ -806,19 +798,15 @@ pub async fn delete_bot(
         },
     );
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(actor),
-        "channel_bot_deleted".to_string(),
+        &auth_user,
+        "channel_bot_deleted",
         Some(serde_json::json!({
             "bot_id": &bot_id,
             "platform": &bot.platform,
             "owner_user_id": &owner_id,
         })),
-        None,
-        None,
-        auth_user.api_key_id.clone(),
-        auth_user.api_key_name.clone(),
     );
 
     Ok(StatusCode::NO_CONTENT)

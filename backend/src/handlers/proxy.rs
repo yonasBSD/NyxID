@@ -176,10 +176,10 @@ fn audit_org_routing(
     user_service_id: &str,
     service_id: &str,
 ) {
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "proxy_routed_via_org".to_string(),
+        auth_user,
+        "proxy_routed_via_org",
         Some(serde_json::json!({
             "routed_via": "org",
             "service_id": service_id,
@@ -190,10 +190,6 @@ fn audit_org_routing(
             "member_user_id": routing.member_user_id,
             "membership_id": routing.membership_id,
         })),
-        None,
-        None,
-        auth_user.api_key_id.clone(),
-        auth_user.api_key_name.clone(),
     );
 }
 
@@ -214,19 +210,15 @@ fn audit_personal_routing(
     user_service_id: Option<&str>,
     service_id: &str,
 ) {
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "proxy_routed_via_personal".to_string(),
+        auth_user,
+        "proxy_routed_via_personal",
         Some(serde_json::json!({
             "routed_via": "personal",
             "service_id": service_id,
             "user_service_id": user_service_id,
         })),
-        None,
-        None,
-        auth_user.api_key_id.clone(),
-        auth_user.api_key_name.clone(),
     );
 }
 
@@ -799,19 +791,15 @@ async fn resolve_via_downstream_service(
             "Service is configured to route via a node, but no viable node is available"
                 .to_string(),
         );
-        audit_service::log_async(
+        audit_service::log_for_user(
             state.db.clone(),
-            Some(user_id_str.to_string()),
-            "proxy_request_denied".to_string(),
+            auth_user,
+            "proxy_request_denied",
             Some(serde_json::json!({
                 "service_id": service_id,
                 "reason": err.to_string(),
                 "node_routing_required": true,
             })),
-            None,
-            None,
-            auth_user.api_key_id.clone(),
-            auth_user.api_key_name.clone(),
         );
         return Err(err);
     }
@@ -827,18 +815,14 @@ async fn resolve_via_downstream_service(
         {
             Ok(result) => result,
             Err(e) => {
-                audit_service::log_async(
+                audit_service::log_for_user(
                     state.db.clone(),
-                    Some(user_id_str.to_string()),
-                    "proxy_request_denied".to_string(),
+                    auth_user,
+                    "proxy_request_denied",
                     Some(serde_json::json!({
                         "service_id": service_id,
                         "reason": e.to_string(),
                     })),
-                    None,
-                    None,
-                    auth_user.api_key_id.clone(),
-                    auth_user.api_key_name.clone(),
                 );
                 return Err(e);
             }
@@ -854,18 +838,14 @@ async fn resolve_via_downstream_service(
         {
             Ok(t) => (t, true),
             Err(e) => {
-                audit_service::log_async(
+                audit_service::log_for_user(
                     state.db.clone(),
-                    Some(user_id_str.to_string()),
-                    "proxy_request_denied".to_string(),
+                    auth_user,
+                    "proxy_request_denied",
                     Some(serde_json::json!({
                         "service_id": service_id,
                         "reason": e.to_string(),
                     })),
-                    None,
-                    None,
-                    auth_user.api_key_id.clone(),
-                    auth_user.api_key_name.clone(),
                 );
                 return Err(e);
             }
@@ -977,10 +957,10 @@ async fn execute_proxy_inner(
     if let Err(e) =
         crate::mw::rate_limit::check_agent_rate_limit(&state.per_agent_limiter, auth_user)
     {
-        audit_service::log_async(
+        audit_service::log_for_user(
             state.db.clone(),
-            Some(user_id_str.clone()),
-            "proxy_request_denied".to_string(),
+            auth_user,
+            "proxy_request_denied",
             Some(serde_json::json!({
                 "service_id": service_id,
                 "path": path,
@@ -988,10 +968,6 @@ async fn execute_proxy_inner(
                 "denial_reason": "rate_limited",
                 "response_status": 429,
             })),
-            None,
-            None,
-            auth_user.api_key_id.clone(),
-            auth_user.api_key_name.clone(),
         );
         return Err(e);
     }
@@ -1045,10 +1021,10 @@ async fn execute_proxy_inner(
                 "Service is configured to route via a node, but no viable node is available"
                     .to_string(),
             );
-            audit_service::log_async(
+            audit_service::log_for_user(
                 state.db.clone(),
-                Some(user_id_str.clone()),
-                "proxy_request_denied".to_string(),
+                auth_user,
+                "proxy_request_denied",
                 Some(serde_json::json!({
                     "service_id": service_id,
                     "user_service_id": pre.user_service_id,
@@ -1058,10 +1034,6 @@ async fn execute_proxy_inner(
                     "denial_reason": "node_routing_required_no_viable_node",
                     "node_routing_required": true,
                 })),
-                None,
-                None,
-                auth_user.api_key_id.clone(),
-                auth_user.api_key_name.clone(),
             );
             return Err(err);
         }
@@ -1077,10 +1049,10 @@ async fn execute_proxy_inner(
             let err = AppError::ApiKeyScopeForbidden(
                 "API key does not have access to this service".to_string(),
             );
-            audit_service::log_async(
+            audit_service::log_for_user(
                 state.db.clone(),
-                Some(user_id_str.clone()),
-                "proxy_request_denied".to_string(),
+                auth_user,
+                "proxy_request_denied",
                 Some(serde_json::json!({
                     "service_id": service_id,
                     "user_service_id": us_id,
@@ -1089,10 +1061,6 @@ async fn execute_proxy_inner(
                     "denial_reason": "api_key_scope_forbidden_service",
                     "response_status": 403,
                 })),
-                None,
-                None,
-                auth_user.api_key_id.clone(),
-                auth_user.api_key_name.clone(),
             );
             return Err(err);
         }
@@ -1103,10 +1071,10 @@ async fn execute_proxy_inner(
             let err = AppError::ApiKeyScopeForbidden(
                 "API key does not have access to this node".to_string(),
             );
-            audit_service::log_async(
+            audit_service::log_for_user(
                 state.db.clone(),
-                Some(user_id_str.clone()),
-                "proxy_request_denied".to_string(),
+                auth_user,
+                "proxy_request_denied",
                 Some(serde_json::json!({
                     "service_id": service_id,
                     "node_id": nid,
@@ -1115,10 +1083,6 @@ async fn execute_proxy_inner(
                     "denial_reason": "api_key_scope_forbidden_node",
                     "response_status": 403,
                 })),
-                None,
-                None,
-                auth_user.api_key_id.clone(),
-                auth_user.api_key_name.clone(),
             );
             return Err(err);
         }
@@ -1162,10 +1126,10 @@ async fn execute_proxy_inner(
             let err = AppError::ApiKeyScopeForbidden(
                 "Scoped API keys must use configured services".to_string(),
             );
-            audit_service::log_async(
+            audit_service::log_for_user(
                 state.db.clone(),
-                Some(user_id_str.clone()),
-                "proxy_request_denied".to_string(),
+                auth_user,
+                "proxy_request_denied",
                 Some(serde_json::json!({
                     "service_id": service_id,
                     "path": path,
@@ -1173,10 +1137,6 @@ async fn execute_proxy_inner(
                     "denial_reason": "api_key_scope_forbidden_legacy",
                     "response_status": 403,
                 })),
-                None,
-                None,
-                auth_user.api_key_id.clone(),
-                auth_user.api_key_name.clone(),
             );
             return Err(err);
         }
@@ -1837,6 +1797,8 @@ async fn execute_proxy_inner(
                             let stream_user_id = user_id_str.clone();
                             let stream_api_key_id = auth_user.api_key_id.clone();
                             let stream_api_key_name = auth_user.api_key_name.clone();
+                            let stream_ip = auth_user.ip_address.clone();
+                            let stream_ua = auth_user.user_agent.clone();
 
                             // Convert the mpsc receiver into a streaming body.
                             let stream = async_stream::stream! {
@@ -1873,8 +1835,8 @@ async fn execute_proxy_inner(
                                                     "routed_via": "node",
                                                     "node_id": node_id_owned,
                                                 })),
-                                                None,
-                                                None,
+                                                stream_ip.clone(),
+                                                stream_ua.clone(),
                                                 stream_api_key_id.clone(),
                                                 stream_api_key_name.clone(),
                                             );
@@ -1902,10 +1864,10 @@ async fn execute_proxy_inner(
                     };
 
                     let proxy_actor_user_id = auth_user.proxy_resolution_user_id();
-                    audit_service::log_async(
+                    audit_service::log_for_user(
                         state.db.clone(),
-                        Some(user_id_str),
-                        "proxy_request".to_string(),
+                        auth_user,
+                        "proxy_request",
                         Some(node_proxy_audit_event_data(
                             service_id,
                             &method_str,
@@ -1915,10 +1877,6 @@ async fn execute_proxy_inner(
                             service_owner_for_approval,
                             &proxy_actor_user_id,
                         )),
-                        None,
-                        None,
-                        auth_user.api_key_id.clone(),
-                        auth_user.api_key_name.clone(),
                     );
 
                     if let Some(ref agent_id) = auth_user.api_key_id
@@ -1980,20 +1938,16 @@ async fn execute_proxy_inner(
         //   * No server-side credential is available, so direct routing
         //     cannot succeed anyway.
         if node_routing_required || !has_server_credential {
-            audit_service::log_async(
+            audit_service::log_for_user(
                 state.db.clone(),
-                Some(user_id_str.clone()),
-                "proxy_request_denied".to_string(),
+                auth_user,
+                "proxy_request_denied",
                 Some(serde_json::json!({
                     "service_id": service_id,
                     "reason": "all_node_routes_failed",
                     "node_routing_required": node_routing_required,
                     "attempted_node_ids": all_node_ids,
                 })),
-                None,
-                None,
-                auth_user.api_key_id.clone(),
-                auth_user.api_key_name.clone(),
             );
             return Err(last_error.unwrap_or_else(|| {
                 AppError::NodeOffline(if node_routing_required {
@@ -2101,10 +2055,10 @@ async fn execute_proxy_inner(
 
         let status = response.status();
 
-        audit_service::log_async(
+        audit_service::log_for_user(
             state.db.clone(),
-            Some(user_id_str),
-            "proxy_request".to_string(),
+            auth_user,
+            "proxy_request",
             Some(serde_json::json!({
                 "service_id": service_id,
                 "method": method.as_str(),
@@ -2113,10 +2067,6 @@ async fn execute_proxy_inner(
                 "acting_client_id": &auth_user.acting_client_id,
                 "codex_transport": true,
             })),
-            None,
-            None,
-            auth_user.api_key_id.clone(),
-            auth_user.api_key_name.clone(),
         );
 
         if let Some(ref agent_id) = auth_user.api_key_id
@@ -2353,10 +2303,10 @@ async fn execute_proxy_inner(
     };
 
     // Audit log the proxy request
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id_str),
-        "proxy_request".to_string(),
+        auth_user,
+        "proxy_request",
         Some(serde_json::json!({
             "service_id": service_id,
             "method": method.as_str(),
@@ -2364,10 +2314,6 @@ async fn execute_proxy_inner(
             "response_status": status.as_u16(),
             "acting_client_id": &auth_user.acting_client_id,
         })),
-        None,
-        None,
-        auth_user.api_key_id.clone(),
-        auth_user.api_key_name.clone(),
     );
 
     if let Some(ref agent_id) = auth_user.api_key_id
@@ -2857,6 +2803,7 @@ fn injection_frame_to_axum(frame: ws_frame_injector::WsFrame) -> axum::extract::
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn audit_ws_frame_auth_injected(
     db: &mongodb::Database,
     user_id: &str,
@@ -2865,6 +2812,8 @@ fn audit_ws_frame_auth_injected(
     routed_node_id: Option<&str>,
     api_key_id: Option<String>,
     api_key_name: Option<String>,
+    ip_address: Option<String>,
+    user_agent: Option<String>,
 ) {
     let mut data = serde_json::json!({
         "service_id": service_id,
@@ -2883,8 +2832,8 @@ fn audit_ws_frame_auth_injected(
         Some(user_id.to_string()),
         "ws_frame_auth_injected".to_string(),
         Some(data),
-        None,
-        None,
+        ip_address,
+        user_agent,
         api_key_id,
         api_key_name,
     );
@@ -2916,6 +2865,8 @@ async fn bridge_websockets(
     user_id: String,
     api_key_id: Option<String>,
     api_key_name: Option<String>,
+    ip_address: Option<String>,
+    user_agent: Option<String>,
 ) -> std::time::Duration {
     let start = std::time::Instant::now();
     let (mut client_sink, mut client_stream) = client_ws.split();
@@ -2981,6 +2932,8 @@ async fn bridge_websockets(
                                     None,
                                     api_key_id.clone(),
                                     api_key_name.clone(),
+                                    ip_address.clone(),
+                                    user_agent.clone(),
                                 );
                                 // NOTE: `direction` is the trigger direction. The injected
                                 // frame is sent to the opposite side so a downstream
@@ -3043,6 +2996,8 @@ async fn bridge_websockets(
                                     None,
                                     api_key_id.clone(),
                                     api_key_name.clone(),
+                                    ip_address.clone(),
+                                    user_agent.clone(),
                                 );
                                 // NOTE: `direction` is the trigger direction. For the HA
                                 // preset this sends the auth frame back upstream to the
@@ -3156,6 +3111,8 @@ async fn handle_ws_passthrough(
     let acting_client_id = auth_user.acting_client_id.clone();
     let ak_id = auth_user.api_key_id.clone();
     let ak_name = auth_user.api_key_name.clone();
+    let req_ip = auth_user.ip_address.clone();
+    let req_ua = auth_user.user_agent.clone();
 
     audit_service::log_async(
         state.db.clone(),
@@ -3166,8 +3123,8 @@ async fn handle_ws_passthrough(
             "path": path,
             "acting_client_id": &acting_client_id,
         })),
-        None,
-        None,
+        req_ip.clone(),
+        req_ua.clone(),
         ak_id.clone(),
         ak_name.clone(),
     );
@@ -3195,6 +3152,8 @@ async fn handle_ws_passthrough(
                 user_id_str.clone(),
                 ak_id.clone(),
                 ak_name.clone(),
+                req_ip.clone(),
+                req_ua.clone(),
             )
             .await;
             drop(guard); // decrement counter (guard moved into closure)
@@ -3208,8 +3167,8 @@ async fn handle_ws_passthrough(
                     "duration_secs": duration.as_secs(),
                     "acting_client_id": &acting_client_id,
                 })),
-                None,
-                None,
+                req_ip,
+                req_ua,
                 ak_id,
                 ak_name,
             );
@@ -3408,6 +3367,8 @@ async fn handle_ws_passthrough_via_node(
     let node_id_owned = node_id.to_string();
     let ak_id = auth_user.api_key_id.clone();
     let ak_name = auth_user.api_key_name.clone();
+    let req_ip = auth_user.ip_address.clone();
+    let req_ua = auth_user.user_agent.clone();
     let service_owner_user_id_owned = service_owner_user_id.to_string();
     let proxy_actor_user_id_owned = proxy_actor_user_id.to_string();
 
@@ -3428,8 +3389,8 @@ async fn handle_ws_passthrough_via_node(
         Some(user_id_str.clone()),
         "proxy_ws_upgrade".to_string(),
         Some(upgrade_event),
-        None,
-        None,
+        req_ip.clone(),
+        req_ua.clone(),
         ak_id.clone(),
         ak_name.clone(),
     );
@@ -3462,6 +3423,8 @@ async fn handle_ws_passthrough_via_node(
                 ak_name.clone(),
                 owner_for_audit.clone(),
                 actor_for_audit.clone(),
+                req_ip.clone(),
+                req_ua.clone(),
             )
             .await;
 
@@ -3482,8 +3445,8 @@ async fn handle_ws_passthrough_via_node(
                 Some(user_id_str),
                 "proxy_ws_disconnect".to_string(),
                 Some(disconnect_event),
-                None,
-                None,
+                req_ip,
+                req_ua,
                 ak_id,
                 ak_name,
             );
@@ -3506,6 +3469,8 @@ async fn bridge_websockets_via_node(
     api_key_name: Option<String>,
     service_owner_user_id: String,
     proxy_actor_user_id: String,
+    ip_address: Option<String>,
+    user_agent: Option<String>,
 ) -> std::time::Duration {
     use crate::services::node_ws_manager::WsProxyFrame;
 
@@ -3618,8 +3583,8 @@ async fn bridge_websockets_via_node(
                             Some(user_id.clone()),
                             "ws_frame_auth_injected".to_string(),
                             Some(event_data),
-                            None,
-                            None,
+                            ip_address.clone(),
+                            user_agent.clone(),
                             api_key_id.clone(),
                             api_key_name.clone(),
                         );
@@ -4230,6 +4195,8 @@ mod tests {
                 "user-1".to_string(),
                 None,
                 None,
+                None,
+                None,
             )
             .await;
         })
@@ -4595,6 +4562,8 @@ mod proxy_resolution_integration_tests {
             api_key_name: None,
             rate_limit_per_second: None,
             rate_limit_burst: None,
+            ip_address: None,
+            user_agent: None,
         }
     }
 
@@ -4614,6 +4583,8 @@ mod proxy_resolution_integration_tests {
             api_key_name: None,
             rate_limit_per_second: None,
             rate_limit_burst: None,
+            ip_address: None,
+            user_agent: None,
         }
     }
 

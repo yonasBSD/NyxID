@@ -12,7 +12,6 @@ use validator::Validate;
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::handlers::admin_helpers::require_admin;
-use crate::handlers::auth::{extract_ip, extract_user_agent};
 use crate::models::invite_code::{InviteCode, InviteCodeUsage};
 use crate::mw::auth::AuthUser;
 use crate::services::invite_code_service::InviteCodeUsageUser;
@@ -148,10 +147,10 @@ fn to_response(ic: InviteCode, users: &HashMap<String, InviteCodeUsageUser>) -> 
 /// Create a new invite code (admin only).
 pub async fn create_invite_code(
     State(state): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ConnectInfo(_peer): ConnectInfo<SocketAddr>,
     auth_user: AuthUser,
     tele: TelemetryContext,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Json(body): Json<CreateInviteCodeRequest>,
 ) -> AppResult<Json<InviteCodeResponse>> {
     require_admin(&state, &auth_user).await?;
@@ -170,19 +169,15 @@ pub async fn create_invite_code(
     )
     .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(admin_id),
-        "admin_invite_code_create".to_string(),
+        &auth_user,
+        "admin_invite_code_create",
         Some(serde_json::json!({
             "invite_code_id": invite.id,
             "code": invite.code,
             "max_uses": invite.max_uses,
         })),
-        extract_ip(&headers, Some(peer)),
-        extract_user_agent(&headers),
-        None,
-        None,
     );
 
     emit_event(
@@ -230,9 +225,9 @@ pub async fn list_invite_codes(
 /// freeform admin-supplied text we shouldn't persist twice.
 pub async fn update_invite_code(
     State(state): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ConnectInfo(_peer): ConnectInfo<SocketAddr>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path(id): Path<String>,
     Json(body): Json<UpdateInviteCodeRequest>,
 ) -> AppResult<Json<InviteCodeResponse>> {
@@ -243,18 +238,14 @@ pub async fn update_invite_code(
 
     let updated = invite_code_service::update_invite_code_note(&state.db, &id, body.note).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin_invite_code_update".to_string(),
+        &auth_user,
+        "admin_invite_code_update",
         Some(serde_json::json!({
             "invite_code_id": id,
             "fields_changed": ["note"],
         })),
-        extract_ip(&headers, Some(peer)),
-        extract_user_agent(&headers),
-        None,
-        None,
     );
 
     // Resolve usage users for the single updated code so the response carries
@@ -270,24 +261,20 @@ pub async fn update_invite_code(
 /// Deactivate an invite code (admin only).
 pub async fn deactivate_invite_code(
     State(state): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ConnectInfo(_peer): ConnectInfo<SocketAddr>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path(id): Path<String>,
 ) -> AppResult<Json<DeactivateInviteCodeResponse>> {
     require_admin(&state, &auth_user).await?;
 
     invite_code_service::deactivate_invite_code(&state.db, &id).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin_invite_code_deactivate".to_string(),
+        &auth_user,
+        "admin_invite_code_deactivate",
         Some(serde_json::json!({ "invite_code_id": id })),
-        extract_ip(&headers, Some(peer)),
-        extract_user_agent(&headers),
-        None,
-        None,
     );
 
     Ok(Json(DeactivateInviteCodeResponse {

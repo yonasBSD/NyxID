@@ -116,10 +116,10 @@ pub async fn issue_ssh_certificate(
     )
     .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id.clone()),
-        "ssh_certificate_issued".to_string(),
+        &auth_user,
+        "ssh_certificate_issued",
         Some(serde_json::json!({
             "service_id": service_id,
             "key_id": issued.key_id,
@@ -128,10 +128,6 @@ pub async fn issue_ssh_certificate(
             "valid_after": issued.valid_after,
             "valid_before": issued.valid_before,
         })),
-        None,
-        None,
-        None,
-        None,
     );
 
     // Telemetry: ssh.certificate_issued. `ttl_secs` derived from the

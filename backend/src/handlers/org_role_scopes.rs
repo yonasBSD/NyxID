@@ -126,19 +126,15 @@ pub async fn set_role_scope(
     )
     .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(actor),
-        "org_role_scope_set".to_string(),
+        &auth_user,
+        "org_role_scope_set",
         Some(serde_json::json!({
             "org_user_id": org_id,
             "role": role,
             "allowed_service_ids": scope.allowed_service_ids.clone(),
         })),
-        None,
-        None,
-        auth_user.api_key_id.clone(),
-        auth_user.api_key_name.clone(),
     );
 
     Ok(Json(stored_scope_to_response(scope)))
@@ -156,18 +152,14 @@ pub async fn clear_role_scope(
 
     org_role_scope_service::clear_scope(&state.db, &org_id, parsed_role).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(actor),
-        "org_role_scope_cleared".to_string(),
+        &auth_user,
+        "org_role_scope_cleared",
         Some(serde_json::json!({
             "org_user_id": org_id,
             "role": parsed_role,
         })),
-        None,
-        None,
-        auth_user.api_key_id.clone(),
-        auth_user.api_key_name.clone(),
     );
 
     Ok(StatusCode::NO_CONTENT)

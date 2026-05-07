@@ -271,20 +271,16 @@ pub async fn create_binding(
     )
     .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(actor),
-        "agent_binding_created".to_string(),
+        &auth_user,
+        "agent_binding_created",
         Some(serde_json::json!({
             "binding_id": &binding.id,
             "api_key_id": &key_id,
             "user_service_id": &body.user_service_id,
             "user_api_key_id": &body.user_api_key_id,
         })),
-        None,
-        None,
-        auth_user.api_key_id.clone(),
-        auth_user.api_key_name.clone(),
     );
 
     let mut responses = enrich_bindings(&state, vec![binding]).await?;
@@ -398,18 +394,14 @@ pub async fn delete_binding(
         .unwrap_or_else(|| binding.user_service_id.clone());
     agent_binding_service::delete_binding(&state.db, &user_id, &key_id, &binding_id).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(actor),
-        "agent_binding_deleted".to_string(),
+        &auth_user,
+        "agent_binding_deleted",
         Some(serde_json::json!({
             "binding_id": &binding_id,
             "api_key_id": &key_id,
         })),
-        None,
-        None,
-        auth_user.api_key_id.clone(),
-        auth_user.api_key_name.clone(),
     );
 
     // Telemetry: agent_binding.deleted. Slug + platform resolved before

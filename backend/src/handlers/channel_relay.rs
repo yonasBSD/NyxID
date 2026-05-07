@@ -1087,6 +1087,8 @@ mod tests {
             api_key_name: Some(api_key.name.clone()),
             rate_limit_per_second: api_key.rate_limit_per_second,
             rate_limit_burst: api_key.rate_limit_burst,
+            ip_address: None,
+            user_agent: None,
         }
     }
 

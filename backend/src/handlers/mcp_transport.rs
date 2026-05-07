@@ -246,6 +246,8 @@ struct McpAuthContext {
     allowed_node_ids: Vec<String>,
     rate_limit_per_second: Option<u32>,
     rate_limit_burst: Option<u32>,
+    ip_address: Option<String>,
+    user_agent: Option<String>,
 }
 
 impl McpAuthContext {
@@ -261,8 +263,33 @@ impl McpAuthContext {
             allowed_node_ids: Vec::new(),
             rate_limit_per_second: None,
             rate_limit_burst: None,
+            ip_address: None,
+            user_agent: None,
         }
     }
+}
+
+fn mcp_extract_ip(headers: &HeaderMap) -> Option<String> {
+    if let Some(forwarded) = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.split(',').next().unwrap_or("").trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(forwarded);
+    }
+    headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn mcp_extract_user_agent(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(String::from)
 }
 
 /// Extract and validate the request credentials, returning the user_id.
@@ -283,6 +310,9 @@ async fn authenticate_mcp(
     headers: &HeaderMap,
     session_fallback: bool,
 ) -> Result<McpAuthContext, Response> {
+    let request_ip = mcp_extract_ip(headers);
+    let request_ua = mcp_extract_user_agent(headers);
+
     // --- Try API key first (stateless auth for headless clients) ---
     if let Some(api_key_header) = headers.get("x-api-key") {
         let raw_key = api_key_header
@@ -306,6 +336,8 @@ async fn authenticate_mcp(
                     allowed_node_ids: api_key.allowed_node_ids.clone(),
                     rate_limit_per_second: api_key.rate_limit_per_second,
                     rate_limit_burst: api_key.rate_limit_burst,
+                    ip_address: request_ip.clone(),
+                    user_agent: request_ua.clone(),
                 });
             }
             Err(_) => return Err(mcp_401(&state.config.base_url)),
@@ -332,7 +364,10 @@ async fn authenticate_mcp(
                 } else {
                     verify_user_active(state, claims.sub).await?
                 };
-                return Ok(McpAuthContext::user(user_id));
+                let mut ctx = McpAuthContext::user(user_id);
+                ctx.ip_address = request_ip.clone();
+                ctx.user_agent = request_ua.clone();
+                return Ok(ctx);
             }
             Err(_) if session_fallback => {
                 // Any JWT error (expired, invalid issuer, etc.) -- fall through
@@ -357,7 +392,10 @@ async fn authenticate_mcp(
             return Err(mcp_403_insufficient_scope());
         }
         let user_id = verify_user_active(state, user_id).await?;
-        return Ok(McpAuthContext::user(user_id));
+        let mut ctx = McpAuthContext::user(user_id);
+        ctx.ip_address = request_ip;
+        ctx.user_agent = request_ua;
+        return Ok(ctx);
     }
 
     Err(mcp_401(&state.config.base_url))
@@ -552,6 +590,9 @@ pub async fn mcp_post(State(state): State<AppState>, headers: HeaderMap, body: S
                 &request,
                 auth.is_api_key,
                 auth.api_key_id.as_deref(),
+                auth.api_key_name.as_deref(),
+                auth.ip_address.as_deref(),
+                auth.user_agent.as_deref(),
                 &tele,
             )
         }
@@ -754,8 +795,8 @@ pub async fn mcp_delete(State(state): State<AppState>, headers: HeaderMap) -> Re
         Some(auth.user_id.clone()),
         "mcp_session_deleted".to_string(),
         Some(serde_json::json!({ "session_id": &sid })),
-        None,
-        None,
+        auth.ip_address.clone(),
+        auth.user_agent.clone(),
         auth.api_key_id.clone(),
         auth.api_key_name.clone(),
     );
@@ -796,12 +837,16 @@ pub async fn mcp_delete(State(state): State<AppState>, headers: HeaderMap) -> Re
 // Method handlers
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn handle_initialize(
     state: &AppState,
     user_id: &str,
     request: &JsonRpcRequest,
     is_api_key: bool,
     api_key_id: Option<&str>,
+    api_key_name: Option<&str>,
+    ip_address: Option<&str>,
+    user_agent: Option<&str>,
     tele: &TelemetryContext,
 ) -> Response {
     // API-key auth is stateless: each request authenticates independently,
@@ -816,10 +861,10 @@ fn handle_initialize(
                     Some(user_id.to_string()),
                     "mcp_session_created".to_string(),
                     Some(serde_json::json!({ "session_id": &id })),
-                    None,
-                    None,
-                    None,
-                    None,
+                    ip_address.map(String::from),
+                    user_agent.map(String::from),
+                    api_key_id.map(String::from),
+                    api_key_name.map(String::from),
                 );
                 Some(id)
             }
@@ -1122,8 +1167,8 @@ async fn handle_tools_call(
             "service_id": service.service_id,
             "response_status": status,
         })),
-        None,
-        None,
+        auth.ip_address.clone(),
+        auth.user_agent.clone(),
         auth.api_key_id.clone(),
         auth.api_key_name.clone(),
     );
@@ -1307,8 +1352,8 @@ async fn handle_meta_call_tool(
             "response_status": status,
             "via": "nyx__call_tool",
         })),
-        None,
-        None,
+        auth.ip_address.clone(),
+        auth.user_agent.clone(),
         auth.api_key_id.clone(),
         auth.api_key_name.clone(),
     );
@@ -1486,8 +1531,8 @@ async fn handle_meta_connect(
                 Some(auth.user_id.clone()),
                 "mcp_connect_service".to_string(),
                 Some(serde_json::json!({ "service_id": service_id })),
-                None,
-                None,
+                auth.ip_address.clone(),
+                auth.user_agent.clone(),
                 auth.api_key_id.clone(),
                 auth.api_key_name.clone(),
             );
@@ -1738,8 +1783,8 @@ async fn handle_mcp_ssh_list(
         Some(auth.user_id.clone()),
         "mcp_ssh_list_services".to_string(),
         Some(serde_json::json!({ "count": count })),
-        None,
-        None,
+        auth.ip_address.clone(),
+        auth.user_agent.clone(),
         auth.api_key_id.clone(),
         auth.api_key_name.clone(),
     );
@@ -1920,8 +1965,8 @@ async fn execute_ssh_command_internal(
                         "routed_via": "node",
                         "node_id": node_id,
                     })),
-                    None,
-                    None,
+                    auth.ip_address.clone(),
+                    auth.user_agent.clone(),
                     auth.api_key_id.clone(),
                     auth.api_key_name.clone(),
                 );
@@ -1968,6 +2013,8 @@ mod tests {
             allowed_node_ids: Vec::new(),
             rate_limit_per_second: None,
             rate_limit_burst: None,
+            ip_address: None,
+            user_agent: None,
         }
     }
 

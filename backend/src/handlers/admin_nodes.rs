@@ -225,15 +225,11 @@ pub async fn admin_disconnect_node(
         node_service::set_node_status(&state.db, &node_id, NodeStatus::Offline).await?;
     }
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin_node_disconnected".to_string(),
+        &auth_user,
+        "admin_node_disconnected",
         Some(serde_json::json!({ "node_id": &node_id })),
-        None,
-        None,
-        None,
-        None,
     );
 
     // Only emit when a real disconnect actually happened. Posting to
@@ -276,15 +272,11 @@ pub async fn admin_delete_node(
             .await;
     }
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin_node_deleted".to_string(),
+        &auth_user,
+        "admin_node_deleted",
         Some(serde_json::json!({ "node_id": &node_id })),
-        None,
-        None,
-        None,
-        None,
     );
 
     emit_event(

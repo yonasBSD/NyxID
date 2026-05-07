@@ -278,10 +278,10 @@ pub async fn create_conversation(
         },
     );
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(actor),
-        "channel_conversation_created".to_string(),
+        &auth_user,
+        "channel_conversation_created",
         Some(serde_json::json!({
             "conversation_id": &conversation.id,
             "channel_bot_id": &body.channel_bot_id,
@@ -290,10 +290,6 @@ pub async fn create_conversation(
             "owner_user_id": &owner_id,
             "target_org_id": body.target_org_id,
         })),
-        None,
-        None,
-        auth_user.api_key_id.clone(),
-        auth_user.api_key_name.clone(),
     );
 
     Ok((
@@ -503,18 +499,14 @@ pub async fn update_conversation(
     )
     .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(actor),
-        "channel_conversation_updated".to_string(),
+        &auth_user,
+        "channel_conversation_updated",
         Some(serde_json::json!({
             "conversation_id": &conversation_id,
             "owner_user_id": &owner_id,
         })),
-        None,
-        None,
-        auth_user.api_key_id.clone(),
-        auth_user.api_key_name.clone(),
     );
 
     Ok(Json(conversation_to_item(&updated)))
@@ -544,18 +536,14 @@ pub async fn delete_conversation(
         },
     );
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(actor),
-        "channel_conversation_deleted".to_string(),
+        &auth_user,
+        "channel_conversation_deleted",
         Some(serde_json::json!({
             "conversation_id": &conversation_id,
             "owner_user_id": &owner_id,
         })),
-        None,
-        None,
-        auth_user.api_key_id.clone(),
-        auth_user.api_key_name.clone(),
     );
 
     Ok(StatusCode::NO_CONTENT)

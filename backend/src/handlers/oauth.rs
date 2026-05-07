@@ -1101,15 +1101,12 @@ async fn issue_authorization_code(
     }
 
     // Audit log the authorization code issuance
-    audit_service::log_async(
+    let _ = user_id_str;
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id_str),
-        "oauth_code_issued".to_string(),
+        auth_user,
+        "oauth_code_issued",
         Some(event_data),
-        None,
-        None,
-        None,
-        None,
     );
 
     Ok(code)
@@ -1277,8 +1274,8 @@ async fn token_inner(
                             .as_ref()
                             .map(|external_subject| external_subject.platform.clone()),
                     })),
-                    None,
-                    None,
+                    crate::handlers::admin_helpers::extract_ip(headers),
+                    crate::handlers::admin_helpers::extract_user_agent(headers),
                     None,
                     None,
                 );
@@ -1427,8 +1424,8 @@ async fn token_inner(
                         "client_id": client_id,
                         "scope": &result.scope,
                     })),
-                    None,
-                    None,
+                    crate::handlers::admin_helpers::extract_ip(headers),
+                    crate::handlers::admin_helpers::extract_user_agent(headers),
                     None,
                     None,
                 );
@@ -1549,8 +1546,8 @@ async fn token_inner(
                             .as_deref()
                             .map(|jkt| jkt.chars().take(16).collect::<String>()),
                     })),
-                    None,
-                    None,
+                    crate::handlers::admin_helpers::extract_ip(headers),
+                    crate::handlers::admin_helpers::extract_user_agent(headers),
                     None,
                     None,
                 );
@@ -2026,8 +2023,8 @@ pub async fn delete_binding(
                 "binding_hash": oauth_broker_service::binding_hash_prefix(&binding_hash),
                 "reason": "client_revoked",
             })),
-            None,
-            None,
+            crate::handlers::admin_helpers::extract_ip(&headers),
+            crate::handlers::admin_helpers::extract_user_agent(&headers),
             None,
             None,
         );
@@ -2101,8 +2098,8 @@ pub async fn revoke(
                     "binding_hash": oauth_broker_service::binding_hash_prefix(&binding_hash),
                     "reason": "client_revoked",
                 })),
-                None,
-                None,
+                crate::handlers::admin_helpers::extract_ip(&headers),
+                crate::handlers::admin_helpers::extract_user_agent(&headers),
                 None,
                 None,
             );

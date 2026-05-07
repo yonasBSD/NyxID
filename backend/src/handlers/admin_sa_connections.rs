@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
-use crate::handlers::admin_helpers::{extract_ip, extract_user_agent, require_admin};
+use crate::handlers::admin_helpers::require_admin;
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
@@ -155,7 +155,7 @@ pub async fn list_sa_connections(
 pub async fn connect_sa_service(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path((sa_id, service_id)): Path<(String, String)>,
     Json(body): Json<AdminSaConnectRequest>,
 ) -> AppResult<Json<AdminSaConnectResponse>> {
@@ -181,19 +181,15 @@ pub async fn connect_sa_service(
     )
     .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin.sa.service_connected".to_string(),
+        &auth_user,
+        "admin.sa.service_connected",
         Some(serde_json::json!({
             "target_sa_id": &sa_id,
             "service_id": &service_id,
             "has_credential": body.credential.is_some(),
         })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
-        None,
-        None,
     );
 
     Ok(Json(AdminSaConnectResponse {
@@ -209,7 +205,7 @@ pub async fn connect_sa_service(
 pub async fn update_sa_connection_credential(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path((sa_id, service_id)): Path<(String, String)>,
     Json(body): Json<AdminSaUpdateCredentialRequest>,
 ) -> AppResult<Json<AdminSaConnectionActionResponse>> {
@@ -233,18 +229,14 @@ pub async fn update_sa_connection_credential(
     )
     .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin.sa.service_credential_updated".to_string(),
+        &auth_user,
+        "admin.sa.service_credential_updated",
         Some(serde_json::json!({
             "target_sa_id": &sa_id,
             "service_id": &service_id,
         })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
-        None,
-        None,
     );
 
     Ok(Json(AdminSaConnectionActionResponse {
@@ -258,7 +250,7 @@ pub async fn update_sa_connection_credential(
 pub async fn disconnect_sa_service(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path((sa_id, service_id)): Path<(String, String)>,
 ) -> AppResult<Json<AdminSaConnectionActionResponse>> {
     require_admin(&state, &auth_user).await?;
@@ -275,18 +267,14 @@ pub async fn disconnect_sa_service(
 
     connection_service::disconnect_user(&state.db, &sa_id, &service_id).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin.sa.service_disconnected".to_string(),
+        &auth_user,
+        "admin.sa.service_disconnected",
         Some(serde_json::json!({
             "target_sa_id": &sa_id,
             "service_id": &service_id,
         })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
-        None,
-        None,
     );
 
     Ok(Json(AdminSaConnectionActionResponse {

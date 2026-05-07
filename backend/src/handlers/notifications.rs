@@ -142,10 +142,10 @@ pub async fn update_settings(
 
     let updated = notification_service::get_or_create_channel(&state.db, &user_id).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id),
-        "notification_settings_updated".to_string(),
+        &auth_user,
+        "notification_settings_updated",
         Some(serde_json::json!({
             "telegram_enabled": updated.telegram_enabled,
             "approval_required": updated.approval_required,
@@ -153,10 +153,6 @@ pub async fn update_settings(
             "grant_expiry_days": updated.grant_expiry_days,
             "push_enabled": updated.push_enabled,
         })),
-        None,
-        None,
-        None,
-        None,
     );
 
     Ok(Json(to_settings_response(&updated)))
@@ -262,19 +258,15 @@ pub async fn telegram_disconnect(
 
     let approval_disabled = no_push_channel && channel.approval_required;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id.clone()),
-        "telegram_disconnected".to_string(),
+        &auth_user,
+        "telegram_disconnected",
         if approval_disabled {
             Some(serde_json::json!({ "approval_auto_disabled": true }))
         } else {
             None
         },
-        None,
-        None,
-        None,
-        None,
     );
 
     // Telemetry: notification.channel_unlinked (Telegram). Only emit

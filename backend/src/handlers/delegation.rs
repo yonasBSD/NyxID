@@ -54,18 +54,14 @@ pub async fn refresh_delegation_token(
         },
     );
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id_str),
-        "delegation_token_refreshed".to_string(),
+        &auth_user,
+        "delegation_token_refreshed",
         Some(serde_json::json!({
             "acting_client_id": acting_client_id,
             "scope": &result.scope,
         })),
-        None,
-        None,
-        None,
-        None,
     );
 
     Ok(Json(DelegationRefreshResponse {

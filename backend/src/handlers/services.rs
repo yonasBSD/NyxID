@@ -1028,15 +1028,11 @@ pub async fn create_service(
     tracing::info!(service_id = %id, name = %body.name, created_by = %auth_user.user_id, "Service created");
 
     // CR-1: Audit log for service creation
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id_str.clone()),
-        "service_created".to_string(),
+        &auth_user,
+        "service_created",
         Some(serde_json::json!({ "service_id": &id, "name": &body.name })),
-        None,
-        None,
-        None,
-        None,
     );
 
     emit_event(
@@ -1144,15 +1140,11 @@ pub async fn delete_service(
     tracing::info!(service_id = %service_id, deactivated_by = %auth_user.user_id, "Service deactivated");
 
     // CR-1: Audit log for service deletion
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "service_deleted".to_string(),
+        &auth_user,
+        "service_deleted",
         Some(serde_json::json!({ "service_id": &service_id })),
-        None,
-        None,
-        None,
-        None,
     );
 
     // CR-16: Use typed response struct
@@ -1836,33 +1828,25 @@ pub async fn update_service(
     tracing::info!(service_id = %service_id, updated_by = %auth_user.user_id, "Service updated");
 
     // CR-1: Audit log for service update
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "service_updated".to_string(),
+        &auth_user,
+        "service_updated",
         Some(serde_json::json!({ "service_id": &service_id })),
-        None,
-        None,
-        None,
-        None,
     );
 
     // Per-change audit for default_request_headers mutations. Values are
     // deliberately *never* logged — only the set of header names — so even
     // misconfigured "sensitive" defaults don't leak into the audit store.
     if default_headers_changed {
-        audit_service::log_async(
+        audit_service::log_for_user(
             state.db.clone(),
-            Some(auth_user.user_id.to_string()),
-            "service_default_headers_updated".to_string(),
+            &auth_user,
+            "service_default_headers_updated",
             Some(serde_json::json!({
                 "service_id": &service_id,
                 "header_names": default_headers_payload_names,
             })),
-            None,
-            None,
-            None,
-            None,
         );
     }
 
@@ -1951,15 +1935,11 @@ pub async fn get_oidc_credentials(
     );
 
     // CR-1/SEC-4: Audit log for credential access
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "oidc_credentials_accessed".to_string(),
+        &auth_user,
+        "oidc_credentials_accessed",
         Some(serde_json::json!({ "service_id": &service_id })),
-        None,
-        None,
-        None,
-        None,
     );
 
     Ok(Json(OidcCredentialsResponse {
@@ -2065,15 +2045,11 @@ pub async fn update_redirect_uris(
     );
 
     // CR-1: Audit log for redirect URI update
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "redirect_uris_updated".to_string(),
+        &auth_user,
+        "redirect_uris_updated",
         Some(serde_json::json!({ "service_id": &service_id })),
-        None,
-        None,
-        None,
-        None,
     );
 
     Ok(Json(RedirectUrisResponse {
@@ -2163,15 +2139,11 @@ pub async fn regenerate_oidc_secret(
     );
 
     // CR-1/SEC-4: Audit log for secret regeneration
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "oidc_secret_regenerated".to_string(),
+        &auth_user,
+        "oidc_secret_regenerated",
         Some(serde_json::json!({ "service_id": &service_id })),
-        None,
-        None,
-        None,
-        None,
     );
 
     Ok(Json(RegenerateSecretResponse {

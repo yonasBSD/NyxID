@@ -1,8 +1,4 @@
-use axum::{
-    Json,
-    extract::State,
-    http::{HeaderMap, header},
-};
+use axum::{Json, extract::State, http::HeaderMap};
 use mongodb::bson::{self, doc};
 use serde::{Deserialize, Serialize};
 
@@ -49,21 +45,6 @@ pub struct UpdateProfileResponse {
 pub struct DeleteAccountResponse {
     pub status: String,
     pub deleted_at: String,
-}
-
-fn extract_ip(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.split(',').next().unwrap_or("").trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
-fn extract_user_agent(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get(header::USER_AGENT)
-        .and_then(|v| v.to_str().ok())
-        .map(String::from)
 }
 
 // --- Handlers ---
@@ -176,7 +157,7 @@ pub async fn delete_me(
     State(state): State<AppState>,
     auth_user: AuthUser,
     tele: TelemetryContext,
-    headers: HeaderMap,
+    _headers: HeaderMap,
 ) -> AppResult<Json<DeleteAccountResponse>> {
     let user_id = auth_user.user_id.to_string();
 
@@ -210,15 +191,11 @@ pub async fn delete_me(
     admin_user_service::delete_current_user_cascade(&state.db, &user_id).await?;
 
     let deleted_at = chrono::Utc::now().to_rfc3339();
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id.clone()),
-        "user.account.deleted".to_string(),
+        &auth_user,
+        "user.account.deleted",
         Some(serde_json::json!({ "self_service": true })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
-        None,
-        None,
     );
 
     // Telemetry: emit user.deleted AFTER the DB cascade so the event's

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::errors::AppResult;
-use crate::handlers::admin_helpers::{extract_ip, extract_user_agent, require_admin};
+use crate::handlers::admin_helpers::require_admin;
 use crate::models::role::Role;
 use crate::mw::auth::AuthUser;
 use crate::services::{audit_service, role_service};
@@ -123,7 +123,7 @@ pub async fn list_roles(
 pub async fn create_role(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Json(body): Json<CreateRoleRequest>,
 ) -> AppResult<Json<RoleResponse>> {
     require_admin(&state, &auth_user).await?;
@@ -145,18 +145,14 @@ pub async fn create_role(
     )
     .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin.role.created".to_string(),
+        &auth_user,
+        "admin.role.created",
         Some(serde_json::json!({
             "role_id": &role.id,
             "role_slug": &role.slug,
         })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
-        None,
-        None,
     );
 
     Ok(Json(role_to_response(role)))
@@ -178,7 +174,7 @@ pub async fn get_role(
 pub async fn update_role(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path(role_id): Path<String>,
     Json(body): Json<UpdateRoleRequest>,
 ) -> AppResult<Json<RoleResponse>> {
@@ -195,18 +191,14 @@ pub async fn update_role(
     )
     .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin.role.updated".to_string(),
+        &auth_user,
+        "admin.role.updated",
         Some(serde_json::json!({
             "role_id": &role_id,
             "role_slug": &role.slug,
         })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
-        None,
-        None,
     );
 
     Ok(Json(role_to_response(role)))
@@ -216,22 +208,18 @@ pub async fn update_role(
 pub async fn delete_role(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path(role_id): Path<String>,
 ) -> AppResult<Json<RoleAssignmentResponse>> {
     require_admin(&state, &auth_user).await?;
 
     role_service::delete_role(&state.db, &role_id).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin.role.deleted".to_string(),
+        &auth_user,
+        "admin.role.deleted",
         Some(serde_json::json!({ "role_id": &role_id })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
-        None,
-        None,
     );
 
     Ok(Json(RoleAssignmentResponse {
@@ -286,25 +274,21 @@ pub async fn get_user_roles(
 pub async fn assign_role(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path((user_id, role_id)): Path<(String, String)>,
 ) -> AppResult<Json<RoleAssignmentResponse>> {
     require_admin(&state, &auth_user).await?;
 
     role_service::assign_role_to_user(&state.db, &user_id, &role_id).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin.role.assigned".to_string(),
+        &auth_user,
+        "admin.role.assigned",
         Some(serde_json::json!({
             "target_user_id": &user_id,
             "role_id": &role_id,
         })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
-        None,
-        None,
     );
 
     Ok(Json(RoleAssignmentResponse {
@@ -316,25 +300,21 @@ pub async fn assign_role(
 pub async fn revoke_role(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path((user_id, role_id)): Path<(String, String)>,
 ) -> AppResult<Json<RoleAssignmentResponse>> {
     require_admin(&state, &auth_user).await?;
 
     role_service::revoke_role_from_user(&state.db, &user_id, &role_id).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin.role.revoked".to_string(),
+        &auth_user,
+        "admin.role.revoked",
         Some(serde_json::json!({
             "target_user_id": &user_id,
             "role_id": &role_id,
         })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
-        None,
-        None,
     );
 
     Ok(Json(RoleAssignmentResponse {
@@ -346,7 +326,7 @@ pub async fn revoke_role(
 pub async fn bulk_assign_role(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path(role_id): Path<String>,
     Json(body): Json<BulkAssignRequest>,
 ) -> AppResult<Json<BulkAssignResponse>> {
@@ -371,10 +351,10 @@ pub async fn bulk_assign_role(
 
     let result = role_service::bulk_assign_role(&state.db, &role_id, user_ids_opt).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin.role.bulk_assigned".to_string(),
+        &auth_user,
+        "admin.role.bulk_assigned",
         Some(serde_json::json!({
             "role_id": &role_id,
             "all": body.all,
@@ -382,10 +362,6 @@ pub async fn bulk_assign_role(
             "assigned_count": result.assigned_count,
             "already_assigned_count": result.already_assigned_count,
         })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
-        None,
-        None,
     );
 
     Ok(Json(BulkAssignResponse {

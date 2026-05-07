@@ -132,17 +132,13 @@ pub async fn set_my_credentials(
     )
     .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id_str.clone()),
-        "user_credentials_set".to_string(),
+        &auth_user,
+        "user_credentials_set",
         Some(serde_json::json!({
             "provider_id": &provider_id,
         })),
-        None,
-        None,
-        None,
-        None,
     );
 
     // Intentionally NO `ServiceConnected` emit here. This endpoint manages
@@ -175,17 +171,13 @@ pub async fn delete_my_credentials(
     user_credentials_service::delete_user_credentials(&state.db, &user_id_str, &provider_id)
         .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id_str.clone()),
-        "user_credentials_deleted".to_string(),
+        &auth_user,
+        "user_credentials_deleted",
         Some(serde_json::json!({
             "provider_id": &provider_id,
         })),
-        None,
-        None,
-        None,
-        None,
     );
 
     // Intentionally NO `ServiceDisconnected` emit here. See the matching

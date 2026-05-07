@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use axum::{
     Form, Json,
     extract::{Path, Query, State},
+    http::HeaderMap,
 };
 use serde::{Deserialize, Serialize};
 
@@ -230,18 +231,14 @@ pub async fn connect_api_key(
     .await?;
     sync_provider_credentials_to_unified_keys(&state, &user_id_str, &provider_id, true).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id_str),
-        "provider_token_connected".to_string(),
+        &auth_user,
+        "provider_token_connected",
         Some(serde_json::json!({
             "provider_id": &provider_id,
             "token_type": "api_key",
         })),
-        None,
-        None,
-        None,
-        None,
     );
 
     Ok(Json(ConnectResponse {
@@ -304,18 +301,14 @@ pub async fn initiate_oauth_connect(
     )
     .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id_str),
-        "provider_oauth_initiated".to_string(),
+        &auth_user,
+        "provider_oauth_initiated",
         Some(serde_json::json!({
             "provider_id": &provider_id,
             "additional_scope_count": additional_scopes.len(),
         })),
-        None,
-        None,
-        None,
-        None,
     );
 
     Ok(Json(OAuthInitiateResponse {
@@ -328,6 +321,7 @@ pub async fn oauth_callback(
     State(state): State<AppState>,
     Path(provider_id): Path<String>,
     Query(query): Query<OAuthCallbackQuery>,
+    headers: HeaderMap,
 ) -> AppResult<Json<ConnectResponse>> {
     let token = user_token_service::handle_oauth_callback(
         &state.db,
@@ -347,8 +341,8 @@ pub async fn oauth_callback(
             "provider_id": &provider_id,
             "token_type": "oauth2",
         })),
-        None,
-        None,
+        crate::handlers::admin_helpers::extract_ip(&headers),
+        crate::handlers::admin_helpers::extract_user_agent(&headers),
         None,
         None,
     );
@@ -418,10 +412,10 @@ async fn generic_oauth_callback_impl(
                 "failed_placeholders": failed_placeholders,
                 "state_lookup_error": state_lookup_error,
             })),
-            None,
-            None,
-            None,
-            None,
+            auth_user.as_ref().and_then(|u| u.ip_address.clone()),
+            auth_user.as_ref().and_then(|u| u.user_agent.clone()),
+            auth_user.as_ref().and_then(|u| u.api_key_id.clone()),
+            auth_user.as_ref().and_then(|u| u.api_key_name.clone()),
         );
         return redirect_callback(frontend_url, "error", Some(&msg));
     }
@@ -448,10 +442,10 @@ async fn generic_oauth_callback_impl(
                 auth_user.as_ref().map(|u| u.user_id.to_string()),
                 "provider_oauth_callback_failed".to_string(),
                 Some(serde_json::json!({ "error": e.to_string() })),
-                None,
-                None,
-                None,
-                None,
+                auth_user.as_ref().and_then(|u| u.ip_address.clone()),
+                auth_user.as_ref().and_then(|u| u.user_agent.clone()),
+                auth_user.as_ref().and_then(|u| u.api_key_id.clone()),
+                auth_user.as_ref().and_then(|u| u.api_key_name.clone()),
             );
             return redirect_callback(
                 frontend_url,
@@ -521,10 +515,10 @@ async fn generic_oauth_callback_impl(
                 "on_behalf_of": &oauth_state.target_user_id,
                 "failed_placeholders": failed_placeholders,
             })),
-            None,
-            None,
-            None,
-            None,
+            auth_user.as_ref().and_then(|u| u.ip_address.clone()),
+            auth_user.as_ref().and_then(|u| u.user_agent.clone()),
+            auth_user.as_ref().and_then(|u| u.api_key_id.clone()),
+            auth_user.as_ref().and_then(|u| u.api_key_name.clone()),
         );
         return redirect_callback(frontend_url, "error", Some(&message));
     }
@@ -551,10 +545,10 @@ async fn generic_oauth_callback_impl(
                     "token_type": "oauth2",
                     "on_behalf_of": &oauth_state.target_user_id,
                 })),
-                None,
-                None,
-                None,
-                None,
+                auth_user.as_ref().and_then(|u| u.ip_address.clone()),
+                auth_user.as_ref().and_then(|u| u.user_agent.clone()),
+                auth_user.as_ref().and_then(|u| u.api_key_id.clone()),
+                auth_user.as_ref().and_then(|u| u.api_key_name.clone()),
             );
 
             if let Err(error) =
@@ -592,10 +586,10 @@ async fn generic_oauth_callback_impl(
                         "reason": "failed_to_sync_unified_keys",
                         "failed_placeholders": failed_placeholders,
                     })),
-                    None,
-                    None,
-                    None,
-                    None,
+                    auth_user.as_ref().and_then(|u| u.ip_address.clone()),
+                    auth_user.as_ref().and_then(|u| u.user_agent.clone()),
+                    auth_user.as_ref().and_then(|u| u.api_key_id.clone()),
+                    auth_user.as_ref().and_then(|u| u.api_key_name.clone()),
                 );
                 if let Some(ref path) = redirect_path {
                     return redirect_to_path(frontend_url, path, "error", Some(&user_msg));
@@ -645,10 +639,10 @@ async fn generic_oauth_callback_impl(
                     "on_behalf_of": &oauth_state.target_user_id,
                     "failed_placeholders": failed_placeholders,
                 })),
-                None,
-                None,
-                None,
-                None,
+                auth_user.as_ref().and_then(|u| u.ip_address.clone()),
+                auth_user.as_ref().and_then(|u| u.user_agent.clone()),
+                auth_user.as_ref().and_then(|u| u.api_key_id.clone()),
+                auth_user.as_ref().and_then(|u| u.api_key_name.clone()),
             );
             // Sanitize error for user-facing redirect -- never leak internal details
             if let Some(ref path) = redirect_path {
@@ -741,15 +735,11 @@ pub async fn disconnect_provider(
         event_data["on_behalf_of"] = serde_json::Value::String(effective_user_id.to_string());
     }
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(effective_user_id.to_string()),
-        "provider_token_disconnected".to_string(),
+        &auth_user,
+        "provider_token_disconnected",
         Some(event_data),
-        None,
-        None,
-        None,
-        None,
     );
 
     Ok(Json(ConnectResponse {
@@ -789,15 +779,11 @@ pub async fn manual_refresh(
         event_data["on_behalf_of"] = serde_json::Value::String(effective_user_id.to_string());
     }
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(effective_user_id.to_string()),
-        "provider_token_refreshed".to_string(),
+        &auth_user,
+        "provider_token_refreshed",
         Some(event_data),
-        None,
-        None,
-        None,
-        None,
     );
 
     Ok(Json(ConnectResponse {
@@ -833,18 +819,14 @@ pub async fn request_device_code(
     )
     .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id_str),
-        "provider_device_code_initiated".to_string(),
+        &auth_user,
+        "provider_device_code_initiated",
         Some(serde_json::json!({
             "provider_id": &provider_id,
             "additional_scope_count": additional_scopes.len(),
         })),
-        None,
-        None,
-        None,
-        None,
     );
 
     Ok(Json(DeviceCodeInitiateResponse {
@@ -891,15 +873,11 @@ pub async fn poll_device_code(
         if effective_user_id != user_id_str {
             event_data["on_behalf_of"] = serde_json::Value::String(effective_user_id.to_string());
         }
-        audit_service::log_async(
+        audit_service::log_for_user(
             state.db.clone(),
-            Some(effective_user_id.to_string()),
-            "provider_token_connected".to_string(),
+            &auth_user,
+            "provider_token_connected",
             Some(event_data),
-            None,
-            None,
-            None,
-            None,
         );
     }
 
@@ -952,19 +930,15 @@ pub async fn telegram_callback(
     )
     .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id_str),
-        "provider_token_connected".to_string(),
+        &auth_user,
+        "provider_token_connected",
         Some(serde_json::json!({
             "provider_id": &provider_id,
             "token_type": "telegram_identity",
             "telegram_user_id": body.id,
         })),
-        None,
-        None,
-        None,
-        None,
     );
 
     Ok(Json(ConnectResponse {
@@ -1092,6 +1066,8 @@ mod tests {
             api_key_name: None,
             rate_limit_per_second: None,
             rate_limit_burst: None,
+            ip_address: None,
+            user_agent: None,
         }
     }
 

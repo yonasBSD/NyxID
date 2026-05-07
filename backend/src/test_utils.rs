@@ -280,6 +280,8 @@ pub(crate) fn test_auth_user(user_id: &str) -> AuthUser {
         api_key_name: None,
         rate_limit_per_second: None,
         rate_limit_burst: None,
+        ip_address: None,
+        user_agent: None,
     }
 }
 
