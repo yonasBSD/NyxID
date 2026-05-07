@@ -143,16 +143,23 @@ To stop NyxID: `docker compose -f docker-compose.yml -f docker-compose.prod.yml 
 
 The server stack above is fully usable from the web console — the CLI (Command Line Interface) is only needed if you want to script credential setup, manage credential nodes, or drive NyxID from your terminal. Skip this section if you'd rather stay in the browser.
 
-The prebuilt installer downloads the attested release binary into `~/.local/bin` in seconds. It does not require Rust or a Node toolchain.
+The installer downloads an attested prebuilt release binary in seconds, installs it into a versioned layout under `~/.local/share/nyxid/versions`, and links `~/.local/bin/nyxid` to the active version. It does not require Rust or a Node toolchain.
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/ChronoAIProject/NyxID/releases/latest/download/nyxid-cli-installer.sh | sh
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/scripts/install.sh)"
 export PATH="$HOME/.local/bin:$PATH"             # make nyxid available in current shell
 nyxid --version                                   # verify
+nyxid doctor                                      # inspect install, auth, release, and update-check state
 ```
 
-> **Power user / unsupported platform fallback:** if no prebuilt binary exists for your OS and CPU architecture, run `bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/scripts/install.sh)"`. That wrapper uses the prebuilt installer first and falls back to `cargo install --git https://github.com/ChronoAIProject/NyxID.git nyxid-cli --locked` only when necessary. You can also run the Cargo command manually if you are developing the CLI or need an unsupported target, but it requires Rust and a source build.
+For rollback and local install inspection:
+
+```bash
+nyxid update --list-versions
+nyxid update --rollback
+```
+
+> **Power user / unsupported platform fallback:** the installer falls back to `cargo install --git https://github.com/ChronoAIProject/NyxID.git nyxid-cli --locked` only when no prebuilt binary exists for your OS and CPU architecture. You can also run the Cargo command manually if you are developing the CLI or need an unsupported target, but it requires Rust and a source build.
 
 ---
 
