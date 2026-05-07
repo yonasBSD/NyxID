@@ -38,6 +38,11 @@ jobs:
   ci-gate:
     name: CI Gate
     uses: ./.github/workflows/ci.yml
+    with:
+      # The publish gate is a release validation, not a PR check, so path
+      # filtering must not skip anything. Force the full suite to run
+      # regardless of which files were touched in the merge commit.
+      force-all: true
 
   # ---------------------------------------------------------------------------
   # Build each component for each platform on its native runner. Each job

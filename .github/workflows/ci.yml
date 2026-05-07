@@ -9,8 +9,19 @@ on:
     # Listing main twice would cause CI to run on every merge commit twice.
     branches: [dev]
   # Allow other workflows (publish-images, release) to reuse this one as a
-  # gate via `uses: ./.github/workflows/ci.yml`.
+  # gate via `uses: ./.github/workflows/ci.yml`. Callers should pass
+  # `force-all: true` to skip path filtering and run the full suite as a
+  # release/publish gate.
   workflow_call:
+    inputs:
+      force-all:
+        description: >-
+          When true, run every job regardless of which paths changed.
+          Used by publish-images.yml so a release-gate run is always a
+          full validation.
+        type: boolean
+        default: false
+        required: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -22,10 +33,105 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
+  # Detect which areas of the monorepo changed so downstream jobs can skip
+  # work that isn't relevant to this PR. Always runs first; outputs feed the
+  # `if:` guards on every other job.
+  #
+  # Filter conventions:
+  #   - `backend` = backend crate OR shared workspace files (root
+  #                 Cargo.toml/Cargo.lock/nextest config)
+  #   - `cli`     = cli crate OR shared workspace files
+  #     => a Cargo.lock change fires BOTH `backend` and `cli`, since they
+  #        are members of the same `[workspace]` and share the lock file.
+  #   - `rust`    = backend OR cli OR shared workspace files (workspace-wide
+  #                 fmt + clippy)
+  #   - `wizard`  = anything that could change the committed wizard bundle
+  #                 hash (frontend sources, .node-version, cli wizard glue)
+  #   - `ci`      = this workflow itself; forces a full run when changed
+  # ---------------------------------------------------------------------------
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      cli: ${{ steps.filter.outputs.cli }}
+      rust: ${{ steps.filter.outputs.rust }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+      sdk: ${{ steps.filter.outputs.sdk }}
+      wizard: ${{ steps.filter.outputs.wizard }}
+      ci: ${{ steps.filter.outputs.ci }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          # Shared workspace files (Cargo.toml / Cargo.lock / nextest config)
+          # are duplicated into both `backend` and `cli` filters by design:
+          # any change to the shared lock file must retest both crates,
+          # since they are members of the same `[workspace]`.
+          # YAML anchors aren't used here -- aliased sequences expand to
+          # nested lists in js-yaml, which paths-filter does not flatten.
+          filters: |
+            backend:
+              - 'backend/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - '.cargo/**'
+              - '.config/nextest.toml'
+            cli:
+              - 'cli/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - '.cargo/**'
+              - '.config/nextest.toml'
+            rust:
+              # `mcp-demo` is the third workspace member; workspace-wide
+              # fmt + clippy must re-run on changes there even though no
+              # job currently builds or tests it directly.
+              - 'backend/**'
+              - 'cli/**'
+              - 'mcp-demo/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - '.cargo/**'
+              - '.config/nextest.toml'
+            frontend:
+              - 'frontend/**'
+              - '.node-version'
+            sdk:
+              - 'sdk/**'
+              - '.node-version'
+            # Inputs hashed by `cli/tests/wizard_bundle_freshness.rs`:
+            #   - every file listed in `cli/src/wizard/bundle-meta/index.manifest`
+            #     (always under `frontend/`).
+            #   - EXTRAS: `frontend/package-lock.json`,
+            #     `frontend/vite.wizard.config.ts`, `frontend/wizard.html`,
+            #     `frontend/vite-plugins/wizard-manifest.ts`, `.node-version`.
+            #   - the committed manifest + hash files themselves.
+            #   - the test source file.
+            # Keep this filter a superset of the EXTRAS list in that test.
+            wizard:
+              - 'frontend/**'
+              - '.node-version'
+              - 'cli/src/wizard/**'
+              - 'cli/tests/wizard_bundle_freshness.rs'
+            # Any workflow change forces a full run -- stops a broken
+            # publish-gate or release pipeline from sneaking through under
+            # path filtering.
+            ci:
+              - '.github/workflows/**'
+              - '.github/actions/**'
+
+  # ---------------------------------------------------------------------------
   # Rust: format check
   # ---------------------------------------------------------------------------
   rust-fmt:
     name: Rust Format
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -39,6 +145,8 @@ jobs:
   # ---------------------------------------------------------------------------
   rust-clippy:
     name: Rust Clippy
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -60,6 +168,8 @@ jobs:
   # ---------------------------------------------------------------------------
   backend-test:
     name: Backend Test
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     services:
       mongodb:
@@ -99,6 +209,8 @@ jobs:
   # ---------------------------------------------------------------------------
   cli-test:
     name: CLI Test
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.cli == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -124,10 +236,12 @@ jobs:
           show: all
 
   # ---------------------------------------------------------------------------
-  # Rust: build with feature flags (KMS providers)
+  # Rust: build with feature flags (KMS providers). Backend-only build.
   # ---------------------------------------------------------------------------
   rust-features:
     name: Rust Features (${{ matrix.features }})
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -155,6 +269,8 @@ jobs:
   # ---------------------------------------------------------------------------
   frontend:
     name: Frontend
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -183,7 +299,7 @@ jobs:
   # `cli/src/wizard/bundle-meta/index.hash`.
   #
   # This job recomputes the hash from sources and fails if it no longer
-  # matches the committed hash — i.e. someone edited wizard source without
+  # matches the committed hash -- i.e. someone edited wizard source without
   # running `npm --prefix frontend run build:wizard`. Because the check is
   # source-only, it is immune to byte-level non-determinism between Vite /
   # esbuild versions that previously caused spurious failures on unrelated
@@ -193,6 +309,8 @@ jobs:
   # ---------------------------------------------------------------------------
   wizard-bundle-freshness:
     name: CLI Wizard Bundle Freshness
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.wizard == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -210,6 +328,8 @@ jobs:
   # ---------------------------------------------------------------------------
   sdk:
     name: SDK Build
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.sdk == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -223,3 +343,59 @@ jobs:
           cache-dependency-path: sdk/package-lock.json
       - run: npm ci
       - run: npm run build
+
+  # ---------------------------------------------------------------------------
+  # Aggregator: a single status check that summarises the whole pipeline.
+  #
+  # Branch protection / required-checks rules should require ONLY this job by
+  # name (`CI Pipeline`). Conditional jobs above may legitimately be skipped
+  # (e.g. a docs-only PR), and listing them individually as required would
+  # leave PRs stuck pending. This job runs unconditionally (`if: always()`)
+  # and treats `success` and `skipped` as OK; `failure` or `cancelled` in
+  # any upstream job fails the gate.
+  #
+  # Reference: https://devopsdirective.com/posts/2025/08/github-actions-required-checks-for-conditional-jobs/
+  # ---------------------------------------------------------------------------
+  ci-pass:
+    name: CI Pipeline
+    if: always()
+    needs:
+      - changes
+      - rust-fmt
+      - rust-clippy
+      - backend-test
+      - cli-test
+      - rust-features
+      - frontend
+      - wizard-bundle-freshness
+      - sdk
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all jobs succeeded or were skipped intentionally
+        env:
+          RESULTS: |
+            changes=${{ needs.changes.result }}
+            rust-fmt=${{ needs.rust-fmt.result }}
+            rust-clippy=${{ needs.rust-clippy.result }}
+            backend-test=${{ needs.backend-test.result }}
+            cli-test=${{ needs.cli-test.result }}
+            rust-features=${{ needs.rust-features.result }}
+            frontend=${{ needs.frontend.result }}
+            wizard-bundle-freshness=${{ needs.wizard-bundle-freshness.result }}
+            sdk=${{ needs.sdk.result }}
+        run: |
+          set -eu
+          echo "Job results:"
+          echo "$RESULTS" | sed 's/^/  /'
+          failed=0
+          while IFS='=' read -r job result; do
+            [ -z "$job" ] && continue
+            case "$result" in
+              success|skipped) ;;
+              *)
+                echo "::error::Job '$job' did not pass (result=$result)"
+                failed=1
+                ;;
+            esac
+          done <<< "$RESULTS"
+          exit "$failed"
