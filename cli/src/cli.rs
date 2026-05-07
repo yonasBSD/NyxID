@@ -320,6 +320,12 @@ pub struct UpdateArgs {
     /// Print installed and latest versions without installing anything
     #[arg(long)]
     pub check: bool,
+    /// Retarget the active nyxid symlink to the previous retained version
+    #[arg(long, conflicts_with_all = ["version", "check", "from_source", "list_versions", "skills_only"])]
+    pub rollback: bool,
+    /// Print installed prebuilt versions without downloading anything
+    #[arg(long, conflicts_with_all = ["version", "check", "from_source", "rollback", "skills_only"])]
+    pub list_versions: bool,
     /// Compile and install from source with cargo install
     #[arg(long)]
     pub from_source: bool,
