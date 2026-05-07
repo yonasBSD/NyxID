@@ -203,18 +203,18 @@ async fn update_skills(base_url: &Option<String>) -> Result<()> {
 }
 
 #[derive(Debug, Deserialize)]
-struct GitHubRelease {
-    tag_name: String,
-    assets: Vec<GitHubAsset>,
+pub(crate) struct GitHubRelease {
+    pub(crate) tag_name: String,
+    pub(crate) assets: Vec<GitHubAsset>,
 }
 
 #[derive(Debug, Deserialize)]
-struct GitHubAsset {
-    name: String,
-    browser_download_url: String,
+pub(crate) struct GitHubAsset {
+    pub(crate) name: String,
+    pub(crate) browser_download_url: String,
 }
 
-fn github_client() -> Result<reqwest::Client> {
+pub(crate) fn github_client() -> Result<reqwest::Client> {
     let mut headers = HeaderMap::new();
     headers.insert(
         USER_AGENT,
@@ -254,7 +254,7 @@ fn github_token() -> Option<String> {
         .find(|value| !value.trim().is_empty())
 }
 
-async fn resolve_release(
+pub(crate) async fn resolve_release(
     client: &reqwest::Client,
     version: Option<&str>,
 ) -> Result<Option<GitHubRelease>> {
@@ -744,7 +744,7 @@ fn expected_workflow_identity(tag: &str) -> String {
     )
 }
 
-fn normalize_release_tag(version: &str) -> Result<String> {
+pub(crate) fn normalize_release_tag(version: &str) -> Result<String> {
     let version = version.trim();
     let version = version.strip_prefix('v').unwrap_or(version);
 

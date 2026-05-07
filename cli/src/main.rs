@@ -9,6 +9,7 @@ mod skill_self_heal;
 mod telemetry;
 #[cfg(test)]
 mod test_support;
+mod update_check;
 mod wizard;
 
 use anyhow::Result;
@@ -76,6 +77,7 @@ async fn main() {
     // user's command runs. Failures here never block the command.
     skill_self_heal::maybe_self_heal(&cli.command).await;
 
+    let update_notice = update_check::start_update_notice(&cli.command);
     let result = run(cli).await;
 
     if let Some(client) = tele_client.as_mut() {
@@ -90,6 +92,10 @@ async fn main() {
                 arch: std::env::consts::ARCH,
             })
             .await;
+    }
+
+    if result.is_ok() {
+        update_check::maybe_print_update_notice(update_notice).await;
     }
 
     if let Err(e) = result {
