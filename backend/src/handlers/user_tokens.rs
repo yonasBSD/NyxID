@@ -11,8 +11,8 @@ use crate::errors::{AppError, AppResult};
 use crate::mw::auth::{AuthUser, OptionalAuthUser};
 use crate::services::url_validation::validate_base_url;
 use crate::services::{
-    audit_service, credential_push_service, org_service, provider_service, user_api_key_service,
-    user_token_service,
+    admin_user_service, audit_service, credential_push_service, org_service, provider_service,
+    user_api_key_service, user_token_service,
 };
 
 // TODO(SEC-9): Apply stricter per-endpoint rate limiting to OAuth callback and
@@ -461,21 +461,74 @@ async fn generic_oauth_callback_impl(
         }
     };
 
-    if let Err(e) = ensure_callback_user_matches_state(auth_user.as_ref(), &oauth_state.user_id) {
+    let provider_id = &oauth_state.provider_config_id;
+
+    if let Err(_e) = ensure_callback_user_matches_state(auth_user.as_ref(), &oauth_state.user_id) {
+        let browser_session_user_id = auth_user.as_ref().map(|u| u.user_id.to_string());
+        let browser_email = match browser_session_user_id.as_deref() {
+            Some(user_id) => admin_user_service::get_user_email(&state.db, user_id)
+                .await
+                .ok()
+                .flatten(),
+            None => None,
+        };
+        let initiator_email = admin_user_service::get_user_email(&state.db, &oauth_state.user_id)
+            .await
+            .ok()
+            .flatten();
+        let message = match (initiator_email.as_deref(), browser_email.as_deref()) {
+            (Some(cli_email), Some(browser_email)) => format!(
+                "This OAuth flow was started by {}, but this browser is signed in as {}. Sign out of NyxID in this browser (or switch to the CLI account) and retry.",
+                mask_email(cli_email),
+                mask_email(browser_email)
+            ),
+            _ => "This OAuth flow was started by a different NyxID account. Sign out of NyxID in this browser (or switch to the CLI account) and retry.".to_string(),
+        };
+        let owner_id = oauth_state
+            .target_user_id
+            .as_deref()
+            .unwrap_or(&oauth_state.user_id);
+        let failed_placeholders =
+            match user_api_key_service::fail_pending_placeholders_for_provider(
+                &state.db,
+                owner_id,
+                provider_id,
+                &message,
+            )
+            .await
+            {
+                Ok(count) => Some(count),
+                Err(error) => {
+                    tracing::warn!(
+                        user_id = %owner_id,
+                        provider_id = %provider_id,
+                        error = %error,
+                        "failed to mark OAuth placeholders as failed after session mismatch"
+                    );
+                    None
+                }
+            };
         audit_service::log_async(
             state.db.clone(),
-            auth_user.as_ref().map(|u| u.user_id.to_string()),
+            Some(oauth_state.user_id.clone()),
             "provider_oauth_callback_failed".to_string(),
-            Some(serde_json::json!({ "error": e.to_string() })),
+            Some(serde_json::json!({
+                "provider_id": provider_id,
+                // Use a fixed audit error so future detailed mismatch errors cannot leak identifiers.
+                "error": "session mismatch",
+                "reason": "session_mismatch",
+                "browser_session_user_id": browser_session_user_id,
+                "on_behalf_of": &oauth_state.target_user_id,
+                "failed_placeholders": failed_placeholders,
+            })),
             None,
             None,
             None,
             None,
         );
-        return redirect_callback(frontend_url, "error", Some("Session mismatch"));
+        return redirect_callback(frontend_url, "error", Some(&message));
     }
 
-    let provider_id = &oauth_state.provider_config_id;
     let redirect_path = oauth_state.redirect_path.clone();
 
     match user_token_service::handle_oauth_callback(
@@ -933,6 +986,20 @@ fn safe_error_message(e: &AppError) -> String {
     }
 }
 
+fn mask_email(email: &str) -> String {
+    let Some((local, domain)) = email.split_once('@') else {
+        return "***".to_string();
+    };
+    let Some(first) = local.chars().next() else {
+        return "***".to_string();
+    };
+    if domain.is_empty() {
+        return "***".to_string();
+    }
+
+    format!("{first}***@{domain}")
+}
+
 fn safe_provider_error_message(error: &str, error_description: Option<&str>) -> String {
     let message = error_description.unwrap_or(error);
     safe_error_message(&AppError::BadRequest(message.to_string()))
@@ -992,6 +1059,7 @@ fn ensure_callback_user_matches_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
     use crate::models::oauth_state::{COLLECTION_NAME as OAUTH_STATES, OAuthState};
     use crate::models::org_membership::COLLECTION_NAME as ORG_MEMBERSHIPS;
     use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
@@ -1005,6 +1073,7 @@ mod tests {
     use axum::http::header::LOCATION;
     use axum::response::IntoResponse;
     use chrono::{Duration, Utc};
+    use mongodb::bson::doc;
     use uuid::Uuid;
 
     fn test_auth_user() -> AuthUser {
@@ -1157,6 +1226,28 @@ mod tests {
             .find_map(|(name, value)| (name == key).then(|| value.into_owned()))
     }
 
+    async fn wait_for_session_mismatch_audit(
+        db: &mongodb::Database,
+        browser_user_id: &str,
+    ) -> Option<AuditLog> {
+        for _ in 0..20 {
+            let found = db
+                .collection::<AuditLog>(AUDIT_LOG)
+                .find_one(doc! {
+                    "event_type": "provider_oauth_callback_failed",
+                    "event_data.reason": "session_mismatch",
+                    "event_data.browser_session_user_id": browser_user_id,
+                })
+                .await
+                .expect("query audit log");
+            if found.is_some() {
+                return found;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        None
+    }
+
     async fn spawn_oauth_token_server() -> (String, tokio::task::JoinHandle<()>) {
         let app = axum::Router::new().route(
             "/token",
@@ -1198,6 +1289,15 @@ mod tests {
             .expect_err("mismatched session should fail");
 
         assert!(matches!(err, AppError::BadRequest(message) if message == "Session mismatch"));
+    }
+
+    #[test]
+    fn mask_email_masks_local_part() {
+        assert_eq!(mask_email("alice@example.com"), "a***@example.com");
+        assert_eq!(mask_email("not-an-email"), "***");
+        assert_eq!(mask_email(""), "***");
+        assert_eq!(mask_email("a@example.com"), "a***@example.com");
+        assert_eq!(mask_email("a@b@c.com"), "a***@b@c.com");
     }
 
     #[test]
@@ -1353,6 +1453,169 @@ mod tests {
         let api_key = get_api_key(&db, &key_id).await;
         assert_eq!(api_key.status, "failed");
         assert_eq!(api_key.error_message.as_deref(), Some("access_denied"));
+    }
+
+    #[tokio::test]
+    async fn generic_oauth_callback_session_mismatch_marks_placeholder_failed() {
+        let Some(db) =
+            connect_test_database("oauth_callback_session_mismatch_marks_placeholder_failed").await
+        else {
+            eprintln!(
+                "skipping provider token handler integration test: no local MongoDB available"
+            );
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let cli_user_id = Uuid::new_v4().to_string();
+        let browser_user_id = Uuid::new_v4().to_string();
+        let provider_id = Uuid::new_v4().to_string();
+        let state_id = Uuid::new_v4().to_string();
+        let key_id = Uuid::new_v4().to_string();
+
+        let mut cli_user = test_user(&cli_user_id, UserType::Person);
+        cli_user.email = "alice@example.com".to_string();
+        let mut browser_user = test_user(&browser_user_id, UserType::Person);
+        browser_user.email = "bob@example.com".to_string();
+
+        db.collection(USERS).insert_one(cli_user).await.unwrap();
+        db.collection(USERS).insert_one(browser_user).await.unwrap();
+        db.collection::<OAuthState>(OAUTH_STATES)
+            .insert_one(test_oauth_state(&state_id, &cli_user_id, &provider_id))
+            .await
+            .unwrap();
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(test_pending_oauth_api_key(
+                &key_id,
+                &cli_user_id,
+                &provider_id,
+            ))
+            .await
+            .unwrap();
+
+        let mut auth_user = test_auth_user();
+        auth_user.user_id = Uuid::parse_str(&browser_user_id).unwrap();
+
+        let redirect = generic_oauth_callback_impl(
+            state,
+            Some(auth_user),
+            GenericOAuthCallbackQuery {
+                code: Some("oauth-code".to_string()),
+                state: Some(state_id),
+                error: None,
+                error_description: None,
+            },
+        )
+        .await;
+
+        let location = redirect_location(redirect);
+        assert_eq!(
+            redirect_query_param(&location, "status").as_deref(),
+            Some("error")
+        );
+        let message = redirect_query_param(&location, "message").expect("message query param");
+        assert!(message.starts_with("This OAuth flow was started by"));
+        assert!(message.contains("a***@example.com"));
+        assert!(message.contains("b***@example.com"));
+
+        let api_key = get_api_key(&db, &key_id).await;
+        assert_eq!(api_key.status, "failed");
+        assert!(
+            api_key
+                .error_message
+                .as_deref()
+                .is_some_and(|msg| !msg.is_empty())
+        );
+
+        let audit = wait_for_session_mismatch_audit(&db, &browser_user_id)
+            .await
+            .expect("session mismatch audit log");
+        assert_eq!(audit.user_id.as_deref(), Some(cli_user_id.as_str()));
+        assert_eq!(audit.event_type, "provider_oauth_callback_failed");
+        let event_data = audit.event_data.expect("audit event data");
+        assert_eq!(
+            event_data.get("reason").and_then(|v| v.as_str()),
+            Some("session_mismatch")
+        );
+        assert_eq!(
+            event_data.get("error").and_then(|v| v.as_str()),
+            Some("session mismatch")
+        );
+        assert_eq!(
+            event_data
+                .get("browser_session_user_id")
+                .and_then(|v| v.as_str()),
+            Some(browser_user_id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn generic_oauth_callback_session_mismatch_soft_miss_uses_fallback_message() {
+        let Some(db) = connect_test_database("oauth_callback_session_mismatch_soft_miss").await
+        else {
+            eprintln!(
+                "skipping provider token handler integration test: no local MongoDB available"
+            );
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let cli_user_id = Uuid::new_v4().to_string();
+        let browser_user_id = Uuid::new_v4().to_string();
+        let provider_id = Uuid::new_v4().to_string();
+        let state_id = Uuid::new_v4().to_string();
+        let key_id = Uuid::new_v4().to_string();
+
+        let mut cli_user = test_user(&cli_user_id, UserType::Person);
+        cli_user.email = "alice@example.com".to_string();
+
+        db.collection(USERS).insert_one(cli_user).await.unwrap();
+        db.collection::<OAuthState>(OAUTH_STATES)
+            .insert_one(test_oauth_state(&state_id, &cli_user_id, &provider_id))
+            .await
+            .unwrap();
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(test_pending_oauth_api_key(
+                &key_id,
+                &cli_user_id,
+                &provider_id,
+            ))
+            .await
+            .unwrap();
+
+        let mut auth_user = test_auth_user();
+        auth_user.user_id = Uuid::parse_str(&browser_user_id).unwrap();
+
+        let redirect = generic_oauth_callback_impl(
+            state,
+            Some(auth_user),
+            GenericOAuthCallbackQuery {
+                code: Some("oauth-code".to_string()),
+                state: Some(state_id),
+                error: None,
+                error_description: None,
+            },
+        )
+        .await;
+
+        let location = redirect_location(redirect);
+        assert_eq!(
+            redirect_query_param(&location, "status").as_deref(),
+            Some("error")
+        );
+        assert_eq!(
+            redirect_query_param(&location, "message").as_deref(),
+            Some(
+                "This OAuth flow was started by a different NyxID account. Sign out of NyxID in this browser (or switch to the CLI account) and retry."
+            )
+        );
+
+        let api_key = get_api_key(&db, &key_id).await;
+        assert_eq!(api_key.status, "failed");
+        assert!(
+            api_key
+                .error_message
+                .as_deref()
+                .is_some_and(|msg| !msg.is_empty())
+        );
     }
 
     #[tokio::test]

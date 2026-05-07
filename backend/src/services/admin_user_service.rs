@@ -29,6 +29,20 @@ const OAUTH_CLIENTS: &str = "oauth_clients";
 const SERVICE_ACCOUNTS: &str = "service_accounts";
 const SERVICE_ACCOUNT_TOKENS: &str = "service_account_tokens";
 
+/// Look up the email for `user_id` without erroring on "not found".
+///
+/// Returns `Ok(None)` if the user doesn't exist (or any other lookup
+/// failure that the caller wants to treat as a soft miss). Used by the
+/// OAuth callback handler to compose a session-mismatch message -- the
+/// callback must not block on a database read.
+pub async fn get_user_email(db: &mongodb::Database, user_id: &str) -> AppResult<Option<String>> {
+    let user = db
+        .collection::<User>(USERS)
+        .find_one(doc! { "_id": user_id })
+        .await?;
+    Ok(user.map(|u| u.email))
+}
+
 /// Create a new user (admin action).
 ///
 /// Hashes the password with Argon2id, validates email uniqueness
