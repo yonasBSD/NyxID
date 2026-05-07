@@ -44,7 +44,7 @@ export function ProvidersCallbackPage() {
           ) : (
             <>
               <XCircle className="h-12 w-12 text-destructive" />
-              <p className="text-sm text-destructive text-center">
+              <p className="text-sm text-destructive text-center break-words">
                 {errorMessage}
               </p>
               <Button

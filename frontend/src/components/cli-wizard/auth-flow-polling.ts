@@ -6,10 +6,16 @@ export function isTerminalAuthFailureStatus(
 
 interface PollOAuthKeyUntilActiveOptions {
   readonly keyId: string;
-  readonly getKey: (keyId: string) => Promise<{ readonly status: string }>;
+  readonly getKey: (keyId: string) => Promise<{
+    readonly status: string;
+    readonly error_message?: string | null;
+  }>;
   readonly completeWithKey: (keyId: string) => Promise<void>;
   readonly isCancelled: () => boolean;
-  readonly onTerminalFailure: (status: string) => void;
+  readonly onTerminalFailure: (key: {
+    readonly status: string;
+    readonly error_message?: string | null;
+  }) => void;
   readonly onTimeout: () => void;
   readonly sleepMs?: (ms: number) => Promise<void>;
   readonly nowMs?: () => number;
@@ -44,7 +50,7 @@ export async function pollOAuthKeyUntilActive({
       // exit immediately instead of waiting for the 5-minute deadline.
       if (isTerminalAuthFailureStatus(key.status)) {
         if (!isCancelled()) {
-          onTerminalFailure(key.status);
+          onTerminalFailure(key);
         }
         return;
       }

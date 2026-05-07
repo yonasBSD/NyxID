@@ -132,7 +132,10 @@ describe("cli wizard auth flows", () => {
     const getKey = vi
       .fn()
       .mockResolvedValueOnce({ status: "pending_auth" })
-      .mockResolvedValueOnce({ status: "failed" });
+      .mockResolvedValueOnce({
+        status: "failed",
+        error_message: "Session mismatch",
+      });
     const completeWithKey = vi.fn();
     const onTerminalFailure = vi.fn();
     const onTimeout = vi.fn();
@@ -150,7 +153,10 @@ describe("cli wizard auth flows", () => {
 
     expect(getKey).toHaveBeenCalledTimes(2);
     expect(completeWithKey).not.toHaveBeenCalled();
-    expect(onTerminalFailure).toHaveBeenCalledWith("failed");
+    expect(onTerminalFailure).toHaveBeenCalledWith({
+      status: "failed",
+      error_message: "Session mismatch",
+    });
     expect(onTimeout).not.toHaveBeenCalled();
   });
 

@@ -94,6 +94,7 @@ interface ActiveKeyResponse {
   readonly slug: string;
   readonly label: string;
   readonly status: string;
+  readonly error_message?: string | null;
 }
 
 interface InitiateOAuthResponse {
@@ -906,10 +907,11 @@ export function OAuthFlow({
         api.get<ActiveKeyResponse>(`/keys/${encodeURIComponent(id)}`),
       completeWithKey,
       isCancelled: () => cancelledRef.current,
-      onTerminalFailure: () => {
+      onTerminalFailure: (key) => {
         setPhase("error");
         setError(
-          "Authorization didn't complete (it may have been canceled or denied on the provider page). Cancel and re-run to try again.",
+          key.error_message?.trim() ||
+            "Authorization didn't complete (it may have been canceled or denied on the provider page). Cancel and re-run to try again.",
         );
       },
       onTimeout: () => {
