@@ -1,10 +1,13 @@
 use axum::{
+    extract::ConnectInfo,
     extract::State,
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
+    http::HeaderMap,
     response::{IntoResponse, Response},
 };
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -202,7 +205,12 @@ fn decode_binary_stream_frame(data: &[u8]) -> Result<(&str, &[u8]), &'static str
 /// Security: The global rate limiter applies to the HTTP upgrade request.
 /// Additionally, a max concurrent connections limit is enforced here.
 /// Auth tokens should only be transmitted over TLS/WSS in production.
-pub async fn ws_handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
+pub async fn ws_handler(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
     // Enforce max concurrent WebSocket connections (includes pending auth).
     // M6: This check + increment is not atomic (TOCTOU). Concurrent upgrade
     // requests could slightly exceed the limit (by 1-2 connections). This is
@@ -223,11 +231,43 @@ pub async fn ws_handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> 
         manager: state.node_ws_manager.clone(),
     };
 
-    ws.on_upgrade(|socket| handle_node_connection(state, socket, guard))
+    let ip = ws_extract_ip(&headers, Some(peer));
+    let ua = headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+
+    ws.on_upgrade(move |socket| handle_node_connection(state, socket, guard, ip, ua))
         .into_response()
 }
 
-async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: PendingAuthGuard) {
+fn ws_extract_ip(headers: &HeaderMap, peer: Option<SocketAddr>) -> Option<String> {
+    if let Some(forwarded) = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.split(',').next().unwrap_or("").trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(forwarded);
+    }
+    if let Some(real_ip) = headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(real_ip);
+    }
+    peer.map(|addr| addr.ip().to_string())
+}
+
+async fn handle_node_connection(
+    state: AppState,
+    socket: WebSocket,
+    _guard: PendingAuthGuard,
+    ip_address: Option<String>,
+    user_agent: Option<String>,
+) {
     let (mut ws_sink, mut ws_stream) = socket.split();
 
     // Wait for auth/register message with 10s timeout
@@ -257,8 +297,8 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
                         None,
                         "node_ws_auth_failed".to_string(),
                         Some(serde_json::json!({ "reason": "invalid_message_format" })),
-                        None,
-                        None,
+                        ip_address.clone(),
+                        user_agent.clone(),
                         None,
                         None,
                     );
@@ -322,10 +362,10 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
                                 None,
                                 "node_ws_auth_failed".to_string(),
                                 Some(serde_json::json!({ "reason": "registration_failed" })),
-                                None,
-                                None,
-                                None,
-                                None,
+                        ip_address.clone(),
+                        user_agent.clone(),
+                        None,
+                        None,
                             );
                             return None;
                         }
@@ -362,10 +402,10 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
                                     "reason": "node_id_mismatch",
                                     "claimed_node_id": &node_id,
                                 })),
-                                None,
-                                None,
-                                None,
-                                None,
+                        ip_address.clone(),
+                        user_agent.clone(),
+                        None,
+                        None,
                             );
                             return None;
                         }
@@ -384,10 +424,10 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
                                 None,
                                 "node_ws_auth_failed".to_string(),
                                 Some(serde_json::json!({ "reason": "invalid_auth_token" })),
-                                None,
-                                None,
-                                None,
-                                None,
+                        ip_address.clone(),
+                        user_agent.clone(),
+                        None,
+                        None,
                             );
                             return None;
                         }
@@ -407,8 +447,8 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
                         None,
                         "node_ws_auth_failed".to_string(),
                         Some(serde_json::json!({ "reason": "unexpected_first_message" })),
-                        None,
-                        None,
+                        ip_address.clone(),
+                        user_agent.clone(),
                         None,
                         None,
                     );

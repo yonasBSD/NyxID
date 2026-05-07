@@ -294,15 +294,11 @@ pub async fn create_registration_token(
         })
     };
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id_str),
-        "node_registration_token_created".to_string(),
+        &auth_user,
+        "node_registration_token_created",
         Some(event_data),
-        None,
-        None,
-        None,
-        None,
     );
 
     Ok(Json(CreateRegistrationTokenResponse {
@@ -430,19 +426,15 @@ pub async fn delete_node(
             .await;
     }
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id_str.clone()),
-        "node_deleted".to_string(),
+        &auth_user,
+        "node_deleted",
         Some(audit_event_data_with_owner(
             &user_id_str,
             &node.user_id,
             serde_json::json!({ "node_id": &node_id }),
         )),
-        None,
-        None,
-        None,
-        None,
     );
 
     emit_event(
@@ -487,19 +479,15 @@ pub async fn rotate_token(
         .await?;
     }
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id_str.clone()),
-        "node_token_rotated".to_string(),
+        &auth_user,
+        "node_token_rotated",
         Some(audit_event_data_with_owner(
             &user_id_str,
             &node.user_id,
             serde_json::json!({ "node_id": &node_id }),
         )),
-        None,
-        None,
-        None,
-        None,
     );
 
     Ok(Json(RotateTokenResponse {
@@ -547,10 +535,10 @@ pub async fn transfer_node(
     transferred_node.user_id = result.new_owner_user_id.clone();
     let new_owner = node_service::owner_info_for_node(&state.db, &transferred_node).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id_str.clone()),
-        "node_transferred".to_string(),
+        &auth_user,
+        "node_transferred",
         Some(audit_event_data_with_owner(
             &user_id_str,
             &result.new_owner_user_id,
@@ -564,10 +552,6 @@ pub async fn transfer_node(
                 "deactivated_pending_credentials_count": result.deactivated_pending_credentials_count,
             }),
         )),
-        None,
-        None,
-        None,
-        None,
     );
 
     Ok(Json(TransferNodeResponse {
@@ -602,20 +586,16 @@ pub async fn push_pending_credential(
     )
     .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id_str),
-        "node_credential_push_created".to_string(),
+        &auth_user,
+        "node_credential_push_created",
         Some(serde_json::json!({
             "node_id": &pending.node_id,
             "service_slug": &pending.service_slug,
             "injection_method": pending.injection_method.as_str(),
             "owner_user_id": &pending.owner_user_id,
         })),
-        None,
-        None,
-        None,
-        None,
     );
 
     if state.node_ws_manager.is_connected(&node_id)
@@ -669,20 +649,16 @@ pub async fn cancel_pending_credential(
     )
     .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id_str),
-        "node_credential_push_canceled".to_string(),
+        &auth_user,
+        "node_credential_push_canceled",
         Some(serde_json::json!({
             "node_id": &pending.node_id,
             "pending_credential_id": &pending.id,
             "service_slug": &pending.service_slug,
             "owner_user_id": &pending.owner_user_id,
         })),
-        None,
-        None,
-        None,
-        None,
     );
 
     Ok(StatusCode::NO_CONTENT)
@@ -763,10 +739,10 @@ pub async fn create_binding(
     let binding =
         node_service::create_binding(&state.db, &user_id_str, &node_id, &body.service_id).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id_str.clone()),
-        "node_binding_created".to_string(),
+        &auth_user,
+        "node_binding_created",
         Some(audit_event_data_with_owner(
             &user_id_str,
             &binding.user_id,
@@ -776,10 +752,6 @@ pub async fn create_binding(
                 "service_id": &body.service_id,
             }),
         )),
-        None,
-        None,
-        None,
-        None,
     );
 
     Ok(Json(CreateBindingResponse {
@@ -811,10 +783,10 @@ pub async fn update_binding(
         .await?;
     }
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id_str.clone()),
-        "node_binding_updated".to_string(),
+        &auth_user,
+        "node_binding_updated",
         Some(audit_event_data_with_owner(
             &user_id_str,
             &node.user_id,
@@ -824,10 +796,6 @@ pub async fn update_binding(
                 "priority": body.priority,
             }),
         )),
-        None,
-        None,
-        None,
-        None,
     );
 
     Ok(StatusCode::NO_CONTENT)
@@ -844,10 +812,10 @@ pub async fn delete_binding(
 
     node_service::delete_binding(&state.db, &user_id_str, &node_id, &binding_id).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id_str.clone()),
-        "node_binding_deleted".to_string(),
+        &auth_user,
+        "node_binding_deleted",
         Some(audit_event_data_with_owner(
             &user_id_str,
             &node.user_id,
@@ -856,10 +824,6 @@ pub async fn delete_binding(
                 "node_id": &node_id,
             }),
         )),
-        None,
-        None,
-        None,
-        None,
     );
 
     Ok(StatusCode::NO_CONTENT)

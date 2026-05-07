@@ -494,18 +494,14 @@ pub async fn create_provider(
     )
     .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id_str),
-        "provider_created".to_string(),
+        &auth_user,
+        "provider_created",
         Some(serde_json::json!({
             "provider_id": &provider.id,
             "slug": &provider.slug,
         })),
-        None,
-        None,
-        None,
-        None,
     );
 
     Ok(Json(provider_to_response(provider)))
@@ -583,15 +579,11 @@ pub async fn update_provider(
         provider_service::update_provider(&state.db, &state.encryption_keys, &provider_id, updates)
             .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "provider_updated".to_string(),
+        &auth_user,
+        "provider_updated",
         Some(serde_json::json!({ "provider_id": &provider_id })),
-        None,
-        None,
-        None,
-        None,
     );
 
     Ok(Json(provider_to_response(updated)))
@@ -607,15 +599,11 @@ pub async fn delete_provider(
 
     provider_service::delete_provider(&state.db, &provider_id).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "provider_deleted".to_string(),
+        &auth_user,
+        "provider_deleted",
         Some(serde_json::json!({ "provider_id": &provider_id })),
-        None,
-        None,
-        None,
-        None,
     );
 
     Ok(Json(DeleteProviderResponse {

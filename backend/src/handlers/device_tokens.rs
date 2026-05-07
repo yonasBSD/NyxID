@@ -309,18 +309,14 @@ pub async fn register_device(
     )
     .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id.clone()),
-        "push_device_registered".to_string(),
+        &auth_user,
+        "push_device_registered",
         Some(serde_json::json!({
             "device_id": device_id,
             "platform": body.platform,
         })),
-        None,
-        None,
-        None,
-        None,
     );
 
     // Telemetry: notification.device_registered (new-device path).
@@ -433,18 +429,14 @@ pub async fn remove_device(
 
     let approval_auto_disabled = channel.push_devices.len() == 1 && should_auto_disable_approval;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id.clone()),
-        "push_device_removed".to_string(),
+        &auth_user,
+        "push_device_removed",
         Some(serde_json::json!({
             "device_id": device_id,
             "approval_auto_disabled": approval_auto_disabled,
         })),
-        None,
-        None,
-        None,
-        None,
     );
 
     // Telemetry: notification.device_removed. Platform is captured pre-delete
@@ -523,19 +515,15 @@ pub async fn remove_current_device(
     let approval_auto_disabled = channel.push_devices.len() == 1
         && should_auto_disable_approval_after_last_push_device_removed(&channel);
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id.clone()),
-        "push_device_removed_on_logout".to_string(),
+        &auth_user,
+        "push_device_removed_on_logout",
         Some(serde_json::json!({
             "platform": body.platform,
             "token_removed": true,
             "approval_auto_disabled": approval_auto_disabled,
         })),
-        None,
-        None,
-        None,
-        None,
     );
 
     // Telemetry: notification.device_removed (sign-out path). Only fires when

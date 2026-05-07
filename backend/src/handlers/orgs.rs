@@ -512,18 +512,14 @@ pub async fn create_org(
         }
     };
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(actor.clone()),
-        "org_created".to_string(),
+        &auth_user,
+        "org_created",
         Some(serde_json::json!({
             "org_user_id": org.id,
             "display_name": body.display_name,
         })),
-        None,
-        None,
-        auth_user.api_key_id.clone(),
-        auth_user.api_key_name.clone(),
     );
 
     let contact_email = org_service::contact_email_for_display(&org);
@@ -654,18 +650,14 @@ pub async fn update_org(
     let slug = slug_for_response(&org);
 
     let contact_email_changed = body.contact_email.is_some();
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(actor),
-        "org_updated".to_string(),
+        &auth_user,
+        "org_updated",
         Some(serde_json::json!({
             "org_user_id": org_id,
             "contact_email_changed": contact_email_changed,
         })),
-        None,
-        None,
-        auth_user.api_key_id.clone(),
-        auth_user.api_key_name.clone(),
     );
 
     Ok(Json(OrgResponse {
@@ -691,15 +683,11 @@ pub async fn delete_org(
 
     org_service::delete_org_user(&state.db, &org_id).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(actor),
-        "org_deleted".to_string(),
+        &auth_user,
+        "org_deleted",
         Some(serde_json::json!({ "org_user_id": org_id })),
-        None,
-        None,
-        auth_user.api_key_id.clone(),
-        auth_user.api_key_name.clone(),
     );
 
     Ok(StatusCode::NO_CONTENT)
@@ -756,19 +744,15 @@ pub async fn add_member(
 
     let user = fetch_user(&state.db, &body.user_id).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(actor),
-        "org_member_added".to_string(),
+        &auth_user,
+        "org_member_added",
         Some(serde_json::json!({
             "org_user_id": org_id,
             "member_user_id": body.user_id,
             "role": body.role,
         })),
-        None,
-        None,
-        auth_user.api_key_id.clone(),
-        auth_user.api_key_name.clone(),
     );
 
     Ok((
@@ -816,18 +800,14 @@ pub async fn update_member(
 
     let user = fetch_user(&state.db, &member_id).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(actor),
-        "org_member_updated".to_string(),
+        &auth_user,
+        "org_member_updated",
         Some(serde_json::json!({
             "org_user_id": org_id,
             "member_user_id": member_id,
         })),
-        None,
-        None,
-        auth_user.api_key_id.clone(),
-        auth_user.api_key_name.clone(),
     );
 
     Ok(Json(
@@ -858,18 +838,14 @@ pub async fn remove_member(
 
     org_service::revoke_membership(&state.db, &org_id, &member_id).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(actor),
-        "org_member_revoked".to_string(),
+        &auth_user,
+        "org_member_revoked",
         Some(serde_json::json!({
             "org_user_id": org_id,
             "member_user_id": member_id,
         })),
-        None,
-        None,
-        auth_user.api_key_id.clone(),
-        auth_user.api_key_name.clone(),
     );
 
     Ok(StatusCode::NO_CONTENT)
@@ -917,18 +893,14 @@ pub async fn create_invite(
     )
     .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(actor),
-        "org_invite_created".to_string(),
+        &auth_user,
+        "org_invite_created",
         Some(serde_json::json!({
             "org_user_id": org_id,
             "invite_id": invite.id,
         })),
-        None,
-        None,
-        auth_user.api_key_id.clone(),
-        auth_user.api_key_name.clone(),
     );
 
     // A freshly created invite has no redeemer yet, so pass `None`.
@@ -969,18 +941,14 @@ pub async fn cancel_invite(
 
     org_invite_service::cancel_invite(&state.db, &org_id, &invite_id).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(actor),
-        "org_invite_cancelled".to_string(),
+        &auth_user,
+        "org_invite_cancelled",
         Some(serde_json::json!({
             "org_user_id": org_id,
             "invite_id": invite_id,
         })),
-        None,
-        None,
-        auth_user.api_key_id.clone(),
-        auth_user.api_key_name.clone(),
     );
 
     Ok(StatusCode::NO_CONTENT)
@@ -995,19 +963,15 @@ pub async fn redeem_invite(
     let actor = auth_user.user_id.to_string();
     let membership = org_invite_service::redeem_invite(&state.db, &nonce, &actor).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(actor),
-        "org_member_joined".to_string(),
+        &auth_user,
+        "org_member_joined",
         Some(serde_json::json!({
             "org_user_id": membership.org_user_id,
             "membership_id": membership.id,
             "role": membership.role,
         })),
-        None,
-        None,
-        auth_user.api_key_id.clone(),
-        auth_user.api_key_name.clone(),
     );
 
     Ok(Json(RedeemInviteResponse {

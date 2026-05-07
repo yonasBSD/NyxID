@@ -1,7 +1,7 @@
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::{HeaderMap, header},
+    http::HeaderMap,
 };
 use futures::TryStreamExt;
 use mongodb::bson::doc;
@@ -183,23 +183,6 @@ async fn require_admin(state: &AppState, auth_user: &AuthUser) -> AppResult<()> 
     Ok(())
 }
 
-/// Extract the client IP from headers (X-Forwarded-For) or return None.
-fn extract_ip(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.split(',').next().unwrap_or("").trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
-/// Extract the User-Agent header.
-fn extract_user_agent(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get(header::USER_AGENT)
-        .and_then(|v| v.to_str().ok())
-        .map(String::from)
-}
-
 fn normalize_optional_nonempty(input: Option<&str>) -> Option<&str> {
     input.map(str::trim).filter(|value| !value.is_empty())
 }
@@ -228,7 +211,7 @@ fn user_to_admin_item(u: User) -> AdminUserItem {
 pub async fn create_user(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Json(body): Json<CreateUserRequest>,
 ) -> AppResult<Json<CreateUserResponse>> {
     require_admin(&state, &auth_user).await?;
@@ -262,19 +245,15 @@ pub async fn create_user(
     )
     .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin.user.created".to_string(),
+        &auth_user,
+        "admin.user.created",
         Some(serde_json::json!({
             "target_user_id": &user.id,
             "target_email": &user.email,
             "is_admin": user.is_admin,
         })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
-        None,
-        None,
     );
 
     Ok(Json(CreateUserResponse {
@@ -364,7 +343,7 @@ pub async fn get_user(
 pub async fn update_user(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path(user_id): Path<String>,
     Json(body): Json<UpdateUserRequest>,
 ) -> AppResult<Json<AdminUserItem>> {
@@ -379,10 +358,10 @@ pub async fn update_user(
     )
     .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin.user.updated".to_string(),
+        &auth_user,
+        "admin.user.updated",
         Some(serde_json::json!({
             "target_user_id": &user_id,
             "target_email": &updated.email,
@@ -392,10 +371,6 @@ pub async fn update_user(
                 "avatar_url": body.avatar_url,
             }
         })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
-        None,
-        None,
     );
 
     Ok(Json(user_to_admin_item(updated)))
@@ -407,7 +382,7 @@ pub async fn update_user(
 pub async fn set_user_role(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path(user_id): Path<String>,
     Json(body): Json<SetRoleRequest>,
 ) -> AppResult<Json<RoleUpdateResponse>> {
@@ -417,18 +392,14 @@ pub async fn set_user_role(
 
     admin_user_service::set_admin_role(&state.db, &admin_id, &user_id, body.is_admin).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(admin_id),
-        "admin.user.role_changed".to_string(),
+        &auth_user,
+        "admin.user.role_changed",
         Some(serde_json::json!({
             "target_user_id": &user_id,
             "is_admin": body.is_admin,
         })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
-        None,
-        None,
     );
 
     Ok(Json(RoleUpdateResponse {
@@ -446,7 +417,7 @@ pub async fn set_user_status(
     State(state): State<AppState>,
     auth_user: AuthUser,
     tele: TelemetryContext,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path(user_id): Path<String>,
     Json(body): Json<SetStatusRequest>,
 ) -> AppResult<Json<StatusUpdateResponse>> {
@@ -456,18 +427,14 @@ pub async fn set_user_status(
 
     admin_user_service::set_user_active(&state.db, &admin_id, &user_id, body.is_active).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(admin_id),
-        "admin.user.status_changed".to_string(),
+        &auth_user,
+        "admin.user.status_changed",
         Some(serde_json::json!({
             "target_user_id": &user_id,
             "is_active": body.is_active,
         })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
-        None,
-        None,
     );
 
     // `is_active=false` is the suspend path; `is_active=true` is unsuspend.
@@ -499,7 +466,7 @@ pub async fn set_user_status(
 pub async fn force_password_reset(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path(user_id): Path<String>,
 ) -> AppResult<Json<AdminActionResponse>> {
     require_admin(&state, &auth_user).await?;
@@ -511,15 +478,11 @@ pub async fn force_password_reset(
         tracing::debug!(token = %t, user_id = %user_id, "Admin-initiated password reset token (dev only)");
     }
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin.user.password_reset".to_string(),
+        &auth_user,
+        "admin.user.password_reset",
         Some(serde_json::json!({ "target_user_id": &user_id })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
-        None,
-        None,
     );
 
     Ok(Json(AdminActionResponse {
@@ -533,7 +496,7 @@ pub async fn force_password_reset(
 pub async fn delete_user(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path(user_id): Path<String>,
 ) -> AppResult<Json<AdminActionResponse>> {
     require_admin(&state, &auth_user).await?;
@@ -551,18 +514,14 @@ pub async fn delete_user(
 
     admin_user_service::delete_user_cascade(&state.db, &admin_id, &user_id).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(admin_id),
-        "admin.user.deleted".to_string(),
+        &auth_user,
+        "admin.user.deleted",
         Some(serde_json::json!({
             "target_user_id": &user_id,
             "target_email": &target_email,
         })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
-        None,
-        None,
     );
 
     Ok(Json(AdminActionResponse {
@@ -576,22 +535,18 @@ pub async fn delete_user(
 pub async fn verify_user_email(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path(user_id): Path<String>,
 ) -> AppResult<Json<VerifyEmailResponse>> {
     require_admin(&state, &auth_user).await?;
 
     admin_user_service::verify_email(&state.db, &user_id).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin.user.email_verified".to_string(),
+        &auth_user,
+        "admin.user.email_verified",
         Some(serde_json::json!({ "target_user_id": &user_id })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
-        None,
-        None,
     );
 
     Ok(Json(VerifyEmailResponse {
@@ -639,7 +594,7 @@ pub async fn list_user_sessions(
 pub async fn revoke_user_sessions(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path(user_id): Path<String>,
 ) -> AppResult<Json<RevokeSessionsResponse>> {
     require_admin(&state, &auth_user).await?;
@@ -654,18 +609,14 @@ pub async fn revoke_user_sessions(
 
     let revoked_count = admin_user_service::revoke_all_user_sessions(&state.db, &user_id).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin.user.sessions_revoked".to_string(),
+        &auth_user,
+        "admin.user.sessions_revoked",
         Some(serde_json::json!({
             "target_user_id": &user_id,
             "revoked_count": revoked_count,
         })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
-        None,
-        None,
     );
 
     Ok(Json(RevokeSessionsResponse {

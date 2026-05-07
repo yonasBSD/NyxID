@@ -689,19 +689,15 @@ pub async fn create_request(
     )
     .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id),
-        "tool_approval_created".to_string(),
+        &auth_user,
+        "tool_approval_created",
         Some(serde_json::json!({
             "request_id": &request.id,
             "tool_name": tool_name,
             "is_destructive": body.is_destructive.unwrap_or(false),
         })),
-        None,
-        None,
-        auth_user.api_key_id.as_deref().map(String::from),
-        auth_user.api_key_name.clone(),
     );
 
     // Telemetry: approval.requested. `channel` defaults to "in_app" when the
@@ -778,20 +774,16 @@ pub async fn decide_request(
     )
     .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(user_id),
-        "approval_decision".to_string(),
+        &auth_user,
+        "approval_decision",
         Some(serde_json::json!({
             "request_id": request_id,
             "service_id": updated.service_id,
             "approved": body.approved,
             "channel": "web",
         })),
-        None,
-        None,
-        None,
-        None,
     );
 
     // Telemetry: approval.decided. Only the web decision path is in scope
@@ -970,18 +962,14 @@ pub async fn revoke_grant(
 
     approval_service::revoke_grant(&state.db, &owner_user_id, &grant_id).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(actor),
-        "approval_grant_revoked".to_string(),
+        &auth_user,
+        "approval_grant_revoked",
         Some(serde_json::json!({
             "grant_id": grant_id,
             "owner_user_id": owner_user_id,
         })),
-        None,
-        None,
-        None,
-        None,
     );
 
     // Resolve a meaningful service_slug. Approval grants store `service_id`
@@ -1561,10 +1549,10 @@ pub async fn set_service_config(
     )
     .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(actor),
-        "service_approval_config_set".to_string(),
+        &auth_user,
+        "service_approval_config_set",
         Some(serde_json::json!({
             "service_id": target.effective_service_id,
             "service_name": target.display_name,
@@ -1573,10 +1561,6 @@ pub async fn set_service_config(
             "approval_required": config.approval_required,
             "approval_mode": config.approval_mode.as_str(),
         })),
-        None,
-        None,
-        None,
-        None,
     );
 
     // Telemetry: approval.config_updated. Prefer the UserService slug for
@@ -1643,19 +1627,15 @@ pub async fn delete_service_config(
     approval_service::delete_service_approval_config(&state.db, &user_id, &effective_service_id)
         .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(actor),
-        "service_approval_config_deleted".to_string(),
+        &auth_user,
+        "service_approval_config_deleted",
         Some(serde_json::json!({
             "service_id": effective_service_id,
             "user_service_id": user_service_id,
             "policy_owner_user_id": user_id,
         })),
-        None,
-        None,
-        None,
-        None,
     );
 
     Ok(Json(MessageResponse {

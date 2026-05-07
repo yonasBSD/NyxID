@@ -1,6 +1,8 @@
+use std::net::SocketAddr;
+
 use axum::{
-    extract::FromRequestParts,
-    http::{Method, request::Parts},
+    extract::{ConnectInfo, FromRequestParts},
+    http::{Method, header, request::Parts},
     middleware::Next,
     response::IntoResponse,
 };
@@ -66,6 +68,53 @@ pub struct AuthUser {
     /// Per-agent rate limit (from ApiKey), None = use user-level defaults
     pub rate_limit_per_second: Option<u32>,
     pub rate_limit_burst: Option<u32>,
+    /// Client IP captured at extraction time (from X-Forwarded-For, X-Real-IP, or
+    /// the TCP peer address). Used to enrich audit log entries.
+    pub ip_address: Option<String>,
+    /// Client User-Agent header captured at extraction time. Used to enrich audit
+    /// log entries.
+    pub user_agent: Option<String>,
+}
+
+/// Extract the client IP from common reverse-proxy headers, falling back to the
+/// TCP peer address available via `ConnectInfo`.
+///
+/// Lookup order: `X-Forwarded-For` (first hop), `X-Real-IP`, then the peer
+/// socket address.
+fn extract_request_ip(parts: &Parts) -> Option<String> {
+    if let Some(forwarded) = parts
+        .headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.split(',').next().unwrap_or("").trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(forwarded);
+    }
+
+    if let Some(real_ip) = parts
+        .headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(real_ip);
+    }
+
+    parts
+        .extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| addr.ip().to_string())
+}
+
+/// Extract the User-Agent header.
+fn extract_request_user_agent(parts: &Parts) -> Option<String> {
+    parts
+        .headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(String::from)
 }
 
 impl AuthUser {
@@ -309,6 +358,8 @@ impl FromRequestParts<AppState> for AuthUser {
         state: &AppState,
     ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
         async move {
+            let request_ip = extract_request_ip(parts);
+            let request_ua = extract_request_user_agent(parts);
             // Try Bearer token first
             if let Some(auth_header) = parts.headers.get("authorization") {
                 let auth_str = auth_header.to_str().map_err(|_| {
@@ -375,6 +426,8 @@ impl FromRequestParts<AppState> for AuthUser {
                                         api_key_name: Some(api_key.name.clone()),
                                         rate_limit_per_second: api_key.rate_limit_per_second,
                                         rate_limit_burst: api_key.rate_limit_burst,
+                                        ip_address: request_ip.clone(),
+                                        user_agent: request_ua.clone(),
                                     };
                                     auth_user.ensure_management_write_scope(
                                         &parts.method,
@@ -454,6 +507,8 @@ impl FromRequestParts<AppState> for AuthUser {
                             api_key_name: None,
                             rate_limit_per_second: None,
                             rate_limit_burst: None,
+                            ip_address: request_ip.clone(),
+                            user_agent: request_ua.clone(),
                         });
                     }
 
@@ -524,6 +579,8 @@ impl FromRequestParts<AppState> for AuthUser {
                         api_key_name,
                         rate_limit_per_second: None,
                         rate_limit_burst: None,
+                        ip_address: request_ip.clone(),
+                        user_agent: request_ua.clone(),
                     });
                 }
             }
@@ -589,6 +646,8 @@ impl FromRequestParts<AppState> for AuthUser {
                                     api_key_name: None,
                                     rate_limit_per_second: None,
                                     rate_limit_burst: None,
+                                    ip_address: request_ip.clone(),
+                                    user_agent: request_ua.clone(),
                                 });
                             }
                             _ => {
@@ -661,6 +720,8 @@ impl FromRequestParts<AppState> for AuthUser {
                     api_key_name: Some(key.name.clone()),
                     rate_limit_per_second: key.rate_limit_per_second,
                     rate_limit_burst: key.rate_limit_burst,
+                    ip_address: request_ip,
+                    user_agent: request_ua,
                 };
                 auth_user.ensure_management_write_scope(&parts.method, parts.uri.path())?;
                 return Ok(auth_user);
@@ -860,6 +921,8 @@ mod tests {
             api_key_name: None,
             rate_limit_per_second: None,
             rate_limit_burst: None,
+            ip_address: None,
+            user_agent: None,
         }
     }
 
@@ -931,6 +994,8 @@ mod tests {
             api_key_name: Some("coding-agent".to_string()),
             rate_limit_per_second: None,
             rate_limit_burst: None,
+            ip_address: None,
+            user_agent: None,
         };
         assert_eq!(user.api_key_id.as_deref(), Some("key-uuid-123"));
         assert_eq!(user.api_key_name.as_deref(), Some("coding-agent"));

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::handlers::admin::AdminActionResponse;
-use crate::handlers::admin_helpers::{extract_ip, extract_user_agent, require_admin};
+use crate::handlers::admin_helpers::require_admin;
 use crate::models::service_account::ServiceAccount;
 use crate::mw::auth::AuthUser;
 use crate::services::{audit_service, org_service, service_account_service};
@@ -166,7 +166,7 @@ pub async fn create_service_account(
     State(state): State<AppState>,
     auth_user: AuthUser,
     tele: TelemetryContext,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Json(body): Json<CreateServiceAccountRequest>,
 ) -> AppResult<Json<CreateServiceAccountResponse>> {
     let actor = auth_user.user_id.to_string();
@@ -205,21 +205,15 @@ pub async fn create_service_account(
     )
     .await?;
 
-    let admin_id = auth_user.user_id.to_string();
-
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(admin_id),
-        "admin.sa.created".to_string(),
+        &auth_user,
+        "admin.sa.created",
         Some(serde_json::json!({
             "target_sa_id": &sa.id,
             "client_id": &sa.client_id,
             "name": &sa.name,
         })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
-        None,
-        None,
     );
 
     emit_event(
@@ -309,7 +303,7 @@ pub async fn get_service_account(
 pub async fn update_service_account(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path(sa_id): Path<String>,
     Json(body): Json<UpdateServiceAccountRequest>,
 ) -> AppResult<Json<ServiceAccountItem>> {
@@ -328,17 +322,13 @@ pub async fn update_service_account(
     )
     .await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin.sa.updated".to_string(),
+        &auth_user,
+        "admin.sa.updated",
         Some(serde_json::json!({
             "target_sa_id": &sa_id,
         })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
-        None,
-        None,
     );
 
     Ok(Json(sa_to_item(updated)))
@@ -349,7 +339,7 @@ pub async fn delete_service_account(
     State(state): State<AppState>,
     auth_user: AuthUser,
     tele: TelemetryContext,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path(sa_id): Path<String>,
 ) -> AppResult<Json<AdminActionResponse>> {
     let existing = service_account_service::get_service_account(&state.db, &sa_id).await?;
@@ -357,17 +347,13 @@ pub async fn delete_service_account(
 
     service_account_service::delete_service_account(&state.db, &sa_id).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin.sa.deleted".to_string(),
+        &auth_user,
+        "admin.sa.deleted",
         Some(serde_json::json!({
             "target_sa_id": &sa_id,
         })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
-        None,
-        None,
     );
 
     emit_event(
@@ -388,7 +374,7 @@ pub async fn rotate_secret(
     State(state): State<AppState>,
     auth_user: AuthUser,
     tele: TelemetryContext,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path(sa_id): Path<String>,
 ) -> AppResult<Json<RotateSecretResponse>> {
     let existing = service_account_service::get_service_account(&state.db, &sa_id).await?;
@@ -396,18 +382,14 @@ pub async fn rotate_secret(
 
     let (updated, raw_secret) = service_account_service::rotate_secret(&state.db, &sa_id).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin.sa.secret_rotated".to_string(),
+        &auth_user,
+        "admin.sa.secret_rotated",
         Some(serde_json::json!({
             "target_sa_id": &sa_id,
             "client_id": &updated.client_id,
         })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
-        None,
-        None,
     );
 
     emit_event(
@@ -431,7 +413,7 @@ pub async fn rotate_secret(
 pub async fn revoke_tokens(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path(sa_id): Path<String>,
 ) -> AppResult<Json<RevokeTokensResponse>> {
     let _sa = service_account_service::get_service_account(&state.db, &sa_id).await?;
@@ -439,18 +421,14 @@ pub async fn revoke_tokens(
 
     let revoked_count = service_account_service::revoke_all_tokens(&state.db, &sa_id).await?;
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "admin.sa.tokens_revoked".to_string(),
+        &auth_user,
+        "admin.sa.tokens_revoked",
         Some(serde_json::json!({
             "target_sa_id": &sa_id,
             "revoked_count": revoked_count,
         })),
-        extract_ip(&headers),
-        extract_user_agent(&headers),
-        None,
-        None,
     );
 
     Ok(Json(RevokeTokensResponse {

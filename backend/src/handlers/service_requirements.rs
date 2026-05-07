@@ -287,18 +287,14 @@ pub async fn add_requirement(
         "Service provider requirement added"
     );
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "service_requirement_added".to_string(),
+        &auth_user,
+        "service_requirement_added",
         Some(serde_json::json!({
             "service_id": &service_id,
             "provider_id": &requirement.provider_config_id,
         })),
-        None,
-        None,
-        None,
-        None,
     );
 
     Ok(Json(RequirementResponse {
@@ -340,18 +336,14 @@ pub async fn remove_requirement(
         "Service provider requirement removed"
     );
 
-    audit_service::log_async(
+    audit_service::log_for_user(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "service_requirement_removed".to_string(),
+        &auth_user,
+        "service_requirement_removed",
         Some(serde_json::json!({
             "service_id": &service_id,
             "requirement_id": &requirement_id,
         })),
-        None,
-        None,
-        None,
-        None,
     );
 
     Ok(Json(DeleteRequirementResponse {

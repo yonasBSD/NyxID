@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
+use crate::handlers::admin_helpers::{extract_ip, extract_user_agent};
 use crate::models::node::Node;
 use crate::models::node_pending_credential::NodePendingCredential;
 use crate::services::{audit_service, node_pending_credential_service, node_service};
@@ -99,8 +100,8 @@ pub async fn consume_pending_credential(
             "service_slug": &pending.service_slug,
             "owner_user_id": &pending.owner_user_id,
         })),
-        None,
-        None,
+        extract_ip(&headers),
+        extract_user_agent(&headers),
         None,
         None,
     );
@@ -137,8 +138,8 @@ pub async fn decline_pending_credential(
                 .and_then(|body| body.reason.as_deref())
                 .is_some_and(|reason| !reason.trim().is_empty()),
         })),
-        None,
-        None,
+        extract_ip(&headers),
+        extract_user_agent(&headers),
         None,
         None,
     );

@@ -595,10 +595,10 @@ fn audit(
     outcome: ForwardOutcome,
     upstream_status_code: i32,
 ) {
-    audit_service::log_async(
+    audit_service::log_for_user(
         db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "channel_event.forwarded".to_string(),
+        auth_user,
+        "channel_event.forwarded",
         Some(serde_json::json!({
             "conversation_id": conversation_id,
             "event_id": envelope.event_id,
@@ -610,10 +610,6 @@ fn audit(
             },
             "upstream_status_code": upstream_status_code,
         })),
-        None,
-        None,
-        auth_user.api_key_id.clone(),
-        auth_user.api_key_name.clone(),
     );
 }
 

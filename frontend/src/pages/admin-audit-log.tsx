@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useAdminAuditLog } from "@/hooks/use-admin";
-import { formatDate } from "@/lib/utils";
+import { formatDateTime } from "@/lib/utils";
 import { PageHeader } from "@/components/shared/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
@@ -130,6 +130,8 @@ export function AdminAuditLogPage() {
                   <TableHead>Agent</TableHead>
                   <TableHead>API Key ID</TableHead>
                   <TableHead>User ID</TableHead>
+                  <TableHead>IP</TableHead>
+                  <TableHead>User Agent</TableHead>
                   <TableHead>Status</TableHead>
                 </TableRow>
               </TableHeader>
@@ -139,8 +141,8 @@ export function AdminAuditLogPage() {
 
                   return (
                     <TableRow key={entry.id}>
-                      <TableCell className="text-xs text-muted-foreground">
-                        {formatDate(entry.created_at)}
+                      <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                        {formatDateTime(entry.created_at)}
                       </TableCell>
                       <TableCell className="font-medium">{entry.event_type}</TableCell>
                       <TableCell>
@@ -155,6 +157,15 @@ export function AdminAuditLogPage() {
                       </TableCell>
                       <TableCell className="font-mono text-xs">
                         {entry.user_id ?? "--"}
+                      </TableCell>
+                      <TableCell className="whitespace-nowrap font-mono text-xs">
+                        {entry.ip_address ?? "--"}
+                      </TableCell>
+                      <TableCell
+                        className="max-w-[240px] truncate text-xs text-muted-foreground"
+                        title={entry.user_agent ?? undefined}
+                      >
+                        {entry.user_agent ?? "--"}
                       </TableCell>
                       <TableCell>
                         {status !== null ? (
