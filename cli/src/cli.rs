@@ -31,6 +31,8 @@ pub enum Commands {
     Whoami(AuthArgs),
     /// Show account overview (services, keys, nodes)
     Status(AuthArgs),
+    /// Run local CLI health checks
+    Doctor(DoctorArgs),
     /// Manage user profile
     Profile {
         #[command(subcommand)]
@@ -307,6 +309,13 @@ impl BaseUrlArgs {
              or pass --base-url, or set NYXID_URL"
         )
     }
+}
+
+#[derive(Args, Clone)]
+pub struct DoctorArgs {
+    /// Emit machine-readable JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Clone)]
