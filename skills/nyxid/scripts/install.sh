@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # SECURITY MANIFEST:
-# Environment variables accessed: HOME, SHELL, PATH, CARGO_HOME, XDG_CONFIG_HOME
+# Environment variables accessed: HOME, SHELL, PATH, CARGO_HOME, XDG_CONFIG_HOME,
+#   XDG_DATA_HOME, NYXID_INSTALL_ROOT, NYXID_ACTIVE_SYMLINK
 # External endpoints called: github.com (prebuilt installer), sh.rustup.rs
 #   (fallback Rust installer), github.com (fallback cargo install)
 # Local files read: shell RC files (~/.zshrc, ~/.bashrc, etc.)
 # Local files written: shell RC files (adds ~/.local/bin if missing),
-#   ~/.local/bin/nyxid
+#   ~/.local/bin/nyxid, ~/.local/share/nyxid/versions/<version>/nyxid
 #
 # NyxID CLI installer -- prefers the prebuilt cargo-dist binary installer and
 # only falls back to cargo install when the host platform has no release asset.
@@ -14,6 +15,8 @@ set -euo pipefail
 REPO="https://github.com/ChronoAIProject/NyxID"
 INSTALLER_URL="https://github.com/ChronoAIProject/NyxID/releases/latest/download/nyxid-cli-installer.sh"
 LOCAL_BIN="$HOME/.local/bin"
+ACTIVE_NYXID="${NYXID_ACTIVE_SYMLINK:-$LOCAL_BIN/nyxid}"
+VERSIONS_ROOT="${NYXID_INSTALL_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/nyxid/versions}"
 CARGO_HOME_DIR="${CARGO_HOME:-$HOME/.cargo}"
 CARGO_BIN="$CARGO_HOME_DIR/bin"
 CARGO_ENV="$CARGO_HOME_DIR/env"
@@ -110,18 +113,51 @@ install_prebuilt() {
   info "Installing NyxID CLI prebuilt binary..."
 
   if curl --proto '=https' --tlsv1.2 -fsSL "$INSTALLER_URL" | sh; then
-    if [ -x "$LOCAL_BIN/nyxid" ]; then
-      chmod 755 "$LOCAL_BIN/nyxid"
-      info "NyxID CLI installed at $LOCAL_BIN/nyxid"
+    if [ -x "$ACTIVE_NYXID" ]; then
+      migrate_prebuilt_to_versioned_layout
+      info "NyxID CLI installed at $ACTIVE_NYXID"
       return 0
     fi
 
-    warn "prebuilt installer completed but $LOCAL_BIN/nyxid was not found"
+    warn "prebuilt installer completed but $ACTIVE_NYXID was not found"
   else
     warn "prebuilt installer failed"
   fi
 
   return 1
+}
+
+detect_nyxid_version() {
+  "$ACTIVE_NYXID" --version 2>/dev/null \
+    | grep -Eo 'v?[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?' \
+    | head -n 1
+}
+
+migrate_prebuilt_to_versioned_layout() {
+  local raw_version version version_dir versioned_bin active_dir tmp_link
+  raw_version="$(detect_nyxid_version || true)"
+  if [ -z "$raw_version" ]; then
+    fail "could not determine nyxid version from $ACTIVE_NYXID --version"
+  fi
+
+  case "$raw_version" in
+    v*) version="$raw_version" ;;
+    *) version="v$raw_version" ;;
+  esac
+
+  version_dir="$VERSIONS_ROOT/$version"
+  versioned_bin="$version_dir/nyxid"
+  active_dir="$(dirname "$ACTIVE_NYXID")"
+  tmp_link="$active_dir/nyxid.tmp.$$"
+
+  mkdir -p "$version_dir" "$active_dir"
+  install -m 755 "$ACTIVE_NYXID" "$versioned_bin"
+
+  rm -f "$tmp_link"
+  ln -s "$versioned_bin" "$tmp_link"
+  mv -f "$tmp_link" "$ACTIVE_NYXID"
+
+  info "Versioned install: $versioned_bin"
 }
 
 install_from_source() {
