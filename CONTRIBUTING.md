@@ -304,7 +304,7 @@ All checks must pass before a PR can be merged. If a check fails, fix the issue 
 
 ### Review Process
 
-- All PRs target the `dev` branch (not `main`)
+- PRs target the `main` branch by default
 - At least one approval is required before merge
 - All CI checks must pass (see above)
 - Security-sensitive changes require explicit security review
