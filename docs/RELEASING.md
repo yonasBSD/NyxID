@@ -22,16 +22,16 @@ The `Release` workflow runs cargo-dist and publishes the `nyxid-cli` package for
 - `aarch64-unknown-linux-gnu` on `ubuntu-24.04-arm`
 - `x86_64-apple-darwin` on `macos-latest`
 - `aarch64-apple-darwin` on `macos-latest`
-- `x86_64-pc-windows-msvc` on `windows-latest`
+
+Windows is not yet a release target. `pty-process`, `nix`, and parts of `rustix` used by the SSH/PTY paths in `cli/src/node/ws_client.rs` are Unix-only and aren't yet `cfg(unix)`-gated. Until that audit lands, Windows users should run `nyxid` under WSL — see [docs/WINDOWS_SETUP.md](WINDOWS_SETUP.md).
 
 Linux release runners install `libdbus-1-dev` and `pkg-config` because the CLI uses the keyring crate's Secret Service backend on Linux. The wizard bundle is already committed under `cli/src/wizard/assets/`, so release builds do not need Node.
 
 cargo-dist publishes:
 
-- Platform archives: `nyxid-cli-<target>.tar.gz` for Unix and `nyxid-cli-<target>.zip` for Windows
+- Platform archives: `nyxid-cli-<target>.tar.gz`
 - SHA-256 checksums
 - `nyxid-cli-installer.sh`
-- `nyxid-cli-installer.ps1`
 - Generated GitHub release notes, with NyxID changelog and container image notes appended by the workflow
 
 ## Attestations
@@ -134,11 +134,7 @@ curl --proto '=https' --tlsv1.2 -LsSf \
 
 Running that generated installer directly writes a regular binary into `~/.local/bin`; the next `nyxid update` migrates it to the versioned layout.
 
-Windows users can use the PowerShell installer from the same release:
-
-```powershell
-irm https://github.com/ChronoAIProject/NyxID/releases/latest/download/nyxid-cli-installer.ps1 | iex
-```
+Windows is not yet supported as a release target — see "What CI Builds" above. Run `nyxid` under WSL.
 
 The repository skill installer at `skills/nyxid/scripts/install.sh` wraps the shell installer and falls back to `cargo install` only when a usable prebuilt binary is not available for the host.
 
