@@ -27,14 +27,14 @@ The SSH helper ships with the main `nyxid` backend binary.
 From the repository root:
 
 ```bash
-cargo install --path backend
+cargo install --path cli
 nyxid ssh --help
 ```
 
 For local development without installing the binary globally:
 
 ```bash
-cargo run -p nyxid -- ssh --help
+cargo run -p nyxid-cli -- ssh --help
 ```
 
 ---

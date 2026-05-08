@@ -6,6 +6,17 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+# Rename the backend binary from the implicit `nyxid` to `nyxid-server` so it
+# does not collide with the CLI's `[[bin]] name = "nyxid"` in cli/Cargo.toml.
+# Without this, `cargo build --bin nyxid` and `cargo build` (workspace) both
+# produce two binaries that race for the same `target/{triple}/release/nyxid`
+# path; whichever wins gets shipped, breaking cargo-dist releases.
+# See backend/Dockerfile and docs/DEPLOYMENT.md for the deployment-side
+# matching changes.
+[[bin]]
+name = "nyxid-server"
+path = "src/main.rs"
+
 [dependencies]
 axum = { workspace = true }
 tower = "0.5.3"

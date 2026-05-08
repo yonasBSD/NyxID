@@ -107,7 +107,7 @@ curl http://localhost:3001/health
 cargo build --release --manifest-path backend/Cargo.toml
 
 # Binary output
-ls -la backend/target/release/nyxid
+ls -la backend/target/release/nyxid-server
 ```
 
 The release binary is a single statically-linked executable (with dynamically linked system libraries). No runtime dependencies beyond the OS.
@@ -812,7 +812,7 @@ If a user has already registered through the normal flow, promote them to admin 
 cargo run --manifest-path backend/Cargo.toml -- --promote-admin admin@example.com
 
 # Using the built binary
-./backend/target/release/nyxid --promote-admin admin@example.com
+./backend/target/release/nyxid-server --promote-admin admin@example.com
 ```
 
 This sets `is_admin = true` and `email_verified = true` on the user. The command exits after completion (does not start the server).
