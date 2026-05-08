@@ -293,12 +293,21 @@ jobs:
             echo "$CHANGES"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
-      - name: Update GitHub Release Notes
+      - name: Create GitHub Release
+        # `dist host` only plans the release; it does not call the GitHub API
+        # to create it. Upstream cargo-dist's generated workflow ends with a
+        # `gh release create ... artifacts/*` step that both creates the
+        # release and uploads every artifact in one shot. We mirror that
+        # pattern but inject our custom changelog + container-images footer
+        # on top of dist's announcement body. If `dist init` regenerates this
+        # workflow, reapply the custom notes block and keep `gh release
+        # create` (not `gh release edit`).
         env:
           PRERELEASE_FLAG: "${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease && '--prerelease' || '' }}"
           ANNOUNCEMENT_TITLE: "${{ fromJson(steps.host.outputs.manifest).announcement_title }}"
           ANNOUNCEMENT_BODY: "${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}"
           CHANGELOG: "${{ steps.changelog.outputs.changes }}"
+          RELEASE_COMMIT: "${{ github.sha }}"
         run: |
           # Write and read notes from a file to avoid quoting breaking things
           {
@@ -311,7 +320,12 @@ jobs:
             printf -- '- `ghcr.io/chronoaiproject/nyxid/node-agent:%s`\n' "${{ github.ref_name }}"
           } > $RUNNER_TEMP/notes.txt
 
-          gh release edit "${{ needs.plan.outputs.tag }}" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt"
+          gh release create "${{ needs.plan.outputs.tag }}" \
+            --target "$RELEASE_COMMIT" \
+            $PRERELEASE_FLAG \
+            --title "$ANNOUNCEMENT_TITLE" \
+            --notes-file "$RUNNER_TEMP/notes.txt" \
+            artifacts/*
 
   announce:
     needs:
