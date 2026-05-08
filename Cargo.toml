@@ -24,14 +24,17 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 cargo-dist-version = "0.30.0"
 allow-dirty = ["ci"]
 ci = "github"
-installers = ["shell", "powershell"]
+# Windows is intentionally omitted: pty-process / nix / rustix are Unix-only
+# and the SSH/PTY paths in cli/src/node/ws_client.rs aren't yet cfg-gated for
+# Windows. Tracking the proper Windows port as a follow-up; until then,
+# Windows users should run nyxid under WSL (see docs/WINDOWS_SETUP.md).
+installers = ["shell"]
 unix-archive = ".tar.gz"
 targets = [
     "aarch64-apple-darwin",
     "aarch64-unknown-linux-gnu",
     "x86_64-apple-darwin",
     "x86_64-unknown-linux-gnu",
-    "x86_64-pc-windows-msvc",
 ]
 packages = ["nyxid-cli"]
 install-path = "~/.local/bin"
@@ -43,7 +46,6 @@ aarch64-apple-darwin = "macos-latest"
 aarch64-unknown-linux-gnu = "ubuntu-24.04-arm"
 x86_64-apple-darwin = "macos-latest"
 x86_64-unknown-linux-gnu = "ubuntu-24.04"
-x86_64-pc-windows-msvc = "windows-latest"
 global = "ubuntu-24.04"
 
 [workspace.metadata.dist.dependencies.apt]
