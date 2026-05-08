@@ -73,3 +73,8 @@ constant_time_eq = "=0.4.2"
 
 [dev-dependencies]
 tempfile = "3"
+# Used by the update::extracts_nested_binary_from_dist_tarball test to
+# build a fixture tarball matching cargo-dist's release layout. These
+# crates are already in the dependency graph transitively via self_update.
+tar = "0.4"
+flate2 = "1"

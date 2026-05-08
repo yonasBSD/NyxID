@@ -386,16 +386,22 @@ fn extract_binary_to_version_dir(archive_path: &Path, tag: &str) -> Result<PathB
 
 fn extract_binary(archive_path: &Path, extract_dir: &Path) -> Result<PathBuf> {
     let bin_name = archive_binary_name();
+    // cargo-dist nests the binary inside a directory named after the package
+    // and target triple, e.g. `nyxid-cli-aarch64-apple-darwin/nyxid`.
+    // self_update::Extract::extract_file matches the in-archive path
+    // exactly, so we have to ask for the nested path.
+    let archive_dir = archive_root_dir(current_target());
+    let in_archive_path = format!("{archive_dir}/{bin_name}");
     self_update::Extract::from_source(archive_path)
-        .extract_file(extract_dir, bin_name)
+        .extract_file(extract_dir, &in_archive_path)
         .with_context(|| {
             format!(
-                "Failed to extract {bin_name} from {}",
+                "Failed to extract {in_archive_path} from {}",
                 archive_path.display()
             )
         })?;
 
-    let new_bin = extract_dir.join(bin_name);
+    let new_bin = extract_dir.join(&archive_dir).join(bin_name);
     if !new_bin.exists() {
         anyhow::bail!(
             "Release archive did not contain expected binary path {}",
@@ -411,6 +417,10 @@ fn extract_binary(archive_path: &Path, extract_dir: &Path) -> Result<PathBuf> {
     }
 
     Ok(new_bin)
+}
+
+fn archive_root_dir(target: &str) -> String {
+    format!("{DIST_PACKAGE_NAME}-{target}")
 }
 
 #[cfg(windows)]
@@ -1000,6 +1010,64 @@ fn exec_skills_update(new_bin: &PathBuf, base_url: &Option<String>) -> Result<()
 mod tests {
     use super::*;
     use std::ffi::OsString;
+
+    #[test]
+    fn extracts_nested_binary_from_dist_tarball() {
+        // cargo-dist tarballs nest the binary inside `{package}-{target}/`,
+        // and self_update::Extract matches paths exactly. Verify the nested
+        // path resolution end-to-end against a tarball that mirrors the
+        // real release layout.
+        let target = "aarch64-apple-darwin";
+        let archive_dir = archive_root_dir(target);
+        assert_eq!(archive_dir, "nyxid-cli-aarch64-apple-darwin");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let archive_path = tmp.path().join("nyxid-cli-aarch64-apple-darwin.tar.gz");
+        let extract_dir = tmp.path().join("extract");
+        std::fs::create_dir_all(&extract_dir).unwrap();
+
+        let payload = b"#!/bin/sh\necho fake-nyxid\n";
+        let mut header = tar::Header::new_gnu();
+        header.set_size(payload.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+
+        let tar_gz = std::fs::File::create(&archive_path).unwrap();
+        let gz_writer = flate2::write::GzEncoder::new(tar_gz, flate2::Compression::default());
+        let mut tar_builder = tar::Builder::new(gz_writer);
+        tar_builder
+            .append_data(
+                &mut header,
+                format!("{archive_dir}/nyxid"),
+                payload.as_slice(),
+            )
+            .unwrap();
+        // Toss in a sibling so we know the path-match logic is exact, not
+        // prefix-based.
+        let mut readme = tar::Header::new_gnu();
+        readme.set_size(8);
+        readme.set_mode(0o644);
+        readme.set_cksum();
+        tar_builder
+            .append_data(
+                &mut readme,
+                format!("{archive_dir}/README.md"),
+                b"readme\n\n".as_slice(),
+            )
+            .unwrap();
+        tar_builder.finish().unwrap();
+        drop(tar_builder);
+
+        let archive_dir_clone = archive_dir.clone();
+        let in_archive_path = format!("{archive_dir_clone}/nyxid");
+        self_update::Extract::from_source(&archive_path)
+            .extract_file(&extract_dir, &in_archive_path)
+            .unwrap();
+
+        let extracted = extract_dir.join(&archive_dir).join("nyxid");
+        assert!(extracted.exists(), "expected {extracted:?} to exist");
+        assert_eq!(std::fs::read(&extracted).unwrap(), payload);
+    }
 
     #[test]
     fn builds_dist_asset_names() {
