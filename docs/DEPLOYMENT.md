@@ -93,7 +93,7 @@ The frontend starts on `http://localhost:3000`.
 
 ```bash
 curl http://localhost:3001/health
-# {"status":"ok","version":"0.4.0"}
+# {"status":"ok","version":"0.5.0"}
 ```
 
 ---
@@ -202,11 +202,11 @@ a specific version by exporting `NYXID_VERSION=v1.2.3` before running compose.
 
 ```bash
 # Tag and push to your container registry
-docker tag nyxid-backend registry.example.com/nyxid/backend:v0.4.0
-docker tag nyxid-frontend registry.example.com/nyxid/frontend:v0.4.0
+docker tag nyxid-backend registry.example.com/nyxid/backend:v0.5.0
+docker tag nyxid-frontend registry.example.com/nyxid/frontend:v0.5.0
 
-docker push registry.example.com/nyxid/backend:v0.4.0
-docker push registry.example.com/nyxid/frontend:v0.4.0
+docker push registry.example.com/nyxid/backend:v0.5.0
+docker push registry.example.com/nyxid/frontend:v0.5.0
 ```
 
 ---
@@ -277,8 +277,8 @@ Edit `k8s/ingress.yaml` and replace `auth.example.com` / `app.example.com` with 
 Edit `k8s/backend-deployment.yaml` and `k8s/frontend-deployment.yaml` to reference your registry:
 
 ```yaml
-image: registry.example.com/nyxid/backend:v0.4.0  # replace
-image: registry.example.com/nyxid/frontend:v0.4.0  # replace
+image: registry.example.com/nyxid/backend:v0.5.0  # replace
+image: registry.example.com/nyxid/frontend:v0.5.0  # replace
 ```
 
 ### Step 5: Apply All Manifests
@@ -658,7 +658,7 @@ npm run build
 
 ```bash
 curl https://auth.example.com/health
-# {"status":"ok","version":"0.4.0"}
+# {"status":"ok","version":"0.5.0"}
 ```
 
 Use this for:
