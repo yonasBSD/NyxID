@@ -22,7 +22,7 @@ RUN mkdir -p backend/src && echo "fn main() {}" > backend/src/main.rs \
 RUN cargo build --release --manifest-path backend/Cargo.toml --features gcp-kms
 
 # Remove the dummy build artifacts (forces recompilation of our code only)
-RUN rm -rf backend/src target/release/deps/nyxid-* target/release/nyxid
+RUN rm -rf backend/src target/release/deps/nyxid-* target/release/nyxid-server
 
 # Copy the real source code, build script, and docs (docs are embedded via include_str!)
 COPY backend/src backend/src
@@ -48,7 +48,10 @@ RUN groupadd -r nyxid && useradd -r -g nyxid -d /app -s /sbin/nologin nyxid
 WORKDIR /app
 
 # Copy the compiled binary
-COPY --from=builder /build/target/release/nyxid /usr/local/bin/nyxid
+# The backend binary is `nyxid-server` (see backend/Cargo.toml [[bin]] block)
+# to avoid colliding with the CLI's `nyxid` binary at the same workspace
+# `target/{triple}/release/` path.
+COPY --from=builder /build/target/release/nyxid-server /usr/local/bin/nyxid-server
 
 # Create directory for JWT keys (mounted at runtime)
 RUN mkdir -p /app/keys && chown nyxid:nyxid /app/keys
@@ -57,4 +60,4 @@ USER nyxid
 
 EXPOSE 3001
 
-ENTRYPOINT ["nyxid"]
+ENTRYPOINT ["nyxid-server"]
