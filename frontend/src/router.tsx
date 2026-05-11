@@ -48,6 +48,7 @@ import {
   OAuthConsentPage,
   OAuthErrorPage,
   PrivacyPage,
+  TermsPage,
   NotificationSettingsPage,
   ApprovalHistoryPage,
   ApprovalGrantsPage,
@@ -171,6 +172,12 @@ const privacyRoute = createRoute({
   path: "/privacy",
   getParentRoute: () => rootRoute,
   component: PrivacyPage,
+});
+
+const termsRoute = createRoute({
+  path: "/terms",
+  getParentRoute: () => rootRoute,
+  component: TermsPage,
 });
 
 const blogIndexRoute = createRoute({
@@ -599,6 +606,7 @@ const routeTree = rootRoute.addChildren([
   oauthConsentRoute,
   oauthErrorRoute,
   privacyRoute,
+  termsRoute,
   blogIndexRoute,
   blogDetailRoute,
   blogPreviewRoute,

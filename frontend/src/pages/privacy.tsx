@@ -30,7 +30,7 @@ export function PrivacyPage() {
         paddingBottom: "max(2rem, var(--sab))",
       }}
     >
-      <div className="w-full max-w-[680px] space-y-8">
+      <div className="w-full max-w-[980px] space-y-8">
         {/* ── Header ── */}
         <div className="flex flex-col items-center gap-4">
           <Link
@@ -240,7 +240,7 @@ export function PrivacyPage() {
               please contact us at:
             </p>
             <p className="font-mono text-xs text-foreground">
-              privacy@nyxid.com
+              contact@chrono-ai.fun
             </p>
           </Section>
         </div>
