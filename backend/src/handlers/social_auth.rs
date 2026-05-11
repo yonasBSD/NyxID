@@ -11,9 +11,9 @@ use crate::crypto::token::{constant_time_eq, generate_random_token, hash_token};
 use crate::errors::{AppError, AppResult};
 use crate::handlers::auth::{
     apply_browser_session_cookies, build_cookie, build_cookie_with_same_site, clear_cookie,
-    clear_cookie_with_same_site, extract_ip, extract_user_agent,
+    clear_cookie_with_same_site, extract_email_domain, extract_ip, extract_referrer_domain,
+    extract_user_agent,
 };
-use crate::handlers::auth::{extract_email_domain, extract_referrer_domain};
 use crate::services::{audit_service, invite_code_service, social_auth_service, token_service};
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event, hash_short_id};
 use social_auth_service::SocialProfile;
@@ -486,9 +486,7 @@ pub async fn callback(
         if let Some(ref iid) = reserved_invite_id
             && let Some(meta) = invite_code_service::fetch_telemetry_meta(&state.db, iid).await
         {
-            let days = (chrono::Utc::now() - meta.created_at)
-                .num_days()
-                .max(0) as u64;
+            let days = (chrono::Utc::now() - meta.created_at).num_days().max(0) as u64;
             emit_event(
                 state.telemetry.as_deref(),
                 &user.id,
@@ -891,9 +889,7 @@ pub async fn apple_callback(
         if let Some(ref iid) = reserved_invite_id
             && let Some(meta) = invite_code_service::fetch_telemetry_meta(&state.db, iid).await
         {
-            let days = (chrono::Utc::now() - meta.created_at)
-                .num_days()
-                .max(0) as u64;
+            let days = (chrono::Utc::now() - meta.created_at).num_days().max(0) as u64;
             emit_event(
                 state.telemetry.as_deref(),
                 &user.id,

@@ -480,9 +480,7 @@ pub async fn register(
         if let Some(ref code_id) = invite_code_id
             && let Some(meta) = invite_code_service::fetch_telemetry_meta(&state.db, code_id).await
         {
-            let days = (chrono::Utc::now() - meta.created_at)
-                .num_days()
-                .max(0) as u64;
+            let days = (chrono::Utc::now() - meta.created_at).num_days().max(0) as u64;
             emit_event(
                 state.telemetry.as_deref(),
                 &result.user_id,
@@ -1143,7 +1141,10 @@ mod tests {
             header::REFERER,
             "https://example.com:443/path?leak=secret".parse().unwrap(),
         );
-        assert_eq!(extract_referrer_domain(&headers), Some("example.com".into()));
+        assert_eq!(
+            extract_referrer_domain(&headers),
+            Some("example.com".into())
+        );
 
         // Bare hostname (rare but allowed by RFC).
         let mut h2 = HeaderMap::new();
