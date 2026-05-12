@@ -312,6 +312,7 @@ pub(crate) fn test_user(user_id: &str, user_type: UserType) -> User {
         password_reset_expires_at: None,
         is_active: true,
         is_admin: false,
+        is_operator: false,
         role_ids: vec![],
         group_ids: vec![],
         invite_code_id: None,

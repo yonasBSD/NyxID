@@ -20,6 +20,9 @@ pub struct UserProfileResponse {
     pub email_verified: bool,
     pub mfa_enabled: bool,
     pub is_admin: bool,
+    pub is_operator: bool,
+    /// Resolved platform role: `"admin"`, `"operator"`, or `"user"`.
+    pub role: String,
     pub is_active: bool,
     pub social_provider: Option<String>,
     pub created_at: String,
@@ -65,6 +68,7 @@ pub async fn get_me(
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
+    let role = user_model.platform_role().as_str().to_string();
     Ok(Json(UserProfileResponse {
         id: user_model.id,
         email: user_model.email,
@@ -73,6 +77,8 @@ pub async fn get_me(
         email_verified: user_model.email_verified,
         mfa_enabled: user_model.mfa_enabled,
         is_admin: user_model.is_admin,
+        is_operator: user_model.is_operator,
+        role,
         is_active: user_model.is_active,
         social_provider: user_model.social_provider,
         created_at: user_model.created_at.to_rfc3339(),

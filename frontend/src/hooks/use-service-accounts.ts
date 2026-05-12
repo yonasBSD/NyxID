@@ -223,7 +223,10 @@ export function useInitiateOAuthForSa() {
       readonly saId: string;
       readonly providerId: string;
     }): Promise<SaOAuthInitiateResponse> => {
-      return api.get<SaOAuthInitiateResponse>(
+      // Mounted as POST under the canonical route since this creates an
+      // OAuth state row (state-mutating). The backend keeps GET as a
+      // legacy fallback for one release; new callers use POST.
+      return api.post<SaOAuthInitiateResponse>(
         `/admin/service-accounts/${saId}/providers/${providerId}/connect/oauth`,
       );
     },

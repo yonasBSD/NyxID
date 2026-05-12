@@ -11,6 +11,8 @@ import {
 import { updateRoleSchema, type UpdateRoleFormData } from "@/schemas/rbac";
 import { ApiError } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
+import { canAdminWrite } from "@/types/api";
+import { useAuthStore } from "@/stores/auth-store";
 import { PageHeader } from "@/components/shared/page-header";
 import { DetailSection } from "@/components/shared/detail-section";
 import { DetailRow } from "@/components/shared/detail-row";
@@ -42,6 +44,8 @@ import { Checkbox } from "@/components/ui/checkbox";
 export function AdminRoleDetailPage() {
   const { roleId } = useParams({ strict: false }) as { roleId: string };
   const navigate = useNavigate();
+  const currentUser = useAuthStore((s) => s.user);
+  const canWrite = canAdminWrite(currentUser);
 
   const { data: role, isLoading, error } = useRole(roleId);
   const updateMutation = useUpdateRole();
@@ -172,30 +176,32 @@ export function AdminRoleDetailPage() {
         title={role.name}
         description={role.description ?? undefined}
         actions={
-          <>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setBulkAssignOpen(true)}
-            >
-              <Users className="mr-1 h-3 w-3" />
-              Assign to All Users
-            </Button>
-            <Button variant="outline" size="sm" onClick={openEditDialog}>
-              <Pencil className="mr-1 h-3 w-3" />
-              Edit
-            </Button>
-            {!role.is_system && (
+          canWrite ? (
+            <>
               <Button
-                variant="destructive"
+                variant="outline"
                 size="sm"
-                onClick={() => setDeleteOpen(true)}
+                onClick={() => setBulkAssignOpen(true)}
               >
-                <Trash2 className="mr-1 h-3 w-3" />
-                Delete
+                <Users className="mr-1 h-3 w-3" />
+                Assign to All Users
               </Button>
-            )}
-          </>
+              <Button variant="outline" size="sm" onClick={openEditDialog}>
+                <Pencil className="mr-1 h-3 w-3" />
+                Edit
+              </Button>
+              {!role.is_system && (
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  onClick={() => setDeleteOpen(true)}
+                >
+                  <Trash2 className="mr-1 h-3 w-3" />
+                  Delete
+                </Button>
+              )}
+            </>
+          ) : null
         }
       />
 

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
-use crate::handlers::admin_helpers::require_admin;
+use crate::handlers::admin_helpers::{require_admin, require_admin_or_operator};
 use crate::mw::auth::AuthUser;
 use crate::services::{audit_service, service_account_service, user_token_service};
 
@@ -88,7 +88,7 @@ pub async fn list_sa_providers(
     auth_user: AuthUser,
     Path(sa_id): Path<String>,
 ) -> AppResult<Json<AdminSaProviderListResponse>> {
-    require_admin(&state, &auth_user).await?;
+    require_admin_or_operator(&state, &auth_user, "admin.service_accounts.providers.list").await?;
 
     // Verify SA exists
     let _sa = service_account_service::get_service_account(&state.db, &sa_id).await?;
@@ -207,10 +207,17 @@ pub async fn disconnect_sa_provider(
     }))
 }
 
-/// GET /api/v1/admin/service-accounts/{sa_id}/providers/{provider_id}/connect/oauth
+/// POST /api/v1/admin/service-accounts/{sa_id}/providers/{provider_id}/connect/oauth
+/// (legacy: GET — kept one release for back-compat, see `routes.rs`)
 ///
 /// Admin initiates an OAuth redirect flow on behalf of a service account.
 /// Returns the authorization URL for the admin to redirect to.
+///
+/// This is a state-mutating action (creates an OAuth state row, emits an
+/// audit entry), so it MUST stay behind `require_admin` — never weaken to
+/// `require_admin_or_operator`. The route is mounted as POST under the
+/// canonical name; the GET fallback exists only so older clients keep
+/// working during a rolling deploy.
 pub async fn initiate_oauth_for_sa(
     State(state): State<AppState>,
     auth_user: AuthUser,

@@ -29,6 +29,35 @@ impl UserType {
     }
 }
 
+/// Platform-level role derived from the `is_admin` and `is_operator` flags
+/// on a user record. The platform has three tiers, ordered low-to-high:
+///
+/// - `User` — regular user, no admin access
+/// - `Operator` — read-only access to admin GET endpoints (no writes).
+///   Intended for strategy / share-ops accounts that need cross-org
+///   platform data without write privileges.
+/// - `Admin` — full read + write access to all `/admin/*` endpoints
+///
+/// `Admin` always implies `Operator`-level read access regardless of the
+/// `is_operator` flag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlatformRole {
+    User,
+    Operator,
+    Admin,
+}
+
+impl PlatformRole {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Operator => "operator",
+            Self::Admin => "admin",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct User {
     #[serde(rename = "_id")]
@@ -48,6 +77,12 @@ pub struct User {
     pub password_reset_expires_at: Option<DateTime<Utc>>,
     pub is_active: bool,
     pub is_admin: bool,
+    /// Platform read-only role. Independent of `is_admin`: when `is_admin`
+    /// is true, operator status is implied regardless of this flag.
+    /// Defaults to false; legacy rows without this field deserialize as
+    /// false.
+    #[serde(default)]
+    pub is_operator: bool,
     #[serde(default)]
     pub role_ids: Vec<String>,
     #[serde(default)]
@@ -76,6 +111,24 @@ pub struct User {
     pub last_login_at: Option<DateTime<Utc>>,
 }
 
+impl User {
+    /// Resolved platform role for this user. `Admin` wins over `Operator`.
+    pub fn platform_role(&self) -> PlatformRole {
+        if self.is_admin {
+            PlatformRole::Admin
+        } else if self.is_operator {
+            PlatformRole::Operator
+        } else {
+            PlatformRole::User
+        }
+    }
+
+    /// True if this user has at least read-only platform admin access.
+    pub fn has_admin_read(&self) -> bool {
+        self.is_admin || self.is_operator
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,6 +152,7 @@ mod tests {
             password_reset_expires_at: None,
             is_active: true,
             is_admin: false,
+            is_operator: false,
             role_ids: vec![],
             group_ids: vec![],
             invite_code_id: None,
@@ -194,5 +248,43 @@ mod tests {
         assert!(restored.user_type.is_person());
         assert_eq!(restored.primary_org_id, None);
         assert_eq!(restored.slug, None);
+    }
+
+    #[test]
+    fn legacy_user_without_is_operator_deserializes_as_false() {
+        // Simulate a row written before the is_operator field existed.
+        let mut doc = bson::to_document(&make_user()).expect("serialize");
+        doc.remove("is_operator");
+        let restored: User = bson::from_document(doc).expect("deserialize legacy");
+        assert!(!restored.is_operator);
+        assert_eq!(restored.platform_role(), PlatformRole::User);
+    }
+
+    #[test]
+    fn platform_role_resolution() {
+        let mut u = make_user();
+        assert_eq!(u.platform_role(), PlatformRole::User);
+        assert!(!u.has_admin_read());
+
+        u.is_operator = true;
+        assert_eq!(u.platform_role(), PlatformRole::Operator);
+        assert!(u.has_admin_read());
+
+        // Admin wins over operator.
+        u.is_admin = true;
+        assert_eq!(u.platform_role(), PlatformRole::Admin);
+        assert!(u.has_admin_read());
+
+        // Admin alone (no operator flag) still has read access.
+        u.is_operator = false;
+        assert_eq!(u.platform_role(), PlatformRole::Admin);
+        assert!(u.has_admin_read());
+    }
+
+    #[test]
+    fn platform_role_serializes_snake_case() {
+        assert_eq!(PlatformRole::User.as_str(), "user");
+        assert_eq!(PlatformRole::Operator.as_str(), "operator");
+        assert_eq!(PlatformRole::Admin.as_str(), "admin");
     }
 }

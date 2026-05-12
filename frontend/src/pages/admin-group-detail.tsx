@@ -13,6 +13,8 @@ import {
 } from "@/hooks/use-rbac";
 import { updateGroupSchema, type UpdateGroupFormData } from "@/schemas/rbac";
 import { ApiError } from "@/lib/api-client";
+import { canAdminWrite } from "@/types/api";
+import { useAuthStore } from "@/stores/auth-store";
 import { formatDate } from "@/lib/utils";
 import { PageHeader } from "@/components/shared/page-header";
 import { DetailSection } from "@/components/shared/detail-section";
@@ -52,6 +54,8 @@ import { toast } from "sonner";
 export function AdminGroupDetailPage() {
   const { groupId } = useParams({ strict: false }) as { groupId: string };
   const navigate = useNavigate();
+  const currentUser = useAuthStore((s) => s.user);
+  const canWrite = canAdminWrite(currentUser);
 
   const { data: group, isLoading, error } = useGroup(groupId);
   const { data: membersData } = useGroupMembers(groupId);
@@ -209,20 +213,22 @@ export function AdminGroupDetailPage() {
         title={group.name}
         description={group.description ?? undefined}
         actions={
-          <>
-            <Button variant="outline" size="sm" onClick={openEditDialog}>
-              <Pencil className="mr-1 h-3 w-3" />
-              Edit
-            </Button>
-            <Button
-              variant="destructive"
-              size="sm"
-              onClick={() => setDeleteOpen(true)}
-            >
-              <Trash2 className="mr-1 h-3 w-3" />
-              Delete
-            </Button>
-          </>
+          canWrite ? (
+            <>
+              <Button variant="outline" size="sm" onClick={openEditDialog}>
+                <Pencil className="mr-1 h-3 w-3" />
+                Edit
+              </Button>
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={() => setDeleteOpen(true)}
+              >
+                <Trash2 className="mr-1 h-3 w-3" />
+                Delete
+              </Button>
+            </>
+          ) : null
         }
       />
 
@@ -264,16 +270,18 @@ export function AdminGroupDetailPage() {
       <Separator />
 
       <DetailSection title="Members">
-        <div className="mb-3">
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => setAddMemberOpen(true)}
-          >
-            <UserPlus className="mr-1 h-4 w-4" />
-            Add Member
-          </Button>
-        </div>
+        {canWrite && (
+          <div className="mb-3">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setAddMemberOpen(true)}
+            >
+              <UserPlus className="mr-1 h-4 w-4" />
+              Add Member
+            </Button>
+          </div>
+        )}
         {members.length === 0 ? (
           <p className="text-sm text-muted-foreground">
             No members in this group.
@@ -300,14 +308,16 @@ export function AdminGroupDetailPage() {
                       )}
                     </TableCell>
                     <TableCell>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-8 w-8"
-                        onClick={() => setRemoveMemberId(member.id)}
-                      >
-                        <UserMinus className="h-4 w-4 text-muted-foreground" />
-                      </Button>
+                      {canWrite && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8"
+                          onClick={() => setRemoveMemberId(member.id)}
+                        >
+                          <UserMinus className="h-4 w-4 text-muted-foreground" />
+                        </Button>
+                      )}
                     </TableCell>
                   </TableRow>
                 ))}

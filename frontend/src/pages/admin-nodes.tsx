@@ -6,6 +6,8 @@ import {
 } from "@/hooks/use-admin-nodes";
 import { ApiError } from "@/lib/api-client";
 import { formatRelativeTime } from "@/lib/utils";
+import { canAdminWrite } from "@/types/api";
+import { useAuthStore } from "@/stores/auth-store";
 import { PageHeader } from "@/components/shared/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
@@ -48,6 +50,8 @@ import type { AdminNodeInfo } from "@/types/nodes";
 const PER_PAGE = 50;
 
 export function AdminNodesPage() {
+  const currentUser = useAuthStore((s) => s.user);
+  const canWrite = canAdminWrite(currentUser);
   const [page, setPage] = useState(1);
   const [statusFilter, setStatusFilter] = useState<string>("");
   const [searchInput, setSearchInput] = useState("");
@@ -249,37 +253,39 @@ export function AdminNodesPage() {
                       {formatRelativeTime(node.last_heartbeat_at) ?? "Never"}
                     </TableCell>
                     <TableCell>
-                      <div className="flex items-center gap-1">
-                        {node.is_connected && (
+                      {canWrite && (
+                        <div className="flex items-center gap-1">
+                          {node.is_connected && (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8 text-muted-foreground hover:text-warning"
+                              onClick={() =>
+                                setActionTarget({
+                                  node,
+                                  action: "disconnect",
+                                })
+                              }
+                            >
+                              <Unplug className="h-4 w-4" />
+                              <span className="sr-only">
+                                Disconnect {node.name}
+                              </span>
+                            </Button>
+                          )}
                           <Button
                             variant="ghost"
                             size="icon"
-                            className="h-8 w-8 text-muted-foreground hover:text-warning"
+                            className="h-8 w-8 text-muted-foreground hover:text-destructive"
                             onClick={() =>
-                              setActionTarget({
-                                node,
-                                action: "disconnect",
-                              })
+                              setActionTarget({ node, action: "delete" })
                             }
                           >
-                            <Unplug className="h-4 w-4" />
-                            <span className="sr-only">
-                              Disconnect {node.name}
-                            </span>
+                            <Trash2 className="h-4 w-4" />
+                            <span className="sr-only">Delete {node.name}</span>
                           </Button>
-                        )}
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                          onClick={() =>
-                            setActionTarget({ node, action: "delete" })
-                          }
-                        >
-                          <Trash2 className="h-4 w-4" />
-                          <span className="sr-only">Delete {node.name}</span>
-                        </Button>
-                      </div>
+                        </div>
+                      )}
                     </TableCell>
                   </TableRow>
                 ))}

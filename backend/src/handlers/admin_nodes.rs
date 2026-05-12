@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::errors::AppResult;
-use crate::handlers::admin_helpers::require_admin;
+use crate::handlers::admin_helpers::{require_admin, require_admin_or_operator};
 use crate::handlers::node_admin::{NodeMetricsInfo, build_metrics_info};
 use crate::models::node::{NodeMetadata, NodeStatus};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
@@ -71,7 +71,7 @@ pub async fn admin_list_nodes(
     auth_user: AuthUser,
     Query(query): Query<AdminNodeListQuery>,
 ) -> AppResult<Json<AdminNodeListResponse>> {
-    require_admin(&state, &auth_user).await?;
+    require_admin_or_operator(&state, &auth_user, "admin.nodes.list").await?;
 
     let page = query.page.unwrap_or(1).max(1);
     let per_page = query.per_page.unwrap_or(50).min(100);
@@ -171,7 +171,7 @@ pub async fn admin_get_node(
     auth_user: AuthUser,
     Path(node_id): Path<String>,
 ) -> AppResult<Json<AdminNodeInfo>> {
-    require_admin(&state, &auth_user).await?;
+    require_admin_or_operator(&state, &auth_user, "admin.nodes.get").await?;
 
     let node = node_service::get_node_by_id(&state.db, &node_id)
         .await?

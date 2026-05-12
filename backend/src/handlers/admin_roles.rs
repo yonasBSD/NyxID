@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::errors::AppResult;
-use crate::handlers::admin_helpers::require_admin;
+use crate::handlers::admin_helpers::{require_admin, require_admin_or_operator};
 use crate::models::role::Role;
 use crate::mw::auth::AuthUser;
 use crate::services::{audit_service, role_service};
@@ -111,7 +111,7 @@ pub async fn list_roles(
     auth_user: AuthUser,
     Query(query): Query<RoleListQuery>,
 ) -> AppResult<Json<RoleListResponse>> {
-    require_admin(&state, &auth_user).await?;
+    require_admin_or_operator(&state, &auth_user, "admin.roles.list").await?;
 
     let roles = role_service::list_roles(&state.db, query.client_id.as_deref()).await?;
     let items: Vec<RoleResponse> = roles.into_iter().map(role_to_response).collect();
@@ -164,7 +164,7 @@ pub async fn get_role(
     auth_user: AuthUser,
     Path(role_id): Path<String>,
 ) -> AppResult<Json<RoleResponse>> {
-    require_admin(&state, &auth_user).await?;
+    require_admin_or_operator(&state, &auth_user, "admin.roles.get").await?;
 
     let role = role_service::get_role(&state.db, &role_id).await?;
     Ok(Json(role_to_response(role)))
@@ -233,7 +233,7 @@ pub async fn get_user_roles(
     auth_user: AuthUser,
     Path(user_id): Path<String>,
 ) -> AppResult<Json<UserRolesResponse>> {
-    require_admin(&state, &auth_user).await?;
+    require_admin_or_operator(&state, &auth_user, "admin.users.roles.list").await?;
 
     let rbac = crate::services::rbac_helpers::resolve_user_rbac(&state.db, &user_id).await?;
     let direct_roles = role_service::get_user_roles(&state.db, &user_id).await?;

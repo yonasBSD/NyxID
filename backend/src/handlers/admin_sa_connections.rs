@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
-use crate::handlers::admin_helpers::require_admin;
+use crate::handlers::admin_helpers::{require_admin, require_admin_or_operator};
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
@@ -96,7 +96,7 @@ pub async fn list_sa_connections(
     auth_user: AuthUser,
     Path(sa_id): Path<String>,
 ) -> AppResult<Json<AdminSaConnectionListResponse>> {
-    require_admin(&state, &auth_user).await?;
+    require_admin_or_operator(&state, &auth_user, "admin.service_accounts.connections.list").await?;
 
     // Verify SA exists
     let _sa = service_account_service::get_service_account(&state.db, &sa_id).await?;

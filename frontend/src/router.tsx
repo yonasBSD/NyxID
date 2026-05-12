@@ -12,6 +12,7 @@ import { ChunkErrorBoundary } from "@/components/chunk-error-boundary";
 import { AuthLayout } from "@/components/layout/auth-layout";
 import { DashboardLayout } from "@/components/layout/dashboard-layout";
 import { useAuthStore } from "@/stores/auth-store";
+import { hasAdminRead } from "@/types/api";
 
 import {
   LandingPage,
@@ -527,7 +528,10 @@ const adminLayout = createRoute({
     if (!isAuthenticated && !isLoading) {
       throw redirect({ to: "/login" });
     }
-    if (!isLoading && (!user || !user.is_admin)) {
+    // Admin layout is reachable by both `admin` (read+write) and `operator`
+    // (read-only). Per-action write controls inside admin pages are gated
+    // separately so operators see admin data but cannot mutate it.
+    if (!isLoading && !hasAdminRead(user)) {
       throw redirect({ to: "/dashboard" });
     }
   },

@@ -273,9 +273,17 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
             "/{sa_id}/providers/{provider_id}/connect/api-key",
             post(handlers::admin_sa_providers::connect_api_key_for_sa),
         )
+        // OAuth-connect on behalf of a service account is a state-mutating
+        // action (creates an OAuth state row, emits an audit entry). It is
+        // mounted as POST under the new route. The legacy GET form is kept
+        // for one release of back-compat with older frontends/CLIs and will
+        // be removed in a future release. Both methods route to the same
+        // handler, which keeps `require_admin` (NOT `require_admin_or_operator`)
+        // because operator is a read-only role.
         .route(
             "/{sa_id}/providers/{provider_id}/connect/oauth",
-            get(handlers::admin_sa_providers::initiate_oauth_for_sa),
+            post(handlers::admin_sa_providers::initiate_oauth_for_sa)
+                .get(handlers::admin_sa_providers::initiate_oauth_for_sa),
         )
         .route(
             "/{sa_id}/providers/{provider_id}/connect/device-code/initiate",

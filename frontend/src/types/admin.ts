@@ -1,3 +1,5 @@
+import type { PlatformRole } from "./api";
+
 export interface AdminUser {
   readonly id: string;
   readonly email: string;
@@ -6,6 +8,11 @@ export interface AdminUser {
   readonly email_verified: boolean;
   readonly is_active: boolean;
   readonly is_admin: boolean;
+  /// Read-only platform admin (issue #715). Older backends omit this field.
+  readonly is_operator?: boolean;
+  /// Resolved platform role string. Older backends omit this; callers should
+  /// fall back to deriving from `is_admin` / `is_operator`.
+  readonly role?: PlatformRole;
   readonly mfa_enabled: boolean;
   readonly role_ids?: readonly string[];
   readonly group_ids?: readonly string[];
@@ -41,8 +48,13 @@ export interface UpdateUserRequest {
   readonly avatar_url?: string;
 }
 
+/// Body for `PATCH /admin/users/{id}/role`. Use `role` for the three-tier
+/// model (admin / operator / user). The legacy `is_admin` field is still
+/// accepted by the backend for back-compat but new callers should send
+/// `role`.
 export interface SetRoleRequest {
-  readonly is_admin: boolean;
+  readonly role?: PlatformRole;
+  readonly is_admin?: boolean;
 }
 
 export interface SetStatusRequest {
@@ -55,7 +67,9 @@ export interface AdminActionResponse {
 
 export interface RoleUpdateResponse {
   readonly id: string;
+  readonly role: PlatformRole;
   readonly is_admin: boolean;
+  readonly is_operator: boolean;
   readonly message: string;
 }
 
@@ -80,14 +94,16 @@ export interface CreateUserRequest {
   readonly email: string;
   readonly password: string;
   readonly display_name?: string;
-  readonly role: "admin" | "user";
+  readonly role: PlatformRole;
 }
 
 export interface CreateUserResponse {
   readonly id: string;
   readonly email: string;
   readonly display_name: string | null;
+  readonly role: PlatformRole;
   readonly is_admin: boolean;
+  readonly is_operator: boolean;
   readonly is_active: boolean;
   readonly email_verified: boolean;
   readonly created_at: string;

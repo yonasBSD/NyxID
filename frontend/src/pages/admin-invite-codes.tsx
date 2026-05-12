@@ -13,6 +13,8 @@ import {
 } from "@/schemas/admin";
 import { ApiError } from "@/lib/api-client";
 import { cn, copyToClipboard, formatDate } from "@/lib/utils";
+import { canAdminWrite } from "@/types/api";
+import { useAuthStore } from "@/stores/auth-store";
 import { PageHeader } from "@/components/shared/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
@@ -56,6 +58,8 @@ import type { InviteCode } from "@/types/admin";
 const DEFAULT_MAX_USES = 10;
 
 export function AdminInviteCodesPage() {
+  const currentUser = useAuthStore((s) => s.user);
+  const canWrite = canAdminWrite(currentUser);
   const { data, isLoading, error } = useAdminInviteCodes();
   const createMutation = useCreateInviteCode();
   const deactivateMutation = useDeactivateInviteCode();
@@ -224,12 +228,14 @@ export function AdminInviteCodesPage() {
         description="Create and manage invite codes that gate new user registration. Each code can grant a bounded number of registrations and can be deactivated at any time."
       />
 
-      <div className="flex items-center justify-end">
-        <Button size="sm" onClick={openCreateDialog}>
-          <Plus className="mr-1 h-4 w-4" />
-          Create Invite Code
-        </Button>
-      </div>
+      {canWrite && (
+        <div className="flex items-center justify-end">
+          <Button size="sm" onClick={openCreateDialog}>
+            <Plus className="mr-1 h-4 w-4" />
+            Create Invite Code
+          </Button>
+        </div>
+      )}
 
       {isLoading ? (
         <div className="space-y-2">
@@ -344,7 +350,7 @@ export function AdminInviteCodesPage() {
                           <Link2 className="h-4 w-4" aria-hidden="true" />
                         )}
                       </Button>
-                      {ic.is_active && (
+                      {canWrite && ic.is_active && (
                         <Button
                           variant="ghost"
                           size="icon"
@@ -650,19 +656,24 @@ export function AdminInviteCodesPage() {
                   onChange={(e) => setNoteDraft(e.target.value)}
                   placeholder="e.g. alice@corp"
                   maxLength={512}
+                  readOnly={!canWrite}
                 />
                 <div className="flex items-center justify-between">
                   <p className="text-xs text-muted-foreground">
-                    Visible to admins only. Leave blank to clear.
+                    {canWrite
+                      ? "Visible to admins only. Leave blank to clear."
+                      : "Read-only — only admins can edit notes."}
                   </p>
-                  <Button
-                    size="sm"
-                    onClick={() => void handleSaveNote()}
-                    disabled={!noteHasChanges || isSaving}
-                    isLoading={isSaving}
-                  >
-                    Save
-                  </Button>
+                  {canWrite && (
+                    <Button
+                      size="sm"
+                      onClick={() => void handleSaveNote()}
+                      disabled={!noteHasChanges || isSaving}
+                      isLoading={isSaving}
+                    >
+                      Save
+                    </Button>
+                  )}
                 </div>
               </div>
 
