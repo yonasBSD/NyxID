@@ -402,7 +402,8 @@ pub async fn set_user_role(
         (None, Some(false)) => "user".to_string(),
         (None, None) => {
             return Err(AppError::ValidationError(
-                "Provide either 'role' ('admin'|'operator'|'user') or 'is_admin' (bool)".to_string(),
+                "Provide either 'role' ('admin'|'operator'|'user') or 'is_admin' (bool)"
+                    .to_string(),
             ));
         }
     };
@@ -999,9 +1000,7 @@ mod operator_route_tests {
     //! representative read handler (`list_users`).
     use super::*;
     use crate::models::user::UserType;
-    use crate::test_utils::{
-        connect_test_database, test_app_state, test_auth_user, test_user,
-    };
+    use crate::test_utils::{connect_test_database, test_app_state, test_auth_user, test_user};
     use uuid::Uuid;
 
     async fn insert_user(db: &mongodb::Database, is_admin: bool, is_operator: bool) -> String {

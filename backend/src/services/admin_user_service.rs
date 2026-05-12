@@ -326,7 +326,6 @@ pub async fn set_platform_role(
     Ok(())
 }
 
-
 /// Set the active status for a target user.
 ///
 /// Self-protection: admin_user_id must differ from target_user_id.

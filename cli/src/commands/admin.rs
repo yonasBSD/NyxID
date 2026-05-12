@@ -202,7 +202,7 @@ async fn run_user(command: AdminUserCommands) -> Result<()> {
                     eprintln!(
                         "Page {}/{} ({} total)",
                         page,
-                        ((total as u64).max(1) + per_page - 1) / per_page,
+                        (total as u64).max(1).div_ceil(per_page),
                         total
                     );
                 }
@@ -269,7 +269,10 @@ async fn run_user(command: AdminUserCommands) -> Result<()> {
             let result: Value = match role.as_str() {
                 "admin" => api.patch(&path, &json!({ "is_admin": true })).await?,
                 "user" => api.patch(&path, &json!({ "is_admin": false })).await?,
-                "operator" => match api.patch::<Value, _>(&path, &json!({ "role": "operator" })).await {
+                "operator" => match api
+                    .patch::<Value, _>(&path, &json!({ "role": "operator" }))
+                    .await
+                {
                     Ok(value) => value,
                     Err(e) => {
                         let msg = e.to_string();

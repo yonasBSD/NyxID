@@ -96,7 +96,12 @@ pub async fn list_sa_connections(
     auth_user: AuthUser,
     Path(sa_id): Path<String>,
 ) -> AppResult<Json<AdminSaConnectionListResponse>> {
-    require_admin_or_operator(&state, &auth_user, "admin.service_accounts.connections.list").await?;
+    require_admin_or_operator(
+        &state,
+        &auth_user,
+        "admin.service_accounts.connections.list",
+    )
+    .await?;
 
     // Verify SA exists
     let _sa = service_account_service::get_service_account(&state.db, &sa_id).await?;

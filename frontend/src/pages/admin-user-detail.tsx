@@ -447,7 +447,7 @@ export function AdminUserDetailPage() {
 
       <Separator />
 
-      <UserGroupsSection userId={userId} canWrite={canWrite} />
+      <UserGroupsSection userId={userId} />
 
       <Separator />
 
@@ -851,17 +851,10 @@ function UserRolesSection({
   );
 }
 
-function UserGroupsSection({
-  userId,
-  // Operator vs admin distinction not used yet because this section is
-  // read-only — group membership is mutated from the group detail page,
-  // not here. Prop kept on the API for symmetry with UserRolesSection so
-  // future write controls remain easy to add.
-  canWrite: _canWrite,
-}: {
-  readonly userId: string;
-  readonly canWrite: boolean;
-}) {
+// This section is read-only: group membership is mutated from the group
+// detail page, not here. No `canWrite` prop needed today; add one when
+// inline write controls show up on this page.
+function UserGroupsSection({ userId }: { readonly userId: string }) {
   const { data: userGroupsData, isLoading } = useUserGroups(userId);
   const groups = userGroupsData?.groups ?? [];
 
