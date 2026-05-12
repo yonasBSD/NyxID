@@ -18,7 +18,6 @@ use crate::models::downstream_service::{
 };
 use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
 use crate::models::ssh_auth_mode::SshAuthMode;
-use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::models::ws_frame_injection::WsFrameInjection;
 use crate::mw::auth::AuthUser;
 use crate::services::url_validation::{validate_base_url, validate_optional_spec_url};
@@ -554,26 +553,19 @@ pub async fn list_services(
     Query(query): Query<ListServicesQuery>,
 ) -> AppResult<Json<ServiceListResponse>> {
     let user_id_str = auth_user.user_id.to_string();
-    let is_admin = state
-        .db
-        .collection::<User>(USERS)
-        .find_one(doc! { "_id": &user_id_str })
-        .await?
-        .is_some_and(|u| u.is_admin);
 
-    // Private services are only visible to their creator (or admins).
-    // Public services (and legacy services without a visibility field) remain visible to all.
-    let mut filter = if is_admin {
-        doc! { "is_active": true }
-    } else {
-        doc! {
-            "is_active": true,
-            "$or": [
-                { "visibility": { "$ne": "private" } },
-                { "visibility": { "$exists": false } },
-                { "visibility": "private", "created_by": &user_id_str },
-            ],
-        }
+    // Private services are only visible to their creator. This applies to
+    // admins too: `unified_key_service` writes a private `DownstreamService`
+    // backing row for every user-created SSH service (slug `_ssh_<uuid>`,
+    // visibility `private`, category `internal`). Without this scoping those
+    // per-user rows leak into the admin /services list.
+    let mut filter = doc! {
+        "is_active": true,
+        "$or": [
+            { "visibility": { "$ne": "private" } },
+            { "visibility": { "$exists": false } },
+            { "visibility": "private", "created_by": &user_id_str },
+        ],
     };
     if let Some(ref category) = query.category {
         let valid = ["provider", "connection", "internal"];
