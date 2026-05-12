@@ -174,6 +174,12 @@ async fn main() {
 
     // Handle CLI commands (exit without starting server)
     if let Some(email) = cli.promote_admin {
+        services::role_service::seed_system_roles(&db)
+            .await
+            .expect("Failed to seed system roles");
+        services::role_service::backfill_platform_role_memberships(&db)
+            .await
+            .expect("Failed to backfill platform role memberships");
         run_promote_admin(&db, &email).await;
         return;
     }
@@ -282,6 +288,16 @@ async fn main() {
     services::role_service::seed_system_roles(&db)
         .await
         .expect("Failed to seed system roles");
+    let platform_role_backfill = services::role_service::backfill_platform_role_memberships(&db)
+        .await
+        .expect("Failed to backfill platform role memberships");
+    tracing::info!(
+        admin_role_id = %platform_role_backfill.admin_role_id,
+        operator_role_id = %platform_role_backfill.operator_role_id,
+        admin_users_modified = platform_role_backfill.admin_users_modified,
+        operator_users_modified = platform_role_backfill.operator_users_modified,
+        "Platform role membership backfill complete"
+    );
 
     // Run unified collection migration (idempotent, non-fatal)
     if let Err(e) = db::migrate_to_unified_collections(&db).await {
