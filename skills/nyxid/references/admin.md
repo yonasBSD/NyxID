@@ -4,6 +4,8 @@
 
 - [Account Management](#account-management)
 - [Admin Operations](#admin-operations)
+  - [Platform roles](#platform-roles)
+  - [User Management](#user-management)
   - [Invite Codes](#invite-codes)
 - [MCP Configuration](#mcp-configuration)
 - [Approval and Errors](#approval-and-errors)
@@ -11,7 +13,7 @@
 ## Account Management
 
 ```bash
-nyxid whoami --output json                             # current user info
+nyxid whoami --output json                             # current user info (shows platform role: admin / operator / user)
 nyxid status --output json                             # full account overview
 nyxid profile update --name "New Name"                 # update display name
 nyxid mfa setup                                        # enable MFA (shows QR code)
@@ -21,11 +23,44 @@ nyxid session list --output json                       # list active sessions
 
 ## Admin Operations
 
-Commands under `nyxid admin` require the caller to have `is_admin=true` on their account. Non-admin callers get `1002 forbidden` from the server.
+### Platform roles
+
+NyxID has three platform-level roles, ordered low-to-high:
+
+- **`user`** — regular user; cannot read or write anything under `/admin/*`.
+- **`operator`** — read-only platform admin. Can call every `/admin/*` GET endpoint (users, invite codes, audit log, OAuth clients, nodes, service accounts) but cannot mutate. Intended for strategy / share-ops / observability accounts that need authoritative cross-org data without holding admin keys.
+- **`admin`** — full read + write on everything under `/admin/*`.
+
+Operator reads are audited via fire-and-forget `admin.read.by_operator` entries that include the calling endpoint marker (e.g. `admin.users.list`, `admin.invite_codes.list`), so the audit trail can answer "operator X read endpoint Y at time T" independently of HTTP access logs.
+
+`admin` overrides `operator` — granting `admin` implies all operator capabilities; you don't need to set both.
+
+> The platform-level `operator` role is **separate from** the org-level `OrgRole::Viewer`. Org roles (`admin / member / viewer`) live on `org_memberships` and only affect access within one organization. Platform roles live on the `User` row and apply NyxID-wide.
+
+### User Management
+
+```bash
+nyxid admin user list                                  # list platform users (paginated, 50/page default)
+nyxid admin user list --search alice@                  # case-insensitive email substring search
+nyxid admin user list --page 2 --per-page 100
+nyxid admin user list --output json                    # machine-readable
+nyxid admin user show <USER_ID>                        # one user's profile + role + verified / MFA / last login
+nyxid admin user set-role <USER_ID> --role admin       # promote to admin (full read + write)
+nyxid admin user set-role <USER_ID> --role operator    # promote to operator (read-only platform admin)
+nyxid admin user set-role <USER_ID> --role user        # demote to regular user
+```
+
+Role-change semantics:
+
+- `set-role` refuses to change the caller's own role (self-protection — admins can't demote themselves and lock the platform out).
+- The CLI sends the legacy `{is_admin: bool}` body for `admin` / `user` transitions and the new `{role: "operator"}` body only when granting operator. Older backends without operator support stay compatible for `admin` / `user`; granting `operator` against an unupgraded backend surfaces a clear "backend upgrade required" error.
+- `list` and `show` are operator-readable. `set-role` requires `admin`.
+
+`nyxid admin` (without a subcommand) lists every available admin operation. Listing operations require operator OR admin; mutating operations require admin. Non-admin / non-operator callers get `1002 forbidden`.
 
 ### Invite Codes
 
-NyxID gates new-user registration behind invite codes. Each code grants a bounded number of registrations and can be deactivated at any time. Only admins can create or deactivate codes.
+NyxID gates new-user registration behind invite codes. Each code grants a bounded number of registrations and can be deactivated at any time. Only admins can create or deactivate codes; operators can `list` codes (read-only) but cannot create or deactivate.
 
 ```bash
 nyxid admin invite-code create                                    # default: 10 uses, no note
