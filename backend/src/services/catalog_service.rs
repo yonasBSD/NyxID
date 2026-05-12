@@ -16,7 +16,7 @@ use crate::models::service_provider_requirement::{
 };
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
-use crate::services::org_service;
+use crate::services::{org_service, role_service};
 
 /// A catalog entry combining DownstreamService + ProviderConfig info.
 pub struct CatalogEntry {
@@ -385,11 +385,16 @@ async fn enforce_catalog_read_access(
     if svc.visibility != "private" || svc.created_by == user_id {
         return Ok(());
     }
-    let is_admin = db
+    let is_admin = match db
         .collection::<User>(USERS)
         .find_one(doc! { "_id": user_id })
         .await?
-        .is_some_and(|u| u.is_admin);
+    {
+        Some(user) => role_service::resolve_platform_role(db, &user)
+            .await?
+            .is_admin(),
+        None => false,
+    };
     let has_active_user_service = if is_admin {
         false
     } else {

@@ -346,7 +346,8 @@ pub async fn reset_password(
 
 /// Promote an existing user to admin by email address.
 ///
-/// Sets `is_admin = true` and `email_verified = true` on the user.
+/// Assigns the platform admin RBAC role, mirrors `is_admin = true`, and sets
+/// `email_verified = true` on the user.
 /// Returns the user ID on success.
 pub async fn promote_user_to_admin(db: &mongodb::Database, email: &str) -> AppResult<String> {
     let normalized = email.to_lowercase();
@@ -362,22 +363,41 @@ pub async fn promote_user_to_admin(db: &mongodb::Database, email: &str) -> AppRe
 
     ensure_person_user(&user)?;
 
-    if user.is_admin {
+    if role_service::resolve_platform_role(db, &user)
+        .await?
+        .is_admin()
+    {
         return Err(AppError::Conflict(format!(
             "User {} is already an admin",
             normalized
         )));
     }
 
+    let platform_role_ids = role_service::get_platform_role_ids(db).await?;
     let now = Utc::now();
     db.collection::<User>(USERS)
         .update_one(
             doc! { "_id": &user.id },
             doc! { "$set": {
                 "is_admin": true,
+                "is_operator": false,
                 "email_verified": true,
                 "updated_at": bson::DateTime::from_chrono(now),
+            },
+            "$pull": {
+                "role_ids": {
+                    "$in": [
+                        &platform_role_ids.admin,
+                        &platform_role_ids.operator,
+                    ],
+                },
             }},
+        )
+        .await?;
+    db.collection::<User>(USERS)
+        .update_one(
+            doc! { "_id": &user.id },
+            doc! { "$addToSet": { "role_ids": &platform_role_ids.admin } },
         )
         .await?;
 

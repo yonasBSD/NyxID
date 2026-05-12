@@ -16,7 +16,7 @@ use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::mw::auth::AuthUser;
-use crate::services::{org_service, user_service_service};
+use crate::services::{org_service, role_service, user_service_service};
 
 use super::services::{ServiceResponse, SshServiceConfigResponse};
 
@@ -127,7 +127,8 @@ pub async fn require_admin(state: &AppState, auth_user: &AuthUser) -> AppResult<
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
-    if !user_model.is_admin {
+    let platform_role = role_service::resolve_platform_role(&state.db, &user_model).await?;
+    if !platform_role.is_admin() {
         return Err(AppError::Forbidden("Admin access required".to_string()));
     }
 
@@ -149,7 +150,8 @@ pub async fn require_admin_or_creator(
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
-    if !user_model.is_admin && service_created_by != user_id_str {
+    let platform_role = role_service::resolve_platform_role(&state.db, &user_model).await?;
+    if !platform_role.is_admin() && service_created_by != user_id_str {
         return Err(AppError::Forbidden(
             "Only admins or the service creator can perform this action".to_string(),
         ));

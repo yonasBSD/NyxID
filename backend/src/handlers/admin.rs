@@ -11,9 +11,11 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::handlers::admin_helpers::{require_admin, require_admin_or_operator};
 use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
-use crate::models::user::{COLLECTION_NAME as USERS, User};
+use crate::models::user::{COLLECTION_NAME as USERS, PlatformRole, User};
 use crate::mw::auth::AuthUser;
-use crate::services::{admin_user_service, audit_service, consent_service, oauth_client_service};
+use crate::services::{
+    admin_user_service, audit_service, consent_service, oauth_client_service, role_service,
+};
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 // --- Request / Response types ---
@@ -185,8 +187,9 @@ fn normalize_optional_nonempty(input: Option<&str>) -> Option<&str> {
 }
 
 /// Convert a User model into an AdminUserItem response struct.
-fn user_to_admin_item(u: User) -> AdminUserItem {
-    let role = u.platform_role().as_str().to_string();
+fn user_to_admin_item(u: User, platform_role: PlatformRole) -> AdminUserItem {
+    let role = platform_role.as_str().to_string();
+    let (is_admin, is_operator) = platform_role.legacy_flags();
     AdminUserItem {
         id: u.id,
         email: u.email,
@@ -194,8 +197,8 @@ fn user_to_admin_item(u: User) -> AdminUserItem {
         avatar_url: u.avatar_url,
         email_verified: u.email_verified,
         is_active: u.is_active,
-        is_admin: u.is_admin,
-        is_operator: u.is_operator,
+        is_admin,
+        is_operator,
         role,
         mfa_enabled: u.mfa_enabled,
         created_at: u.created_at.to_rfc3339(),
@@ -245,6 +248,7 @@ pub async fn create_user(
     )
     .await?;
 
+    let platform_role = role_service::resolve_platform_role(&state.db, &user).await?;
     audit_service::log_for_user(
         state.db.clone(),
         &auth_user,
@@ -252,18 +256,19 @@ pub async fn create_user(
         Some(serde_json::json!({
             "target_user_id": &user.id,
             "target_email": &user.email,
-            "role": user.platform_role().as_str(),
+            "role": platform_role.as_str(),
         })),
     );
 
-    let role = user.platform_role().as_str().to_string();
+    let role = platform_role.as_str().to_string();
+    let (is_admin, is_operator) = platform_role.legacy_flags();
     Ok(Json(CreateUserResponse {
         id: user.id,
         email: user.email,
         display_name: user.display_name,
         role,
-        is_admin: user.is_admin,
-        is_operator: user.is_operator,
+        is_admin,
+        is_operator,
         is_active: user.is_active,
         email_verified: user.email_verified,
         created_at: user.created_at.to_rfc3339(),
@@ -310,7 +315,15 @@ pub async fn list_users(
         .try_collect()
         .await?;
 
-    let items: Vec<AdminUserItem> = users.into_iter().map(user_to_admin_item).collect();
+    let platform_role_ids = role_service::get_platform_role_ids(&state.db).await?;
+    let items: Vec<AdminUserItem> = users
+        .into_iter()
+        .map(|user| {
+            let platform_role =
+                role_service::resolve_platform_role_from_ids(&user, &platform_role_ids);
+            user_to_admin_item(user, platform_role)
+        })
+        .collect();
 
     Ok(Json(AdminUserListResponse {
         users: items,
@@ -337,7 +350,8 @@ pub async fn get_user(
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
-    Ok(Json(user_to_admin_item(user_model)))
+    let platform_role = role_service::resolve_platform_role(&state.db, &user_model).await?;
+    Ok(Json(user_to_admin_item(user_model, platform_role)))
 }
 
 /// PUT /api/v1/admin/users/:user_id
@@ -376,7 +390,8 @@ pub async fn update_user(
         })),
     );
 
-    Ok(Json(user_to_admin_item(updated)))
+    let platform_role = role_service::resolve_platform_role(&state.db, &updated).await?;
+    Ok(Json(user_to_admin_item(updated, platform_role)))
 }
 
 /// PATCH /api/v1/admin/users/:user_id/role
@@ -408,7 +423,9 @@ pub async fn set_user_role(
         }
     };
 
-    admin_user_service::set_platform_role(&state.db, &admin_id, &user_id, &role).await?;
+    let updated =
+        admin_user_service::set_platform_role(&state.db, &admin_id, &user_id, &role).await?;
+    let platform_role = role_service::resolve_platform_role(&state.db, &updated).await?;
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -416,15 +433,12 @@ pub async fn set_user_role(
         "admin.user.role_changed",
         Some(serde_json::json!({
             "target_user_id": &user_id,
-            "role": &role,
+            "role": platform_role.as_str(),
         })),
     );
 
-    let (is_admin, is_operator) = match role.as_str() {
-        "admin" => (true, false),
-        "operator" => (false, true),
-        _ => (false, false),
-    };
+    let role = platform_role.as_str().to_string();
+    let (is_admin, is_operator) = platform_role.legacy_flags();
 
     Ok(Json(RoleUpdateResponse {
         id: user_id,
@@ -1000,14 +1014,24 @@ mod operator_route_tests {
     //! representative read handler (`list_users`).
     use super::*;
     use crate::models::user::UserType;
+    use crate::services::role_service;
     use crate::test_utils::{connect_test_database, test_app_state, test_auth_user, test_user};
     use uuid::Uuid;
 
     async fn insert_user(db: &mongodb::Database, is_admin: bool, is_operator: bool) -> String {
+        role_service::seed_system_roles(db)
+            .await
+            .expect("seed platform roles");
+        let platform_role_ids = role_service::get_platform_role_ids(db)
+            .await
+            .expect("platform role ids");
         let id = Uuid::new_v4().to_string();
         let mut user = test_user(&id, UserType::Person);
-        user.is_admin = is_admin;
-        user.is_operator = is_operator;
+        if is_admin {
+            user.role_ids.push(platform_role_ids.admin);
+        } else if is_operator {
+            user.role_ids.push(platform_role_ids.operator);
+        }
         db.collection::<User>(USERS)
             .insert_one(&user)
             .await
@@ -1097,5 +1121,135 @@ mod operator_route_tests {
             "operator create-user should yield 403 Forbidden, got {:?}",
             err
         );
+    }
+
+    #[tokio::test]
+    async fn set_role_operator_assigns_operator_system_role() {
+        let Some(db) = connect_test_database("admin_route_set_operator").await else {
+            eprintln!("skipping set_role_operator: no local MongoDB available");
+            return;
+        };
+        let admin_id = insert_user(&db, true, false).await;
+        let target_id = insert_user(&db, false, false).await;
+        let state = test_app_state(db.clone());
+
+        let response = set_user_role(
+            State(state),
+            test_auth_user(&admin_id),
+            HeaderMap::new(),
+            Path(target_id.clone()),
+            Json(SetRoleRequest {
+                role: Some("operator".to_string()),
+                is_admin: None,
+            }),
+        )
+        .await
+        .expect("admin can assign operator role");
+
+        assert_eq!(response.0.role, "operator");
+        assert!(!response.0.is_admin);
+        assert!(response.0.is_operator);
+
+        let platform_role_ids = role_service::get_platform_role_ids(&db)
+            .await
+            .expect("platform role ids");
+        let target = db
+            .collection::<User>(USERS)
+            .find_one(doc! { "_id": &target_id })
+            .await
+            .expect("query target")
+            .expect("target exists");
+        assert!(target.role_ids.contains(&platform_role_ids.operator));
+        assert!(!target.role_ids.contains(&platform_role_ids.admin));
+    }
+
+    #[tokio::test]
+    async fn set_role_legacy_is_admin_true_assigns_admin_system_role() {
+        let Some(db) = connect_test_database("admin_route_set_legacy_admin").await else {
+            eprintln!("skipping set_role_legacy_admin: no local MongoDB available");
+            return;
+        };
+        let admin_id = insert_user(&db, true, false).await;
+        let target_id = insert_user(&db, false, false).await;
+        let state = test_app_state(db.clone());
+
+        let response = set_user_role(
+            State(state),
+            test_auth_user(&admin_id),
+            HeaderMap::new(),
+            Path(target_id.clone()),
+            Json(SetRoleRequest {
+                role: None,
+                is_admin: Some(true),
+            }),
+        )
+        .await
+        .expect("legacy is_admin=true still assigns admin");
+
+        assert_eq!(response.0.role, "admin");
+        assert!(response.0.is_admin);
+        assert!(!response.0.is_operator);
+
+        let platform_role_ids = role_service::get_platform_role_ids(&db)
+            .await
+            .expect("platform role ids");
+        let target = db
+            .collection::<User>(USERS)
+            .find_one(doc! { "_id": &target_id })
+            .await
+            .expect("query target")
+            .expect("target exists");
+        assert!(target.role_ids.contains(&platform_role_ids.admin));
+        assert!(!target.role_ids.contains(&platform_role_ids.operator));
+    }
+
+    #[tokio::test]
+    async fn set_role_user_revokes_admin_and_operator_roles() {
+        let Some(db) = connect_test_database("admin_route_set_user").await else {
+            eprintln!("skipping set_role_user: no local MongoDB available");
+            return;
+        };
+        let admin_id = insert_user(&db, true, false).await;
+        let target_id = insert_user(&db, false, false).await;
+        let platform_role_ids = role_service::get_platform_role_ids(&db)
+            .await
+            .expect("platform role ids");
+        db.collection::<User>(USERS)
+            .update_one(
+                doc! { "_id": &target_id },
+                doc! { "$addToSet": { "role_ids": { "$each": [
+                    &platform_role_ids.admin,
+                    &platform_role_ids.operator,
+                ]}}},
+            )
+            .await
+            .expect("grant both platform roles");
+        let state = test_app_state(db.clone());
+
+        let response = set_user_role(
+            State(state),
+            test_auth_user(&admin_id),
+            HeaderMap::new(),
+            Path(target_id.clone()),
+            Json(SetRoleRequest {
+                role: Some("user".to_string()),
+                is_admin: None,
+            }),
+        )
+        .await
+        .expect("admin can demote to user");
+
+        assert_eq!(response.0.role, "user");
+        assert!(!response.0.is_admin);
+        assert!(!response.0.is_operator);
+
+        let target = db
+            .collection::<User>(USERS)
+            .find_one(doc! { "_id": &target_id })
+            .await
+            .expect("query target")
+            .expect("target exists");
+        assert!(!target.role_ids.contains(&platform_role_ids.admin));
+        assert!(!target.role_ids.contains(&platform_role_ids.operator));
     }
 }

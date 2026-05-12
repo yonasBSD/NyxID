@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::crypto::password;
 use crate::errors::{AppError, AppResult};
 use crate::models::session::{COLLECTION_NAME as SESSIONS, Session};
-use crate::models::user::{COLLECTION_NAME as USERS, User};
+use crate::models::user::{COLLECTION_NAME as USERS, PlatformRole, User};
 use crate::services::role_service;
 
 /// Maximum password length to prevent Argon2 DoS via extremely long passwords.
@@ -128,11 +128,22 @@ pub async fn create_user(
     let password_hash = password::hash_password(password_raw)?;
     let now = Utc::now();
     let user_id = Uuid::new_v4().to_string();
-    let is_admin = role == "admin";
-    let is_operator = role == "operator";
+    let platform_role = match role {
+        "admin" => PlatformRole::Admin,
+        "operator" => PlatformRole::Operator,
+        "user" => PlatformRole::User,
+        _ => {
+            return Err(AppError::ValidationError(
+                "Role must be 'admin', 'operator', or 'user'".to_string(),
+            ));
+        }
+    };
+    let (is_admin, is_operator) = platform_role.legacy_flags();
 
     // Auto-assign default roles to new admin-created users
-    let default_role_ids = role_service::get_default_role_ids(db).await?;
+    let mut role_ids = role_service::get_default_role_ids(db).await?;
+    let platform_role_ids = role_service::get_platform_role_ids(db).await?;
+    role_service::add_platform_role_id(&mut role_ids, platform_role, &platform_role_ids);
 
     let new_user = User {
         id: user_id.clone(),
@@ -148,7 +159,7 @@ pub async fn create_user(
         is_active: true,
         is_admin,
         is_operator,
-        role_ids: default_role_ids,
+        role_ids,
         group_ids: vec![],
         invite_code_id: None,
         mfa_enabled: false,
@@ -279,31 +290,32 @@ pub async fn update_user(
 /// Set the platform role for a target user. Accepts `"admin"`, `"operator"`,
 /// or `"user"`. Self-protection: admin_user_id must differ from target_user_id.
 ///
-/// Both `is_admin` and `is_operator` flags are written so the role is always
-/// fully specified; an admin demoted to operator ends up with
-/// `is_admin=false, is_operator=true` and a user with both flags false.
+/// Platform RBAC role membership is authoritative. The legacy boolean fields
+/// are still mirrored so older deployment code and stored documents remain
+/// compatible during the migration window.
 pub async fn set_platform_role(
     db: &mongodb::Database,
     admin_user_id: &str,
     target_user_id: &str,
     role: &str,
-) -> AppResult<()> {
+) -> AppResult<User> {
     if admin_user_id == target_user_id {
         return Err(AppError::ValidationError(
             "Cannot change your own platform role".to_string(),
         ));
     }
 
-    let (is_admin, is_operator) = match role {
-        "admin" => (true, false),
-        "operator" => (false, true),
-        "user" => (false, false),
+    let platform_role = match role {
+        "admin" => PlatformRole::Admin,
+        "operator" => PlatformRole::Operator,
+        "user" => PlatformRole::User,
         _ => {
             return Err(AppError::ValidationError(
                 "Role must be 'admin', 'operator', or 'user'".to_string(),
             ));
         }
     };
+    let (is_admin, is_operator) = platform_role.legacy_flags();
 
     let _target = db
         .collection::<User>(USERS)
@@ -311,6 +323,7 @@ pub async fn set_platform_role(
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
+    let platform_role_ids = role_service::get_platform_role_ids(db).await?;
     let now = Utc::now();
     db.collection::<User>(USERS)
         .update_one(
@@ -319,11 +332,42 @@ pub async fn set_platform_role(
                 "is_admin": is_admin,
                 "is_operator": is_operator,
                 "updated_at": bson::DateTime::from_chrono(now),
+            },
+            "$pull": {
+                "role_ids": {
+                    "$in": [
+                        &platform_role_ids.admin,
+                        &platform_role_ids.operator,
+                    ],
+                },
             }},
         )
         .await?;
 
-    Ok(())
+    match platform_role {
+        PlatformRole::Admin => {
+            db.collection::<User>(USERS)
+                .update_one(
+                    doc! { "_id": target_user_id },
+                    doc! { "$addToSet": { "role_ids": &platform_role_ids.admin } },
+                )
+                .await?;
+        }
+        PlatformRole::Operator => {
+            db.collection::<User>(USERS)
+                .update_one(
+                    doc! { "_id": target_user_id },
+                    doc! { "$addToSet": { "role_ids": &platform_role_ids.operator } },
+                )
+                .await?;
+        }
+        PlatformRole::User => {}
+    }
+
+    db.collection::<User>(USERS)
+        .find_one(doc! { "_id": target_user_id })
+        .await?
+        .ok_or_else(|| AppError::Internal("User disappeared after role update".to_string()))
 }
 
 /// Set the active status for a target user.
