@@ -15,11 +15,16 @@ pub async fn run(api: &mut ApiClient, output: OutputFormat) -> Result<()> {
             let id = user["id"].as_str().unwrap_or("-");
             let email = user["email"].as_str().unwrap_or("-");
             let name = user["display_name"].as_str().unwrap_or("-");
-            let role = if user["is_admin"].as_bool().unwrap_or(false) {
-                "admin"
-            } else {
-                "user"
-            };
+            // Backend includes a derived `role` string ("admin" / "operator"
+            // / "user"); fall back to the legacy `is_admin` flag for older
+            // backends that haven't been redeployed yet.
+            let role = user["role"].as_str().unwrap_or_else(|| {
+                if user["is_admin"].as_bool().unwrap_or(false) {
+                    "admin"
+                } else {
+                    "user"
+                }
+            });
             let mfa = if user["mfa_enabled"].as_bool().unwrap_or(false) {
                 "enabled"
             } else {

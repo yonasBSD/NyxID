@@ -1,3 +1,8 @@
+/// Resolved platform role for a user. `admin` is full read+write,
+/// `operator` is read-only platform admin (issue #715), `user` is a
+/// regular user with no platform admin access.
+export type PlatformRole = "admin" | "operator" | "user";
+
 export interface User {
   readonly id: string;
   readonly email: string;
@@ -6,8 +11,50 @@ export interface User {
   readonly email_verified: boolean;
   readonly mfa_enabled: boolean;
   readonly is_admin: boolean;
+  /// Read-only platform admin. Defaults to false. When true (and `is_admin`
+  /// is false) the user can hit admin GET endpoints but no writes.
+  readonly is_operator?: boolean;
+  /// Resolved platform role string. Older backends omit this field; callers
+  /// should fall back to deriving from `is_admin` / `is_operator`.
+  readonly role?: PlatformRole;
   readonly is_active: boolean;
   readonly created_at: string;
+}
+
+/// Resolve the effective platform role for a user payload returned by the
+/// backend. Newer backends include the `role` string directly; older
+/// backends only return `is_admin`. This helper bridges both shapes.
+export function resolvePlatformRole(
+  user: Pick<User, "is_admin" | "is_operator" | "role">,
+): PlatformRole {
+  if (user.role) return user.role;
+  if (user.is_admin) return "admin";
+  if (user.is_operator) return "operator";
+  return "user";
+}
+
+/// True if the user has at least read-only platform admin access (admin OR
+/// operator). Use this to gate admin nav and admin GET-driven UI.
+export function hasAdminRead(
+  user: Pick<User, "is_admin" | "is_operator" | "role"> | null | undefined,
+): boolean {
+  if (!user) return false;
+  const role = resolvePlatformRole(user);
+  return role === "admin" || role === "operator";
+}
+
+/// True only if the user has full platform admin write access (i.e. role
+/// === "admin"). Use this to gate every admin write UI control: create
+/// buttons, delete buttons, role-change selects, edit dialogs, status
+/// toggles, etc. Operators must see read data but never see write
+/// controls — both because the backend will reject the call and because a
+/// disabled-but-visible button creates the impression that an operator
+/// might one day be granted that power.
+export function canAdminWrite(
+  user: Pick<User, "is_admin" | "is_operator" | "role"> | null | undefined,
+): boolean {
+  if (!user) return false;
+  return resolvePlatformRole(user) === "admin";
 }
 
 export interface ApiKey {

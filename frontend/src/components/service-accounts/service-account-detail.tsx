@@ -65,6 +65,14 @@ interface ServiceAccountDetailProps {
    */
   readonly breadcrumbsPrefix?: readonly BreadcrumbItem[];
   readonly showProviderSections?: boolean;
+  /// Whether the viewing user has write access to this service account.
+  /// Caller responsibility: the admin route passes
+  /// `canAdminWrite(currentUser)` (platform admin only); the org route
+  /// passes whether the user is admin of the owning org. When false,
+  /// every write control (Edit / Delete / Rotate / Revoke / Connect /
+  /// Disconnect) is hidden. Defaults to `false` so a forgotten caller
+  /// fails closed rather than exposing writes to a read-only viewer.
+  readonly canWrite?: boolean;
 }
 
 export function ServiceAccountDetail({
@@ -72,6 +80,7 @@ export function ServiceAccountDetail({
   backTo,
   breadcrumbsPrefix,
   showProviderSections = true,
+  canWrite = false,
 }: ServiceAccountDetailProps) {
   const navigate = useNavigate();
 
@@ -271,20 +280,22 @@ export function ServiceAccountDetail({
         title={sa.name}
         description={sa.description ?? undefined}
         actions={
-          <>
-            <Button variant="outline" size="sm" onClick={openEditDialog}>
-              <Pencil className="mr-1 h-3 w-3" />
-              Edit
-            </Button>
-            <Button
-              variant="destructive"
-              size="sm"
-              onClick={() => setConfirmAction("delete")}
-            >
-              <Trash2 className="mr-1 h-3 w-3" />
-              Delete
-            </Button>
-          </>
+          canWrite ? (
+            <>
+              <Button variant="outline" size="sm" onClick={openEditDialog}>
+                <Pencil className="mr-1 h-3 w-3" />
+                Edit
+              </Button>
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={() => setConfirmAction("delete")}
+              >
+                <Trash2 className="mr-1 h-3 w-3" />
+                Delete
+              </Button>
+            </>
+          ) : null
         }
       />
 
@@ -327,7 +338,7 @@ export function ServiceAccountDetail({
       <Separator />
 
       {showProviderSections ? (
-        <SaConnectedServices saId={saId} />
+        <SaConnectedServices saId={saId} canWrite={canWrite} />
       ) : (
         <DetailSection title="Provider Connections">
           <p className="text-sm text-muted-foreground">
@@ -341,24 +352,28 @@ export function ServiceAccountDetail({
         </DetailSection>
       )}
 
-      <Separator />
+      {canWrite && (
+        <>
+          <Separator />
 
-      <DetailSection title="Actions">
-        <div className="flex flex-wrap gap-2">
-          <Button variant="outline" size="sm" onClick={openRotateDialog}>
-            <RefreshCw className="mr-1 h-3 w-3" />
-            Rotate Secret
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setConfirmAction("revoke-tokens")}
-          >
-            <Ban className="mr-1 h-3 w-3" />
-            Revoke Tokens
-          </Button>
-        </div>
-      </DetailSection>
+          <DetailSection title="Actions">
+            <div className="flex flex-wrap gap-2">
+              <Button variant="outline" size="sm" onClick={openRotateDialog}>
+                <RefreshCw className="mr-1 h-3 w-3" />
+                Rotate Secret
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setConfirmAction("revoke-tokens")}
+              >
+                <Ban className="mr-1 h-3 w-3" />
+                Revoke Tokens
+              </Button>
+            </div>
+          </DetailSection>
+        </>
+      )}
 
       {/* Edit Dialog */}
       <Dialog open={editOpen} onOpenChange={setEditOpen}>

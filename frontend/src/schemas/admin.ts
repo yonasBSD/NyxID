@@ -28,7 +28,7 @@ export const createUserSchema = z.object({
     .max(200, "Display name must be 200 characters or less")
     .optional()
     .or(z.literal("")),
-  role: z.enum(["admin", "user"], {
+  role: z.enum(["admin", "operator", "user"], {
     error: "Role is required",
   }),
 });

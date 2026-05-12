@@ -6,6 +6,8 @@ import { useAdminUsers, useCreateUser } from "@/hooks/use-admin";
 import { createUserSchema, type CreateUserFormData } from "@/schemas/admin";
 import { ApiError } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
+import { resolvePlatformRole, canAdminWrite } from "@/types/api";
+import { useAuthStore } from "@/stores/auth-store";
 import { PageHeader } from "@/components/shared/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
@@ -59,6 +61,9 @@ export function AdminUsersPage() {
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
+
+  const currentUser = useAuthStore((s) => s.user);
+  const canWrite = canAdminWrite(currentUser);
 
   const { data, isLoading, error } = useAdminUsers(page, PER_PAGE, search);
   const createMutation = useCreateUser();
@@ -148,10 +153,12 @@ export function AdminUsersPage() {
             </Button>
           )}
         </form>
-        <Button size="sm" onClick={openCreateDialog}>
-          <UserPlus className="mr-1 h-4 w-4" />
-          Create User
-        </Button>
+        {canWrite && (
+          <Button size="sm" onClick={openCreateDialog}>
+            <UserPlus className="mr-1 h-4 w-4" />
+            Create User
+          </Button>
+        )}
       </div>
 
       {isLoading ? (
@@ -227,13 +234,18 @@ export function AdminUsersPage() {
                       </Badge>
                     </TableCell>
                     <TableCell>
-                      {user.is_admin ? (
-                        <Badge variant="default">Admin</Badge>
-                      ) : (
-                        <span className="text-muted-foreground text-xs">
-                          User
-                        </span>
-                      )}
+                      {(() => {
+                        const role = resolvePlatformRole(user);
+                        if (role === "admin")
+                          return <Badge variant="default">Admin</Badge>;
+                        if (role === "operator")
+                          return <Badge variant="secondary">Operator</Badge>;
+                        return (
+                          <span className="text-muted-foreground text-xs">
+                            User
+                          </span>
+                        );
+                      })()}
                     </TableCell>
                     <TableCell>
                       <Badge
@@ -378,6 +390,9 @@ export function AdminUsersPage() {
                       </FormControl>
                       <SelectContent>
                         <SelectItem value="user">User</SelectItem>
+                        <SelectItem value="operator">
+                          Operator (read-only platform admin)
+                        </SelectItem>
                         <SelectItem value="admin">Admin</SelectItem>
                       </SelectContent>
                     </Select>

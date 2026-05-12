@@ -11,7 +11,7 @@ use validator::Validate;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
-use crate::handlers::admin_helpers::require_admin;
+use crate::handlers::admin_helpers::{require_admin, require_admin_or_operator};
 use crate::models::invite_code::{InviteCode, InviteCodeUsage};
 use crate::mw::auth::AuthUser;
 use crate::services::invite_code_service::InviteCodeUsageUser;
@@ -203,7 +203,7 @@ pub async fn list_invite_codes(
     State(state): State<AppState>,
     auth_user: AuthUser,
 ) -> AppResult<Json<InviteCodeListResponse>> {
-    require_admin(&state, &auth_user).await?;
+    require_admin_or_operator(&state, &auth_user, "admin.invite_codes.list").await?;
 
     let result = invite_code_service::list_invite_codes(&state.db).await?;
 

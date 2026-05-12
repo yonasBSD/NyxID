@@ -11,6 +11,8 @@ import {
 import { createGroupSchema, type CreateGroupFormData } from "@/schemas/rbac";
 import { ApiError } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
+import { canAdminWrite } from "@/types/api";
+import { useAuthStore } from "@/stores/auth-store";
 import { PageHeader } from "@/components/shared/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
@@ -45,6 +47,8 @@ import { toast } from "sonner";
 
 export function AdminGroupsPage() {
   const navigate = useNavigate();
+  const currentUser = useAuthStore((s) => s.user);
+  const canWrite = canAdminWrite(currentUser);
   const [createOpen, setCreateOpen] = useState(false);
   const [deleteGroupId, setDeleteGroupId] = useState<string | null>(null);
 
@@ -124,10 +128,12 @@ export function AdminGroupsPage() {
         title="Group Management"
         description="Manage groups and their role assignments."
         actions={
-          <Button size="sm" onClick={openCreateDialog}>
-            <Plus className="mr-1 h-4 w-4" />
-            Add Group
-          </Button>
+          canWrite ? (
+            <Button size="sm" onClick={openCreateDialog}>
+              <Plus className="mr-1 h-4 w-4" />
+              Add Group
+            </Button>
+          ) : null
         }
       />
 
@@ -217,17 +223,19 @@ export function AdminGroupsPage() {
                     {formatDate(group.created_at)}
                   </TableCell>
                   <TableCell>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-8 w-8"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setDeleteGroupId(group.id);
-                      }}
-                    >
-                      <Trash2 className="h-4 w-4 text-muted-foreground" />
-                    </Button>
+                    {canWrite && (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setDeleteGroupId(group.id);
+                        }}
+                      >
+                        <Trash2 className="h-4 w-4 text-muted-foreground" />
+                      </Button>
+                    )}
                   </TableCell>
                 </TableRow>
               ))}

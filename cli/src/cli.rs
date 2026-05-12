@@ -220,6 +220,46 @@ pub enum AdminCommands {
         #[command(subcommand)]
         command: InviteCodeCommands,
     },
+    /// Inspect users and manage platform roles (admin / operator / user)
+    User {
+        #[command(subcommand)]
+        command: AdminUserCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AdminUserCommands {
+    /// List platform users (paginated)
+    List {
+        /// Page number (1-based)
+        #[arg(long, default_value_t = 1)]
+        page: u64,
+        /// Results per page (max 100)
+        #[arg(long, default_value_t = 50)]
+        per_page: u64,
+        /// Case-insensitive email substring search
+        #[arg(long)]
+        search: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Show a single user's profile by ID
+    Show {
+        /// User ID (UUID)
+        id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Set a user's platform role (admin | operator | user)
+    SetRole {
+        /// User ID (UUID)
+        id: String,
+        /// New platform role
+        #[arg(long, value_parser = ["admin", "operator", "user"])]
+        role: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
 }
 
 #[derive(Subcommand)]

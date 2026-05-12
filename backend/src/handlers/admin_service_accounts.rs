@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::handlers::admin::AdminActionResponse;
-use crate::handlers::admin_helpers::require_admin;
+use crate::handlers::admin_helpers::{require_admin, require_admin_or_operator};
 use crate::models::service_account::ServiceAccount;
 use crate::mw::auth::AuthUser;
 use crate::services::{audit_service, org_service, service_account_service};
@@ -34,6 +34,34 @@ async fn require_admin_or_owning_org_admin(
     // Otherwise the SA must be org-owned and the caller must be admin of
     // that org. `effective_owner_user_id` falls back to created_by for
     // pre-owner-field records.
+    let owner = sa.effective_owner_user_id();
+    let actor = auth_user.user_id.to_string();
+    let access = org_service::resolve_owner_access(&state.db, &actor, owner).await?;
+    if access.can_write() {
+        return Ok(());
+    }
+
+    Err(AppError::Forbidden(
+        "admin access required (global or owning org)".to_string(),
+    ))
+}
+
+/// Read-only variant of [`require_admin_or_owning_org_admin`]. Allows the
+/// platform `operator` role through the global path so strategy /
+/// share-ops accounts can inspect service accounts without write
+/// privileges.
+async fn require_admin_read_or_owning_org_admin(
+    state: &AppState,
+    auth_user: &AuthUser,
+    sa: &ServiceAccount,
+) -> AppResult<()> {
+    if require_admin_or_operator(state, auth_user, "admin.service_accounts.get")
+        .await
+        .is_ok()
+    {
+        return Ok(());
+    }
+
     let owner = sa.effective_owner_user_id();
     let actor = auth_user.user_id.to_string();
     let access = org_service::resolve_owner_access(&state.db, &actor, owner).await?;
@@ -248,20 +276,29 @@ pub async fn list_service_accounts(
     let actor = auth_user.user_id.to_string();
 
     // Two listing modes:
-    // - org_id set: org admin can list SAs owned by their org. No global
-    //   admin requirement.
-    // - org_id unset: legacy global listing, requires global admin.
+    // - org_id unset: legacy global listing. Requires global admin or
+    //   operator (read-only). Audited via the helper.
+    // - org_id set: org-scoped listing. Allow global admin/operator
+    //   through first (otherwise an operator can list every SA but gets
+    //   denied when narrowing to one org — backwards). Then fall back to
+    //   org-admin write access for the target org.
     let owner_filter = if let Some(target_org_id) = query.org_id.as_deref() {
-        let access = org_service::resolve_owner_access(&state.db, &actor, target_org_id).await?;
-        if !access.can_write() {
-            return Err(AppError::OrgRoleInsufficient(
-                "admin access to the target org is required to list its service accounts"
-                    .to_string(),
-            ));
+        if require_admin_or_operator(&state, &auth_user, "admin.service_accounts.list.org")
+            .await
+            .is_err()
+        {
+            let access =
+                org_service::resolve_owner_access(&state.db, &actor, target_org_id).await?;
+            if !access.can_write() {
+                return Err(AppError::OrgRoleInsufficient(
+                    "admin access to the target org is required to list its service accounts"
+                        .to_string(),
+                ));
+            }
         }
         Some(target_org_id.to_string())
     } else {
-        require_admin(&state, &auth_user).await?;
+        require_admin_or_operator(&state, &auth_user, "admin.service_accounts.list").await?;
         None
     };
 
@@ -294,7 +331,7 @@ pub async fn get_service_account(
     Path(sa_id): Path<String>,
 ) -> AppResult<Json<ServiceAccountItem>> {
     let sa = service_account_service::get_service_account(&state.db, &sa_id).await?;
-    require_admin_or_owning_org_admin(&state, &auth_user, &sa).await?;
+    require_admin_read_or_owning_org_admin(&state, &auth_user, &sa).await?;
 
     Ok(Json(sa_to_item(sa)))
 }

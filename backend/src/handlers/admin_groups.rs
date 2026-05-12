@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::errors::AppResult;
-use crate::handlers::admin_helpers::require_admin;
+use crate::handlers::admin_helpers::{require_admin, require_admin_or_operator};
 use crate::models::role::Role;
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::AuthUser;
@@ -151,7 +151,7 @@ pub async fn list_groups(
     State(state): State<AppState>,
     auth_user: AuthUser,
 ) -> AppResult<Json<GroupListResponse>> {
-    require_admin(&state, &auth_user).await?;
+    require_admin_or_operator(&state, &auth_user, "admin.groups.list").await?;
 
     let groups = group_service::list_groups(&state.db).await?;
     let mut items = Vec::with_capacity(groups.len());
@@ -207,7 +207,7 @@ pub async fn get_group(
     auth_user: AuthUser,
     Path(group_id): Path<String>,
 ) -> AppResult<Json<GroupResponse>> {
-    require_admin(&state, &auth_user).await?;
+    require_admin_or_operator(&state, &auth_user, "admin.groups.get").await?;
 
     let group = group_service::get_group(&state.db, &group_id).await?;
     let response = build_group_response(&state.db, group).await?;
@@ -283,7 +283,7 @@ pub async fn get_members(
     auth_user: AuthUser,
     Path(group_id): Path<String>,
 ) -> AppResult<Json<GroupMembersResponse>> {
-    require_admin(&state, &auth_user).await?;
+    require_admin_or_operator(&state, &auth_user, "admin.groups.members.list").await?;
 
     let members = group_service::get_members(&state.db, &group_id).await?;
     let total = members.len() as u64;
@@ -361,7 +361,7 @@ pub async fn get_user_groups(
     auth_user: AuthUser,
     Path(user_id): Path<String>,
 ) -> AppResult<Json<UserGroupsResponse>> {
-    require_admin(&state, &auth_user).await?;
+    require_admin_or_operator(&state, &auth_user, "admin.users.groups.list").await?;
 
     let groups = group_service::get_user_groups(&state.db, &user_id).await?;
     let mut items = Vec::with_capacity(groups.len());

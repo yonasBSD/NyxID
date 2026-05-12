@@ -14,6 +14,7 @@ import type {
   CreateUserResponse,
   AdminAuditLogListResponse,
 } from "@/types/admin";
+import type { PlatformRole } from "@/types/api";
 
 export function useAdminUsers(page: number, perPage: number, search?: string) {
   return useQuery({
@@ -124,13 +125,13 @@ export function useSetUserRole() {
   return useMutation({
     mutationFn: async ({
       userId,
-      isAdmin,
+      role,
     }: {
       readonly userId: string;
-      readonly isAdmin: boolean;
+      readonly role: PlatformRole;
     }): Promise<RoleUpdateResponse> => {
       return api.patch<RoleUpdateResponse>(`/admin/users/${userId}/role`, {
-        is_admin: isAdmin,
+        role,
       });
     },
     onSuccess: (_, { userId }) => {

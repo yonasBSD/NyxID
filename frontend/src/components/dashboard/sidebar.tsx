@@ -25,6 +25,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth-store";
+import { hasAdminRead } from "@/types/api";
 
 /* ── Navigation Config ── */
 const NAV_ITEMS = [
@@ -195,8 +196,10 @@ export function Sidebar({
           ))}
         </div>
 
-        {/* Admin section */}
-        {user?.is_admin && (
+        {/* Admin section — visible to admins (read+write) and operators
+            (read-only). Per-action write controls are gated separately
+            inside individual admin pages. */}
+        {hasAdminRead(user) && (
           <div className="flex flex-col gap-1">
             <p className="mb-1 px-4 text-[11px] font-semibold uppercase tracking-[1px] text-text-tertiary">
               Admin

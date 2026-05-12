@@ -24,6 +24,7 @@ import { useAuthStore } from "@/stores/auth-store";
 import { updateUserSchema, type UpdateUserFormData } from "@/schemas/admin";
 import { formatDate, formatRelativeTime } from "@/lib/utils";
 import { ApiError } from "@/lib/api-client";
+import { resolvePlatformRole, canAdminWrite, type PlatformRole } from "@/types/api";
 import { PageHeader } from "@/components/shared/page-header";
 import { DetailSection } from "@/components/shared/detail-section";
 import { DetailRow } from "@/components/shared/detail-row";
@@ -67,7 +68,6 @@ import {
   Pencil,
   Trash2,
   ShieldCheck,
-  ShieldOff,
   UserCheck,
   UserX,
   KeyRound,
@@ -78,13 +78,19 @@ import {
 import { toast } from "sonner";
 
 type ConfirmAction =
-  | "toggle-admin"
+  | "set-role"
   | "toggle-status"
   | "delete"
   | "revoke-sessions"
   | "reset-password"
   | "verify-email"
   | null;
+
+const ROLE_LABEL: Record<PlatformRole, string> = {
+  admin: "Admin",
+  operator: "Operator",
+  user: "User",
+};
 
 export function AdminUserDetailPage() {
   const { userId } = useParams({ strict: false }) as { userId: string };
@@ -104,8 +110,13 @@ export function AdminUserDetailPage() {
 
   const [editOpen, setEditOpen] = useState(false);
   const [confirmAction, setConfirmAction] = useState<ConfirmAction>(null);
+  /// Role pending confirmation for the role-change dialog. `null` means no
+  /// change is queued; a non-null value names the role the admin picked
+  /// in the role select but hasn't confirmed yet.
+  const [pendingRole, setPendingRole] = useState<PlatformRole | null>(null);
 
   const isSelf = currentUser?.id === userId;
+  const canWrite = canAdminWrite(currentUser);
   const sessions = sessionsData?.sessions ?? [];
 
   const form = useForm<UpdateUserFormData>({
@@ -157,22 +168,21 @@ export function AdminUserDetailPage() {
     }
   }
 
-  async function handleToggleAdmin() {
-    if (!user) return;
+  async function handleSetRole() {
+    if (!user || !pendingRole) return;
     try {
       await roleMutation.mutateAsync({
         userId,
-        isAdmin: !user.is_admin,
+        role: pendingRole,
       });
-      toast.success(
-        user.is_admin ? "Admin role revoked" : "Admin role granted",
-      );
+      toast.success(`Role updated to ${ROLE_LABEL[pendingRole]}`);
     } catch (err) {
       toast.error(
         err instanceof ApiError ? err.message : "Failed to update role",
       );
     } finally {
       setConfirmAction(null);
+      setPendingRole(null);
     }
   }
 
@@ -292,22 +302,24 @@ export function AdminUserDetailPage() {
         title={user.display_name ?? user.email}
         description={user.display_name ? user.email : undefined}
         actions={
-          <>
-            <Button variant="outline" size="sm" onClick={openEditDialog}>
-              <Pencil className="mr-1 h-3 w-3" />
-              Edit
-            </Button>
-            {!isSelf && (
-              <Button
-                variant="destructive"
-                size="sm"
-                onClick={() => setConfirmAction("delete")}
-              >
-                <Trash2 className="mr-1 h-3 w-3" />
-                Delete
+          canWrite ? (
+            <>
+              <Button variant="outline" size="sm" onClick={openEditDialog}>
+                <Pencil className="mr-1 h-3 w-3" />
+                Edit
               </Button>
-            )}
-          </>
+              {!isSelf && (
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  onClick={() => setConfirmAction("delete")}
+                >
+                  <Trash2 className="mr-1 h-3 w-3" />
+                  Delete
+                </Button>
+              )}
+            </>
+          ) : null
         }
       />
 
@@ -324,12 +336,19 @@ export function AdminUserDetailPage() {
           badge
           badgeVariant={user.is_active ? "success" : "destructive"}
         />
-        <DetailRow
-          label="Role"
-          value={user.is_admin ? "Admin" : "User"}
-          badge
-          badgeVariant={user.is_admin ? "default" : "secondary"}
-        />
+        {(() => {
+          const role = resolvePlatformRole(user);
+          const variant: "default" | "secondary" =
+            role === "admin" ? "default" : "secondary";
+          return (
+            <DetailRow
+              label="Role"
+              value={ROLE_LABEL[role]}
+              badge
+              badgeVariant={variant}
+            />
+          );
+        })()}
         <DetailRow
           label="Email Verified"
           value={user.email_verified ? "Verified" : "Unverified"}
@@ -346,70 +365,85 @@ export function AdminUserDetailPage() {
         <DetailRow label="Last Login" value={formatDate(user.last_login_at)} />
       </DetailSection>
 
-      <Separator />
+      {canWrite && (
+        <>
+          <Separator />
 
-      <DetailSection title="Actions">
-        <div className="flex flex-wrap gap-2">
-          {!isSelf && (
-            <>
+          <DetailSection title="Actions">
+            <div className="flex flex-wrap items-center gap-2">
+              {!isSelf && (
+                <>
+                  <div className="flex items-center gap-2">
+                    <ShieldCheck className="h-3 w-3 text-muted-foreground" />
+                    <Select
+                      value={resolvePlatformRole(user)}
+                      onValueChange={(value) => {
+                        const next = value as PlatformRole;
+                        if (next === resolvePlatformRole(user)) return;
+                        setPendingRole(next);
+                        setConfirmAction("set-role");
+                      }}
+                    >
+                      <SelectTrigger className="h-9 w-[180px]">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="user">User</SelectItem>
+                        <SelectItem value="operator">
+                          Operator (read-only)
+                        </SelectItem>
+                        <SelectItem value="admin">Admin</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setConfirmAction("toggle-status")}
+                  >
+                    {user.is_active ? (
+                      <UserX className="mr-1 h-3 w-3" />
+                    ) : (
+                      <UserCheck className="mr-1 h-3 w-3" />
+                    )}
+                    {user.is_active ? "Disable User" : "Enable User"}
+                  </Button>
+                </>
+              )}
+              {!user.email_verified && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setConfirmAction("verify-email")}
+                >
+                  <MailCheck className="mr-1 h-3 w-3" />
+                  Verify Email
+                </Button>
+              )}
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => setConfirmAction("toggle-admin")}
+                onClick={() => setConfirmAction("reset-password")}
               >
-                {user.is_admin ? (
-                  <ShieldOff className="mr-1 h-3 w-3" />
-                ) : (
-                  <ShieldCheck className="mr-1 h-3 w-3" />
-                )}
-                {user.is_admin ? "Change to User" : "Change to Admin"}
+                <KeyRound className="mr-1 h-3 w-3" />
+                Reset Password
               </Button>
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => setConfirmAction("toggle-status")}
+                onClick={() => setConfirmAction("revoke-sessions")}
               >
-                {user.is_active ? (
-                  <UserX className="mr-1 h-3 w-3" />
-                ) : (
-                  <UserCheck className="mr-1 h-3 w-3" />
-                )}
-                {user.is_active ? "Disable User" : "Enable User"}
+                <LogOut className="mr-1 h-3 w-3" />
+                Revoke Sessions
               </Button>
-            </>
-          )}
-          {!user.email_verified && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setConfirmAction("verify-email")}
-            >
-              <MailCheck className="mr-1 h-3 w-3" />
-              Verify Email
-            </Button>
-          )}
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setConfirmAction("reset-password")}
-          >
-            <KeyRound className="mr-1 h-3 w-3" />
-            Reset Password
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setConfirmAction("revoke-sessions")}
-          >
-            <LogOut className="mr-1 h-3 w-3" />
-            Revoke Sessions
-          </Button>
-        </div>
-      </DetailSection>
+            </div>
+          </DetailSection>
+        </>
+      )}
 
       <Separator />
 
-      <UserRolesSection userId={userId} />
+      <UserRolesSection userId={userId} canWrite={canWrite} />
 
       <Separator />
 
@@ -545,22 +579,36 @@ export function AdminUserDetailPage() {
       </Dialog>
 
       {/* Confirmation Dialogs */}
-      <ConfirmDialog
-        open={confirmAction === "toggle-admin"}
-        onOpenChange={(open) => {
-          if (!open) setConfirmAction(null);
-        }}
-        title={user.is_admin ? "Change Role to User" : "Change Role to Admin"}
-        description={
-          user.is_admin
-            ? `Are you sure you want to change ${user.email} from Admin to User? They will lose all admin privileges.`
-            : `Are you sure you want to change ${user.email} from User to Admin? They will gain full admin privileges.`
-        }
-        confirmLabel={user.is_admin ? "Change to User" : "Change to Admin"}
-        variant={user.is_admin ? "destructive" : "default"}
-        isPending={roleMutation.isPending}
-        onConfirm={() => void handleToggleAdmin()}
-      />
+      {pendingRole &&
+        (() => {
+          const currentRole = resolvePlatformRole(user);
+          // Going down (admin → operator/user, operator → user) is the
+          // dangerous direction; flag it as destructive so the confirm
+          // button gets a red treatment and the admin slows down.
+          const rank: Record<PlatformRole, number> = {
+            user: 0,
+            operator: 1,
+            admin: 2,
+          };
+          const isDowngrade = rank[pendingRole] < rank[currentRole];
+          return (
+            <ConfirmDialog
+              open={confirmAction === "set-role"}
+              onOpenChange={(open) => {
+                if (!open) {
+                  setConfirmAction(null);
+                  setPendingRole(null);
+                }
+              }}
+              title={`Change role to ${ROLE_LABEL[pendingRole]}`}
+              description={`Are you sure you want to change ${user.email} from ${ROLE_LABEL[currentRole]} to ${ROLE_LABEL[pendingRole]}?`}
+              confirmLabel={`Change to ${ROLE_LABEL[pendingRole]}`}
+              variant={isDowngrade ? "destructive" : "default"}
+              isPending={roleMutation.isPending}
+              onConfirm={() => void handleSetRole()}
+            />
+          );
+        })()}
 
       <ConfirmDialog
         open={confirmAction === "toggle-status"}
@@ -634,7 +682,13 @@ export function AdminUserDetailPage() {
   );
 }
 
-function UserRolesSection({ userId }: { readonly userId: string }) {
+function UserRolesSection({
+  userId,
+  canWrite,
+}: {
+  readonly userId: string;
+  readonly canWrite: boolean;
+}) {
   const { data: userRolesData, isLoading } = useUserRoles(userId);
   const { data: allRolesData } = useRoles();
   const assignMutation = useAssignRole();
@@ -685,11 +739,17 @@ function UserRolesSection({ userId }: { readonly userId: string }) {
 
   return (
     <DetailSection title="Roles">
-      <div className="mb-3">
-        <Button size="sm" variant="outline" onClick={() => setAssignOpen(true)}>
-          Assign Role
-        </Button>
-      </div>
+      {canWrite && (
+        <div className="mb-3">
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setAssignOpen(true)}
+          >
+            Assign Role
+          </Button>
+        </div>
+      )}
 
       {directRoles.length > 0 && (
         <div className="mb-3">
@@ -700,7 +760,7 @@ function UserRolesSection({ userId }: { readonly userId: string }) {
             {directRoles.map((role) => (
               <Badge key={role.id} variant="default" className="gap-1">
                 {role.name}
-                {!role.is_system && (
+                {canWrite && !role.is_system && (
                   <button
                     type="button"
                     className="ml-1 rounded-full hover:bg-primary-foreground/20 disabled:opacity-50"
@@ -791,6 +851,9 @@ function UserRolesSection({ userId }: { readonly userId: string }) {
   );
 }
 
+// This section is read-only: group membership is mutated from the group
+// detail page, not here. No `canWrite` prop needed today; add one when
+// inline write controls show up on this page.
 function UserGroupsSection({ userId }: { readonly userId: string }) {
   const { data: userGroupsData, isLoading } = useUserGroups(userId);
   const groups = userGroupsData?.groups ?? [];

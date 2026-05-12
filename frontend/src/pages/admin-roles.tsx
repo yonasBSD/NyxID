@@ -6,6 +6,8 @@ import { useRoles, useCreateRole, useDeleteRole } from "@/hooks/use-rbac";
 import { createRoleSchema, type CreateRoleFormData } from "@/schemas/rbac";
 import { ApiError } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
+import { canAdminWrite } from "@/types/api";
+import { useAuthStore } from "@/stores/auth-store";
 import { PageHeader } from "@/components/shared/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
@@ -41,6 +43,8 @@ import { Checkbox } from "@/components/ui/checkbox";
 
 export function AdminRolesPage() {
   const navigate = useNavigate();
+  const currentUser = useAuthStore((s) => s.user);
+  const canWrite = canAdminWrite(currentUser);
   const [createOpen, setCreateOpen] = useState(false);
   const [deleteRoleId, setDeleteRoleId] = useState<string | null>(null);
 
@@ -121,10 +125,12 @@ export function AdminRolesPage() {
         title="Role Management"
         description="Manage roles and permissions for your organization."
         actions={
-          <Button size="sm" onClick={openCreateDialog}>
-            <Plus className="mr-1 h-4 w-4" />
-            Add Role
-          </Button>
+          canWrite ? (
+            <Button size="sm" onClick={openCreateDialog}>
+              <Plus className="mr-1 h-4 w-4" />
+              Add Role
+            </Button>
+          ) : null
         }
       />
 
@@ -211,7 +217,7 @@ export function AdminRolesPage() {
                     {formatDate(role.created_at)}
                   </TableCell>
                   <TableCell>
-                    {!role.is_system && (
+                    {canWrite && !role.is_system && (
                       <Button
                         variant="ghost"
                         size="icon"

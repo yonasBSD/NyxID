@@ -12,6 +12,8 @@ import {
 } from "@/schemas/service-accounts";
 import { ApiError } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
+import { canAdminWrite } from "@/types/api";
+import { useAuthStore } from "@/stores/auth-store";
 import { PageHeader } from "@/components/shared/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
@@ -61,6 +63,8 @@ const PER_PAGE = 20;
 // components/dashboard/create-service-account-dialog.tsx if the file grows.
 export function AdminServiceAccountsPage() {
   const navigate = useNavigate();
+  const currentUser = useAuthStore((s) => s.user);
+  const canWrite = canAdminWrite(currentUser);
   const [page, setPage] = useState(1);
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
@@ -175,10 +179,12 @@ export function AdminServiceAccountsPage() {
             </Button>
           )}
         </form>
-        <Button size="sm" onClick={openCreateDialog}>
-          <Plus className="mr-1 h-4 w-4" />
-          Create Service Account
-        </Button>
+        {canWrite && (
+          <Button size="sm" onClick={openCreateDialog}>
+            <Plus className="mr-1 h-4 w-4" />
+            Create Service Account
+          </Button>
+        )}
       </div>
 
       {isLoading ? (

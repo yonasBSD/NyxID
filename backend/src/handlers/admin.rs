@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
+use crate::handlers::admin_helpers::{require_admin, require_admin_or_operator};
 use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::AuthUser;
@@ -41,6 +42,9 @@ pub struct AdminUserItem {
     pub email_verified: bool,
     pub is_active: bool,
     pub is_admin: bool,
+    pub is_operator: bool,
+    /// Resolved platform role: `"admin"`, `"operator"`, or `"user"`.
+    pub role: String,
     pub mfa_enabled: bool,
     pub created_at: String,
     pub last_login_at: Option<String>,
@@ -90,7 +94,9 @@ pub struct CreateUserResponse {
     pub id: String,
     pub email: String,
     pub display_name: Option<String>,
+    pub role: String,
     pub is_admin: bool,
+    pub is_operator: bool,
     pub is_active: bool,
     pub email_verified: bool,
     pub created_at: String,
@@ -104,9 +110,16 @@ pub struct UpdateUserRequest {
     pub avatar_url: Option<String>,
 }
 
+/// Body for `PATCH /admin/users/{id}/role`. Either `role` or `is_admin`
+/// must be set; `role` wins when both are present. `role` accepts
+/// `"admin"`, `"operator"`, or `"user"`. `is_admin` is the legacy two-tier
+/// shape and is preserved so existing CLI/UI clients keep working.
 #[derive(Debug, Deserialize)]
 pub struct SetRoleRequest {
-    pub is_admin: bool,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub is_admin: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -122,7 +135,9 @@ pub struct AdminActionResponse {
 #[derive(Debug, Serialize)]
 pub struct RoleUpdateResponse {
     pub id: String,
+    pub role: String,
     pub is_admin: bool,
+    pub is_operator: bool,
     pub message: String,
 }
 
@@ -165,30 +180,13 @@ pub struct RevokeSessionsResponse {
 
 // --- Helpers ---
 
-/// Verify that the authenticated user is an admin.
-async fn require_admin(state: &AppState, auth_user: &AuthUser) -> AppResult<()> {
-    let user_id = auth_user.user_id.to_string();
-
-    let user_model = state
-        .db
-        .collection::<User>(USERS)
-        .find_one(doc! { "_id": &user_id })
-        .await?
-        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
-
-    if !user_model.is_admin {
-        return Err(AppError::Forbidden("Admin access required".to_string()));
-    }
-
-    Ok(())
-}
-
 fn normalize_optional_nonempty(input: Option<&str>) -> Option<&str> {
     input.map(str::trim).filter(|value| !value.is_empty())
 }
 
 /// Convert a User model into an AdminUserItem response struct.
 fn user_to_admin_item(u: User) -> AdminUserItem {
+    let role = u.platform_role().as_str().to_string();
     AdminUserItem {
         id: u.id,
         email: u.email,
@@ -197,6 +195,8 @@ fn user_to_admin_item(u: User) -> AdminUserItem {
         email_verified: u.email_verified,
         is_active: u.is_active,
         is_admin: u.is_admin,
+        is_operator: u.is_operator,
+        role,
         mfa_enabled: u.mfa_enabled,
         created_at: u.created_at.to_rfc3339(),
         last_login_at: u.last_login_at.map(|t| t.to_rfc3339()),
@@ -230,9 +230,9 @@ pub async fn create_user(
     }
 
     // Validate role
-    if body.role != "admin" && body.role != "user" {
+    if body.role != "admin" && body.role != "operator" && body.role != "user" {
         return Err(AppError::ValidationError(
-            "Role must be 'admin' or 'user'".to_string(),
+            "Role must be 'admin', 'operator', or 'user'".to_string(),
         ));
     }
 
@@ -252,15 +252,18 @@ pub async fn create_user(
         Some(serde_json::json!({
             "target_user_id": &user.id,
             "target_email": &user.email,
-            "is_admin": user.is_admin,
+            "role": user.platform_role().as_str(),
         })),
     );
 
+    let role = user.platform_role().as_str().to_string();
     Ok(Json(CreateUserResponse {
         id: user.id,
         email: user.email,
         display_name: user.display_name,
+        role,
         is_admin: user.is_admin,
+        is_operator: user.is_operator,
         is_active: user.is_active,
         email_verified: user.email_verified,
         created_at: user.created_at.to_rfc3339(),
@@ -276,7 +279,7 @@ pub async fn list_users(
     auth_user: AuthUser,
     Query(query): Query<UserListQuery>,
 ) -> AppResult<Json<AdminUserListResponse>> {
-    require_admin(&state, &auth_user).await?;
+    require_admin_or_operator(&state, &auth_user, "admin.users.list").await?;
 
     let page = query.page.unwrap_or(1).max(1);
     let per_page = query.per_page.unwrap_or(50).min(100);
@@ -325,7 +328,7 @@ pub async fn get_user(
     auth_user: AuthUser,
     Path(user_id): Path<String>,
 ) -> AppResult<Json<AdminUserItem>> {
-    require_admin(&state, &auth_user).await?;
+    require_admin_or_operator(&state, &auth_user, "admin.users.get").await?;
 
     let user_model = state
         .db
@@ -390,7 +393,22 @@ pub async fn set_user_role(
 
     let admin_id = auth_user.user_id.to_string();
 
-    admin_user_service::set_admin_role(&state.db, &admin_id, &user_id, body.is_admin).await?;
+    // Resolve the requested role. `role` wins when both are present so new
+    // clients can opt into the three-tier model without the legacy
+    // `is_admin` flag silently overriding it.
+    let role = match (body.role.as_deref(), body.is_admin) {
+        (Some(r), _) => r.to_string(),
+        (None, Some(true)) => "admin".to_string(),
+        (None, Some(false)) => "user".to_string(),
+        (None, None) => {
+            return Err(AppError::ValidationError(
+                "Provide either 'role' ('admin'|'operator'|'user') or 'is_admin' (bool)"
+                    .to_string(),
+            ));
+        }
+    };
+
+    admin_user_service::set_platform_role(&state.db, &admin_id, &user_id, &role).await?;
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -398,14 +416,22 @@ pub async fn set_user_role(
         "admin.user.role_changed",
         Some(serde_json::json!({
             "target_user_id": &user_id,
-            "is_admin": body.is_admin,
+            "role": &role,
         })),
     );
 
+    let (is_admin, is_operator) = match role.as_str() {
+        "admin" => (true, false),
+        "operator" => (false, true),
+        _ => (false, false),
+    };
+
     Ok(Json(RoleUpdateResponse {
         id: user_id,
-        is_admin: body.is_admin,
-        message: "User admin role updated".to_string(),
+        role,
+        is_admin,
+        is_operator,
+        message: "User platform role updated".to_string(),
     }))
 }
 
@@ -564,7 +590,7 @@ pub async fn list_user_sessions(
     auth_user: AuthUser,
     Path(user_id): Path<String>,
 ) -> AppResult<Json<AdminSessionListResponse>> {
-    require_admin(&state, &auth_user).await?;
+    require_admin_or_operator(&state, &auth_user, "admin.users.sessions.list").await?;
 
     let sessions = admin_user_service::list_user_sessions(&state.db, &user_id).await?;
 
@@ -634,7 +660,7 @@ pub async fn list_audit_log(
     tele: TelemetryContext,
     Query(query): Query<AuditLogQuery>,
 ) -> AppResult<Json<AuditLogListResponse>> {
-    require_admin(&state, &auth_user).await?;
+    require_admin_or_operator(&state, &auth_user, "admin.audit_log.list").await?;
 
     let page = query.page.unwrap_or(1).max(1);
     let per_page = query.per_page.unwrap_or(50).min(100);
@@ -865,7 +891,7 @@ pub async fn list_oauth_clients(
     State(state): State<AppState>,
     auth_user: AuthUser,
 ) -> AppResult<Json<OAuthClientListResponse>> {
-    require_admin(&state, &auth_user).await?;
+    require_admin_or_operator(&state, &auth_user, "admin.oauth_clients.list").await?;
 
     let clients = oauth_client_service::list_clients(&state.db).await?;
 
@@ -939,7 +965,7 @@ pub async fn list_client_consents(
     auth_user: AuthUser,
     Path(client_id): Path<String>,
 ) -> AppResult<Json<ClientConsentListResponse>> {
-    require_admin(&state, &auth_user).await?;
+    require_admin_or_operator(&state, &auth_user, "admin.oauth_clients.consents.list").await?;
 
     let consents = consent_service::list_client_consents(&state.db, &client_id).await?;
 
@@ -963,4 +989,113 @@ pub async fn list_client_consents(
     }
 
     Ok(Json(ClientConsentListResponse { consents: items }))
+}
+
+#[cfg(test)]
+mod operator_route_tests {
+    //! End-to-end tests proving the operator role's read/write split holds at
+    //! the actual handler entrypoint, not just inside the helper. These are
+    //! the tests the reviewer asked for: an operator must get 403 from a
+    //! representative write handler (`set_user_role`) and 200 from a
+    //! representative read handler (`list_users`).
+    use super::*;
+    use crate::models::user::UserType;
+    use crate::test_utils::{connect_test_database, test_app_state, test_auth_user, test_user};
+    use uuid::Uuid;
+
+    async fn insert_user(db: &mongodb::Database, is_admin: bool, is_operator: bool) -> String {
+        let id = Uuid::new_v4().to_string();
+        let mut user = test_user(&id, UserType::Person);
+        user.is_admin = is_admin;
+        user.is_operator = is_operator;
+        db.collection::<User>(USERS)
+            .insert_one(&user)
+            .await
+            .expect("insert test user");
+        id
+    }
+
+    #[tokio::test]
+    async fn operator_can_list_users() {
+        let Some(db) = connect_test_database("admin_route_operator_read").await else {
+            eprintln!("skipping operator_can_list_users: no local MongoDB available");
+            return;
+        };
+        let operator_id = insert_user(&db, false, true).await;
+        let state = test_app_state(db);
+
+        let result = list_users(
+            State(state),
+            test_auth_user(&operator_id),
+            Query(UserListQuery {
+                page: None,
+                per_page: None,
+                search: None,
+            }),
+        )
+        .await
+        .expect("operator should be allowed to GET /admin/users");
+        assert!(
+            result.0.users.iter().any(|u| u.id == operator_id),
+            "operator should see at least their own row in the list"
+        );
+    }
+
+    #[tokio::test]
+    async fn operator_cannot_change_user_role() {
+        let Some(db) = connect_test_database("admin_route_operator_write").await else {
+            eprintln!("skipping operator_cannot_change_user_role: no local MongoDB available");
+            return;
+        };
+        let operator_id = insert_user(&db, false, true).await;
+        let target_id = insert_user(&db, false, false).await;
+        let state = test_app_state(db);
+
+        let err = set_user_role(
+            State(state),
+            test_auth_user(&operator_id),
+            HeaderMap::new(),
+            Path(target_id.clone()),
+            Json(SetRoleRequest {
+                role: Some("admin".to_string()),
+                is_admin: None,
+            }),
+        )
+        .await
+        .expect_err("operator must NOT be allowed to PATCH /admin/users/{id}/role");
+        assert!(
+            matches!(err, AppError::Forbidden(_)),
+            "operator role change should yield 403 Forbidden, got {:?}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn operator_cannot_create_user() {
+        let Some(db) = connect_test_database("admin_route_operator_create").await else {
+            eprintln!("skipping operator_cannot_create_user: no local MongoDB available");
+            return;
+        };
+        let operator_id = insert_user(&db, false, true).await;
+        let state = test_app_state(db);
+
+        let err = create_user(
+            State(state),
+            test_auth_user(&operator_id),
+            HeaderMap::new(),
+            Json(CreateUserRequest {
+                email: "newbie@example.com".to_string(),
+                password: "password123".to_string(),
+                display_name: None,
+                role: "user".to_string(),
+            }),
+        )
+        .await
+        .expect_err("operator must NOT be allowed to POST /admin/users");
+        assert!(
+            matches!(err, AppError::Forbidden(_)),
+            "operator create-user should yield 403 Forbidden, got {:?}",
+            err
+        );
+    }
 }

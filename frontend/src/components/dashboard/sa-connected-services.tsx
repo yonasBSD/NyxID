@@ -33,9 +33,19 @@ import { toast } from "sonner";
 
 interface SaConnectedServicesProps {
   readonly saId: string;
+  /// Whether the viewing user has admin write access. When false (i.e.
+  /// the user is platform `operator`), all connect / update / disconnect
+  /// controls are hidden so the panel reads as data-only. Defaults to
+  /// true so callers that pre-date this prop continue to render writes
+  /// (existing behavior). The admin SA detail page passes `false` for
+  /// operators.
+  readonly canWrite?: boolean;
 }
 
-export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
+export function SaConnectedServices({
+  saId,
+  canWrite = true,
+}: SaConnectedServicesProps) {
   const { data: saConnections, isLoading: connectionsLoading } =
     useSaConnections(saId);
   const { data: allServices } = useServices();
@@ -184,34 +194,36 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
                       {formatDate(conn.connected_at)}
                     </TableCell>
                     <TableCell>
-                      <div className="flex gap-1">
-                        {conn.has_credential && (
+                      {canWrite && (
+                        <div className="flex gap-1">
+                          {conn.has_credential && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() =>
+                                handleUpdateServiceCredential(conn.service_id)
+                              }
+                              disabled={
+                                updateConnectionCredentialMutation.isPending
+                              }
+                            >
+                              <KeyRound className="mr-1 h-3 w-3" />
+                              Update
+                            </Button>
+                          )}
                           <Button
                             variant="ghost"
                             size="sm"
                             onClick={() =>
-                              handleUpdateServiceCredential(conn.service_id)
+                              void handleDisconnectService(conn.service_id)
                             }
-                            disabled={
-                              updateConnectionCredentialMutation.isPending
-                            }
+                            disabled={disconnectServiceMutation.isPending}
                           >
-                            <KeyRound className="mr-1 h-3 w-3" />
-                            Update
+                            <Unlink className="mr-1 h-3 w-3" />
+                            Disconnect
                           </Button>
-                        )}
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() =>
-                            void handleDisconnectService(conn.service_id)
-                          }
-                          disabled={disconnectServiceMutation.isPending}
-                        >
-                          <Unlink className="mr-1 h-3 w-3" />
-                          Disconnect
-                        </Button>
-                      </div>
+                        </div>
+                      )}
                     </TableCell>
                   </TableRow>
                 ))}
@@ -224,7 +236,7 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
           </p>
         )}
 
-        {availableServices.length > 0 && (
+        {canWrite && availableServices.length > 0 && (
           <div className="mt-3">
             <ConnectServiceDropdown
               services={availableServices}

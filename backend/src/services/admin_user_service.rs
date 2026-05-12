@@ -91,9 +91,9 @@ pub async fn create_user(
     }
 
     // Validate role
-    if role != "admin" && role != "user" {
+    if role != "admin" && role != "user" && role != "operator" {
         return Err(AppError::ValidationError(
-            "Role must be 'admin' or 'user'".to_string(),
+            "Role must be 'admin', 'operator', or 'user'".to_string(),
         ));
     }
 
@@ -129,6 +129,7 @@ pub async fn create_user(
     let now = Utc::now();
     let user_id = Uuid::new_v4().to_string();
     let is_admin = role == "admin";
+    let is_operator = role == "operator";
 
     // Auto-assign default roles to new admin-created users
     let default_role_ids = role_service::get_default_role_ids(db).await?;
@@ -146,6 +147,7 @@ pub async fn create_user(
         password_reset_expires_at: None,
         is_active: true,
         is_admin,
+        is_operator,
         role_ids: default_role_ids,
         group_ids: vec![],
         invite_code_id: None,
@@ -161,7 +163,7 @@ pub async fn create_user(
 
     db.collection::<User>(USERS).insert_one(&new_user).await?;
 
-    tracing::info!(user_id = %user_id, is_admin = %is_admin, "Admin created user");
+    tracing::info!(user_id = %user_id, is_admin = %is_admin, is_operator = %is_operator, "Admin created user");
 
     Ok(new_user)
 }
@@ -274,20 +276,34 @@ pub async fn update_user(
     Ok(updated)
 }
 
-/// Set the admin role for a target user.
+/// Set the platform role for a target user. Accepts `"admin"`, `"operator"`,
+/// or `"user"`. Self-protection: admin_user_id must differ from target_user_id.
 ///
-/// Self-protection: admin_user_id must differ from target_user_id.
-pub async fn set_admin_role(
+/// Both `is_admin` and `is_operator` flags are written so the role is always
+/// fully specified; an admin demoted to operator ends up with
+/// `is_admin=false, is_operator=true` and a user with both flags false.
+pub async fn set_platform_role(
     db: &mongodb::Database,
     admin_user_id: &str,
     target_user_id: &str,
-    is_admin: bool,
+    role: &str,
 ) -> AppResult<()> {
     if admin_user_id == target_user_id {
         return Err(AppError::ValidationError(
-            "Cannot change your own admin role".to_string(),
+            "Cannot change your own platform role".to_string(),
         ));
     }
+
+    let (is_admin, is_operator) = match role {
+        "admin" => (true, false),
+        "operator" => (false, true),
+        "user" => (false, false),
+        _ => {
+            return Err(AppError::ValidationError(
+                "Role must be 'admin', 'operator', or 'user'".to_string(),
+            ));
+        }
+    };
 
     let _target = db
         .collection::<User>(USERS)
@@ -301,6 +317,7 @@ pub async fn set_admin_role(
             doc! { "_id": target_user_id },
             doc! { "$set": {
                 "is_admin": is_admin,
+                "is_operator": is_operator,
                 "updated_at": bson::DateTime::from_chrono(now),
             }},
         )
