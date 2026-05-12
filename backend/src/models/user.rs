@@ -2,7 +2,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::bson_datetime;
-use super::role::{PLATFORM_ADMIN_ROLE_ID, PLATFORM_OPERATOR_ROLE_ID};
 
 pub const COLLECTION_NAME: &str = "users";
 
@@ -126,33 +125,6 @@ pub struct User {
     pub updated_at: DateTime<Utc>,
     #[serde(default, with = "bson_datetime::optional")]
     pub last_login_at: Option<DateTime<Utc>>,
-}
-
-impl User {
-    /// Resolved platform role for this user. `Admin` wins over `Operator`.
-    ///
-    /// Runtime code that has a database handle should prefer
-    /// `role_service::resolve_platform_role`, which resolves the current
-    /// system role IDs by slug. This pure model method recognizes the stable
-    /// IDs used for newly seeded platform roles and deliberately ignores the
-    /// legacy boolean flags.
-    pub fn platform_role(&self) -> PlatformRole {
-        if self
-            .role_ids
-            .iter()
-            .any(|role_id| role_id == PLATFORM_ADMIN_ROLE_ID)
-        {
-            PlatformRole::Admin
-        } else if self
-            .role_ids
-            .iter()
-            .any(|role_id| role_id == PLATFORM_OPERATOR_ROLE_ID)
-        {
-            PlatformRole::Operator
-        } else {
-            PlatformRole::User
-        }
-    }
 }
 
 #[cfg(test)]
@@ -283,29 +255,6 @@ mod tests {
         doc.remove("is_operator");
         let restored: User = bson::from_document(doc).expect("deserialize legacy");
         assert!(!restored.is_operator);
-        assert_eq!(restored.platform_role(), PlatformRole::User);
-    }
-
-    #[test]
-    fn platform_role_resolution() {
-        let mut u = make_user();
-        assert_eq!(u.platform_role(), PlatformRole::User);
-        assert!(!u.platform_role().has_admin_read());
-
-        u.role_ids.push(PLATFORM_OPERATOR_ROLE_ID.to_string());
-        assert_eq!(u.platform_role(), PlatformRole::Operator);
-        assert!(u.platform_role().has_admin_read());
-
-        // Admin wins over operator.
-        u.role_ids.push(PLATFORM_ADMIN_ROLE_ID.to_string());
-        assert_eq!(u.platform_role(), PlatformRole::Admin);
-        assert!(u.platform_role().has_admin_read());
-
-        // Admin alone still has read access.
-        u.role_ids
-            .retain(|role_id| role_id != PLATFORM_OPERATOR_ROLE_ID);
-        assert_eq!(u.platform_role(), PlatformRole::Admin);
-        assert!(u.platform_role().has_admin_read());
     }
 
     #[test]

@@ -315,7 +315,6 @@ pub async fn set_platform_role(
             ));
         }
     };
-    let (is_admin, is_operator) = platform_role.legacy_flags();
 
     let _target = db
         .collection::<User>(USERS)
@@ -324,45 +323,14 @@ pub async fn set_platform_role(
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
     let platform_role_ids = role_service::get_platform_role_ids(db).await?;
-    let now = Utc::now();
+    let pipeline = role_service::set_platform_role_update(
+        platform_role,
+        &platform_role_ids,
+        bson::DateTime::from_chrono(Utc::now()),
+    );
     db.collection::<User>(USERS)
-        .update_one(
-            doc! { "_id": target_user_id },
-            doc! { "$set": {
-                "is_admin": is_admin,
-                "is_operator": is_operator,
-                "updated_at": bson::DateTime::from_chrono(now),
-            },
-            "$pull": {
-                "role_ids": {
-                    "$in": [
-                        &platform_role_ids.admin,
-                        &platform_role_ids.operator,
-                    ],
-                },
-            }},
-        )
+        .update_one(doc! { "_id": target_user_id }, pipeline)
         .await?;
-
-    match platform_role {
-        PlatformRole::Admin => {
-            db.collection::<User>(USERS)
-                .update_one(
-                    doc! { "_id": target_user_id },
-                    doc! { "$addToSet": { "role_ids": &platform_role_ids.admin } },
-                )
-                .await?;
-        }
-        PlatformRole::Operator => {
-            db.collection::<User>(USERS)
-                .update_one(
-                    doc! { "_id": target_user_id },
-                    doc! { "$addToSet": { "role_ids": &platform_role_ids.operator } },
-                )
-                .await?;
-        }
-        PlatformRole::User => {}
-    }
 
     db.collection::<User>(USERS)
         .find_one(doc! { "_id": target_user_id })

@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::crypto::password;
 use crate::crypto::token::{generate_random_token, hash_token};
 use crate::errors::{AppError, AppResult};
-use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+use crate::models::user::{COLLECTION_NAME as USERS, PlatformRole, User, UserType};
 use crate::services::role_service;
 
 /// Maximum password length to prevent Argon2 DoS via extremely long passwords.
@@ -374,31 +374,14 @@ pub async fn promote_user_to_admin(db: &mongodb::Database, email: &str) -> AppRe
     }
 
     let platform_role_ids = role_service::get_platform_role_ids(db).await?;
-    let now = Utc::now();
+    let mut pipeline = role_service::set_platform_role_update(
+        PlatformRole::Admin,
+        &platform_role_ids,
+        bson::DateTime::from_chrono(Utc::now()),
+    );
+    pipeline.push(doc! { "$set": { "email_verified": true } });
     db.collection::<User>(USERS)
-        .update_one(
-            doc! { "_id": &user.id },
-            doc! { "$set": {
-                "is_admin": true,
-                "is_operator": false,
-                "email_verified": true,
-                "updated_at": bson::DateTime::from_chrono(now),
-            },
-            "$pull": {
-                "role_ids": {
-                    "$in": [
-                        &platform_role_ids.admin,
-                        &platform_role_ids.operator,
-                    ],
-                },
-            }},
-        )
-        .await?;
-    db.collection::<User>(USERS)
-        .update_one(
-            doc! { "_id": &user.id },
-            doc! { "$addToSet": { "role_ids": &platform_role_ids.admin } },
-        )
+        .update_one(doc! { "_id": &user.id }, pipeline)
         .await?;
 
     tracing::info!(user_id = %user.id, email = %normalized, "User promoted to admin");

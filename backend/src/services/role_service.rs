@@ -6,8 +6,7 @@ use uuid::Uuid;
 use crate::errors::{AppError, AppResult};
 use crate::models::group::{COLLECTION_NAME as GROUPS, Group};
 use crate::models::role::{
-    COLLECTION_NAME as ROLES, PLATFORM_ADMIN_ROLE_ID, PLATFORM_ADMIN_ROLE_SLUG,
-    PLATFORM_OPERATOR_ROLE_ID, PLATFORM_OPERATOR_ROLE_SLUG, PLATFORM_USER_ROLE_ID,
+    COLLECTION_NAME as ROLES, PLATFORM_ADMIN_ROLE_SLUG, PLATFORM_OPERATOR_ROLE_SLUG,
     PLATFORM_USER_ROLE_SLUG, Role,
 };
 use crate::models::user::{COLLECTION_NAME as USERS, PlatformRole, User};
@@ -29,7 +28,6 @@ pub struct PlatformRoleIds {
 }
 
 struct SystemRoleSpec {
-    id: &'static str,
     name: &'static str,
     slug: &'static str,
     description: &'static str,
@@ -78,7 +76,7 @@ async fn ensure_system_role(db: &mongodb::Database, spec: &SystemRoleSpec) -> Ap
     }
 
     let role = Role {
-        id: spec.id.to_string(),
+        id: Uuid::new_v4().to_string(),
         name: spec.name.to_string(),
         slug: spec.slug.to_string(),
         description: Some(spec.description.to_string()),
@@ -120,10 +118,6 @@ pub async fn get_platform_role_ids(db: &mongodb::Database) -> AppResult<Platform
 }
 
 pub fn resolve_platform_role_from_ids(user: &User, role_ids: &PlatformRoleIds) -> PlatformRole {
-    if role_ids.admin == PLATFORM_ADMIN_ROLE_ID && role_ids.operator == PLATFORM_OPERATOR_ROLE_ID {
-        return user.platform_role();
-    }
-
     if user
         .role_ids
         .iter()
@@ -156,6 +150,52 @@ pub fn add_platform_role_id(
         PlatformRole::Operator => push_unique(role_ids, platform_role_ids.operator.clone()),
         PlatformRole::User => {}
     }
+}
+
+/// Build an aggregation-pipeline `update_one` doc that atomically swaps a
+/// user's platform RBAC membership to `target` and mirrors the legacy
+/// `is_admin` / `is_operator` flags in a single round-trip. The pipeline:
+///   1. Strips any existing admin/operator role IDs from `role_ids`.
+///   2. Appends the role ID for `target` (none when `target = User`).
+///   3. Sets the legacy flag mirror.
+///   4. Stamps `updated_at`.
+pub fn set_platform_role_update(
+    target: PlatformRole,
+    platform_role_ids: &PlatformRoleIds,
+    now: bson::DateTime,
+) -> Vec<bson::Document> {
+    let (is_admin, is_operator) = target.legacy_flags();
+    let to_add: Vec<String> = match target {
+        PlatformRole::Admin => vec![platform_role_ids.admin.clone()],
+        PlatformRole::Operator => vec![platform_role_ids.operator.clone()],
+        PlatformRole::User => vec![],
+    };
+
+    vec![doc! {
+        "$set": {
+            "is_admin": is_admin,
+            "is_operator": is_operator,
+            "updated_at": now,
+            "role_ids": {
+                "$concatArrays": [
+                    {
+                        "$filter": {
+                            "input": { "$ifNull": ["$role_ids", []] },
+                            "cond": {
+                                "$not": {
+                                    "$in": [
+                                        "$$this",
+                                        [&platform_role_ids.admin, &platform_role_ids.operator],
+                                    ]
+                                }
+                            }
+                        }
+                    },
+                    to_add,
+                ]
+            }
+        }
+    }]
 }
 
 pub struct PlatformRoleBackfillResult {
@@ -462,7 +502,6 @@ pub async fn get_default_role_ids(db: &mongodb::Database) -> AppResult<Vec<Strin
 /// a seeded `admin` role can safely backfill users onto that role.
 pub async fn seed_system_roles(db: &mongodb::Database) -> AppResult<()> {
     let admin = SystemRoleSpec {
-        id: PLATFORM_ADMIN_ROLE_ID,
         name: PLATFORM_ADMIN_ROLE_NAME,
         slug: PLATFORM_ADMIN_ROLE_SLUG,
         description: PLATFORM_ADMIN_ROLE_DESCRIPTION,
@@ -472,7 +511,6 @@ pub async fn seed_system_roles(db: &mongodb::Database) -> AppResult<()> {
     ensure_system_role(db, &admin).await?;
 
     let operator = SystemRoleSpec {
-        id: PLATFORM_OPERATOR_ROLE_ID,
         name: PLATFORM_OPERATOR_ROLE_NAME,
         slug: PLATFORM_OPERATOR_ROLE_SLUG,
         description: PLATFORM_OPERATOR_ROLE_DESCRIPTION,
@@ -482,7 +520,6 @@ pub async fn seed_system_roles(db: &mongodb::Database) -> AppResult<()> {
     ensure_system_role(db, &operator).await?;
 
     let user = SystemRoleSpec {
-        id: PLATFORM_USER_ROLE_ID,
         name: PLATFORM_USER_ROLE_NAME,
         slug: PLATFORM_USER_ROLE_SLUG,
         description: PLATFORM_USER_ROLE_DESCRIPTION,
@@ -555,6 +592,45 @@ mod tests {
             .await
             .expect("insert flagged user");
         user_id
+    }
+
+    fn make_user_with_role_ids(role_ids: Vec<String>) -> User {
+        let mut user = test_user("00000000-0000-0000-0000-000000000000", UserType::Person);
+        user.role_ids = role_ids;
+        user
+    }
+
+    #[test]
+    fn resolve_platform_role_from_ids_picks_admin_over_operator() {
+        let role_ids = PlatformRoleIds {
+            admin: "admin-id".to_string(),
+            operator: "operator-id".to_string(),
+        };
+
+        let none = make_user_with_role_ids(vec![]);
+        assert_eq!(
+            resolve_platform_role_from_ids(&none, &role_ids),
+            PlatformRole::User
+        );
+
+        let only_operator = make_user_with_role_ids(vec!["operator-id".to_string()]);
+        assert_eq!(
+            resolve_platform_role_from_ids(&only_operator, &role_ids),
+            PlatformRole::Operator
+        );
+
+        let both = make_user_with_role_ids(vec!["admin-id".to_string(), "operator-id".to_string()]);
+        assert_eq!(
+            resolve_platform_role_from_ids(&both, &role_ids),
+            PlatformRole::Admin
+        );
+
+        let only_admin = make_user_with_role_ids(vec!["admin-id".to_string()]);
+        assert_eq!(
+            resolve_platform_role_from_ids(&only_admin, &role_ids),
+            PlatformRole::Admin
+        );
+        assert!(resolve_platform_role_from_ids(&only_admin, &role_ids).has_admin_read());
     }
 
     #[tokio::test]

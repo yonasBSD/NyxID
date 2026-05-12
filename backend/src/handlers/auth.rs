@@ -1034,35 +1034,16 @@ pub async fn setup(
     // Promote to admin and mark email as verified. The RBAC membership is
     // authoritative; the legacy flag is mirrored during the migration window.
     let platform_role_ids = role_service::get_platform_role_ids(&state.db).await?;
-    let now = chrono::Utc::now();
+    let mut pipeline = role_service::set_platform_role_update(
+        crate::models::user::PlatformRole::Admin,
+        &platform_role_ids,
+        mongodb::bson::DateTime::from_chrono(chrono::Utc::now()),
+    );
+    pipeline.push(doc! { "$set": { "email_verified": true } });
     state
         .db
         .collection::<User>(USERS)
-        .update_one(
-            doc! { "_id": &result.user_id },
-            doc! { "$set": {
-                "is_admin": true,
-                "is_operator": false,
-                "email_verified": true,
-                "updated_at": mongodb::bson::DateTime::from_chrono(now),
-            },
-            "$pull": {
-                "role_ids": {
-                    "$in": [
-                        &platform_role_ids.admin,
-                        &platform_role_ids.operator,
-                    ],
-                },
-            }},
-        )
-        .await?;
-    state
-        .db
-        .collection::<User>(USERS)
-        .update_one(
-            doc! { "_id": &result.user_id },
-            doc! { "$addToSet": { "role_ids": &platform_role_ids.admin } },
-        )
+        .update_one(doc! { "_id": &result.user_id }, pipeline)
         .await?;
 
     audit_service::log_async(
