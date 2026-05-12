@@ -1,7 +1,16 @@
 import "react-native-gesture-handler";
 import { StatusBar } from "expo-status-bar";
 import * as Notifications from "expo-notifications";
+import * as SplashScreen from "expo-splash-screen";
 import { useCallback, useEffect, useRef, useState } from "react";
+
+// Keep the native splash visible until we've loaded fonts. The
+// expo-splash-screen plugin disables Expo's default auto-hide, so the
+// app must explicitly hide the splash itself (see effect below).
+SplashScreen.preventAutoHideAsync().catch(() => {
+  /* no-op — preventAutoHideAsync rejects if the splash has already
+     been hidden, e.g. during fast refresh. Safe to ignore. */
+});
 import { ActivityIndicator, AppState, StyleSheet, Text, View } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { onlineManager, QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -14,14 +23,17 @@ import {
 } from "@react-navigation/native";
 import { useFonts } from "expo-font";
 import {
+  Manrope_400Regular,
   Manrope_500Medium,
   Manrope_600SemiBold,
   Manrope_700Bold,
 } from "@expo-google-fonts/manrope";
 import {
+  SpaceGrotesk_500Medium,
   SpaceGrotesk_600SemiBold,
   SpaceGrotesk_700Bold,
 } from "@expo-google-fonts/space-grotesk";
+import { JetBrainsMono_400Regular } from "@expo-google-fonts/jetbrains-mono";
 import { AppErrorBoundary } from "./AppErrorBoundary";
 import { AppNavigator, RootStackParamList } from "./AppNavigator";
 import { appLinking, extractChallengeIdFromNotificationResponse } from "./linking";
@@ -97,11 +109,14 @@ export default function App() {
   }, [navigationRef]);
 
   const [fontsLoaded] = useFonts({
+    Manrope_400Regular,
     Manrope_500Medium,
     Manrope_600SemiBold,
     Manrope_700Bold,
+    SpaceGrotesk_500Medium,
     SpaceGrotesk_600SemiBold,
     SpaceGrotesk_700Bold,
+    JetBrainsMono_400Regular,
   });
   const [fontLoadTimeout, setFontLoadTimeout] = useState(false);
 
@@ -109,6 +124,18 @@ export default function App() {
     const t = setTimeout(() => setFontLoadTimeout(true), 8000);
     return () => clearTimeout(t);
   }, []);
+
+  // Hide the native splash once we have enough state to render the UI.
+  // expo-splash-screen plugin disables the auto-hide, so without this
+  // call the splash never goes away.
+  const ready = fontsLoaded || fontLoadTimeout;
+  useEffect(() => {
+    if (ready) {
+      SplashScreen.hideAsync().catch(() => {
+        /* already hidden — fine */
+      });
+    }
+  }, [ready]);
 
   useEffect(() => {
     let disposed = false;
@@ -260,7 +287,7 @@ export default function App() {
     return (
       <View style={appLoadingStyles.container}>
         <StatusBar style="light" />
-        <ActivityIndicator size="large" color="#8B5CF6" />
+        <ActivityIndicator size="large" color="#9775fa" />
         <Text style={appLoadingStyles.text}>Loading...</Text>
       </View>
     );
@@ -348,13 +375,13 @@ function ThemedAppShell({
 const appLoadingStyles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#10101A",
+    backgroundColor: "#07060e",
     justifyContent: "center",
     alignItems: "center",
     gap: 16,
   },
   text: {
-    color: "#F0EEFF",
+    color: "#e8e4f0",
     fontSize: 16,
   },
 });

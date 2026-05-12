@@ -1,3 +1,8 @@
+---
+title: Terms of Use
+effective_date: 2026-05-11
+---
+
 # NyxID — Terms of Use
 
 **Last updated:** 11 May 2026

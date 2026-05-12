@@ -4,17 +4,31 @@
   "private": true,
   "main": "index.ts",
   "scripts": {
-    "start": "EXPO_PUBLIC_DEV_MODE=true expo start",
-    "android": "EXPO_PUBLIC_DEV_MODE=true expo run:android",
-    "ios": "EXPO_PUBLIC_DEV_MODE=true expo run:ios",
-    "ios:prod": "EXPO_PUBLIC_API_BASE_URL=https://nyx-api.chrono-ai.fun/api/v1 expo run:ios",
-    "web": "expo start --web",
+    "start": "APP_ENV=dev expo start",
+    "android": "APP_ENV=dev expo run:android",
+    "ios": "APP_ENV=dev expo run:ios",
+    "web": "APP_ENV=dev expo start --web",
     "typecheck": "tsc --noEmit",
-    "bump:android:build": "sh scripts/bump-android-build.sh",
-    "build:ios": "EXPO_PUBLIC_API_BASE_URL=https://nyx-api.chrono-ai.fun/api/v1 expo run:ios --configuration Release",
-    "bump:ios:build": "sh scripts/bump-ios-build.sh",
-    "build:ios:testflight": "pnpm run bump:ios:build && grep -q 'EXPO_PUBLIC_API_BASE_URL' ios/.xcode.env.local 2>/dev/null || echo 'export EXPO_PUBLIC_API_BASE_URL=https://nyx-api.chrono-ai.fun/api/v1' >> ios/.xcode.env.local && xcodebuild -workspace ios/NyxIDMobile.xcworkspace -scheme NyxIDMobile -configuration Release -destination 'generic/platform=iOS' -archivePath ios/build/NyxIDMobile.xcarchive -allowProvisioningUpdates archive",
-    "eas-build-post-install": "node scripts/patch-android-build-gradle.js"
+    "build:ios": "APP_ENV=prod node scripts/build-ios.js",
+    "build:ios:dev": "APP_ENV=dev node scripts/build-ios.js",
+    "build:android": "APP_ENV=prod node scripts/build-android.js",
+    "build:android:dev": "APP_ENV=dev node scripts/build-android.js",
+    "build:prod": "pnpm build:ios && pnpm build:android",
+    "build:dev": "pnpm build:ios:dev && pnpm build:android:dev",
+    "submit:ios": "APP_ENV=prod node scripts/submit-ios.js",
+    "submit:android": "APP_ENV=prod node scripts/submit-android.js",
+    "submit:prod": "pnpm submit:ios && pnpm submit:android",
+    "release:ios": "pnpm build:ios && pnpm submit:ios",
+    "release:android": "pnpm build:android && pnpm submit:android",
+    "release:prod": "pnpm release:ios && pnpm release:android",
+    "bump:ios": "node scripts/bump-version.js ios prod",
+    "bump:android": "node scripts/bump-version.js android prod",
+    "bump:both": "node scripts/bump-version.js both prod",
+    "clean:ios": "node scripts/clean.js ios",
+    "clean:android": "node scripts/clean.js android",
+    "clean:caches": "node scripts/clean.js caches",
+    "clean": "node scripts/clean.js all",
+    "clean:full": "node scripts/clean.js full"
   },
   "expo": {
     "autolinking": {
@@ -29,6 +43,7 @@
     }
   },
   "dependencies": {
+    "@expo-google-fonts/jetbrains-mono": "^0.4.1",
     "@expo-google-fonts/manrope": "^0.4.2",
     "@expo-google-fonts/space-grotesk": "^0.4.1",
     "@expo/vector-icons": "^15.1.1",
@@ -45,13 +60,16 @@
     "expo-linear-gradient": "^55.0.12",
     "expo-notifications": "~55.0.17",
     "expo-secure-store": "~55.0.12",
+    "expo-splash-screen": "~55.0.20",
     "expo-status-bar": "~55.0.5",
     "expo-task-manager": "~55.0.13",
     "expo-web-browser": "~55.0.13",
     "posthog-react-native": "^4.2.0",
+    "punycode": "^2.3.1",
     "react": "19.2.0",
     "react-native": "0.83.4",
     "react-native-gesture-handler": "^2.30.1",
+    "react-native-markdown-display": "^7.0.2",
     "react-native-reanimated": "^4.2.1",
     "react-native-safe-area-context": "5.6.2",
     "react-native-screens": "~4.23.0",
@@ -61,6 +79,8 @@
   },
   "devDependencies": {
     "@types/react": "~19.2.14",
+    "dotenv": "^16.4.5",
+    "googleapis": "^144.0.0",
     "typescript": "~5.9.3"
   }
 }
