@@ -105,7 +105,19 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
 ///
 /// Headers under `x-openclaw-*` are caller-supplied OpenClaw routing / scope
 /// hints; the gateway owns their semantics, so NyxID must not strip them.
-const ALLOWED_FORWARD_HEADER_PREFIXES: &[&str] = &["x-openclaw-"];
+///
+/// Headers under `x-amz-*` are required by AWS APIs — most notably
+/// `X-Amz-Target` for JSON-RPC services like Cost Explorer, which routes
+/// operations entirely via that header rather than a URL path. NyxID's
+/// `aws_sigv4` injection sets `X-Amz-Date` / `X-Amz-Content-Sha256` /
+/// optionally `X-Amz-Security-Token` itself; those are kept outside the
+/// caller-forwarding loop on `outbound_headers` (see `aws_sigv4` arm in
+/// `forward_request`), so duplicate-injection isn't a concern.
+///
+/// Headers under `x-goog-*` are GCP-specific routing hints (e.g.
+/// `X-Goog-User-Project` for billing-quota project selection on BigQuery
+/// calls against the billing-export dataset). NyxID#716.
+const ALLOWED_FORWARD_HEADER_PREFIXES: &[&str] = &["x-openclaw-", "x-amz-", "x-goog-"];
 
 /// Returns `true` when the header name is in the allowlist or matches an
 /// allowlisted prefix. Caller must lowercase the name before calling.
@@ -4001,5 +4013,412 @@ mod tests {
         assert_eq!(svc.auth_method, "body");
         assert_eq!(svc.auth_key_name, "app_secret");
         assert!(svc.token_exchange_config.is_none());
+    }
+
+    // ─── cloud-billing smoke tests (NyxID#716) ─────────────────────────
+    //
+    // These spin up a local axum mock at a random port and exercise
+    // forward_request end-to-end: SigV4 / GCP OAuth signing happens
+    // against the mock, then the mock asserts the on-wire shape. They
+    // are integration-flavor — slower than the pure-unit aws_sigv4
+    // tests in the cloud-auth crate — but they're the only place that
+    // proves the signing + injection + cache pipeline composes
+    // correctly when wired through `forward_request`.
+
+    fn make_billing_proxy_target(
+        base_url: String,
+        auth_method: &str,
+        credential: String,
+    ) -> ProxyTarget {
+        let now = Utc::now();
+        ProxyTarget {
+            base_url: base_url.clone(),
+            auth_method: auth_method.to_string(),
+            auth_key_name: String::new(),
+            credential,
+            service: DownstreamService {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: "Cloud Billing Test".to_string(),
+                slug: "test-cloud-billing".to_string(),
+                description: None,
+                base_url,
+                auth_method: auth_method.to_string(),
+                auth_key_name: String::new(),
+                credential_encrypted: vec![],
+                auth_type: None,
+                openapi_spec_url: None,
+                asyncapi_spec_url: None,
+                streaming_supported: false,
+                ssh_config: None,
+                service_type: "http".to_string(),
+                visibility: "public".to_string(),
+                oauth_client_id: None,
+                service_category: "connection".to_string(),
+                requires_user_credential: true,
+                is_active: true,
+                created_by: "test".to_string(),
+                identity_propagation_mode: "none".to_string(),
+                identity_include_user_id: false,
+                identity_include_email: false,
+                identity_include_name: false,
+                identity_jwt_audience: None,
+                forward_access_token: false,
+                inject_delegation_token: false,
+                delegation_token_scope: "proxy:*".to_string(),
+                provider_config_id: None,
+                homepage_url: None,
+                repository_url: None,
+                issues_url: None,
+                capabilities: None,
+                auth_notes: None,
+                known_limitations: None,
+                required_permissions: None,
+                recommended_skills: None,
+                examples_url: None,
+                custom_user_agent: None,
+                default_request_headers: None,
+                ws_frame_injections: Vec::new(),
+                developer_app_ids: None,
+                token_exchange_config: None,
+                created_at: now,
+                updated_at: now,
+            },
+            catalog_default_headers: Vec::new(),
+            user_service_default_headers: Vec::new(),
+            ws_frame_injections: Vec::new(),
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct AwsMockState {
+        captured_authorization: Arc<std::sync::Mutex<Option<String>>>,
+        captured_amz_date: Arc<std::sync::Mutex<Option<String>>>,
+        captured_amz_content_sha256: Arc<std::sync::Mutex<Option<String>>>,
+        captured_body: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+        request_count: Arc<AtomicUsize>,
+    }
+
+    async fn aws_mock_handler(
+        State(state): State<AwsMockState>,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> Json<serde_json::Value> {
+        state.request_count.fetch_add(1, Ordering::SeqCst);
+        *state.captured_authorization.lock().unwrap() = headers
+            .get(reqwest::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .map(ToString::to_string);
+        *state.captured_amz_date.lock().unwrap() = headers
+            .get("x-amz-date")
+            .and_then(|v| v.to_str().ok())
+            .map(ToString::to_string);
+        *state.captured_amz_content_sha256.lock().unwrap() = headers
+            .get("x-amz-content-sha256")
+            .and_then(|v| v.to_str().ok())
+            .map(ToString::to_string);
+        *state.captured_body.lock().unwrap() = Some(body.to_vec());
+        Json(serde_json::json!({
+            "ResultsByTime": [],
+            "GroupDefinitions": [],
+        }))
+    }
+
+    async fn start_aws_mock() -> (String, AwsMockState, tokio::task::JoinHandle<()>) {
+        let state = AwsMockState::default();
+        let app = Router::new()
+            .route("/", post(aws_mock_handler))
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        (format!("http://{addr}"), state, server)
+    }
+
+    /// End-to-end: forward_request with `auth_method=aws_sigv4` produces
+    /// a request whose Authorization header is a well-formed SigV4
+    /// signature, X-Amz-Date / X-Amz-Content-Sha256 are present, and
+    /// the body reaches the downstream unmodified.
+    #[tokio::test]
+    async fn aws_sigv4_smoke_signs_and_forwards_request() {
+        let (base_url, mock, server) = start_aws_mock().await;
+        let creds_json = r#"{"access_key_id":"AKIDEXAMPLE","secret_access_key":"wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY","region":"us-east-1","service":"ce"}"#;
+        let target = make_billing_proxy_target(base_url, "aws_sigv4", creds_json.to_string());
+
+        let mut req_headers = reqwest::header::HeaderMap::new();
+        req_headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            "application/x-amz-json-1.1".parse().unwrap(),
+        );
+        req_headers.insert(
+            "x-amz-target",
+            "AWSInsightsServiceV20210101.GetCostAndUsage"
+                .parse()
+                .unwrap(),
+        );
+
+        let body =
+            br#"{"TimePeriod":{"Start":"2026-04-13","End":"2026-05-13"},"Granularity":"MONTHLY","Metrics":["BlendedCost"]}"#;
+
+        let resp = forward_request(
+            &Client::new(),
+            &target,
+            reqwest::Method::POST,
+            "",
+            None,
+            req_headers,
+            ProxyBody::Buffered(Some(bytes::Bytes::copy_from_slice(body))),
+            vec![],
+            vec![],
+            None,
+            &empty_token_cache(),
+            &empty_gcp_cache(),
+            &empty_response_cache(),
+        )
+        .await
+        .expect("aws_sigv4 proxy call");
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(mock.request_count.load(Ordering::SeqCst), 1);
+
+        let auth = mock.captured_authorization.lock().unwrap().clone().unwrap();
+        assert!(
+            auth.starts_with("AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/"),
+            "authorization header malformed: {auth}"
+        );
+        assert!(
+            auth.contains("/us-east-1/ce/aws4_request"),
+            "credential scope wrong: {auth}"
+        );
+        // x-amz-target was caller-supplied so it MUST be in SignedHeaders.
+        assert!(
+            auth.contains("x-amz-target"),
+            "x-amz-target should be signed: {auth}"
+        );
+        assert!(auth.contains("Signature="));
+
+        let amz_date = mock.captured_amz_date.lock().unwrap().clone().unwrap();
+        // ISO 8601 basic format: 20260513T123456Z
+        assert!(
+            amz_date.len() == 16 && amz_date.ends_with('Z') && amz_date.contains('T'),
+            "x-amz-date format wrong: {amz_date}"
+        );
+
+        // Body hash matches what AWS expects: hex SHA256 of the request body.
+        let expected_hash = {
+            use sha2::Digest;
+            let mut h = sha2::Sha256::new();
+            h.update(body);
+            hex::encode(h.finalize())
+        };
+        assert_eq!(
+            mock.captured_amz_content_sha256
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap(),
+            expected_hash
+        );
+
+        // Body wasn't mutated.
+        assert_eq!(
+            mock.captured_body.lock().unwrap().clone().unwrap(),
+            body.to_vec()
+        );
+
+        server.abort();
+    }
+
+    /// Cache integration: with a non-zero-TTL CloudResponseCache, two
+    /// identical aws_sigv4 calls hit the upstream only once.
+    #[tokio::test]
+    async fn aws_sigv4_smoke_response_cache_replays_second_call() {
+        let (base_url, mock, server) = start_aws_mock().await;
+        let creds_json = r#"{"access_key_id":"AKIDEXAMPLE","secret_access_key":"secret","region":"us-east-1","service":"ce"}"#;
+        let target = make_billing_proxy_target(base_url, "aws_sigv4", creds_json.to_string());
+        let cache = CloudResponseCache::new(60);
+
+        let body = bytes::Bytes::from_static(
+            br#"{"TimePeriod":{"Start":"2026-04-13","End":"2026-05-13"}}"#,
+        );
+
+        for _ in 0..2 {
+            let resp = forward_request(
+                &Client::new(),
+                &target,
+                reqwest::Method::POST,
+                "",
+                None,
+                reqwest::header::HeaderMap::new(),
+                ProxyBody::Buffered(Some(body.clone())),
+                vec![],
+                vec![],
+                None,
+                &empty_token_cache(),
+                &empty_gcp_cache(),
+                &cache,
+            )
+            .await
+            .expect("call");
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        assert_eq!(
+            mock.request_count.load(Ordering::SeqCst),
+            1,
+            "second call should have been served from the response cache"
+        );
+
+        server.abort();
+    }
+
+    // ─── GCP service-account smoke test ─────────────────────────────
+
+    /// Generate a fresh 2048-bit RSA private key in PKCS#1 PEM format
+    /// for the GCP smoke test. We can't ship a real key in source code
+    /// (would trigger secret scanners), and embedded fake keys won't
+    /// parse. The workspace dev profile opt-level=3's the `rsa` and
+    /// `num-bigint-dig` crates so generation finishes in ~1s.
+    fn generate_test_rsa_pem() -> String {
+        use rsa::{RsaPrivateKey, pkcs1::EncodeRsaPrivateKey};
+        let mut rng = rand::thread_rng();
+        let key = RsaPrivateKey::new(&mut rng, 2048).expect("rsa keygen");
+        key.to_pkcs1_pem(rsa::pkcs1::LineEnding::LF)
+            .expect("pem encode")
+            .to_string()
+    }
+
+    #[derive(Clone, Default)]
+    struct GcpMockState {
+        token_endpoint_count: Arc<AtomicUsize>,
+        api_endpoint_count: Arc<AtomicUsize>,
+        captured_api_authorization: Arc<std::sync::Mutex<Option<String>>>,
+        captured_jwt_assertion: Arc<std::sync::Mutex<Option<String>>>,
+    }
+
+    async fn gcp_token_handler(
+        State(state): State<GcpMockState>,
+        body: Bytes,
+    ) -> Json<serde_json::Value> {
+        state.token_endpoint_count.fetch_add(1, Ordering::SeqCst);
+        // Body is application/x-www-form-urlencoded: grant_type=...&assertion=<JWT>
+        let body_str = String::from_utf8_lossy(&body);
+        for pair in body_str.split('&') {
+            if let Some(jwt) = pair.strip_prefix("assertion=") {
+                *state.captured_jwt_assertion.lock().unwrap() =
+                    Some(urlencoding::decode(jwt).unwrap_or_default().into_owned());
+            }
+        }
+        Json(serde_json::json!({
+            "access_token": "fake-google-token-1",
+            "expires_in": 3600,
+            "token_type": "Bearer",
+        }))
+    }
+
+    async fn gcp_api_handler(
+        State(state): State<GcpMockState>,
+        headers: HeaderMap,
+    ) -> Json<serde_json::Value> {
+        state.api_endpoint_count.fetch_add(1, Ordering::SeqCst);
+        *state.captured_api_authorization.lock().unwrap() = headers
+            .get(reqwest::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .map(ToString::to_string);
+        Json(serde_json::json!({ "billingAccounts": [] }))
+    }
+
+    async fn start_gcp_mock() -> (String, GcpMockState, tokio::task::JoinHandle<()>) {
+        let state = GcpMockState::default();
+        let app = Router::new()
+            .route("/oauth2/token", post(gcp_token_handler))
+            .route("/v1/billingAccounts", axum::routing::get(gcp_api_handler))
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        (format!("http://{addr}"), state, server)
+    }
+
+    fn build_gcp_service_account_credential(token_uri: &str) -> String {
+        // Generate a fresh RSA key for the SA JSON. Embed it + a custom
+        // `token_uri` so JWT signing flows through `nyxid_cloud_auth::
+        // gcp_oauth` exactly as it would for a real SA, but the token
+        // endpoint is our mock.
+        let pem = generate_test_rsa_pem();
+        // Build the JSON via serde so newlines in the PEM survive the
+        // escape round-trip (manual format!() with `\\n` substitution
+        // would mangle the body).
+        serde_json::json!({
+            "type": "service_account",
+            "project_id": "test-project",
+            "private_key_id": "abc",
+            "private_key": pem,
+            "client_email": "sa@test-project.iam.gserviceaccount.com",
+            "token_uri": token_uri,
+        })
+        .to_string()
+    }
+
+    /// End-to-end: forward_request with `auth_method=gcp_service_account`
+    /// mints a token from the mock OAuth endpoint, injects it as a Bearer
+    /// header on the downstream API call, and reuses the cached token on
+    /// a follow-up request without re-minting.
+    #[tokio::test]
+    async fn gcp_service_account_smoke_mints_token_and_caches() {
+        let (base_url, mock, server) = start_gcp_mock().await;
+        let credential = build_gcp_service_account_credential(&format!("{base_url}/oauth2/token"));
+        let target = make_billing_proxy_target(base_url.clone(), "gcp_service_account", credential);
+        let gcp_cache = GcpTokenCache::new();
+
+        for _ in 0..2 {
+            let resp = forward_request(
+                &Client::new(),
+                &target,
+                reqwest::Method::GET,
+                "v1/billingAccounts",
+                None,
+                reqwest::header::HeaderMap::new(),
+                ProxyBody::Buffered(None),
+                vec![],
+                vec![],
+                None,
+                &empty_token_cache(),
+                &gcp_cache,
+                &empty_response_cache(),
+            )
+            .await
+            .expect("gcp call");
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        // Token endpoint hit once across two API calls — proves the cache works.
+        assert_eq!(
+            mock.token_endpoint_count.load(Ordering::SeqCst),
+            1,
+            "GCP token endpoint should have been called exactly once"
+        );
+        assert_eq!(mock.api_endpoint_count.load(Ordering::SeqCst), 2);
+
+        // The Authorization header sent to the API matches the access_token
+        // returned by the mock token endpoint.
+        assert_eq!(
+            mock.captured_api_authorization
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap(),
+            "Bearer fake-google-token-1"
+        );
+
+        // The assertion sent to the token endpoint is a JWT (three
+        // dot-separated base64 segments).
+        let assertion = mock.captured_jwt_assertion.lock().unwrap().clone().unwrap();
+        assert_eq!(assertion.split('.').count(), 3, "assertion must be a JWT");
+
+        server.abort();
     }
 }
