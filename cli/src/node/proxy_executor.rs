@@ -194,10 +194,30 @@ pub async fn execute_proxy_request(
     // 4. Collect forwarded headers. We accumulate them in `forwarded_headers`
     //    as well as applying them to the builder so SigV4 can sign over the
     //    exact set that will be sent.
+    //
+    //    For aws_sigv4 we strip caller-supplied managed headers
+    //    (Authorization, X-Amz-Date, X-Amz-Content-Sha256, X-Amz-Security-Token)
+    //    before attaching — the signer step below adds canonical values
+    //    and reqwest's `.header()` appends rather than replaces, so
+    //    keeping caller values would produce duplicate headers on the
+    //    wire (Codex review BLOCKER 8).
+    let is_aws_sigv4 = cred.aws_sigv4_credential().is_some();
     let mut forwarded_headers: Vec<(String, String)> = Vec::new();
     if let Some(headers) = request["headers"].as_object() {
         for (name, value) in headers {
             if let Some(v) = value.as_str() {
+                if is_aws_sigv4 {
+                    let lower = name.to_ascii_lowercase();
+                    if matches!(
+                        lower.as_str(),
+                        "authorization"
+                            | "x-amz-date"
+                            | "x-amz-content-sha256"
+                            | "x-amz-security-token"
+                    ) {
+                        continue;
+                    }
+                }
                 req_builder = req_builder.header(name.as_str(), v);
                 forwarded_headers.push((name.clone(), v.to_string()));
             }

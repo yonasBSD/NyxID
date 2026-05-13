@@ -456,9 +456,13 @@ async fn main() {
         ws_passthrough_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         token_exchange_cache: Arc::new(TokenExchangeCache::new()),
         gcp_token_cache: Arc::new(nyxid_cloud_auth::gcp_oauth::GcpTokenCache::new()),
-        cloud_response_cache: Arc::new(services::cloud_response_cache::CloudResponseCache::new(
-            config.cloud_response_cache_ttl_secs,
-        )),
+        cloud_response_cache: Arc::new(
+            services::cloud_response_cache::CloudResponseCache::with_bounds(
+                config.cloud_response_cache_ttl_secs,
+                config.cloud_response_cache_max_entry_bytes,
+                config.cloud_response_cache_max_entries,
+            ),
+        ),
         telemetry: telemetry::TelemetryClient::from_config(&config),
     };
 

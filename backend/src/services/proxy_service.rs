@@ -2025,6 +2025,22 @@ pub async fn forward_request(
     if target.service.forward_access_token && caller_token.is_some() {
         outbound_headers.retain(|(n, _)| !n.eq_ignore_ascii_case("authorization"));
     }
+    // SigV4 attaches its own X-Amz-Date / X-Amz-Content-Sha256 / X-Amz-
+    // Security-Token after the auth dispatch. `reqwest::header()` appends
+    // rather than replaces, so a caller-supplied value for any of these
+    // would ride alongside the signer's value on the wire — AWS rejects
+    // the request with a signature-mismatch error and the body hash
+    // disagreement is a latent integrity bug regardless. Codex review
+    // BLOCKER 8: strip them from `outbound_headers` before attaching.
+    if target.auth_method == "aws_sigv4" {
+        outbound_headers.retain(|(n, _)| {
+            let lower = n.to_ascii_lowercase();
+            !matches!(
+                lower.as_str(),
+                "x-amz-date" | "x-amz-content-sha256" | "x-amz-security-token" | "authorization"
+            )
+        });
+    }
 
     for (name, value) in &outbound_headers {
         request = request.header(name, value);
@@ -2070,7 +2086,13 @@ pub async fn forward_request(
     // Pre-flight cache lookup for billing-API auth methods (NyxID#716).
     // Done after the body has been finalized but before signing or
     // sending — a cache hit saves the SigV4 HMAC chain + the outbound
-    // network call.
+    // network call. The key is scoped per (auth_method, credential
+    // fingerprint, base_url, method, path+query, response-affecting
+    // headers, body), so two users hitting the same catalog endpoint
+    // with different credentials get different entries (Codex review
+    // BLOCKER 1) and two AWS JSON-RPC operations with the same body
+    // but different `x-amz-target` headers don't replay each other
+    // (BLOCKER 2).
     let cache_key: Option<String> =
         if cloud_response_cache::is_cacheable_auth_method(&target.auth_method) {
             let body_bytes_for_key: &[u8] = match &body {
@@ -2081,11 +2103,21 @@ pub async fn forward_request(
                 Some(q) => format!("{}?{}", prepared.path, q),
                 None => prepared.path.clone(),
             };
+            // Headers that have actually been attached to the outgoing
+            // request, plus any prepared delegated headers. Both feed
+            // the cache key's header digest.
+            let mut key_headers: Vec<(String, String)> = outbound_headers.to_vec();
+            for (n, v) in &prepared.delegated_headers {
+                key_headers.push((n.clone(), v.clone()));
+            }
+            let fingerprint = CloudResponseCache::credential_fingerprint(&target.credential);
             let key = CloudResponseCache::key(
                 &target.auth_method,
+                &fingerprint,
                 &target.base_url,
                 method.as_str(),
                 &path_and_query,
+                &key_headers,
                 body_bytes_for_key,
             );
             if let Some(cached) = cloud_response_cache.get(&key) {
@@ -4370,7 +4402,15 @@ mod tests {
     #[tokio::test]
     async fn gcp_service_account_smoke_mints_token_and_caches() {
         let (base_url, mock, server) = start_gcp_mock().await;
-        let credential = build_gcp_service_account_credential(&format!("{base_url}/oauth2/token"));
+        let mock_token_uri = format!("{base_url}/oauth2/token");
+        // BLOCKER 7 follow-up: production rejects non-Google token_uri.
+        // The smoke test points at a local mock, so register that URL as
+        // trusted for the duration of the test. Debug-only symbol; the
+        // release build doesn't include this hook.
+        nyxid_cloud_auth::gcp_oauth::set_trusted_token_endpoints_for_testing(vec![
+            mock_token_uri.clone(),
+        ]);
+        let credential = build_gcp_service_account_credential(&mock_token_uri);
         let target = make_billing_proxy_target(base_url.clone(), "gcp_service_account", credential);
         let gcp_cache = GcpTokenCache::new();
 

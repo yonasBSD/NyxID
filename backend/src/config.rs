@@ -237,9 +237,20 @@ pub struct AppConfig {
     /// `gcp_service_account` proxy auth methods. AWS Cost Explorer
     /// charges $0.01 per paginated request and BigQuery billing-export
     /// data only updates every few hours, so identical proxy requests
-    /// in a short window get served from cache. Defaults to 300 (5
-    /// minutes); set to 0 to disable. See NyxID#716.
+    /// in a short window get served from cache. **Defaults to 0
+    /// (disabled).** Operators should review the cache scoping
+    /// (per-credential + per-operation-header keying via
+    /// `CloudResponseCache::key`) and the bounds below before enabling.
+    /// See NyxID#716 + Codex review REC 11.
     pub cloud_response_cache_ttl_secs: u64,
+    /// Maximum bytes for a single cacheable response. Larger responses
+    /// are forwarded uncached. Default 1 MiB. Override via
+    /// `CLOUD_RESPONSE_CACHE_MAX_ENTRY_BYTES`.
+    pub cloud_response_cache_max_entry_bytes: usize,
+    /// Maximum number of cached entries. LRU-ish eviction by
+    /// insertion timestamp when full. Override via
+    /// `CLOUD_RESPONSE_CACHE_MAX_ENTRIES`.
+    pub cloud_response_cache_max_entries: usize,
 
     // Registration gate
     /// When `true` (default), new-user registration requires a valid invite
@@ -768,7 +779,15 @@ impl AppConfig {
             cloud_response_cache_ttl_secs: env::var("CLOUD_RESPONSE_CACHE_TTL_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(300),
+                .unwrap_or(0),
+            cloud_response_cache_max_entry_bytes: env::var("CLOUD_RESPONSE_CACHE_MAX_ENTRY_BYTES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(crate::services::cloud_response_cache::DEFAULT_MAX_ENTRY_BYTES),
+            cloud_response_cache_max_entries: env::var("CLOUD_RESPONSE_CACHE_MAX_ENTRIES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(crate::services::cloud_response_cache::DEFAULT_MAX_ENTRIES),
 
             invite_code_required: parse_invite_code_required(env::var("INVITE_CODE_REQUIRED").ok()),
             email_auth_enabled: parse_bool_env("EMAIL_AUTH_ENABLED", false),
@@ -1082,7 +1101,11 @@ mod tests {
             channel_event_rate_limit_burst: 200,
             channel_event_dedup_capacity: 32_768,
             channel_event_dedup_ttl_secs: 300,
-            cloud_response_cache_ttl_secs: 300,
+            cloud_response_cache_ttl_secs: 0,
+            cloud_response_cache_max_entry_bytes:
+                crate::services::cloud_response_cache::DEFAULT_MAX_ENTRY_BYTES,
+            cloud_response_cache_max_entries:
+                crate::services::cloud_response_cache::DEFAULT_MAX_ENTRIES,
             invite_code_required: true,
             email_auth_enabled: false,
             auto_verify_email: false,

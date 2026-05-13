@@ -9,7 +9,7 @@
 //! cold-miss key all wait on the same mint via a per-key mutex.
 
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
 use jsonwebtoken::{EncodingKey, Header};
@@ -75,17 +75,73 @@ impl GcpServiceAccountKey {
         Ok(key)
     }
 
-    pub fn token_endpoint(&self) -> &str {
-        self.token_uri
-            .as_deref()
-            .unwrap_or("https://oauth2.googleapis.com/token")
+    /// The OAuth token endpoint we'll POST to. We do NOT honor the
+    /// `token_uri` field from the user-uploaded JSON: that field is
+    /// attacker-controlled in a hosted deployment and would let a
+    /// malicious credential aim a signed JWT-bearer assertion at an
+    /// arbitrary internal URL — an SSRF primitive (Codex review
+    /// BLOCKER 7). Instead we validate that `token_uri`, if set,
+    /// matches one of the trusted Google endpoints
+    /// ([`trusted_token_endpoints`]).
+    pub fn token_endpoint(&self) -> CloudAuthResult<String> {
+        let candidate = self
+            .token_uri
+            .clone()
+            .unwrap_or_else(|| "https://oauth2.googleapis.com/token".to_string());
+        let trusted = trusted_token_endpoints();
+        if trusted.contains(&candidate) {
+            Ok(candidate)
+        } else {
+            Err(CloudAuthError::InvalidCredential(format!(
+                "gcp_service_account credential's token_uri '{candidate}' is not a trusted Google OAuth endpoint; \
+                 expected one of {trusted:?}"
+            )))
+        }
     }
+}
+
+/// Trusted OAuth token-exchange endpoints. Production builds get the
+/// canonical Google list. Tests inject mock endpoints via
+/// [`set_trusted_token_endpoints_for_testing`] before any first use.
+fn trusted_token_endpoints() -> Vec<String> {
+    TRUSTED_ENDPOINTS
+        .read()
+        .expect("TRUSTED_ENDPOINTS lock not poisoned")
+        .clone()
+}
+
+static TRUSTED_ENDPOINTS: std::sync::LazyLock<std::sync::RwLock<Vec<String>>> =
+    std::sync::LazyLock::new(|| {
+        std::sync::RwLock::new(vec![
+            "https://oauth2.googleapis.com/token".to_string(),
+            "https://accounts.google.com/o/oauth2/token".to_string(),
+        ])
+    });
+
+/// Test-only override. Replaces the trusted endpoint list with a
+/// caller-supplied set so smoke tests can route to a local mock URL.
+///
+/// Gated on `debug_assertions` rather than a Cargo feature so release
+/// builds (which always have `debug_assertions = false`) physically
+/// cannot contain this symbol — even via accidental feature
+/// unification across the workspace. Tests, debug builds, and local
+/// `cargo run` keep access.
+#[cfg(debug_assertions)]
+pub fn set_trusted_token_endpoints_for_testing(endpoints: Vec<String>) {
+    *TRUSTED_ENDPOINTS
+        .write()
+        .expect("TRUSTED_ENDPOINTS lock not poisoned") = endpoints;
 }
 
 #[derive(Serialize)]
 struct JwtClaims<'a> {
     iss: &'a str,
-    sub: &'a str,
+    /// `sub` claim. Omitted by default per Codex review REC 7 — Google's
+    /// JWT-bearer flow doesn't require it, and setting it equal to
+    /// `iss` is semantically reserved for domain-wide delegation which
+    /// we don't expose.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sub: Option<&'a str>,
     aud: &'a str,
     scope: String,
     iat: u64,
@@ -214,12 +270,16 @@ async fn mint_access_token(
     key: &GcpServiceAccountKey,
     scope: &str,
 ) -> CloudAuthResult<CachedToken> {
-    let token_uri = key.token_endpoint().to_string();
+    let token_uri = key.token_endpoint()?;
     let iat = now_unix();
     let exp = iat + 3600;
+    // BLOCKER 7 + REC 7 follow-up: omit `sub`. Google's JWT-bearer
+    // flow only requires `iss = client_email`. Setting `sub` to the
+    // same value is legacy and reserved semantics for domain-wide
+    // delegation — we don't support that case, so leave the claim out.
     let claims = JwtClaims {
         iss: &key.client_email,
-        sub: &key.client_email,
+        sub: None,
         aud: &token_uri,
         scope: scope.to_string(),
         iat,
@@ -250,7 +310,18 @@ async fn mint_access_token(
 
     let status = response.status();
     if !status.is_success() {
+        // Cap upstream error body to 1 KiB before it crosses our error
+        // boundary so a malicious or accidentally-huge response can't
+        // blow up logs (Codex review BLOCKER 7 follow-up).
         let body = response.text().await.unwrap_or_default();
+        const MAX_BODY: usize = 1024;
+        let body = if body.len() > MAX_BODY {
+            let mut truncated = body;
+            truncated.truncate(MAX_BODY);
+            format!("{truncated}…[truncated]")
+        } else {
+            body
+        };
         return Err(CloudAuthError::UpstreamError {
             status: status.as_u16(),
             body,
@@ -258,9 +329,10 @@ async fn mint_access_token(
     }
 
     let parsed: TokenResponse = response.json().await?;
-    let expires_at = now_unix()
-        .saturating_add(parsed.expires_in)
-        .max(now_unix() + Duration::from_secs(60).as_secs());
+    // NIT 1 cleanup: capture `now` once. The previous `now_unix() ... .max(now_unix() + 60)`
+    // pattern called the clock twice and could have differed by one second.
+    let now = now_unix();
+    let expires_at = now.saturating_add(parsed.expires_in).max(now + 60);
 
     Ok(CachedToken {
         token: Arc::from(parsed.access_token.into_boxed_str()),
@@ -286,7 +358,10 @@ mod tests {
         let key = GcpServiceAccountKey::from_json(SAMPLE_SA).expect("parse");
         assert_eq!(key.client_email, "sa@test-project.iam.gserviceaccount.com");
         assert_eq!(key.project_id, "test-project");
-        assert_eq!(key.token_endpoint(), "https://oauth2.googleapis.com/token");
+        assert_eq!(
+            key.token_endpoint().expect("default endpoint is trusted"),
+            "https://oauth2.googleapis.com/token"
+        );
     }
 
     #[test]
@@ -313,16 +388,40 @@ mod tests {
     }
 
     #[test]
-    fn custom_token_uri_is_honored() {
+    fn untrusted_token_uri_is_rejected() {
+        // BLOCKER 7 fix: a user-supplied `token_uri` pointing at an
+        // arbitrary URL must be rejected, otherwise a malicious
+        // credential JSON is an SSRF primitive on a hosted backend.
         let raw = r#"{
             "type": "service_account",
             "project_id": "p",
             "private_key_id": "k",
             "private_key": "-----BEGIN RSA PRIVATE KEY-----\nX\n-----END RSA PRIVATE KEY-----\n",
             "client_email": "sa@p.iam.gserviceaccount.com",
-            "token_uri": "https://custom.example.com/token"
+            "token_uri": "https://attacker.example.com/token"
         }"#;
         let key = GcpServiceAccountKey::from_json(raw).expect("parse");
-        assert_eq!(key.token_endpoint(), "https://custom.example.com/token");
+        let err = key
+            .token_endpoint()
+            .expect_err("untrusted endpoint must error");
+        assert!(matches!(err, CloudAuthError::InvalidCredential(_)));
+    }
+
+    #[test]
+    fn alternate_google_endpoint_is_trusted() {
+        let raw = r#"{
+            "type": "service_account",
+            "project_id": "p",
+            "private_key_id": "k",
+            "private_key": "-----BEGIN RSA PRIVATE KEY-----\nX\n-----END RSA PRIVATE KEY-----\n",
+            "client_email": "sa@p.iam.gserviceaccount.com",
+            "token_uri": "https://accounts.google.com/o/oauth2/token"
+        }"#;
+        let key = GcpServiceAccountKey::from_json(raw).expect("parse");
+        assert_eq!(
+            key.token_endpoint()
+                .expect("alternate Google endpoint trusted"),
+            "https://accounts.google.com/o/oauth2/token"
+        );
     }
 }
