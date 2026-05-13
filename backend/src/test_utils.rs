@@ -156,6 +156,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         channel_event_rate_limit_burst: 200,
         channel_event_dedup_capacity: 32_768,
         channel_event_dedup_ttl_secs: 300,
+        cloud_response_cache_ttl_secs: 300,
         invite_code_required: false,
         email_auth_enabled: false,
         auto_verify_email: false,
@@ -260,6 +261,9 @@ pub(crate) fn test_app_state(db: mongodb::Database) -> AppState {
         ws_passthrough_count: Arc::new(AtomicUsize::new(0)),
         token_exchange_cache: Arc::new(TokenExchangeCache::new()),
         gcp_token_cache: Arc::new(nyxid_cloud_auth::gcp_oauth::GcpTokenCache::new()),
+        cloud_response_cache: Arc::new(
+            crate::services::cloud_response_cache::CloudResponseCache::new(0),
+        ),
         telemetry: None,
     }
 }

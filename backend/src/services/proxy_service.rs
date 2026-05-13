@@ -21,6 +21,7 @@ use crate::models::user_service_connection::{
     COLLECTION_NAME as USER_SERVICE_CONNECTIONS, UserServiceConnection,
 };
 use crate::models::ws_frame_injection::WsFrameInjection;
+use crate::services::cloud_response_cache::{self, CloudResponseCache};
 use crate::services::delegation_service::DelegatedCredential;
 use crate::services::node_ws_manager::NodeWsManager;
 use crate::services::provider_token_exchange_service::{self, TokenExchangeCache};
@@ -1887,6 +1888,8 @@ pub async fn forward_request(
     token_exchange_cache: &TokenExchangeCache,
     // GCP service-account access-token cache (used by `gcp_service_account`).
     gcp_token_cache: &GcpTokenCache,
+    // In-memory response cache for cloud-billing auth methods (NyxID#716).
+    cloud_response_cache: &CloudResponseCache,
 ) -> AppResult<reqwest::Response> {
     let mut all_delegated = delegated_credentials;
     extend_with_path_credential(&mut all_delegated, target);
@@ -2051,6 +2054,40 @@ pub async fn forward_request(
     } else {
         body
     };
+
+    // Pre-flight cache lookup for billing-API auth methods (NyxID#716).
+    // Done after the body has been finalized but before signing or
+    // sending — a cache hit saves the SigV4 HMAC chain + the outbound
+    // network call.
+    let cache_key: Option<String> =
+        if cloud_response_cache::is_cacheable_auth_method(&target.auth_method) {
+            let body_bytes_for_key: &[u8] = match &body {
+                ProxyBody::Buffered(Some(b)) => b.as_ref(),
+                ProxyBody::Buffered(None) => &[][..],
+            };
+            let path_and_query = match prepared.query.as_deref() {
+                Some(q) => format!("{}?{}", prepared.path, q),
+                None => prepared.path.clone(),
+            };
+            let key = CloudResponseCache::key(
+                &target.auth_method,
+                &target.base_url,
+                method.as_str(),
+                &path_and_query,
+                body_bytes_for_key,
+            );
+            if let Some(cached) = cloud_response_cache.get(&key) {
+                tracing::debug!(
+                    auth_method = %target.auth_method,
+                    base_url = %target.base_url,
+                    "cloud_response_cache hit"
+                );
+                return Ok(cached);
+            }
+            Some(key)
+        } else {
+            None
+        };
 
     // Inject credentials based on auth method
     match target.auth_method.as_str() {
@@ -2227,6 +2264,20 @@ pub async fn forward_request(
         AppError::Internal("Proxy request failed".to_string())
     })?;
 
+    // Cache successful billing-API responses so a follow-up request
+    // with the same body replays from memory. Non-2xx responses are
+    // passed through unchanged by `insert_and_replay`.
+    if let Some(key) = cache_key {
+        let replayed = cloud_response_cache
+            .insert_and_replay(key, response)
+            .await
+            .map_err(|e| {
+                tracing::error!("cloud_response_cache buffer failed: {e}");
+                AppError::Internal("Failed to buffer cacheable response".to_string())
+            })?;
+        return Ok(replayed);
+    }
+
     Ok(response)
 }
 
@@ -2386,6 +2437,12 @@ mod tests {
 
     fn empty_gcp_cache() -> GcpTokenCache {
         GcpTokenCache::new()
+    }
+
+    fn empty_response_cache() -> CloudResponseCache {
+        // TTL=0 disables storage; tests covering cacheable paths
+        // construct a separate instance with a real TTL.
+        CloudResponseCache::new(0)
     }
 
     #[tokio::test]
@@ -2694,6 +2751,7 @@ mod tests {
             None,
             &empty_token_cache(),
             &empty_gcp_cache(),
+            &empty_response_cache(),
         )
         .await
         .expect("proxy request should succeed");
@@ -2743,6 +2801,7 @@ mod tests {
             None,
             &empty_token_cache(),
             &empty_gcp_cache(),
+            &empty_response_cache(),
         )
         .await
         .expect("proxy request should succeed");
@@ -2795,6 +2854,7 @@ mod tests {
             None,
             &empty_token_cache(),
             &empty_gcp_cache(),
+            &empty_response_cache(),
         )
         .await
         .expect("proxy request should succeed");
@@ -2850,6 +2910,7 @@ mod tests {
             None,
             &empty_token_cache(),
             &empty_gcp_cache(),
+            &empty_response_cache(),
         )
         .await
         .expect("proxy request should succeed");
@@ -2899,6 +2960,7 @@ mod tests {
             None,
             &empty_token_cache(),
             &empty_gcp_cache(),
+            &empty_response_cache(),
         )
         .await
         .expect("proxy request should succeed");
@@ -2969,6 +3031,7 @@ mod tests {
             None,
             &empty_token_cache(),
             &empty_gcp_cache(),
+            &empty_response_cache(),
         )
         .await
         .expect_err("backslash in requested path should be rejected");
@@ -3024,6 +3087,7 @@ mod tests {
                 None,
                 &empty_token_cache(),
                 &empty_gcp_cache(),
+                &empty_response_cache(),
             )
             .await
             .expect_err("percent-encoded requested path breaker should be rejected");
@@ -3063,6 +3127,7 @@ mod tests {
             None,
             &empty_token_cache(),
             &empty_gcp_cache(),
+            &empty_response_cache(),
         )
         .await
         .expect("non-segment dot sequences should be allowed");
@@ -3095,6 +3160,7 @@ mod tests {
             None,
             &empty_token_cache(),
             &empty_gcp_cache(),
+            &empty_response_cache(),
         )
         .await
         .expect_err("invalid path credential should be rejected");
@@ -3126,6 +3192,7 @@ mod tests {
                 None,
                 &empty_token_cache(),
                 &empty_gcp_cache(),
+                &empty_response_cache(),
             )
             .await
             .expect_err("blank or whitespace path credential should be rejected");
@@ -3157,6 +3224,7 @@ mod tests {
             None,
             &empty_token_cache(),
             &empty_gcp_cache(),
+            &empty_response_cache(),
         )
         .await
         .expect_err("invalid path prefix should be rejected");
@@ -3188,6 +3256,7 @@ mod tests {
                 None,
                 &empty_token_cache(),
                 &empty_gcp_cache(),
+                &empty_response_cache(),
             )
             .await
             .expect_err("blank or whitespace path prefix should be rejected");
@@ -3219,6 +3288,7 @@ mod tests {
             None,
             &empty_token_cache(),
             &empty_gcp_cache(),
+            &empty_response_cache(),
         )
         .await
         .expect_err("percent-encoded path credential should be rejected");
@@ -3275,6 +3345,7 @@ mod tests {
             None,
             &empty_token_cache(),
             &empty_gcp_cache(),
+            &empty_response_cache(),
         )
         .await
         .expect_err("percent-encoded path prefix should be rejected");
@@ -3527,6 +3598,7 @@ mod tests {
             None,
             &cache,
             &empty_gcp_cache(),
+            &empty_response_cache(),
         )
         .await
         .expect("lark proxy request should succeed");
@@ -3561,6 +3633,7 @@ mod tests {
             None,
             &cache,
             &empty_gcp_cache(),
+            &empty_response_cache(),
         )
         .await
         .expect("first call");
@@ -3579,6 +3652,7 @@ mod tests {
             None,
             &cache,
             &empty_gcp_cache(),
+            &empty_response_cache(),
         )
         .await
         .expect("second call");
@@ -3610,6 +3684,7 @@ mod tests {
             None,
             &TokenExchangeCache::new(),
             &empty_gcp_cache(),
+            &empty_response_cache(),
         )
         .await
         .expect_err("malformed credential should error");
@@ -3812,6 +3887,7 @@ mod tests {
             None,
             &empty_token_cache(),
             &empty_gcp_cache(),
+            &empty_response_cache(),
         )
         .await
         .expect("GET with body auth should forward without body injection");
@@ -3887,6 +3963,7 @@ mod tests {
             None,
             &empty_token_cache(),
             &empty_gcp_cache(),
+            &empty_response_cache(),
         )
         .await
         .expect("POST with body auth should merge credential into JSON body");

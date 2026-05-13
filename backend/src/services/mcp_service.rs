@@ -2058,6 +2058,7 @@ pub async fn execute_tool(
     config: &crate::config::AppConfig,
     token_exchange_cache: &crate::services::provider_token_exchange_service::TokenExchangeCache,
     gcp_token_cache: &nyxid_cloud_auth::gcp_oauth::GcpTokenCache,
+    cloud_response_cache: &crate::services::cloud_response_cache::CloudResponseCache,
     exec_ctx: &McpExecContext<'_>,
 ) -> AppResult<(u16, String)> {
     use crate::models::user::{COLLECTION_NAME as USERS, User};
@@ -2500,6 +2501,7 @@ pub async fn execute_tool(
         None,
         token_exchange_cache,
         gcp_token_cache,
+        cloud_response_cache,
     )
     .await?;
 

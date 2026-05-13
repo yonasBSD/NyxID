@@ -270,6 +270,7 @@ pub async fn llm_proxy_request(
             None,
             &state.token_exchange_cache,
             &state.gcp_token_cache,
+            &state.cloud_response_cache,
         )
         .await?;
 
@@ -626,6 +627,7 @@ pub async fn gateway_request(
             None,
             &state.token_exchange_cache,
             &state.gcp_token_cache,
+            &state.cloud_response_cache,
         )
         .await?;
 
