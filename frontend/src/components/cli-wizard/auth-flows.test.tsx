@@ -1,11 +1,12 @@
-import { render, waitFor } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import type { ComponentProps } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { ApiError } from "@/lib/api-client";
 import {
   isTerminalAuthFailureStatus,
   pollOAuthKeyUntilActive,
 } from "./auth-flow-polling";
-import { DeviceCodeFlow, OAuthFlow } from "./auth-flows";
+import { DeviceCodeFlow, OAuthFlow, ProviderWaitingPanel } from "./auth-flows";
 
 const {
   mockDelete,
@@ -181,6 +182,141 @@ describe("cli wizard auth flows", () => {
     expect(onTimeout).not.toHaveBeenCalled();
   });
 
+  // Issue #653 stale-tab path: a 404 means the placeholder no longer
+  // exists (abandoned by another tab, hard-deleted, never persisted).
+  // Treat as terminal so the wizard exits with a clear message instead
+  // of polling silently for the full 5-minute deadline.
+  it("treats a 404 from polling as a terminal failure", async () => {
+    const getKey = vi
+      .fn()
+      .mockRejectedValue(
+        new ApiError(404, {
+          error: "not_found",
+          error_code: 1004,
+          message: "Key not found",
+        }),
+      );
+    const completeWithKey = vi.fn();
+    const onTerminalFailure = vi.fn();
+    const onTimeout = vi.fn();
+
+    await pollOAuthKeyUntilActive({
+      keyId: "key-1",
+      getKey,
+      completeWithKey,
+      isCancelled: () => false,
+      onTerminalFailure,
+      onTimeout,
+      sleepMs: vi.fn().mockResolvedValue(undefined),
+    });
+
+    expect(getKey).toHaveBeenCalledTimes(1);
+    expect(completeWithKey).not.toHaveBeenCalled();
+    expect(onTimeout).not.toHaveBeenCalled();
+    expect(onTerminalFailure).toHaveBeenCalledTimes(1);
+    const call = onTerminalFailure.mock.calls[0]?.[0] as {
+      status: string;
+      error_message?: string | null;
+    };
+    expect(call.status).toBe("failed");
+    expect(call.error_message).toMatch(/no longer exists/i);
+  });
+
+  // Non-404 fetch errors (transient network blips, 5xx, refresh-token
+  // churn) must remain transient — keep polling, not exit.
+  it("keeps polling on transient (non-404) fetch errors", async () => {
+    const getKey = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("network down"))
+      .mockResolvedValueOnce({ status: "active" });
+    const completeWithKey = vi.fn().mockResolvedValue(undefined);
+    const onTerminalFailure = vi.fn();
+    const onTimeout = vi.fn();
+
+    await pollOAuthKeyUntilActive({
+      keyId: "key-1",
+      getKey,
+      completeWithKey,
+      isCancelled: () => false,
+      onTerminalFailure,
+      onTimeout,
+      sleepMs: vi.fn().mockResolvedValue(undefined),
+    });
+
+    expect(getKey).toHaveBeenCalledTimes(2);
+    expect(completeWithKey).toHaveBeenCalledWith("key-1");
+    expect(onTerminalFailure).not.toHaveBeenCalled();
+    expect(onTimeout).not.toHaveBeenCalled();
+  });
+
+  // Issue #653 — the wizard MUST reach a terminal state for every
+  // outcome. After enough consecutive non-success polls (e.g. the
+  // wizard's local CLI server died, or backend is sustained-down), give
+  // up and surface a "lost contact" message so the user sees something
+  // actionable instead of "Waiting…" forever.
+  it("escalates to terminal failure after sustained polling errors", async () => {
+    const getKey = vi
+      .fn()
+      .mockRejectedValue(new Error("network down"));
+    const completeWithKey = vi.fn();
+    const onTerminalFailure = vi.fn();
+    const onTimeout = vi.fn();
+
+    await pollOAuthKeyUntilActive({
+      keyId: "key-1",
+      getKey,
+      completeWithKey,
+      isCancelled: () => false,
+      onTerminalFailure,
+      onTimeout,
+      sleepMs: vi.fn().mockResolvedValue(undefined),
+      maxConsecutiveErrors: 3,
+    });
+
+    expect(getKey).toHaveBeenCalledTimes(3);
+    expect(completeWithKey).not.toHaveBeenCalled();
+    expect(onTimeout).not.toHaveBeenCalled();
+    expect(onTerminalFailure).toHaveBeenCalledTimes(1);
+    const call = onTerminalFailure.mock.calls[0]?.[0] as {
+      status: string;
+      error_message?: string | null;
+    };
+    expect(call.status).toBe("failed");
+    expect(call.error_message).toMatch(/lost contact|nyxid status/i);
+  });
+
+  // The consecutive-error counter must RESET on a successful poll —
+  // intermittent blips during a long OAuth flow shouldn't trip the
+  // escalation if interspersed with healthy responses.
+  it("resets the consecutive-error counter when a poll succeeds", async () => {
+    const getKey = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("blip 1"))
+      .mockRejectedValueOnce(new Error("blip 2"))
+      .mockResolvedValueOnce({ status: "pending_auth" })
+      .mockRejectedValueOnce(new Error("blip 3"))
+      .mockResolvedValueOnce({ status: "active" });
+    const completeWithKey = vi.fn().mockResolvedValue(undefined);
+    const onTerminalFailure = vi.fn();
+    const onTimeout = vi.fn();
+
+    await pollOAuthKeyUntilActive({
+      keyId: "key-1",
+      getKey,
+      completeWithKey,
+      isCancelled: () => false,
+      onTerminalFailure,
+      onTimeout,
+      sleepMs: vi.fn().mockResolvedValue(undefined),
+      maxConsecutiveErrors: 3,
+    });
+
+    expect(getKey).toHaveBeenCalledTimes(5);
+    expect(completeWithKey).toHaveBeenCalledWith("key-1");
+    expect(onTerminalFailure).not.toHaveBeenCalled();
+    expect(onTimeout).not.toHaveBeenCalled();
+  });
+
   it("posts target_org_id when creating an OAuth placeholder under an org", async () => {
     resetFlowMocks();
 
@@ -225,4 +361,249 @@ describe("cli wizard auth flows", () => {
       });
     },
   );
+});
+
+// Issue #653: standardized waiting-screen layout shared by every
+// OAuth-style flow. Polling + heartbeat mechanics live elsewhere; this
+// suite locks down the visible UX shape so future provider additions
+// stay consistent.
+describe("ProviderWaitingPanel", () => {
+  it("renders title, status, instructions, prominent open button, docs link, and cancel", () => {
+    const onOpen = vi.fn();
+    const onCancel = vi.fn();
+    render(
+      <ProviderWaitingPanel
+        providerName="Lark API (User OAuth)"
+        statusLine="Waiting for provider authorization (polling every 2s)…"
+        instructions={[
+          "Click the button below to open Lark sign-in.",
+          "Approve the request on the Lark page.",
+          "Return here — this page will finish automatically.",
+        ]}
+        onOpenProvider={onOpen}
+        documentationUrl="https://example.com/lark/docs"
+        onCancel={onCancel}
+      />,
+    );
+
+    expect(
+      screen.getByRole("heading", {
+        name: /Connecting to Lark API \(User OAuth\)/i,
+      }),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(/Waiting for provider authorization/i),
+    ).toBeTruthy();
+    // Numbered instructions (3 items in this fixture).
+    expect(screen.getAllByRole("listitem")).toHaveLength(3);
+    // Prominent primary button labelled with provider name.
+    const openBtn = screen.getByRole("button", {
+      name: /Open Lark API \(User OAuth\) sign-in/i,
+    });
+    expect(openBtn).toBeTruthy();
+    openBtn.click();
+    expect(onOpen).toHaveBeenCalledTimes(1);
+    // Docs link is rendered when provided.
+    const docsLink = screen.getByRole("link", {
+      name: /Learn more about this connection/i,
+    });
+    expect(docsLink.getAttribute("href")).toBe(
+      "https://example.com/lark/docs",
+    );
+    // Cancel always present.
+    const cancelBtn = screen.getByRole("button", { name: /^Cancel$/ });
+    cancelBtn.click();
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  // Device-code flows pass a provider-specific block (the user_code +
+  // verification URL). The OAuth flow doesn't and should still render
+  // cleanly.
+  it("renders the optional provider-specific block when provided", () => {
+    render(
+      <ProviderWaitingPanel
+        providerName="OpenAI Codex"
+        statusLine="Waiting for authorization…"
+        instructions={["Open the URL above.", "Enter the code.", "Approve."]}
+        providerBlock={<div data-testid="device-code-block">code: ABCD</div>}
+        onOpenProvider={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("device-code-block")).toBeTruthy();
+  });
+
+  it("hides the open button when onOpenProvider is null (URL not yet ready)", () => {
+    render(
+      <ProviderWaitingPanel
+        providerName="OpenAI Codex"
+        statusLine="Requesting device code…"
+        instructions={["Wait while we set up the request."]}
+        onOpenProvider={null}
+        onCancel={vi.fn()}
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { name: /Open OpenAI Codex sign-in/i }),
+    ).toBeNull();
+  });
+
+  it("omits the docs link when documentationUrl is unset", () => {
+    render(
+      <ProviderWaitingPanel
+        providerName="Custom Provider"
+        statusLine="Waiting…"
+        instructions={["Step one"]}
+        onOpenProvider={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+    expect(
+      screen.queryByRole("link", { name: /Learn more about this connection/i }),
+    ).toBeNull();
+  });
+
+  it("renders the error line when an error message is present", () => {
+    render(
+      <ProviderWaitingPanel
+        providerName="Lark"
+        statusLine="Waiting…"
+        instructions={["Step one"]}
+        onOpenProvider={vi.fn()}
+        onCancel={vi.fn()}
+        error="Authorization timed out — please retry."
+      />,
+    );
+    expect(
+      screen.getByText(/Authorization timed out — please retry\./i),
+    ).toBeTruthy();
+  });
+});
+
+// Issue #653 — root-cause regression test for the polling-doesn't-fire
+// bug. PR #723's third-round review caught that OAuthFlow's main
+// useEffect had `[phase]` deps and its cleanup set `cancelledRef.
+// current = true`. When the async function inside calls
+// `setPhase("waiting")` then `await pollUntilActive(...)`, React fires
+// the cleanup during the polling loop's first sleep — which flips
+// cancelledRef and makes the polling loop bail before its first GET.
+// Result: zero `/keys/<id>` requests in the network tab, wizard hangs
+// on "Waiting for provider authorization…" indefinitely.
+//
+// Pre-fix this test fails (mockGet for /keys/key-1 is never called).
+// Post-fix it passes (cleanup no longer flips the shared
+// cancelledRef on phase change).
+//
+// Existing OAuth integration tests didn't catch this because their
+// `mockPost` returned `status: "active"` immediately, hitting the
+// short-circuit at auth-flows.tsx:857 that bypasses pollUntilActive
+// entirely. This test deliberately starts with `pending_auth` so the
+// polling loop is the path that has to work.
+describe("OAuthFlow polling integration", () => {
+  beforeEach(() => {
+    resetFlowMocks();
+  });
+
+  it(
+    "actually fires GET /keys/<id> while the placeholder is pending_auth (issue #653 root cause)",
+    async () => {
+      // Override defaults: POST /keys returns pending_auth so the
+      // active short-circuit doesn't fire; GET /keys/key-1 also
+      // returns pending_auth so the polling has to keep going for
+      // multiple ticks (we only assert the first GET fires; the
+      // wizard's done transition isn't what's being tested here).
+      mockPost.mockImplementation(async (path: string) => {
+        if (path === "/keys") {
+          return {
+            id: "key-1",
+            status: "pending_auth",
+            slug: "llm-openai",
+            label: "OpenAI",
+          };
+        }
+        throw new Error(`unexpected POST ${path}`);
+      });
+      mockGet.mockImplementation(async (path: string) => {
+        if (
+          path.startsWith("/providers/") &&
+          path.endsWith("/oauth?redirect_path=%2Fkeys%2Fkey-1")
+        ) {
+          return { authorization_url: "https://example.com/oauth" };
+        }
+        if (path === "/keys/key-1") {
+          return {
+            id: "key-1",
+            status: "pending_auth",
+            slug: "llm-openai",
+            label: "OpenAI",
+          };
+        }
+        throw new Error(`unexpected GET ${path}`);
+      });
+
+      // Note: no need to stub `window.open` — issue #653 Option A
+      // removed the auto-window.open from the wizard's effect. The
+      // OAuth URL is rendered as the prominent "Open {provider} sign-
+      // in" button instead, and polling fires regardless of whether
+      // that button has been clicked.
+      renderOAuthFlow();
+
+      // Wait for the polling loop to fire its first GET. Default
+      // polling interval is 2s; allow generous slack for CI.
+      await waitFor(
+        () => {
+          expect(mockGet).toHaveBeenCalledWith("/keys/key-1");
+        },
+        { timeout: 5000 },
+      );
+    },
+    10_000,
+  );
+});
+
+// Issue #653 review (PR #723 second-round adversarial review): when
+// the OAuth or device-code flow has reached a terminal error, the
+// wizard MUST render a dedicated error layout — not the polling
+// waiting panel with its spinner and "Open provider sign-in" button
+// still active. Showing the spinner would lie about the flow still
+// being in progress; showing the open button would invite the user
+// to retry an authorization URL the backend has already abandoned.
+describe("OAuthFlow error phase", () => {
+  beforeEach(() => {
+    resetFlowMocks();
+  });
+
+  it("renders the error layout (no spinner, no open button) when phase is error", async () => {
+    // Force the flow into the error phase by making placeholder
+    // creation fail — the catch block sets phase = "error" and
+    // surfaces the message.
+    mockPost.mockReset();
+    mockPost.mockRejectedValueOnce(
+      new Error("backend rejected the placeholder create"),
+    );
+    renderOAuthFlow();
+    await waitFor(() => {
+      expect(
+        screen.getByText(/backend rejected the placeholder create/i),
+      ).toBeTruthy();
+    });
+
+    // Polling spinner copy (from the waiting panel) must NOT be shown.
+    expect(
+      screen.queryByText(/Waiting for provider authorization/i),
+    ).toBeNull();
+    expect(
+      screen.queryByText(/Setting up placeholder service/i),
+    ).toBeNull();
+    expect(screen.queryByText(/Checking provider credentials/i)).toBeNull();
+
+    // The "Open … sign-in" button must NOT be rendered — there's
+    // nothing useful to open at this point.
+    expect(
+      screen.queryByRole("button", { name: /Open .* sign-in/i }),
+    ).toBeNull();
+
+    // Cancel button stays available so the user can exit cleanly.
+    expect(screen.getByRole("button", { name: /^Cancel$/ })).toBeTruthy();
+  });
 });

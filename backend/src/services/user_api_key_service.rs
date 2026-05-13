@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
+use crate::models::oauth_state::{COLLECTION_NAME as OAUTH_STATES, OAuthState};
 use crate::models::user_api_key::{COLLECTION_NAME, UserApiKey};
 use crate::models::user_provider_token::{
     COLLECTION_NAME as USER_PROVIDER_TOKENS, UserProviderToken,
@@ -343,6 +344,136 @@ pub async fn fail_pending_placeholders_for_provider(
         .await?;
 
     Ok(result.modified_count)
+}
+
+/// Lazy reconciliation of a single `pending_auth` OAuth placeholder. Called
+/// from the wizard's polling endpoint (`GET /api/v1/keys/{id}`) so each poll
+/// is a chance to converge the placeholder to a terminal status without
+/// waiting on the OAuth callback to push the update.
+///
+/// Two passes:
+///
+/// 1. **Sync from a fresh token** (issue #653 success path). If a
+///    `UserProviderToken` exists for this `(user_id, provider_config_id)`
+///    AND it is fresher than this placeholder's `updated_at` (the OAuth
+///    callback inserted/updated a token after the placeholder was created),
+///    re-run `sync_provider_token_to_api_keys` so the placeholder is
+///    promoted to `active`. This catches the race / silent-sync-failure
+///    case while leaving previously-stored tokens alone.
+///
+///    The freshness check is critical: a `UserProviderToken` from a *prior*
+///    successful OAuth (still in the DB because the user previously
+///    connected this provider) must NOT be applied to a fresh `pending_
+///    auth` placeholder created for a *new* OAuth attempt. Doing so would
+///    flip the wizard to "Done" the moment it starts polling, before the
+///    user has even completed the in-flight consent on the provider page.
+///
+/// 2. **Fail abandoned flows** (issue #653 cancel/deny path). If the row
+///    is still `pending_auth` AND no live (non-expired) `OAuthState` row
+///    remains for this `(user_id, provider_config_id)`, the OAuth flow has
+///    been abandoned: the user cancelled on the provider page, the network
+///    dropped before the callback landed, or the state TTL expired. Mark
+///    the placeholder `failed` so the wizard's next poll exits with a
+///    clear message instead of hanging until its 5-minute deadline.
+///
+/// Best-effort: any error here is bubbled but the caller (the read
+/// handler) should log + ignore so the read still proceeds with whatever
+/// state currently exists. No-op for non-pending rows, non-OAuth keys, or
+/// keys without a `provider_config_id`.
+pub async fn reconcile_pending_oauth_placeholder(
+    db: &mongodb::Database,
+    user_id: &str,
+    api_key_id: &str,
+) -> AppResult<()> {
+    let api_key = match get_api_key(db, user_id, api_key_id).await {
+        Ok(k) => k,
+        // Caller (the read handler) will surface 404 next; nothing to
+        // reconcile.
+        Err(_) => return Ok(()),
+    };
+    if api_key.status != "pending_auth" {
+        return Ok(());
+    }
+    let Some(provider_config_id) = api_key.provider_config_id.as_deref() else {
+        return Ok(());
+    };
+
+    // Pass 1: pull forward only if a token landed AFTER this placeholder
+    // was last touched. A token from a previous OAuth must not retroactively
+    // mark a fresh placeholder active.
+    let candidate_token = db
+        .collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+        .find_one(doc! {
+            "user_id": user_id,
+            "provider_config_id": provider_config_id,
+            "status": { "$in": ["active", "expired", "refresh_failed"] },
+        })
+        .await?;
+    if let Some(token) = candidate_token
+        && token.updated_at > api_key.updated_at
+    {
+        sync_provider_token_to_api_keys(db, user_id, provider_config_id).await?;
+        // Re-read; if pass 1 promoted us to `active`, we're done.
+        let api_key = match get_api_key(db, user_id, api_key_id).await {
+            Ok(k) => k,
+            Err(_) => return Ok(()),
+        };
+        if api_key.status != "pending_auth" {
+            return Ok(());
+        }
+    }
+
+    // Pass 2: mark failed if the OAuth state is gone (abandoned flow).
+    //
+    // The `$or` on `user_id` / `target_user_id` is critical for org-scoped
+    // wizard flows. When an admin runs `nyxid service add --org X`, the
+    // placeholder lives under the org user_id, but `OAuthState.user_id` is
+    // the *actor* (admin) and the org user_id lives in
+    // `OAuthState.target_user_id`. Querying only by `user_id` would never
+    // find the live state for org flows, so Pass 2 would fire on the very
+    // first poll and fail every legitimate org-scoped placeholder.
+    let now = bson::DateTime::from_chrono(Utc::now());
+    let live_state_count = db
+        .collection::<OAuthState>(OAUTH_STATES)
+        .count_documents(doc! {
+            "$or": [
+                { "user_id": user_id },
+                { "target_user_id": user_id },
+            ],
+            "provider_config_id": provider_config_id,
+            "expires_at": { "$gt": &now },
+        })
+        .await?;
+    if live_state_count > 0 {
+        return Ok(());
+    }
+
+    let message = normalize_error_message(
+        "Authorization timed out or was cancelled. Cancel and re-run the wizard to try again.",
+    );
+    db.collection::<UserApiKey>(COLLECTION_NAME)
+        .update_one(
+            doc! {
+                "_id": api_key_id,
+                "user_id": user_id,
+                "status": "pending_auth",
+            },
+            doc! {
+                "$set": {
+                    "status": "failed",
+                    "error_message": message,
+                    "credential_encrypted": bson::Bson::Null,
+                    "access_token_encrypted": bson::Bson::Null,
+                    "refresh_token_encrypted": bson::Bson::Null,
+                    "token_scopes": bson::Bson::Null,
+                    "expires_at": bson::Bson::Null,
+                    "updated_at": &now,
+                },
+            },
+        )
+        .await?;
+
+    Ok(())
 }
 
 pub async fn activate_node_managed_api_key(
@@ -752,12 +883,15 @@ mod tests {
     use mongodb::bson::doc;
 
     use super::{
-        USER_PROVIDER_TOKENS, fail_pending_placeholders_for_provider, has_server_credential,
+        OAUTH_STATES, USER_PROVIDER_TOKENS, fail_pending_placeholders_for_provider,
+        has_server_credential, reconcile_pending_oauth_placeholder,
         sync_provider_token_to_api_keys,
     };
+    use crate::models::oauth_state::OAuthState;
     use crate::models::user_api_key::UserApiKey;
     use crate::models::user_provider_token::UserProviderToken;
     use crate::test_utils::connect_test_database;
+    use chrono::Duration;
 
     fn sample_key(credential_type: &str) -> UserApiKey {
         UserApiKey {
@@ -1099,6 +1233,407 @@ mod tests {
                 .unwrap();
 
         assert_eq!(failed, 0);
+    }
+
+    fn live_oauth_state(user_id: &str, provider_id: &str) -> OAuthState {
+        live_oauth_state_full(user_id, None, provider_id)
+    }
+
+    fn live_oauth_state_for_org(actor_id: &str, org_id: &str, provider_id: &str) -> OAuthState {
+        live_oauth_state_full(actor_id, Some(org_id), provider_id)
+    }
+
+    fn live_oauth_state_full(
+        actor_id: &str,
+        target_user_id: Option<&str>,
+        provider_id: &str,
+    ) -> OAuthState {
+        let now = Utc::now();
+        OAuthState {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: actor_id.to_string(),
+            provider_config_id: provider_id.to_string(),
+            code_verifier: None,
+            device_code_encrypted: None,
+            user_code_encrypted: None,
+            poll_interval: None,
+            target_user_id: target_user_id.map(str::to_string),
+            credential_user_id: None,
+            redirect_path: None,
+            consumed: false,
+            expires_at: now + Duration::minutes(10),
+            created_at: now,
+        }
+    }
+
+    fn provider_token(user_id: &str, provider_id: &str) -> UserProviderToken {
+        let now = Utc::now();
+        UserProviderToken {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: user_id.to_string(),
+            provider_config_id: provider_id.to_string(),
+            credential_user_id: None,
+            token_type: "oauth2".to_string(),
+            access_token_encrypted: Some(vec![1, 2, 3]),
+            refresh_token_encrypted: Some(vec![4, 5, 6]),
+            token_scopes: Some("openid profile".to_string()),
+            expires_at: None,
+            api_key_encrypted: None,
+            status: "active".to_string(),
+            last_refreshed_at: None,
+            last_used_at: None,
+            error_message: None,
+            label: None,
+            metadata: None,
+            gateway_url: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    /// Issue #653 success path: a `UserProviderToken` lands but the original
+    /// callback's sync didn't update this placeholder. The next wizard poll
+    /// triggers reconcile, which re-runs sync and brings the row to `active`.
+    /// The token must be FRESHER than the placeholder for promotion (see the
+    /// regression test `reconcile_does_not_resurrect_placeholder_with_stale_
+    /// token` for why).
+    #[tokio::test]
+    async fn reconcile_promotes_pending_to_active_when_fresh_token_lands() {
+        let Some(db) = connect_test_database("user_api_key_reconcile_promotes").await else {
+            eprintln!("skipping user_api_key_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        let key_id = uuid::Uuid::new_v4().to_string();
+        let placeholder_at = Utc::now() - Duration::seconds(30);
+
+        let mut placeholder =
+            provider_key(&key_id, &user_id, &provider_id, "pending_auth", "oauth2");
+        placeholder.created_at = placeholder_at;
+        placeholder.updated_at = placeholder_at;
+        db.collection::<UserApiKey>(super::COLLECTION_NAME)
+            .insert_one(placeholder)
+            .await
+            .unwrap();
+        // Token created AFTER the placeholder — simulates the OAuth callback
+        // landing a fresh token that the original sync missed (race / silent
+        // sync error).
+        db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+            .insert_one(provider_token(&user_id, &provider_id))
+            .await
+            .unwrap();
+
+        reconcile_pending_oauth_placeholder(&db, &user_id, &key_id)
+            .await
+            .unwrap();
+
+        let key = get_key(&db, &key_id).await;
+        assert_eq!(key.status, "active");
+        assert_eq!(key.access_token_encrypted, Some(vec![1, 2, 3]));
+        assert_eq!(key.refresh_token_encrypted, Some(vec![4, 5, 6]));
+    }
+
+    /// Regression test for the local-test bug we hit on first ship: a user
+    /// who previously connected the provider has a stale `UserProviderToken`
+    /// row from that earlier OAuth. When they start a NEW OAuth attempt, a
+    /// fresh `pending_auth` placeholder is created; the wizard polls; the
+    /// reconcile must NOT use the stale token to flip the placeholder to
+    /// active. Otherwise the wizard reports "Done" before the user has even
+    /// completed the in-flight consent on the provider page.
+    #[tokio::test]
+    async fn reconcile_does_not_resurrect_placeholder_with_stale_token() {
+        let Some(db) = connect_test_database("user_api_key_reconcile_skips_stale_token").await
+        else {
+            eprintln!("skipping user_api_key_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        let key_id = uuid::Uuid::new_v4().to_string();
+
+        // Stale token from a previous OAuth (10 minutes ago).
+        let mut stale_token = provider_token(&user_id, &provider_id);
+        let stale_at = Utc::now() - Duration::minutes(10);
+        stale_token.created_at = stale_at;
+        stale_token.updated_at = stale_at;
+        db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+            .insert_one(stale_token)
+            .await
+            .unwrap();
+
+        // Fresh placeholder for a new OAuth attempt (just now). User is
+        // currently on the provider's consent page; OAuth has NOT completed.
+        db.collection::<UserApiKey>(super::COLLECTION_NAME)
+            .insert_one(provider_key(
+                &key_id,
+                &user_id,
+                &provider_id,
+                "pending_auth",
+                "oauth2",
+            ))
+            .await
+            .unwrap();
+        // A live OAuth state (the in-flight attempt) keeps the abandon-fail
+        // pass from firing, so this test is purely about Pass 1 behaviour.
+        db.collection::<OAuthState>(OAUTH_STATES)
+            .insert_one(live_oauth_state(&user_id, &provider_id))
+            .await
+            .unwrap();
+
+        reconcile_pending_oauth_placeholder(&db, &user_id, &key_id)
+            .await
+            .unwrap();
+
+        let key = get_key(&db, &key_id).await;
+        assert_eq!(
+            key.status, "pending_auth",
+            "stale token must not retroactively promote a fresh placeholder"
+        );
+        assert!(key.access_token_encrypted.is_none());
+    }
+
+    /// Issue #653 cancel/deny path: user closed the Lark page or denied
+    /// without redirecting back with `?error=`. No callback ever arrives, no
+    /// OAuth state remains. Reconcile flips the placeholder to `failed` so
+    /// the wizard's next poll exits with an actionable message instead of
+    /// hanging until the 5-minute deadline.
+    #[tokio::test]
+    async fn reconcile_marks_failed_when_no_live_oauth_state() {
+        let Some(db) = connect_test_database("user_api_key_reconcile_fails_abandoned").await else {
+            eprintln!("skipping user_api_key_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        let key_id = uuid::Uuid::new_v4().to_string();
+
+        db.collection::<UserApiKey>(super::COLLECTION_NAME)
+            .insert_one(provider_key(
+                &key_id,
+                &user_id,
+                &provider_id,
+                "pending_auth",
+                "oauth2",
+            ))
+            .await
+            .unwrap();
+
+        reconcile_pending_oauth_placeholder(&db, &user_id, &key_id)
+            .await
+            .unwrap();
+
+        let key = get_key(&db, &key_id).await;
+        assert_eq!(key.status, "failed");
+        assert!(
+            key.error_message
+                .as_deref()
+                .is_some_and(|m| m.contains("timed out") || m.contains("cancelled"))
+        );
+    }
+
+    /// Don't fail prematurely while the OAuth flow is still in flight.
+    /// A live OAuth state means the user is mid-consent on the provider page.
+    #[tokio::test]
+    async fn reconcile_keeps_pending_when_oauth_state_still_alive() {
+        let Some(db) = connect_test_database("user_api_key_reconcile_keeps_pending").await else {
+            eprintln!("skipping user_api_key_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        let key_id = uuid::Uuid::new_v4().to_string();
+
+        db.collection::<UserApiKey>(super::COLLECTION_NAME)
+            .insert_one(provider_key(
+                &key_id,
+                &user_id,
+                &provider_id,
+                "pending_auth",
+                "oauth2",
+            ))
+            .await
+            .unwrap();
+        db.collection::<OAuthState>(OAUTH_STATES)
+            .insert_one(live_oauth_state(&user_id, &provider_id))
+            .await
+            .unwrap();
+
+        reconcile_pending_oauth_placeholder(&db, &user_id, &key_id)
+            .await
+            .unwrap();
+
+        let key = get_key(&db, &key_id).await;
+        assert_eq!(key.status, "pending_auth");
+    }
+
+    /// Active rows are terminal-success and must be left alone.
+    #[tokio::test]
+    async fn reconcile_noop_for_already_active_key() {
+        let Some(db) = connect_test_database("user_api_key_reconcile_noop_active").await else {
+            eprintln!("skipping user_api_key_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        let key_id = uuid::Uuid::new_v4().to_string();
+
+        db.collection::<UserApiKey>(super::COLLECTION_NAME)
+            .insert_one(provider_key(
+                &key_id,
+                &user_id,
+                &provider_id,
+                "active",
+                "oauth2",
+            ))
+            .await
+            .unwrap();
+
+        reconcile_pending_oauth_placeholder(&db, &user_id, &key_id)
+            .await
+            .unwrap();
+
+        let key = get_key(&db, &key_id).await;
+        assert_eq!(key.status, "active");
+    }
+
+    /// Issue #653 PR #723 review — Critical #1: in-flight OAuth callback
+    /// race. After `handle_oauth_callback` atomically claims the OAuth
+    /// state (`consumed: true`) but before the token-exchange roundtrip
+    /// to the provider completes (~1+ s for Lark), reconcile must NOT
+    /// see the in-progress flow as "abandoned". The state row is still
+    /// present (with consumed=true and a live expires_at), so Pass 2's
+    /// "no live state" check should treat it as live.
+    #[tokio::test]
+    async fn reconcile_keeps_pending_when_oauth_state_is_consumed_but_not_yet_deleted() {
+        let Some(db) = connect_test_database("user_api_key_reconcile_in_flight_callback").await
+        else {
+            eprintln!("skipping user_api_key_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        let key_id = uuid::Uuid::new_v4().to_string();
+
+        db.collection::<UserApiKey>(super::COLLECTION_NAME)
+            .insert_one(provider_key(
+                &key_id,
+                &user_id,
+                &provider_id,
+                "pending_auth",
+                "oauth2",
+            ))
+            .await
+            .unwrap();
+        // Simulate a callback that has atomically claimed the state but
+        // hasn't yet finished the token exchange + insert. The row is
+        // alive (not yet deleted by the cleanup at the end of
+        // `handle_oauth_callback`) and within `expires_at`.
+        let mut in_flight = live_oauth_state(&user_id, &provider_id);
+        in_flight.consumed = true;
+        db.collection::<OAuthState>(OAUTH_STATES)
+            .insert_one(in_flight)
+            .await
+            .unwrap();
+
+        reconcile_pending_oauth_placeholder(&db, &user_id, &key_id)
+            .await
+            .unwrap();
+
+        let key = get_key(&db, &key_id).await;
+        assert_eq!(
+            key.status, "pending_auth",
+            "in-flight callback (consumed state, no token yet) must not be reported as abandoned"
+        );
+    }
+
+    /// Issue #653 PR #723 review — Critical #2: org-scoped wizard flows.
+    /// `OAuthState.user_id` is the actor (admin); the org user_id lives
+    /// in `target_user_id`. The placeholder is owned by the org user.
+    /// Reconcile must match the live state via `target_user_id` so that
+    /// org-scoped placeholders aren't immediately failed on the first
+    /// poll.
+    #[tokio::test]
+    async fn reconcile_finds_live_state_for_org_scoped_placeholder() {
+        let Some(db) = connect_test_database("user_api_key_reconcile_org_scope_state_lookup").await
+        else {
+            eprintln!("skipping user_api_key_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let admin_id = uuid::Uuid::new_v4().to_string();
+        let org_user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        let key_id = uuid::Uuid::new_v4().to_string();
+
+        // Placeholder lives under the org user id (the row owner).
+        db.collection::<UserApiKey>(super::COLLECTION_NAME)
+            .insert_one(provider_key(
+                &key_id,
+                &org_user_id,
+                &provider_id,
+                "pending_auth",
+                "oauth2",
+            ))
+            .await
+            .unwrap();
+        // OAuth state is initiated by the admin actor on behalf of the
+        // org — admin id in `user_id`, org id in `target_user_id`.
+        db.collection::<OAuthState>(OAUTH_STATES)
+            .insert_one(live_oauth_state_for_org(
+                &admin_id,
+                &org_user_id,
+                &provider_id,
+            ))
+            .await
+            .unwrap();
+
+        // Reconcile is invoked with the row owner (the org user id).
+        reconcile_pending_oauth_placeholder(&db, &org_user_id, &key_id)
+            .await
+            .unwrap();
+
+        let key = get_key(&db, &key_id).await;
+        assert_eq!(
+            key.status, "pending_auth",
+            "org-scoped placeholder must not be failed when an OAuth state exists under an admin actor with target_user_id matching the row owner"
+        );
+    }
+
+    /// Direct-credential keys (no provider_config_id) aren't OAuth-flow rows;
+    /// they shouldn't be touched even when status happens to be pending_auth.
+    #[tokio::test]
+    async fn reconcile_noop_for_key_without_provider_config_id() {
+        let Some(db) = connect_test_database("user_api_key_reconcile_noop_non_oauth").await else {
+            eprintln!("skipping user_api_key_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let key_id = uuid::Uuid::new_v4().to_string();
+
+        let mut key = sample_key("api_key");
+        key.id = key_id.clone();
+        key.user_id = user_id.clone();
+        key.provider_config_id = None;
+        key.status = "pending_auth".to_string();
+        db.collection::<UserApiKey>(super::COLLECTION_NAME)
+            .insert_one(key)
+            .await
+            .unwrap();
+
+        reconcile_pending_oauth_placeholder(&db, &user_id, &key_id)
+            .await
+            .unwrap();
+
+        let key = get_key(&db, &key_id).await;
+        assert_eq!(key.status, "pending_auth");
     }
 
     #[tokio::test]
