@@ -764,16 +764,14 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
     paddingHorizontal: spacing.xxl,
     paddingTop: spacing.sm,
     minHeight: 41,
-    gap: 2,
+    gap: spacing.xxs,
   },
   title: {
-    fontSize: 26,
-    fontWeight: "700",
+    ...typeScale.h1,
     color: c.textPrimary,
-    fontFamily: "SpaceGrotesk_700Bold",
   },
   subtitle: {
-    fontSize: 13,
+    ...typeScale.body,
     color: c.textSecondary,
     marginBottom: spacing.md,
   },
@@ -814,6 +812,8 @@ const createSheetStyles = (c: ThemeColors) => StyleSheet.create({
     right: 0,
     bottom: 0,
     backgroundColor: c.bg,
+    // Bottom sheets use a larger top radius than card lg (10) per
+    // iOS HIG; keep 24 explicitly as a sheet-only override.
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     borderWidth: 1,
@@ -828,13 +828,13 @@ const createSheetStyles = (c: ThemeColors) => StyleSheet.create({
   },
   handleArea: {
     alignItems: "center",
-    paddingTop: 10,
-    paddingBottom: 6,
+    paddingTop: spacing.md,
+    paddingBottom: spacing.xs + spacing.xxs,
   },
   handle: {
     width: 36,
     height: 4,
-    borderRadius: 2,
+    borderRadius: radius.pill,
     backgroundColor: c.handleBg,
   },
   sheetHeader: {
@@ -847,15 +847,13 @@ const createSheetStyles = (c: ThemeColors) => StyleSheet.create({
     borderBottomColor: c.borderSoft,
   },
   sheetTitle: {
-    fontSize: 18,
-    fontWeight: "700",
+    ...typeScale.h2,
     color: c.textPrimary,
-    fontFamily: "SpaceGrotesk_700Bold",
   },
   closeBtn: {
     width: 30,
     height: 30,
-    borderRadius: 15,
+    borderRadius: radius.full,
     backgroundColor: c.primaryGlow,
     borderWidth: 1,
     borderColor: c.borderSoft,
@@ -863,8 +861,7 @@ const createSheetStyles = (c: ThemeColors) => StyleSheet.create({
     justifyContent: "center",
   },
   closeBtnText: {
-    fontSize: 14,
-    fontWeight: "600",
+    ...typeScale.description,
     color: c.textMuted,
   },
   sheetBody: {
@@ -877,10 +874,9 @@ const createSheetStyles = (c: ThemeColors) => StyleSheet.create({
     gap: spacing.lg,
   },
   orgContext: {
-    fontSize: 12,
-    fontWeight: "600",
+    ...typeScale.overline,
     color: c.textSecondary,
-    letterSpacing: 0.3,
+    letterSpacing: 0.6,
   },
   stateNotice: {
     borderRadius: radius.sm,
@@ -890,9 +886,8 @@ const createSheetStyles = (c: ThemeColors) => StyleSheet.create({
     padding: spacing.lg,
   },
   stateNoticeText: {
-    fontSize: 13,
+    ...typeScale.body,
     color: c.warning,
-    lineHeight: 20,
   },
   detailCard: {
     borderRadius: radius.md,
