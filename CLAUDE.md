@@ -37,7 +37,7 @@ fn my_handler() -> AppResult<Json<MyResponse>> {
     // AppResult<T> = Result<T, AppError>
 }
 ```
-Error variants map to HTTP status codes and numeric error codes (1000-3002, 7000, 8000-8003). Internal/database errors never leak details to clients.
+Error variants map to HTTP status codes and numeric error codes; see `backend/src/errors/mod.rs` for the authoritative list. Internal/database errors never leak details to clients.
 
 ### 4. Frontend Patterns
 
@@ -206,7 +206,7 @@ Rich metadata on `DownstreamService` for AI agent discovery (issue #148). Agents
 ```
 cli/src/
 |-- main.rs              # CLI entry point
-|-- cli.rs               # Clap subcommand definitions (25 top-level commands, incl. channel-bot)
+|-- cli.rs               # Clap subcommand definitions (top-level commands incl. channel-bot, channel-event, pairing, telemetry, repo)
 |-- commands/            # Command implementations (one file per command group, incl. ai_setup.rs with agent subcommands, channel_bot.rs with bot+route CRUD)
 |-- api_client.rs        # HTTP client for NyxID API calls
 |-- auth.rs              # Token storage and retrieval (file-based session)
@@ -217,21 +217,21 @@ backend/src/
 |-- db.rs                # MongoDB connection + ensure_indexes()
 |-- routes.rs            # All route definitions
 |-- main.rs              # Server startup
-|-- models/              # MongoDB document structs (40 models, 38 collections, incl. agent_service_binding, node, node_service_binding, mcp_session, openclaw_channel_mapping, user_endpoint, user_api_key, user_service, channel_bot, channel_conversation, channel_event_log, channel_message)
-|-- services/            # Business logic (52 services, incl. agent_binding_service, node_service, node_routing_service, node_ws_manager, node_metrics_service, openclaw_channel_service, unified_key_service, catalog_service, user_endpoint_service, user_api_key_service, user_service_service, action_description, channel_bot_service, channel_event_service, channel_routing_service, channel_relay_service, channel_platform, event_dedup_cache, channel_adapters/{telegram,discord,lark,openclaw})
-|-- handlers/            # HTTP handlers (51 handler modules, incl. agent_bindings, node_admin, admin_nodes, node_ws, developer_apps, ssh_exec, llms_txt, openclaw_channel, keys, catalog, user_endpoints, user_api_keys_external, user_services_handler, channel_bots, channel_conversations, channel_events, channel_webhooks, channel_relay)
+|-- models/              # MongoDB document structs, one per collection (incl. agent_service_binding, node, node_service_binding, mcp_session, openclaw_channel_mapping, user_endpoint, user_api_key, user_service, channel_bot, channel_conversation, channel_event_log, channel_message)
+|-- services/            # Business logic (incl. agent_binding_service, node_service, node_routing_service, node_ws_manager, node_metrics_service, openclaw_channel_service, unified_key_service, catalog_service, user_endpoint_service, user_api_key_service, user_service_service, action_description, channel_bot_service, channel_event_service, channel_routing_service, channel_relay_service, channel_platform, event_dedup_cache, channel_adapters/{telegram,discord,lark,openclaw})
+|-- handlers/            # HTTP handlers (incl. agent_bindings, node_admin, admin_nodes, node_ws, developer_apps, ssh_exec, llms_txt, openclaw_channel, keys, catalog, user_endpoints, user_api_keys_external, user_services_handler, channel_bots, channel_conversations, channel_events, channel_webhooks, channel_relay)
 |-- crypto/              # JWT, AES, password hashing, token generation, KeyProvider trait, KMS providers, JWKS
 |-- errors/              # AppError enum, ErrorResponse, AppResult
 |-- mw/                  # Middleware: auth, rate_limit, security_headers
 
 frontend/src/
-|-- pages/               # Route pages (43 pages, incl. nodes, node-detail, admin-nodes, service-detail, providers, ai-setup, keys, key-detail, channel-bots, channel-bot-detail, channel-conversation-detail)
+|-- pages/               # Route pages (incl. nodes, node-detail, admin-nodes, service-detail, providers, ai-setup, keys, key-detail, channel-bots, channel-bot-detail, channel-conversation-detail)
 |-- components/          # UI components (auth/, dashboard/, layout/, shared/, ui/; incl. add-key-dialog for unified key creation)
-|-- hooks/               # TanStack Query hooks (20 hooks, incl. use-agent-bindings, use-nodes, use-admin-nodes, use-providers, use-developer-apps, use-keys, use-channel-bots, use-channel-conversations, use-channel-messages)
-|-- schemas/             # Zod validation schemas (10 schema files + tests, incl. agent-bindings.ts, nodes.ts, channels.ts)
+|-- hooks/               # TanStack Query hooks (incl. use-agent-bindings, use-nodes, use-admin-nodes, use-providers, use-developer-apps, use-keys, use-channel-bots, use-channel-conversations, use-channel-messages)
+|-- schemas/             # Zod validation schemas with vitest specs (incl. agent-bindings.ts, nodes.ts, channels.ts)
 |-- stores/              # Zustand stores (auth-store)
 |-- lib/                 # API client, constants, utils
-|-- types/               # TypeScript type definitions (7 files, incl. AdminNodeInfo, NodeMetricsInfo, approvals, keys)
+|-- types/               # TypeScript type definitions (incl. AdminNodeInfo, NodeMetricsInfo, approvals, keys)
 |-- router.tsx           # TanStack Router config
 
 mobile/src/              # React Native + Expo mobile app (Expo 53, RN 0.79, TypeScript)
