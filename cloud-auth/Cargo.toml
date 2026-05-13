@@ -1,0 +1,31 @@
+[package]
+name = "nyxid-cloud-auth"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared AWS SigV4 + GCP service-account signing primitives for the NyxID backend and node agent."
+
+[lib]
+name = "nyxid_cloud_auth"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+hex = "0.4"
+url = "2.5"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+jsonwebtoken = { version = "10.3", default-features = false, features = ["use_pem", "aws_lc_rs"] }
+thiserror = "2"
+dashmap = "6"
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
