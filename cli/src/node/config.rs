@@ -289,6 +289,57 @@ impl CredentialConfig {
             oauth_client_id_param_name: None,
         }
     }
+
+    /// Create an AWS SigV4 credential config. The encrypted JSON blob
+    /// (access_key_id / secret_access_key / region / service) lives in
+    /// `header_value_encrypted` to reuse the existing TOML schema.
+    /// NyxID#716.
+    pub fn new_aws_sigv4(credential_json_encrypted: String, target_url: Option<String>) -> Self {
+        Self {
+            injection_method: "aws_sigv4".to_string(),
+            target_url,
+            header_name: None,
+            header_value_encrypted: Some(credential_json_encrypted),
+            param_name: None,
+            param_value_encrypted: None,
+            oauth_managed: false,
+            oauth_token_url: None,
+            oauth_access_token_encrypted: None,
+            oauth_refresh_token_encrypted: None,
+            oauth_token_expires_at: None,
+            oauth_client_id_encrypted: None,
+            oauth_client_secret_encrypted: None,
+            oauth_scopes: None,
+            oauth_token_endpoint_auth_method: None,
+            oauth_client_id_param_name: None,
+        }
+    }
+
+    /// Create a GCP service-account credential config. The encrypted SA
+    /// JSON key file content lives in `header_value_encrypted`. NyxID#716.
+    pub fn new_gcp_service_account(
+        credential_json_encrypted: String,
+        target_url: Option<String>,
+    ) -> Self {
+        Self {
+            injection_method: "gcp_service_account".to_string(),
+            target_url,
+            header_name: None,
+            header_value_encrypted: Some(credential_json_encrypted),
+            param_name: None,
+            param_value_encrypted: None,
+            oauth_managed: false,
+            oauth_token_url: None,
+            oauth_access_token_encrypted: None,
+            oauth_refresh_token_encrypted: None,
+            oauth_token_expires_at: None,
+            oauth_client_id_encrypted: None,
+            oauth_client_secret_encrypted: None,
+            oauth_scopes: None,
+            oauth_token_endpoint_auth_method: None,
+            oauth_client_id_param_name: None,
+        }
+    }
 }
 
 impl NodeConfig {
