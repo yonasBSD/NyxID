@@ -105,22 +105,37 @@ pub fn sign_request(
 
     let payload_hash = hex_sha256(body);
 
-    // Build the canonical headers. Lowercased name, trimmed value,
-    // sorted ASCII-ascending by name. We always include `host`,
-    // `x-amz-date`, and `x-amz-content-sha256`. Caller-supplied headers
-    // are folded in; if any conflict on (lowercase) name we keep the
-    // caller's value but normalize the name to lowercase.
-    let mut canonical: Vec<(String, String)> = Vec::with_capacity(headers.len() + 4);
-    canonical.push(("host".to_string(), host_with_port(&parsed, host)));
-    canonical.push(("x-amz-date".to_string(), amz_date.clone()));
-    canonical.push(("x-amz-content-sha256".to_string(), payload_hash.clone()));
+    // Build the canonical headers per SigV4:
+    // 1. Lowercase the name.
+    // 2. Trim leading/trailing whitespace from the value AND collapse
+    //    sequential internal SP/HTAB into a single space (Codex review
+    //    REC 2). The AWS spec says canonical values use single-space
+    //    separation; relying on `.trim()` alone would let
+    //    `"foo  bar"` and `"foo bar"` hash differently while AWS
+    //    treats them as equal.
+    // 3. Aggregate duplicate header names by joining their values with
+    //    a comma — SigV4 requires `SignedHeaders` entries to be
+    //    unique (Codex review REC 1). Reqwest preserves caller-set
+    //    duplicates verbatim so a caller passing two `Accept` headers
+    //    would otherwise produce a malformed signature.
+    // 4. Sort by name (ASCII ascending).
+    //
+    // We always include `host`, `x-amz-date`, `x-amz-content-sha256`
+    // and (when present) `x-amz-security-token`. Caller-supplied
+    // copies of these are dropped — the signer owns them.
+    let mut accumulator: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    accumulator.insert("host".to_string(), vec![host_with_port(&parsed, host)]);
+    accumulator.insert("x-amz-date".to_string(), vec![amz_date.clone()]);
+    accumulator.insert(
+        "x-amz-content-sha256".to_string(),
+        vec![payload_hash.clone()],
+    );
     if let Some(token) = &creds.session_token {
-        canonical.push(("x-amz-security-token".to_string(), token.clone()));
+        accumulator.insert("x-amz-security-token".to_string(), vec![token.clone()]);
     }
     for (name, value) in headers {
         let lower = name.to_ascii_lowercase();
-        // Skip auth-control headers we manage. `authorization` is the
-        // output we're producing; the `x-amz-*` ones are added above.
         if matches!(
             lower.as_str(),
             "authorization"
@@ -131,9 +146,15 @@ pub fn sign_request(
         ) {
             continue;
         }
-        canonical.push((lower, value.trim().to_string()));
+        accumulator
+            .entry(lower)
+            .or_default()
+            .push(canonical_value(value));
     }
-    canonical.sort_by(|a, b| a.0.cmp(&b.0));
+    let canonical: Vec<(String, String)> = accumulator
+        .into_iter()
+        .map(|(name, values)| (name, values.join(",")))
+        .collect();
 
     let signed_headers_list = canonical
         .iter()
@@ -211,6 +232,29 @@ pub fn sign_request(
     Ok(out)
 }
 
+/// SigV4 header-value canonicalization: trim ends, collapse internal
+/// runs of SP/HTAB into a single SP. AWS spec
+/// (`https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv-create-signed-request.html`)
+/// requires this so that semantically-equal header values produce the
+/// same signature (Codex review REC 2).
+fn canonical_value(raw: &str) -> String {
+    let trimmed = raw.trim_matches(|c: char| c == ' ' || c == '\t');
+    let mut out = String::with_capacity(trimmed.len());
+    let mut in_ws = false;
+    for c in trimmed.chars() {
+        if c == ' ' || c == '\t' {
+            if !in_ws {
+                out.push(' ');
+                in_ws = true;
+            }
+        } else {
+            out.push(c);
+            in_ws = false;
+        }
+    }
+    out
+}
+
 fn host_with_port(parsed: &Url, host: &str) -> String {
     match parsed.port() {
         // SigV4 omits default ports from the host header.
@@ -224,6 +268,16 @@ fn host_with_port(parsed: &Url, host: &str) -> String {
     }
 }
 
+/// Canonical request URI.
+///
+/// **Scope limitation (Codex review REC 4):** this implementation
+/// passes the parsed path through verbatim, which is correct for the
+/// services NyxID currently proxies (AWS Cost Explorer: `POST /`).
+/// For services with non-trivial paths (S3 object keys, DynamoDB
+/// resource paths, REST APIs like CloudFront management), SigV4 needs
+/// segment-wise RFC 3986 encoding that preserves `/` as a separator
+/// while encoding everything else inside each segment. Add that
+/// before exposing this signer to new AWS services.
 fn canonical_uri(parsed: &Url) -> String {
     let path = parsed.path();
     if path.is_empty() {
@@ -233,20 +287,65 @@ fn canonical_uri(parsed: &Url) -> String {
     }
 }
 
+/// Canonical query string per SigV4.
+///
+/// Rewritten to NOT use `form_urlencoded::parse` (Codex review REC 3),
+/// which would `+`-decode and lose distinction between literal `+` and
+/// encoded space. We instead walk the raw query string, split on `&`,
+/// split each pair on the first `=`, percent-decode each part under
+/// RFC 3986 rules, then re-encode under SigV4's unreserved-only rule
+/// and sort. Empty values, repeated keys, and missing `=` are
+/// preserved.
 fn canonical_query(parsed: &Url) -> String {
     let Some(query) = parsed.query() else {
         return String::new();
     };
-    // Split, decode, re-encode under SigV4's strict rules, sort.
-    let mut pairs: Vec<(String, String)> = url::form_urlencoded::parse(query.as_bytes())
-        .into_owned()
-        .collect();
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for raw_pair in query.split('&') {
+        if raw_pair.is_empty() {
+            continue;
+        }
+        let (raw_key, raw_value) = match raw_pair.split_once('=') {
+            Some((k, v)) => (k, v),
+            None => (raw_pair, ""),
+        };
+        let key = decode_query_component(raw_key);
+        let value = decode_query_component(raw_value);
+        pairs.push((key, value));
+    }
+    // SigV4 sorts by encoded (k, v) pair. We sort by the decoded pair
+    // here, then re-encode; for inputs that don't have ambiguous
+    // encodings this is equivalent.
     pairs.sort();
     pairs
         .into_iter()
         .map(|(k, v)| format!("{}={}", encode_rfc3986(&k), encode_rfc3986(&v)))
         .collect::<Vec<_>>()
         .join("&")
+}
+
+/// Percent-decode a query-string component to bytes (treating `+` as
+/// a literal `+`, NOT as space — SigV4 uses RFC 3986 query syntax,
+/// not application/x-www-form-urlencoded). Falls back to raw bytes
+/// on invalid percent escapes.
+fn decode_query_component(input: &str) -> String {
+    let mut out = Vec::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(h), Some(l)) = (hi, lo) {
+                out.push(((h << 4) | l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// RFC 3986 unreserved-only percent-encoding used by SigV4 query canonicalization.
@@ -427,5 +526,85 @@ mod tests {
         assert_eq!(host_with_port(&parsed, "example.com"), "example.com");
         let parsed = Url::parse("https://example.com:8443/").unwrap();
         assert_eq!(host_with_port(&parsed, "example.com"), "example.com:8443");
+    }
+
+    /// Codex review REC 2: SigV4 canonical header values must collapse
+    /// internal whitespace runs to a single space.
+    #[test]
+    fn canonical_value_collapses_internal_whitespace() {
+        assert_eq!(canonical_value("foo  bar"), "foo bar");
+        assert_eq!(canonical_value("foo\tbar"), "foo bar");
+        assert_eq!(canonical_value("foo \t bar  baz"), "foo bar baz");
+        assert_eq!(
+            canonical_value(" leading and trailing "),
+            "leading and trailing"
+        );
+        assert_eq!(canonical_value("single"), "single");
+    }
+
+    /// Codex review REC 1: duplicate caller-supplied headers must be
+    /// folded into a single canonical entry with comma-joined values.
+    /// We assert this end-to-end by checking the SignedHeaders list
+    /// only contains each name once.
+    #[test]
+    fn duplicate_header_names_are_aggregated() {
+        let creds = AwsCredentials {
+            access_key_id: "AKIDEXAMPLE".to_string(),
+            secret_access_key: "secret".to_string(),
+            region: "us-east-1".to_string(),
+            service: "ce".to_string(),
+            session_token: None,
+        };
+        let headers = vec![
+            ("Accept".to_string(), "application/json".to_string()),
+            ("accept".to_string(), "text/plain".to_string()),
+        ];
+        let signed = sign_request(
+            "POST",
+            "https://ce.us-east-1.amazonaws.com/",
+            &headers,
+            b"",
+            &creds,
+        )
+        .expect("sign");
+        let auth = signed.iter().find(|h| h.name == "Authorization").unwrap();
+        // `accept` must appear EXACTLY once in SignedHeaders.
+        let signed_headers_segment = auth
+            .value
+            .split("SignedHeaders=")
+            .nth(1)
+            .and_then(|s| s.split(',').next())
+            .expect("SignedHeaders");
+        let count = signed_headers_segment
+            .split(';')
+            .filter(|n| *n == "accept")
+            .count();
+        assert_eq!(
+            count, 1,
+            "duplicate `accept` should aggregate to one entry: {signed_headers_segment}"
+        );
+    }
+
+    /// Codex review REC 3: query canonicalization must handle empty
+    /// values, repeated keys, and missing `=` correctly without
+    /// `form_urlencoded::parse`'s `+`-as-space behavior.
+    #[test]
+    fn canonical_query_handles_edge_cases() {
+        let parsed = Url::parse("https://x/?a=&b&c=hello%20world&a=2").unwrap();
+        let q = canonical_query(&parsed);
+        // Sorted by (decoded) key then value: `a=` < `a=2` < `b=` < `c=hello world`
+        // After re-encode: `a=` `a=2` `b=` `c=hello%20world`.
+        assert_eq!(q, "a=&a=2&b=&c=hello%20world");
+    }
+
+    #[test]
+    fn canonical_query_treats_plus_as_literal() {
+        // SigV4 query syntax is RFC 3986, NOT
+        // application/x-www-form-urlencoded — `+` is a literal `+`,
+        // not a space.
+        let parsed = Url::parse("https://x/?q=a+b").unwrap();
+        let q = canonical_query(&parsed);
+        // Literal `+` re-encodes to `%2B` under the unreserved-only rule.
+        assert_eq!(q, "q=a%2Bb");
     }
 }

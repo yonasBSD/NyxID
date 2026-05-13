@@ -527,7 +527,7 @@ mod tests {
         config.credentials.insert(
             "aws-cost-explorer".to_string(),
             CredentialConfig::new_aws_sigv4(
-                aws_enc,
+                Some(aws_enc),
                 Some("https://ce.us-east-1.amazonaws.com".into()),
             ),
         );
@@ -537,7 +537,7 @@ mod tests {
         config.credentials.insert(
             "gcp-cloud-billing".to_string(),
             CredentialConfig::new_gcp_service_account(
-                gcp_enc,
+                Some(gcp_enc),
                 Some("https://cloudbilling.googleapis.com".into()),
             ),
         );

@@ -319,9 +319,23 @@ pub async fn execute_proxy_request(
     }
 
     // 7. Execute request
+    let gcp_credential_for_invalidation: Option<String> =
+        cred.gcp_service_account_credential().map(|s| s.to_string());
     match req_builder.send().await {
         Ok(response) => {
             let status = response.status().as_u16();
+            // GCP-specific: drop the cached access token on 401/403 so
+            // the next request re-mints. Codex review REC 8.
+            if let Some(creds_json) = gcp_credential_for_invalidation.as_deref()
+                && matches!(status, 401 | 403)
+            {
+                gcp_token_cache().invalidate(creds_json, DEFAULT_GCP_SCOPES);
+                tracing::warn!(
+                    service_slug = %service_slug,
+                    status,
+                    "gcp_service_account: upstream rejected token, invalidated cached access token"
+                );
+            }
             let is_streaming = should_stream_response(&response, status);
 
             if is_streaming {

@@ -2308,6 +2308,21 @@ pub async fn forward_request(
         AppError::Internal("Proxy request failed".to_string())
     })?;
 
+    // GCP-specific: if the upstream rejects our bearer token as
+    // expired / revoked (401 or 403), drop the cached access token so
+    // the next request mints a fresh one instead of replaying the
+    // stale one until natural TTL expiry. Codex review REC 8.
+    if target.auth_method == "gcp_service_account"
+        && matches!(response.status().as_u16(), 401 | 403)
+    {
+        gcp_token_cache.invalidate(&target.credential, DEFAULT_GCP_SCOPES);
+        tracing::warn!(
+            base_url = %target.base_url,
+            status = response.status().as_u16(),
+            "gcp_service_account: upstream rejected token, invalidated cached access token"
+        );
+    }
+
     // Cache successful billing-API responses so a follow-up request
     // with the same body replays from memory. Non-2xx responses are
     // passed through unchanged by `insert_and_replay`.
