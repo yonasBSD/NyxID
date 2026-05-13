@@ -269,6 +269,7 @@ pub async fn llm_proxy_request(
             delegated,
             None,
             &state.token_exchange_cache,
+            &state.gcp_token_cache,
         )
         .await?;
 
@@ -624,6 +625,7 @@ pub async fn gateway_request(
             delegated,
             None,
             &state.token_exchange_cache,
+            &state.gcp_token_cache,
         )
         .await?;
 

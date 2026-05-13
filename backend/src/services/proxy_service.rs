@@ -27,6 +27,8 @@ use crate::services::provider_token_exchange_service::{self, TokenExchangeCache}
 use crate::services::{
     agent_binding_service, user_api_key_service, user_service_service, user_token_service,
 };
+use nyxid_cloud_auth::aws_sigv4::{self, AwsCredentials};
+use nyxid_cloud_auth::gcp_oauth::{DEFAULT_GCP_SCOPES, GcpTokenCache};
 
 /// Default User-Agent injected at the proxy boundary when neither the
 /// caller nor the resolved service supplies one. Resolved at compile
@@ -135,7 +137,15 @@ pub(crate) fn credential_header_name(target: &ProxyTarget) -> Option<String> {
                 Some(trimmed.to_string())
             }
         }
-        "bearer" | "bot_bearer" | "basic" => Some("authorization".to_string()),
+        "bearer" | "bot_bearer" | "basic" | "gcp_service_account" => {
+            Some("authorization".to_string())
+        }
+        // SigV4 sets Authorization plus several `X-Amz-*` headers; the only
+        // one a caller-supplied or catalog default header could collide with
+        // is `Authorization`, so we strip just that. The `X-Amz-*` headers
+        // are added unconditionally by sign_request and are not expected
+        // from upstream sources.
+        "aws_sigv4" => Some("authorization".to_string()),
         "token_exchange" => target
             .service
             .token_exchange_config
@@ -1875,6 +1885,8 @@ pub async fn forward_request(
     caller_token: Option<&str>,
     // Shared generic token exchange cache (used by `token_exchange`).
     token_exchange_cache: &TokenExchangeCache,
+    // GCP service-account access-token cache (used by `gcp_service_account`).
+    gcp_token_cache: &GcpTokenCache,
 ) -> AppResult<reqwest::Response> {
     let mut all_delegated = delegated_credentials;
     extend_with_path_credential(&mut all_delegated, target);
@@ -2116,6 +2128,46 @@ pub async fn forward_request(
                 &token,
             )?;
         }
+        "aws_sigv4" => {
+            // AWS Signature V4. Used by Cost Explorer (and any other AWS
+            // service NyxID later proxies). The signature covers method +
+            // URL + signed headers + body hash, so we hand `sign_request`
+            // exactly the bytes that will be sent. `prepared.delegated_headers`
+            // are typically empty for cloud-billing services but signed if
+            // present for consistency with the direct-header path.
+            let mut signed_input: Vec<(String, String)> = outbound_headers.clone();
+            for (name, value) in &prepared.delegated_headers {
+                signed_input.push((name.clone(), value.clone()));
+            }
+            let body_bytes: &[u8] = match &body {
+                ProxyBody::Buffered(Some(b)) => b.as_ref(),
+                ProxyBody::Buffered(None) => &[][..],
+            };
+            let creds = AwsCredentials::from_json(&target.credential).map_err(|e| {
+                AppError::Internal(format!(
+                    "aws_sigv4 credential is malformed: {e}. Expected JSON with access_key_id, secret_access_key, region, service."
+                ))
+            })?;
+            let signed_headers =
+                aws_sigv4::sign_request(method.as_str(), &url, &signed_input, body_bytes, &creds)
+                    .map_err(|e| AppError::Internal(format!("aws_sigv4 signing failed: {e}")))?;
+            for header in signed_headers {
+                request = request.header(&header.name, &header.value);
+            }
+        }
+        "gcp_service_account" => {
+            // GCP service-account JWT-bearer OAuth. Token cache lives in
+            // AppState; refreshes 5 min before expiry. Same access token
+            // is shared across `gcp-cloud-billing` and `gcp-bigquery-billing`
+            // because the default scopes cover both.
+            let token = gcp_token_cache
+                .access_token(client, &target.credential, DEFAULT_GCP_SCOPES)
+                .await
+                .map_err(|e| {
+                    AppError::Internal(format!("gcp_service_account token mint failed: {e}"))
+                })?;
+            request = request.bearer_auth(token.as_ref());
+        }
         _ => {
             return Err(AppError::Internal(format!(
                 "Unknown auth method: {}",
@@ -2330,6 +2382,10 @@ mod tests {
     /// `provider_token_exchange_service::tests`.
     fn empty_token_cache() -> TokenExchangeCache {
         TokenExchangeCache::new()
+    }
+
+    fn empty_gcp_cache() -> GcpTokenCache {
+        GcpTokenCache::new()
     }
 
     #[tokio::test]
@@ -2637,6 +2693,7 @@ mod tests {
             vec![],
             None,
             &empty_token_cache(),
+            &empty_gcp_cache(),
         )
         .await
         .expect("proxy request should succeed");
@@ -2685,6 +2742,7 @@ mod tests {
             vec![],
             None,
             &empty_token_cache(),
+            &empty_gcp_cache(),
         )
         .await
         .expect("proxy request should succeed");
@@ -2736,6 +2794,7 @@ mod tests {
             vec![],
             None,
             &empty_token_cache(),
+            &empty_gcp_cache(),
         )
         .await
         .expect("proxy request should succeed");
@@ -2790,6 +2849,7 @@ mod tests {
             vec![],
             None,
             &empty_token_cache(),
+            &empty_gcp_cache(),
         )
         .await
         .expect("proxy request should succeed");
@@ -2838,6 +2898,7 @@ mod tests {
             }],
             None,
             &empty_token_cache(),
+            &empty_gcp_cache(),
         )
         .await
         .expect("proxy request should succeed");
@@ -2907,6 +2968,7 @@ mod tests {
             vec![],
             None,
             &empty_token_cache(),
+            &empty_gcp_cache(),
         )
         .await
         .expect_err("backslash in requested path should be rejected");
@@ -2961,6 +3023,7 @@ mod tests {
                 vec![],
                 None,
                 &empty_token_cache(),
+                &empty_gcp_cache(),
             )
             .await
             .expect_err("percent-encoded requested path breaker should be rejected");
@@ -2999,6 +3062,7 @@ mod tests {
             vec![],
             None,
             &empty_token_cache(),
+            &empty_gcp_cache(),
         )
         .await
         .expect("non-segment dot sequences should be allowed");
@@ -3030,6 +3094,7 @@ mod tests {
             }],
             None,
             &empty_token_cache(),
+            &empty_gcp_cache(),
         )
         .await
         .expect_err("invalid path credential should be rejected");
@@ -3060,6 +3125,7 @@ mod tests {
                 }],
                 None,
                 &empty_token_cache(),
+                &empty_gcp_cache(),
             )
             .await
             .expect_err("blank or whitespace path credential should be rejected");
@@ -3090,6 +3156,7 @@ mod tests {
             }],
             None,
             &empty_token_cache(),
+            &empty_gcp_cache(),
         )
         .await
         .expect_err("invalid path prefix should be rejected");
@@ -3120,6 +3187,7 @@ mod tests {
                 }],
                 None,
                 &empty_token_cache(),
+                &empty_gcp_cache(),
             )
             .await
             .expect_err("blank or whitespace path prefix should be rejected");
@@ -3150,6 +3218,7 @@ mod tests {
             }],
             None,
             &empty_token_cache(),
+            &empty_gcp_cache(),
         )
         .await
         .expect_err("percent-encoded path credential should be rejected");
@@ -3205,6 +3274,7 @@ mod tests {
             }],
             None,
             &empty_token_cache(),
+            &empty_gcp_cache(),
         )
         .await
         .expect_err("percent-encoded path prefix should be rejected");
@@ -3456,6 +3526,7 @@ mod tests {
             vec![],
             None,
             &cache,
+            &empty_gcp_cache(),
         )
         .await
         .expect("lark proxy request should succeed");
@@ -3489,6 +3560,7 @@ mod tests {
             vec![],
             None,
             &cache,
+            &empty_gcp_cache(),
         )
         .await
         .expect("first call");
@@ -3506,6 +3578,7 @@ mod tests {
             vec![],
             None,
             &cache,
+            &empty_gcp_cache(),
         )
         .await
         .expect("second call");
@@ -3536,6 +3609,7 @@ mod tests {
             vec![],
             None,
             &TokenExchangeCache::new(),
+            &empty_gcp_cache(),
         )
         .await
         .expect_err("malformed credential should error");
@@ -3737,6 +3811,7 @@ mod tests {
             vec![],
             None,
             &empty_token_cache(),
+            &empty_gcp_cache(),
         )
         .await
         .expect("GET with body auth should forward without body injection");
@@ -3811,6 +3886,7 @@ mod tests {
             vec![],
             None,
             &empty_token_cache(),
+            &empty_gcp_cache(),
         )
         .await
         .expect("POST with body auth should merge credential into JSON body");

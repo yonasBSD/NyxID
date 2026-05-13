@@ -1139,6 +1139,7 @@ async fn handle_tools_call(
         &state.jwt_keys,
         &state.config,
         &state.token_exchange_cache,
+        &state.gcp_token_cache,
         &exec_ctx,
     )
     .await
@@ -1327,6 +1328,7 @@ async fn handle_meta_call_tool(
         &state.jwt_keys,
         &state.config,
         &state.token_exchange_cache,
+        &state.gcp_token_cache,
         &exec_ctx,
     )
     .await

@@ -259,6 +259,7 @@ pub(crate) fn test_app_state(db: mongodb::Database) -> AppState {
         )),
         ws_passthrough_count: Arc::new(AtomicUsize::new(0)),
         token_exchange_cache: Arc::new(TokenExchangeCache::new()),
+        gcp_token_cache: Arc::new(nyxid_cloud_auth::gcp_oauth::GcpTokenCache::new()),
         telemetry: None,
     }
 }

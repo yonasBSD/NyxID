@@ -3943,6 +3943,7 @@ dependencies = [
  "libc",
  "mongodb",
  "nix 0.31.2",
+ "nyxid-cloud-auth",
  "open",
  "p256",
  "pty-process",

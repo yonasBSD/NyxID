@@ -100,6 +100,11 @@ pub struct AppState {
     /// tenant tokens, OAuth 2.0 client_credentials, etc.) and the channel
     /// bot adapter's outbound replies.
     pub token_exchange_cache: Arc<TokenExchangeCache>,
+    /// GCP service-account access-token cache. Backs the
+    /// `gcp_service_account` proxy auth method (Cloud Billing API,
+    /// BigQuery billing exports). Tokens are minted on demand from the
+    /// stored SA JSON and refreshed 5 minutes before expiry. NyxID#716.
+    pub gcp_token_cache: Arc<nyxid_cloud_auth::gcp_oauth::GcpTokenCache>,
     /// Vendor-neutral telemetry client. `None` when no DSN is configured
     /// (the default hard-off state — see `docs/TELEMETRY.md` §3).
     pub telemetry: Option<Arc<telemetry::TelemetryClient>>,
@@ -444,6 +449,7 @@ async fn main() {
         dpop_jti_cache,
         ws_passthrough_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         token_exchange_cache: Arc::new(TokenExchangeCache::new()),
+        gcp_token_cache: Arc::new(nyxid_cloud_auth::gcp_oauth::GcpTokenCache::new()),
         telemetry: telemetry::TelemetryClient::from_config(&config),
     };
 
