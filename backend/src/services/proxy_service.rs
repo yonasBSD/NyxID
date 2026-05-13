@@ -106,15 +106,17 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
 /// Headers under `x-openclaw-*` are caller-supplied OpenClaw routing / scope
 /// hints; the gateway owns their semantics, so NyxID must not strip them.
 ///
-/// Headers under `x-amz-*` are required by AWS APIs — most notably
-/// `X-Amz-Target` for JSON-RPC services like Cost Explorer, which routes
-/// operations entirely via that header rather than a URL path. NyxID's
-/// `aws_sigv4` injection sets `X-Amz-Date` / `X-Amz-Content-Sha256` /
-/// optionally `X-Amz-Security-Token` itself; those are kept outside the
-/// caller-forwarding loop on `outbound_headers` (see `aws_sigv4` arm in
-/// `forward_request`), so duplicate-injection isn't a concern.
+/// Headers under `x-amz-*` are AWS-namespace headers. Most callers will
+/// use them as routing hints — notably `X-Amz-Target` for JSON-RPC
+/// services like Cost Explorer, which dispatches operations entirely
+/// via that header rather than a URL path. We forward those through.
+/// The signer-managed subset (`Authorization`, `X-Amz-Date`,
+/// `X-Amz-Content-Sha256`, `X-Amz-Security-Token`) is stripped from
+/// `outbound_headers` later in `forward_request` (search for "BLOCKER 8"
+/// in the auth dispatch) before the signer adds its own canonical
+/// values, so duplicate-injection on the wire is impossible.
 ///
-/// Headers under `x-goog-*` are GCP-specific routing hints (e.g.
+/// Headers under `x-goog-*` are GCP-namespace headers (e.g.
 /// `X-Goog-User-Project` for billing-quota project selection on BigQuery
 /// calls against the billing-export dataset). NyxID#716.
 const ALLOWED_FORWARD_HEADER_PREFIXES: &[&str] = &["x-openclaw-", "x-amz-", "x-goog-"];
@@ -4322,18 +4324,24 @@ mod tests {
 
     // ─── GCP service-account smoke test ─────────────────────────────
 
-    /// Generate a fresh 2048-bit RSA private key in PKCS#1 PEM format
-    /// for the GCP smoke test. We can't ship a real key in source code
-    /// (would trigger secret scanners), and embedded fake keys won't
-    /// parse. The workspace dev profile opt-level=3's the `rsa` and
-    /// `num-bigint-dig` crates so generation finishes in ~1s.
-    fn generate_test_rsa_pem() -> String {
-        use rsa::{RsaPrivateKey, pkcs1::EncodeRsaPrivateKey};
+    /// Generate a fresh 2048-bit RSA keypair for the GCP smoke test.
+    /// Returns `(private_pem_pkcs1, public_pem_pkcs1)`. The workspace
+    /// dev profile opt-level=3's `rsa` + `num-bigint-dig` so generation
+    /// finishes in ~1s. The public half is used to verify the JWT we
+    /// send to the mock OAuth endpoint (Codex review REC 6).
+    fn generate_test_rsa_keypair() -> (String, String) {
+        use rsa::{RsaPrivateKey, pkcs1::EncodeRsaPrivateKey, pkcs1::EncodeRsaPublicKey};
         let mut rng = rand::thread_rng();
-        let key = RsaPrivateKey::new(&mut rng, 2048).expect("rsa keygen");
-        key.to_pkcs1_pem(rsa::pkcs1::LineEnding::LF)
-            .expect("pem encode")
-            .to_string()
+        let priv_key = RsaPrivateKey::new(&mut rng, 2048).expect("rsa keygen");
+        let pub_key = rsa::RsaPublicKey::from(&priv_key);
+        let private_pem = priv_key
+            .to_pkcs1_pem(rsa::pkcs1::LineEnding::LF)
+            .expect("priv pem encode")
+            .to_string();
+        let public_pem = pub_key
+            .to_pkcs1_pem(rsa::pkcs1::LineEnding::LF)
+            .expect("pub pem encode");
+        (private_pem, public_pem)
     }
 
     #[derive(Clone, Default)]
@@ -4390,20 +4398,12 @@ mod tests {
         (format!("http://{addr}"), state, server)
     }
 
-    fn build_gcp_service_account_credential(token_uri: &str) -> String {
-        // Generate a fresh RSA key for the SA JSON. Embed it + a custom
-        // `token_uri` so JWT signing flows through `nyxid_cloud_auth::
-        // gcp_oauth` exactly as it would for a real SA, but the token
-        // endpoint is our mock.
-        let pem = generate_test_rsa_pem();
-        // Build the JSON via serde so newlines in the PEM survive the
-        // escape round-trip (manual format!() with `\\n` substitution
-        // would mangle the body).
+    fn build_gcp_service_account_credential(private_pem: &str, token_uri: &str) -> String {
         serde_json::json!({
             "type": "service_account",
             "project_id": "test-project",
             "private_key_id": "abc",
-            "private_key": pem,
+            "private_key": private_pem,
             "client_email": "sa@test-project.iam.gserviceaccount.com",
             "token_uri": token_uri,
         })
@@ -4425,7 +4425,8 @@ mod tests {
         nyxid_cloud_auth::gcp_oauth::set_trusted_token_endpoints_for_testing(vec![
             mock_token_uri.clone(),
         ]);
-        let credential = build_gcp_service_account_credential(&mock_token_uri);
+        let (private_pem, public_pem) = generate_test_rsa_keypair();
+        let credential = build_gcp_service_account_credential(&private_pem, &mock_token_uri);
         let target = make_billing_proxy_target(base_url.clone(), "gcp_service_account", credential);
         let gcp_cache = GcpTokenCache::new();
 
@@ -4469,10 +4470,51 @@ mod tests {
             "Bearer fake-google-token-1"
         );
 
-        // The assertion sent to the token endpoint is a JWT (three
-        // dot-separated base64 segments).
+        // Codex review REC 6: don't stop at "three segments". Verify
+        // the JWT signature against the public half of the keypair
+        // we generated, AND that the claims match what the spec
+        // requires for Google's JWT-bearer flow.
         let assertion = mock.captured_jwt_assertion.lock().unwrap().clone().unwrap();
         assert_eq!(assertion.split('.').count(), 3, "assertion must be a JWT");
+
+        use jsonwebtoken::{Algorithm, DecodingKey, Validation};
+        let mut validation = Validation::new(Algorithm::RS256);
+        // The mint flow sets `aud = token_uri`; verify exact match.
+        validation.set_audience(&[mock_token_uri.as_str()]);
+        validation.set_issuer(&["sa@test-project.iam.gserviceaccount.com"]);
+        // The default validates `exp` (good) and rejects on missing
+        // claims listed in `required_spec_claims` (defaults to exp).
+        let decoding_key =
+            DecodingKey::from_rsa_pem(public_pem.as_bytes()).expect("public key parse");
+        let token =
+            jsonwebtoken::decode::<serde_json::Value>(&assertion, &decoding_key, &validation)
+                .expect("JWT signature + claims valid");
+        let claims = token.claims;
+        // REC 7 follow-up: `sub` claim must be omitted.
+        assert!(
+            claims.get("sub").is_none(),
+            "JWT should omit `sub` claim by default: {claims:?}"
+        );
+        // Required claims present.
+        assert_eq!(claims["iss"], "sa@test-project.iam.gserviceaccount.com");
+        // Scope must contain both default scopes.
+        let scope = claims["scope"].as_str().expect("scope claim is a string");
+        assert!(
+            scope.contains("https://www.googleapis.com/auth/cloud-platform"),
+            "scope claim missing cloud-platform: {scope}"
+        );
+        assert!(
+            scope.contains("https://www.googleapis.com/auth/bigquery"),
+            "scope claim missing bigquery: {scope}"
+        );
+        // iat <= exp and exp - iat == 3600.
+        let iat = claims["iat"].as_u64().expect("iat is u64");
+        let exp = claims["exp"].as_u64().expect("exp is u64");
+        assert_eq!(
+            exp.saturating_sub(iat),
+            3600,
+            "JWT lifetime should be 1 hour"
+        );
 
         server.abort();
     }

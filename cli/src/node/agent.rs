@@ -1557,7 +1557,17 @@ fn migrate_config(
         let encrypted = target.store_credential_value(slug, value)?;
         if let Some(cred_config) = updated.credentials.get_mut(slug) {
             match injection_method.as_str() {
-                "header" => cred_config.header_value_encrypted = encrypted,
+                // path_prefix and the two cloud-billing methods all
+                // store the encrypted credential on
+                // `header_value_encrypted` (Codex review REC 10). The
+                // pre-NyxID#716 migration code only knew about
+                // `"header"` and `"query_param"`, so a backend switch
+                // from file → keychain (or vice versa) on a node with
+                // a path-prefix or cloud-billing credential would
+                // silently drop the encrypted-payload pointer.
+                "header" | "path_prefix" | "aws_sigv4" | "gcp_service_account" => {
+                    cred_config.header_value_encrypted = encrypted;
+                }
                 "query_param" => cred_config.param_value_encrypted = encrypted,
                 _ => {}
             }

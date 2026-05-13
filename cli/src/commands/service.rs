@@ -1561,7 +1561,9 @@ fn prompt_password(prompt: &str, flag: &str) -> Result<String> {
 /// Used for multi-field credential payloads (aws_sigv4 access-key JSON,
 /// gcp_service_account SA JSON) where typing into rpassword would be
 /// error-prone. Trims surrounding whitespace so a trailing newline from
-/// the file doesn't produce a JSON-parse error on the server.
+/// the file doesn't produce a JSON-parse error on the server. Also
+/// strips a UTF-8 BOM if present (Codex review NIT 3) — JSON parsers
+/// reject U+FEFF in leading position.
 fn read_credential_file(path: &str) -> Result<String> {
     use std::io::Read;
     let raw = if path == "-" {
@@ -1573,9 +1575,14 @@ fn read_credential_file(path: &str) -> Result<String> {
     } else {
         std::fs::read_to_string(path).with_context(|| format!("Reading credential file {path}"))?
     };
-    let trimmed = raw.trim();
+    let without_bom = raw.strip_prefix('\u{feff}').unwrap_or(&raw);
+    let trimmed = without_bom.trim();
     if trimmed.is_empty() {
-        bail!("Credential file {path} is empty");
+        if path == "-" {
+            bail!("Credential read from stdin is empty");
+        } else {
+            bail!("Credential file {path} is empty");
+        }
     }
     Ok(trimmed.to_string())
 }

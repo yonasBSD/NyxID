@@ -93,15 +93,17 @@ const AUTH_METHOD_DEFAULTS: Record<string, string> = {
   none: "",
 };
 
-// AWS SigV4 credential is a JSON object with these 4 required fields,
-// stored on the backend as the encrypted `credential` blob. Default
-// values cover the AWS Cost Explorer common case (region us-east-1,
-// service `ce`); the user only has to fill in the access-key pair.
+// AWS SigV4 credential is a JSON object with these fields, stored on
+// the backend as the encrypted `credential` blob. `session_token` is
+// optional for callers using STS temporary credentials (Codex review
+// REC 9). Default region+service cover the AWS Cost Explorer common
+// case; users with other AWS services can override.
 interface AwsSigv4Fields {
   readonly access_key_id: string;
   readonly secret_access_key: string;
   readonly region: string;
   readonly service: string;
+  readonly session_token: string;
 }
 
 const AWS_SIGV4_DEFAULTS: AwsSigv4Fields = {
@@ -109,6 +111,7 @@ const AWS_SIGV4_DEFAULTS: AwsSigv4Fields = {
   secret_access_key: "",
   region: "us-east-1",
   service: "ce",
+  session_token: "",
 };
 
 function parseAwsSigv4Credential(credential: string): AwsSigv4Fields {
@@ -122,6 +125,8 @@ function parseAwsSigv4Credential(credential: string): AwsSigv4Fields {
           typeof parsed.secret_access_key === "string" ? parsed.secret_access_key : "",
         region: typeof parsed.region === "string" ? parsed.region : AWS_SIGV4_DEFAULTS.region,
         service: typeof parsed.service === "string" ? parsed.service : AWS_SIGV4_DEFAULTS.service,
+        session_token:
+          typeof parsed.session_token === "string" ? parsed.session_token : "",
       };
     }
   } catch {
@@ -131,18 +136,26 @@ function parseAwsSigv4Credential(credential: string): AwsSigv4Fields {
 }
 
 function composeAwsSigv4Credential(fields: AwsSigv4Fields): string {
+  const trimmedToken = fields.session_token.trim();
   const anyPresent =
     fields.access_key_id.trim() ||
     fields.secret_access_key.trim() ||
     fields.region.trim() !== AWS_SIGV4_DEFAULTS.region ||
-    fields.service.trim() !== AWS_SIGV4_DEFAULTS.service;
+    fields.service.trim() !== AWS_SIGV4_DEFAULTS.service ||
+    trimmedToken;
   if (!anyPresent) return "";
-  return JSON.stringify({
+  const payload: Record<string, string> = {
     access_key_id: fields.access_key_id.trim(),
     secret_access_key: fields.secret_access_key.trim(),
     region: fields.region.trim() || AWS_SIGV4_DEFAULTS.region,
     service: fields.service.trim() || AWS_SIGV4_DEFAULTS.service,
-  });
+  };
+  // Only include `session_token` when the user typed one — STS
+  // temporary credentials need it, long-lived IAM users don't.
+  if (trimmedToken) {
+    payload.session_token = trimmedToken;
+  }
+  return JSON.stringify(payload);
 }
 
 // Derive a user-friendly credential field label/placeholder from the auth
@@ -728,6 +741,18 @@ function KeyForm({
                   For other AWS services, change `service` to match
                   (e.g. `s3`, `dynamodb`).
                 </p>
+                <div className="space-y-1.5">
+                  <Label htmlFor="add-key-aws-session-token">
+                    Session Token <span className="text-text-tertiary">(optional, for STS temporary credentials)</span>
+                  </Label>
+                  <Input
+                    id="add-key-aws-session-token"
+                    type="password"
+                    placeholder="Leave blank for long-lived IAM user credentials"
+                    value={fields.session_token}
+                    onChange={(e) => update({ session_token: e.target.value })}
+                  />
+                </div>
               </>
             );
           })()
