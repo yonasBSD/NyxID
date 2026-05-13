@@ -88,8 +88,62 @@ const AUTH_METHOD_DEFAULTS: Record<string, string> = {
   body: "app_secret",
   bot_bearer: "Authorization",
   token_exchange: "",
+  aws_sigv4: "",
+  gcp_service_account: "",
   none: "",
 };
+
+// AWS SigV4 credential is a JSON object with these 4 required fields,
+// stored on the backend as the encrypted `credential` blob. Default
+// values cover the AWS Cost Explorer common case (region us-east-1,
+// service `ce`); the user only has to fill in the access-key pair.
+interface AwsSigv4Fields {
+  readonly access_key_id: string;
+  readonly secret_access_key: string;
+  readonly region: string;
+  readonly service: string;
+}
+
+const AWS_SIGV4_DEFAULTS: AwsSigv4Fields = {
+  access_key_id: "",
+  secret_access_key: "",
+  region: "us-east-1",
+  service: "ce",
+};
+
+function parseAwsSigv4Credential(credential: string): AwsSigv4Fields {
+  if (!credential) return AWS_SIGV4_DEFAULTS;
+  try {
+    const parsed = JSON.parse(credential);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return {
+        access_key_id: typeof parsed.access_key_id === "string" ? parsed.access_key_id : "",
+        secret_access_key:
+          typeof parsed.secret_access_key === "string" ? parsed.secret_access_key : "",
+        region: typeof parsed.region === "string" ? parsed.region : AWS_SIGV4_DEFAULTS.region,
+        service: typeof parsed.service === "string" ? parsed.service : AWS_SIGV4_DEFAULTS.service,
+      };
+    }
+  } catch {
+    // Fall through to defaults on parse error.
+  }
+  return AWS_SIGV4_DEFAULTS;
+}
+
+function composeAwsSigv4Credential(fields: AwsSigv4Fields): string {
+  const anyPresent =
+    fields.access_key_id.trim() ||
+    fields.secret_access_key.trim() ||
+    fields.region.trim() !== AWS_SIGV4_DEFAULTS.region ||
+    fields.service.trim() !== AWS_SIGV4_DEFAULTS.service;
+  if (!anyPresent) return "";
+  return JSON.stringify({
+    access_key_id: fields.access_key_id.trim(),
+    secret_access_key: fields.secret_access_key.trim(),
+    region: fields.region.trim() || AWS_SIGV4_DEFAULTS.region,
+    service: fields.service.trim() || AWS_SIGV4_DEFAULTS.service,
+  });
+}
 
 // Derive a user-friendly credential field label/placeholder from the auth
 // method + key name. Prevents confusing "API Key / Credential" + "sk-..." for
@@ -115,6 +169,18 @@ function getCredentialFieldMeta(
   }
   if (authMethod === "basic") {
     return { label: "Username:Password", placeholder: "user:pass" };
+  }
+  if (authMethod === "aws_sigv4") {
+    return {
+      label: "AWS Credentials",
+      placeholder: "Use the structured fields below",
+    };
+  }
+  if (authMethod === "gcp_service_account") {
+    return {
+      label: "Service Account JSON",
+      placeholder: "Paste the full service-account JSON key",
+    };
   }
   return { label: "API Key / Credential", placeholder: "sk-..." };
 }
@@ -169,7 +235,9 @@ function shouldShowAuthKeyName(authMethod: string): boolean {
     authMethod !== "oidc" &&
     authMethod !== "oauth2" &&
     authMethod !== "bot_bearer" &&
-    authMethod !== "token_exchange"
+    authMethod !== "token_exchange" &&
+    authMethod !== "aws_sigv4" &&
+    authMethod !== "gcp_service_account"
   );
 }
 
@@ -597,6 +665,92 @@ function KeyForm({
               </>
             );
           })()
+        ) : form.authMethod === "aws_sigv4" ? (
+          (() => {
+            const fields = parseAwsSigv4Credential(form.credential);
+            const update = (patch: Partial<AwsSigv4Fields>) =>
+              onChange({
+                credential: composeAwsSigv4Credential({ ...fields, ...patch }),
+              });
+            return (
+              <>
+                <div className="space-y-1.5">
+                  <Label htmlFor="add-key-aws-akid">
+                    Access Key ID
+                    {requiresCredential && <span className="text-destructive"> *</span>}
+                  </Label>
+                  <Input
+                    id="add-key-aws-akid"
+                    placeholder="AKIA..."
+                    value={fields.access_key_id}
+                    onChange={(e) => update({ access_key_id: e.target.value })}
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="add-key-aws-secret">
+                    Secret Access Key
+                    {requiresCredential && <span className="text-destructive"> *</span>}
+                  </Label>
+                  <Input
+                    id="add-key-aws-secret"
+                    type="password"
+                    placeholder="40-character secret"
+                    value={fields.secret_access_key}
+                    onChange={(e) => update({ secret_access_key: e.target.value })}
+                  />
+                  <p className="text-[11px] text-muted-foreground">
+                    Stored encrypted. The IAM policy attached to this key
+                    enforces read-only — NyxID never elevates it.
+                  </p>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="add-key-aws-region">Region</Label>
+                    <Input
+                      id="add-key-aws-region"
+                      placeholder="us-east-1"
+                      value={fields.region}
+                      onChange={(e) => update({ region: e.target.value })}
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="add-key-aws-service">Service</Label>
+                    <Input
+                      id="add-key-aws-service"
+                      placeholder="ce"
+                      value={fields.service}
+                      onChange={(e) => update({ service: e.target.value })}
+                    />
+                  </div>
+                </div>
+                <p className="text-[11px] text-muted-foreground">
+                  Cost Explorer is single-region (us-east-1, service=ce).
+                  For other AWS services, change `service` to match
+                  (e.g. `s3`, `dynamodb`).
+                </p>
+              </>
+            );
+          })()
+        ) : form.authMethod === "gcp_service_account" ? (
+          <div className="space-y-1.5">
+            <Label htmlFor="add-key-gcp-json">
+              Service Account JSON
+              {requiresCredential && <span className="text-destructive"> *</span>}
+            </Label>
+            <textarea
+              id="add-key-gcp-json"
+              className="flex min-h-[160px] w-full rounded-[10px] border border-input bg-transparent px-[14px] py-2 font-mono text-[12px] text-foreground ring-offset-background transition-colors placeholder:text-text-tertiary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+              placeholder='{ "type": "service_account", "project_id": "...", "private_key": "-----BEGIN ...", "client_email": "..." }'
+              value={form.credential}
+              onChange={(e) => onChange({ credential: e.target.value })}
+              spellCheck={false}
+            />
+            <p className="text-[11px] text-muted-foreground">
+              Paste the entire JSON content of the service-account key file.
+              Stored encrypted; NyxID mints short-lived access tokens from it
+              on demand and caches them in memory.
+            </p>
+          </div>
         ) : (
           <div className="space-y-1.5">
             <Label htmlFor="add-key-credential">
