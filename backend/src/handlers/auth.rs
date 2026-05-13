@@ -15,7 +15,9 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{ACCESS_TOKEN_COOKIE_NAME, AuthUser, SESSION_COOKIE_NAME};
-use crate::services::{audit_service, auth_service, invite_code_service, token_service};
+use crate::services::{
+    audit_service, auth_service, invite_code_service, role_service, token_service,
+};
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event, hash_short_id};
 
 // --- Request / Response types ---
@@ -1029,19 +1031,19 @@ pub async fn setup(
     )
     .await?;
 
-    // Promote to admin and mark email as verified
-    let now = chrono::Utc::now();
+    // Promote to admin and mark email as verified. The RBAC membership is
+    // authoritative; the legacy flag is mirrored during the migration window.
+    let platform_role_ids = role_service::get_platform_role_ids(&state.db).await?;
+    let mut pipeline = role_service::set_platform_role_update(
+        crate::models::user::PlatformRole::Admin,
+        &platform_role_ids,
+        mongodb::bson::DateTime::from_chrono(chrono::Utc::now()),
+    );
+    pipeline.push(doc! { "$set": { "email_verified": true } });
     state
         .db
         .collection::<User>(USERS)
-        .update_one(
-            doc! { "_id": &result.user_id },
-            doc! { "$set": {
-                "is_admin": true,
-                "email_verified": true,
-                "updated_at": mongodb::bson::DateTime::from_chrono(now),
-            }},
-        )
+        .update_one(doc! { "_id": &result.user_id }, pipeline)
         .await?;
 
     audit_service::log_async(

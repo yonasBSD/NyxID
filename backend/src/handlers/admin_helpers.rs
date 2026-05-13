@@ -5,14 +5,13 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::AuthUser;
-use crate::services::audit_service;
+use crate::services::{audit_service, role_service};
 
 /// Check that the authenticated user has admin (write) privileges.
 ///
-/// Admin access is determined by the `is_admin` flag on the user record.
-/// This is the canonical admin check for write paths. The "admin" RBAC role
-/// is informational and used for claim injection into tokens; it does not
-/// replace this flag. For read-only admin access, use [`require_admin_or_operator`].
+/// Admin access is determined by platform RBAC role membership. This is the
+/// canonical admin check for write paths. For read-only admin access, use
+/// [`require_admin_or_operator`].
 pub async fn require_admin(state: &AppState, auth_user: &AuthUser) -> AppResult<()> {
     let user_id = auth_user.user_id.to_string();
     let user_model = state
@@ -22,14 +21,16 @@ pub async fn require_admin(state: &AppState, auth_user: &AuthUser) -> AppResult<
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
-    if !user_model.is_admin {
+    let platform_role = role_service::resolve_platform_role(&state.db, &user_model).await?;
+    if !platform_role.is_admin() {
         return Err(AppError::Forbidden("Admin access required".to_string()));
     }
     Ok(())
 }
 
 /// Check that the authenticated user has at least read-only platform admin
-/// access — either `is_admin` (full admin) or `is_operator` (read-only).
+/// access — either `admin` (full admin) or `operator` (read-only) platform
+/// RBAC role membership.
 ///
 /// Use this on admin GET handlers that should be accessible to operator-role
 /// users (strategy / share-ops accounts that need cross-org platform data
@@ -62,11 +63,12 @@ pub async fn require_admin_or_operator(
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
-    if !user_model.has_admin_read() {
+    let platform_role = role_service::resolve_platform_role(&state.db, &user_model).await?;
+    if !platform_role.has_admin_read() {
         return Err(AppError::Forbidden("Admin access required".to_string()));
     }
 
-    if !user_model.is_admin && user_model.is_operator {
+    if matches!(platform_role, crate::models::user::PlatformRole::Operator) {
         audit_service::log_for_user(
             state.db.clone(),
             auth_user,
@@ -113,14 +115,24 @@ pub fn validate_slug(slug: &str) -> AppResult<()> {
 mod tests {
     use super::*;
     use crate::models::user::UserType;
+    use crate::services::role_service;
     use crate::test_utils::{connect_test_database, test_app_state, test_auth_user, test_user};
     use uuid::Uuid;
 
     async fn insert_user(db: &mongodb::Database, is_admin: bool, is_operator: bool) -> String {
+        role_service::seed_system_roles(db)
+            .await
+            .expect("seed platform roles");
+        let platform_role_ids = role_service::get_platform_role_ids(db)
+            .await
+            .expect("platform role ids");
         let id = Uuid::new_v4().to_string();
         let mut user = test_user(&id, UserType::Person);
-        user.is_admin = is_admin;
-        user.is_operator = is_operator;
+        if is_admin {
+            user.role_ids.push(platform_role_ids.admin);
+        } else if is_operator {
+            user.role_ids.push(platform_role_ids.operator);
+        }
         db.collection::<User>(USERS)
             .insert_one(&user)
             .await

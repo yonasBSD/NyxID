@@ -6,7 +6,7 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::AuthUser;
-use crate::services::{admin_user_service, audit_service, telemetry_erasure_service};
+use crate::services::{admin_user_service, audit_service, role_service, telemetry_erasure_service};
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 // --- Request / Response types ---
@@ -68,7 +68,9 @@ pub async fn get_me(
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
-    let role = user_model.platform_role().as_str().to_string();
+    let platform_role = role_service::resolve_platform_role(&state.db, &user_model).await?;
+    let role = platform_role.as_str().to_string();
+    let (is_admin, is_operator) = platform_role.legacy_flags();
     Ok(Json(UserProfileResponse {
         id: user_model.id,
         email: user_model.email,
@@ -76,8 +78,8 @@ pub async fn get_me(
         avatar_url: user_model.avatar_url,
         email_verified: user_model.email_verified,
         mfa_enabled: user_model.mfa_enabled,
-        is_admin: user_model.is_admin,
-        is_operator: user_model.is_operator,
+        is_admin,
+        is_operator,
         role,
         is_active: user_model.is_active,
         social_provider: user_model.social_provider,
@@ -222,4 +224,44 @@ pub async fn delete_me(
         status: "DELETED".to_string(),
         deleted_at,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::user::UserType;
+    use crate::services::role_service;
+    use crate::test_utils::{connect_test_database, test_app_state, test_auth_user, test_user};
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn get_me_derives_platform_role_fields_from_rbac_membership() {
+        let Some(db) = connect_test_database("users_me_platform_role").await else {
+            eprintln!("skipping users/me role test: no local MongoDB available");
+            return;
+        };
+        role_service::seed_system_roles(&db)
+            .await
+            .expect("seed platform roles");
+        let platform_role_ids = role_service::get_platform_role_ids(&db)
+            .await
+            .expect("platform role ids");
+
+        let user_id = Uuid::new_v4().to_string();
+        let mut user = test_user(&user_id, UserType::Person);
+        user.role_ids.push(platform_role_ids.operator);
+        db.collection::<User>(USERS)
+            .insert_one(&user)
+            .await
+            .expect("insert user");
+        let state = test_app_state(db);
+
+        let response = get_me(State(state), test_auth_user(&user_id))
+            .await
+            .expect("get profile");
+
+        assert_eq!(response.0.role, "operator");
+        assert!(!response.0.is_admin);
+        assert!(response.0.is_operator);
+    }
 }

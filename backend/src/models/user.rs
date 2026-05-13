@@ -29,8 +29,8 @@ impl UserType {
     }
 }
 
-/// Platform-level role derived from the `is_admin` and `is_operator` flags
-/// on a user record. The platform has three tiers, ordered low-to-high:
+/// Platform-level role derived from RBAC platform role membership. The
+/// platform has three tiers, ordered low-to-high:
 ///
 /// - `User` — regular user, no admin access
 /// - `Operator` — read-only access to admin GET endpoints (no writes).
@@ -38,8 +38,7 @@ impl UserType {
 ///   platform data without write privileges.
 /// - `Admin` — full read + write access to all `/admin/*` endpoints
 ///
-/// `Admin` always implies `Operator`-level read access regardless of the
-/// `is_operator` flag.
+/// `Admin` always implies `Operator`-level read access.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlatformRole {
@@ -54,6 +53,22 @@ impl PlatformRole {
             Self::User => "user",
             Self::Operator => "operator",
             Self::Admin => "admin",
+        }
+    }
+
+    pub fn has_admin_read(&self) -> bool {
+        matches!(self, Self::Admin | Self::Operator)
+    }
+
+    pub fn is_admin(&self) -> bool {
+        matches!(self, Self::Admin)
+    }
+
+    pub fn legacy_flags(&self) -> (bool, bool) {
+        match self {
+            Self::Admin => (true, false),
+            Self::Operator => (false, true),
+            Self::User => (false, false),
         }
     }
 }
@@ -76,11 +91,12 @@ pub struct User {
     #[serde(default, with = "bson_datetime::optional")]
     pub password_reset_expires_at: Option<DateTime<Utc>>,
     pub is_active: bool,
+    /// Legacy mirror of platform admin RBAC membership. Kept for storage and
+    /// response compatibility during the migration window; RBAC role_ids are
+    /// authoritative for access checks.
     pub is_admin: bool,
-    /// Platform read-only role. Independent of `is_admin`: when `is_admin`
-    /// is true, operator status is implied regardless of this flag.
-    /// Defaults to false; legacy rows without this field deserialize as
-    /// false.
+    /// Legacy mirror of platform operator RBAC membership. Defaults to false;
+    /// legacy rows without this field deserialize as false.
     #[serde(default)]
     pub is_operator: bool,
     #[serde(default)]
@@ -109,24 +125,6 @@ pub struct User {
     pub updated_at: DateTime<Utc>,
     #[serde(default, with = "bson_datetime::optional")]
     pub last_login_at: Option<DateTime<Utc>>,
-}
-
-impl User {
-    /// Resolved platform role for this user. `Admin` wins over `Operator`.
-    pub fn platform_role(&self) -> PlatformRole {
-        if self.is_admin {
-            PlatformRole::Admin
-        } else if self.is_operator {
-            PlatformRole::Operator
-        } else {
-            PlatformRole::User
-        }
-    }
-
-    /// True if this user has at least read-only platform admin access.
-    pub fn has_admin_read(&self) -> bool {
-        self.is_admin || self.is_operator
-    }
 }
 
 #[cfg(test)]
@@ -257,28 +255,6 @@ mod tests {
         doc.remove("is_operator");
         let restored: User = bson::from_document(doc).expect("deserialize legacy");
         assert!(!restored.is_operator);
-        assert_eq!(restored.platform_role(), PlatformRole::User);
-    }
-
-    #[test]
-    fn platform_role_resolution() {
-        let mut u = make_user();
-        assert_eq!(u.platform_role(), PlatformRole::User);
-        assert!(!u.has_admin_read());
-
-        u.is_operator = true;
-        assert_eq!(u.platform_role(), PlatformRole::Operator);
-        assert!(u.has_admin_read());
-
-        // Admin wins over operator.
-        u.is_admin = true;
-        assert_eq!(u.platform_role(), PlatformRole::Admin);
-        assert!(u.has_admin_read());
-
-        // Admin alone (no operator flag) still has read access.
-        u.is_operator = false;
-        assert_eq!(u.platform_role(), PlatformRole::Admin);
-        assert!(u.has_admin_read());
     }
 
     #[test]

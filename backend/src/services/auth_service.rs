@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::crypto::password;
 use crate::crypto::token::{generate_random_token, hash_token};
 use crate::errors::{AppError, AppResult};
-use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+use crate::models::user::{COLLECTION_NAME as USERS, PlatformRole, User, UserType};
 use crate::services::role_service;
 
 /// Maximum password length to prevent Argon2 DoS via extremely long passwords.
@@ -346,7 +346,8 @@ pub async fn reset_password(
 
 /// Promote an existing user to admin by email address.
 ///
-/// Sets `is_admin = true` and `email_verified = true` on the user.
+/// Assigns the platform admin RBAC role, mirrors `is_admin = true`, and sets
+/// `email_verified = true` on the user.
 /// Returns the user ID on success.
 pub async fn promote_user_to_admin(db: &mongodb::Database, email: &str) -> AppResult<String> {
     let normalized = email.to_lowercase();
@@ -362,23 +363,25 @@ pub async fn promote_user_to_admin(db: &mongodb::Database, email: &str) -> AppRe
 
     ensure_person_user(&user)?;
 
-    if user.is_admin {
+    if role_service::resolve_platform_role(db, &user)
+        .await?
+        .is_admin()
+    {
         return Err(AppError::Conflict(format!(
             "User {} is already an admin",
             normalized
         )));
     }
 
-    let now = Utc::now();
+    let platform_role_ids = role_service::get_platform_role_ids(db).await?;
+    let mut pipeline = role_service::set_platform_role_update(
+        PlatformRole::Admin,
+        &platform_role_ids,
+        bson::DateTime::from_chrono(Utc::now()),
+    );
+    pipeline.push(doc! { "$set": { "email_verified": true } });
     db.collection::<User>(USERS)
-        .update_one(
-            doc! { "_id": &user.id },
-            doc! { "$set": {
-                "is_admin": true,
-                "email_verified": true,
-                "updated_at": bson::DateTime::from_chrono(now),
-            }},
-        )
+        .update_one(doc! { "_id": &user.id }, pipeline)
         .await?;
 
     tracing::info!(user_id = %user.id, email = %normalized, "User promoted to admin");
