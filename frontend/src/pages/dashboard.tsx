@@ -555,7 +555,7 @@ function StatusCell({
   return (
     <Link
       to={href}
-      className="group flex items-center gap-3 rounded-xl border border-border/50 bg-card px-4 py-3 transition-colors duration-200 hover:bg-white/[0.03]"
+      className="group flex h-full items-center gap-3 rounded-xl border border-border/50 bg-card px-4 py-3 transition-colors duration-200 hover:bg-white/[0.03]"
     >
       <div
         className={cn(
