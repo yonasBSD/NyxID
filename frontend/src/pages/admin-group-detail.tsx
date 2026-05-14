@@ -48,7 +48,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Pencil, Trash2, AlertCircle, UserPlus, UserMinus } from "lucide-react";
+import { Pencil, Trash2, AlertCircle, UserPlus, UserMinus, Users } from "lucide-react";
 import { toast } from "sonner";
 
 export function AdminGroupDetailPage() {
@@ -118,11 +118,9 @@ export function AdminGroupDetailPage() {
       toast.success("Group updated successfully");
       setEditOpen(false);
     } catch (err) {
-      if (err instanceof ApiError) {
-        form.setError("root", { message: err.message });
-      } else {
-        toast.error("Failed to update group");
-      }
+      toast.error(
+        err instanceof ApiError ? err.message : "Failed to update group",
+      );
     }
   }
 
@@ -206,17 +204,13 @@ export function AdminGroupDetailPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        breadcrumbs={[
-          { label: "Group Management", to: "/admin/groups" },
-          { label: group.name },
-        ]}
         title={group.name}
         description={group.description ?? undefined}
         actions={
           canWrite ? (
             <>
               <Button variant="outline" size="sm" onClick={openEditDialog}>
-                <Pencil className="mr-1 h-3 w-3" />
+                <Pencil className="h-3 w-3" />
                 Edit
               </Button>
               <Button
@@ -224,7 +218,7 @@ export function AdminGroupDetailPage() {
                 size="sm"
                 onClick={() => setDeleteOpen(true)}
               >
-                <Trash2 className="mr-1 h-3 w-3" />
+                <Trash2 className="h-3 w-3" />
                 Delete
               </Button>
             </>
@@ -233,16 +227,15 @@ export function AdminGroupDetailPage() {
       />
 
       <DetailSection title="Group Information">
-        <DetailRow label="ID" value={group.id} copyable mono />
+        <DetailRow label="ID" value={group.id} copyable />
         <DetailRow label="Name" value={group.name} />
-        <DetailRow label="Slug" value={group.slug} copyable mono />
+        <DetailRow label="Slug" value={group.slug} copyable />
         <DetailRow label="Members" value={String(group.member_count)} />
         {group.parent_group_id && (
           <DetailRow
             label="Parent Group"
             value={group.parent_group_id}
             copyable
-            mono
           />
         )}
         <DetailRow label="Created" value={formatDate(group.created_at)} />
@@ -259,7 +252,7 @@ export function AdminGroupDetailPage() {
         ) : (
           <div className="flex flex-wrap gap-2">
             {group.roles.map((role) => (
-              <Badge key={role.id} variant="outline">
+              <Badge key={role.id} variant="secondary">
                 {role.name}
               </Badge>
             ))}
@@ -277,15 +270,18 @@ export function AdminGroupDetailPage() {
               variant="outline"
               onClick={() => setAddMemberOpen(true)}
             >
-              <UserPlus className="mr-1 h-4 w-4" />
+              <UserPlus className="h-3 w-3" />
               Add Member
             </Button>
           </div>
         )}
         {members.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            No members in this group.
-          </p>
+          <div className="flex flex-col items-center justify-center gap-3 py-8 text-center">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-border">
+              <Users className="h-4 w-4 text-muted-foreground" />
+            </div>
+            <p className="text-[12px] text-muted-foreground">No members in this group.</p>
+          </div>
         ) : (
           <div className="rounded-xl border border-border">
             <Table>
@@ -315,7 +311,7 @@ export function AdminGroupDetailPage() {
                           className="h-8 w-8"
                           onClick={() => setRemoveMemberId(member.id)}
                         >
-                          <UserMinus className="h-4 w-4 text-muted-foreground" />
+                          <UserMinus className="h-3 w-3 text-muted-foreground" />
                         </Button>
                       )}
                     </TableCell>
@@ -341,11 +337,6 @@ export function AdminGroupDetailPage() {
               onSubmit={form.handleSubmit((data) => void handleEdit(data))}
               className="space-y-4"
             >
-              {form.formState.errors.root && (
-                <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
-                  {form.formState.errors.root.message}
-                </div>
-              )}
               <FormField
                 control={form.control}
                 name="name"
@@ -393,7 +384,7 @@ export function AdminGroupDetailPage() {
                     <FormLabel>Roles</FormLabel>
                     <FormControl>
                       <select
-                        className="flex w-full rounded-[10px] border border-input bg-popover px-3 py-2 text-[13px] text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring [&_option]:bg-popover [&_option]:text-foreground [&_option:checked]:bg-primary/20"
+                        className="flex w-full rounded-lg border border-input bg-popover px-3 py-1.5 text-[12px] text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring [&_option]:bg-popover [&_option]:text-foreground [&_option:checked]:bg-primary/20"
                         multiple
                         value={
                           field.value
@@ -431,7 +422,7 @@ export function AdminGroupDetailPage() {
                 >
                   Cancel
                 </Button>
-                <Button type="submit" isLoading={updateMutation.isPending}>
+                <Button type="submit" variant="primary" isLoading={updateMutation.isPending}>
                   Save Changes
                 </Button>
               </DialogFooter>

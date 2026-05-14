@@ -37,7 +37,7 @@ import {
   FormLabel,
   FormMessage,
 } from "@/components/ui/form";
-import { Pencil, Trash2, AlertCircle, Users } from "lucide-react";
+import { Pencil, Trash2, AlertCircle, Users, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 import { Checkbox } from "@/components/ui/checkbox";
 
@@ -100,11 +100,9 @@ export function AdminRoleDetailPage() {
       toast.success("Role updated successfully");
       setEditOpen(false);
     } catch (err) {
-      if (err instanceof ApiError) {
-        form.setError("root", { message: err.message });
-      } else {
-        toast.error("Failed to update role");
-      }
+      toast.error(
+        err instanceof ApiError ? err.message : "Failed to update role",
+      );
     }
   }
 
@@ -169,10 +167,6 @@ export function AdminRoleDetailPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        breadcrumbs={[
-          { label: "Role Management", to: "/admin/roles" },
-          { label: role.name },
-        ]}
         title={role.name}
         description={role.description ?? undefined}
         actions={
@@ -183,11 +177,11 @@ export function AdminRoleDetailPage() {
                 size="sm"
                 onClick={() => setBulkAssignOpen(true)}
               >
-                <Users className="mr-1 h-3 w-3" />
+                <Users className="h-3 w-3" />
                 Assign to All Users
               </Button>
               <Button variant="outline" size="sm" onClick={openEditDialog}>
-                <Pencil className="mr-1 h-3 w-3" />
+                <Pencil className="h-3 w-3" />
                 Edit
               </Button>
               {!role.is_system && (
@@ -196,7 +190,7 @@ export function AdminRoleDetailPage() {
                   size="sm"
                   onClick={() => setDeleteOpen(true)}
                 >
-                  <Trash2 className="mr-1 h-3 w-3" />
+                  <Trash2 className="h-3 w-3" />
                   Delete
                 </Button>
               )}
@@ -206,14 +200,14 @@ export function AdminRoleDetailPage() {
       />
 
       <DetailSection title="Role Information">
-        <DetailRow label="ID" value={role.id} copyable mono />
+        <DetailRow label="ID" value={role.id} copyable />
         <DetailRow label="Name" value={role.name} />
-        <DetailRow label="Slug" value={role.slug} copyable mono />
+        <DetailRow label="Slug" value={role.slug} copyable />
         <DetailRow
           label="Type"
           value={role.is_system ? "System" : "Custom"}
           badge
-          badgeVariant={role.is_system ? "secondary" : "outline"}
+          badgeVariant={role.is_system ? "secondary" : "default"}
         />
         <DetailRow
           label="Default"
@@ -222,7 +216,7 @@ export function AdminRoleDetailPage() {
           badgeVariant={role.is_default ? "success" : "secondary"}
         />
         {role.client_id && (
-          <DetailRow label="Client ID" value={role.client_id} copyable mono />
+          <DetailRow label="Client ID" value={role.client_id} copyable />
         )}
         <DetailRow label="Created" value={formatDate(role.created_at)} />
         <DetailRow label="Updated" value={formatDate(role.updated_at)} />
@@ -232,13 +226,16 @@ export function AdminRoleDetailPage() {
 
       <DetailSection title="Permissions">
         {role.permissions.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            No permissions assigned.
-          </p>
+          <div className="flex flex-col items-center justify-center gap-3 py-8 text-center">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-border">
+              <ShieldCheck className="h-4 w-4 text-muted-foreground" />
+            </div>
+            <p className="text-[12px] text-muted-foreground">No permissions assigned.</p>
+          </div>
         ) : (
           <div className="flex flex-wrap gap-2">
             {role.permissions.map((perm) => (
-              <Badge key={perm} variant="outline" className="font-mono text-xs">
+              <Badge key={perm} variant="secondary" className="font-mono text-xs">
                 {perm}
               </Badge>
             ))}
@@ -260,11 +257,6 @@ export function AdminRoleDetailPage() {
               onSubmit={form.handleSubmit((data) => void handleEdit(data))}
               className="space-y-4"
             >
-              {form.formState.errors.root && (
-                <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
-                  {form.formState.errors.root.message}
-                </div>
-              )}
               <FormField
                 control={form.control}
                 name="name"
@@ -354,7 +346,7 @@ export function AdminRoleDetailPage() {
                 >
                   Cancel
                 </Button>
-                <Button type="submit" isLoading={updateMutation.isPending}>
+                <Button type="submit" variant="primary" isLoading={updateMutation.isPending}>
                   Save Changes
                 </Button>
               </DialogFooter>
