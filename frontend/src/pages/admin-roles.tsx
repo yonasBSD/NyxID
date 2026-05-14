@@ -366,14 +366,14 @@ export function AdminRolesPage() {
                 control={createForm.control}
                 name="is_default"
                 render={({ field }) => (
-                  <FormItem className="flex items-center gap-2">
+                  <FormItem className="flex items-center gap-2 space-y-0">
                     <FormControl>
                       <Checkbox
                         checked={field.value}
                         onCheckedChange={field.onChange}
                       />
                     </FormControl>
-                    <FormLabel className="!mt-0">
+                    <FormLabel>
                       Auto-assign to new users
                     </FormLabel>
                     <FormMessage />
