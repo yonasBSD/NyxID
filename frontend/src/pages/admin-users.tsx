@@ -190,7 +190,42 @@ export function AdminUsersPage() {
         </div>
       ) : (
         <>
-          <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
+          {/* Mobile card view */}
+          <div className="flex flex-col gap-3 md:hidden">
+            {users.map((user) => {
+              const role = resolvePlatformRole(user);
+              return (
+                <div
+                  key={user.id}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => void navigate({ to: "/admin/users/$userId", params: { userId: user.id } })}
+                  onKeyDown={(e) => { if (e.key === "Enter") void navigate({ to: "/admin/users/$userId", params: { userId: user.id } }); }}
+                  className="rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-white/[0.03] cursor-pointer"
+                >
+                  <p className="text-[13px] font-semibold text-foreground truncate">{user.display_name ?? user.email}</p>
+                  {user.display_name && (
+                    <p className="text-[11px] text-muted-foreground truncate">{user.email}</p>
+                  )}
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    <Badge variant={user.is_active ? "success" : "destructive"}>
+                      {user.is_active ? "Active" : "Disabled"}
+                    </Badge>
+                    {role === "admin" && <Badge variant="default">Admin</Badge>}
+                    {role === "operator" && <Badge variant="secondary">Operator</Badge>}
+                    {user.mfa_enabled && <Badge variant="success">MFA</Badge>}
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+                    <span>{user.email_verified ? "Verified" : "Unverified"}</span>
+                    <span>{formatDate(user.last_login_at)}</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Desktop table view */}
+          <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -247,11 +282,7 @@ export function AdminUsersPage() {
                           return <Badge variant="default">Admin</Badge>;
                         if (role === "operator")
                           return <Badge variant="secondary">Operator</Badge>;
-                        return (
-                          <span className="text-muted-foreground text-xs">
-                            User
-                          </span>
-                        );
+                        return <Badge variant="secondary">User</Badge>;
                       })()}
                     </TableCell>
                     <TableCell>
@@ -262,13 +293,9 @@ export function AdminUsersPage() {
                       </Badge>
                     </TableCell>
                     <TableCell>
-                      {user.mfa_enabled ? (
-                        <Badge variant="success">On</Badge>
-                      ) : (
-                        <span className="text-muted-foreground text-xs">
-                          Off
-                        </span>
-                      )}
+                      <Badge variant={user.mfa_enabled ? "success" : "secondary"}>
+                        {user.mfa_enabled ? "On" : "Off"}
+                      </Badge>
                     </TableCell>
                     <TableCell className="text-muted-foreground">
                       {formatDate(user.created_at)}

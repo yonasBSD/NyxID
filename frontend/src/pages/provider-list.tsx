@@ -15,7 +15,7 @@ import {
 import { ApiError } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Button, ButtonIcon } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -135,10 +135,15 @@ export function ProviderListPage() {
         </div>
         <Dialog open={createOpen} onOpenChange={setCreateOpen}>
           <DialogTrigger asChild>
-            <Button variant="primary" className="w-fit">
-              <ButtonIcon variant="primary"><Plus className="h-3 w-3" /></ButtonIcon>
+            <button
+              type="button"
+              className="flex h-8 items-center gap-2 rounded-lg border border-white/[0.08] px-3 text-[12px] text-text-tertiary transition-all duration-300 hover:border-white/[0.15] hover:text-muted-foreground"
+            >
+              <span className="flex h-[22px] w-[22px] items-center justify-center rounded-[6px] border border-white/[0.08] bg-white/[0.04]">
+                <Plus className="h-3 w-3" />
+              </span>
               Add Provider
-            </Button>
+            </button>
           </DialogTrigger>
           <DialogContent>
             <DialogHeader>

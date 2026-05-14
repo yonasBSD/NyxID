@@ -268,7 +268,95 @@ export function AdminInviteCodesPage() {
           </div>
         </div>
       ) : (
-        <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
+        <>
+        {/* Mobile cards */}
+        <div className="flex flex-col gap-3 md:hidden">
+          {inviteCodes.map((ic) => (
+            <div
+              key={ic.id}
+              className={cn(
+                "rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-white/[0.03] cursor-pointer",
+                isSaving && "pointer-events-none opacity-60",
+              )}
+              onClick={() => {
+                if (isSaving) return;
+                setSelectedCodeId(ic.id);
+              }}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium font-mono text-foreground truncate">
+                    {ic.code}
+                  </p>
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {getStatusBadge(ic)}
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <MoreVertical className="h-3 w-3" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuItem
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void handleCopyCode(ic.code, ic.id);
+                        }}
+                      >
+                        <Copy className="h-3 w-3" />
+                        Copy code
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void handleCopyLink(ic.code, ic.id);
+                        }}
+                      >
+                        <Link2 className="h-3 w-3" />
+                        Copy invite link
+                      </DropdownMenuItem>
+                      {canWrite && ic.is_active && (
+                        <DropdownMenuItem
+                          className="text-destructive focus:text-destructive"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setDeactivateTarget(ic);
+                          }}
+                        >
+                          <Ban className="h-3 w-3" />
+                          Deactivate
+                        </DropdownMenuItem>
+                      )}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </div>
+              </div>
+              <div className="mt-2 text-xs text-muted-foreground">
+                <span className="tabular-nums">
+                  {String(ic.used_count)}/{String(ic.max_uses)} uses
+                </span>
+                {ic.note && (
+                  <>
+                    <span className="text-border mx-1.5">|</span>
+                    <span className="truncate">{ic.note}</span>
+                  </>
+                )}
+              </div>
+              <div className="mt-1.5 text-xs text-muted-foreground">
+                <span>Created {formatDate(ic.created_at)}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Desktop table */}
+        <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
           <Table>
             <TableHeader>
               <TableRow>
@@ -367,6 +455,7 @@ export function AdminInviteCodesPage() {
             </TableBody>
           </Table>
         </div>
+        </>
       )}
 
       {/* Create Invite Code Dialog */}

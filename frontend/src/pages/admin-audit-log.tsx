@@ -127,7 +127,48 @@ export function AdminAuditLogPage() {
         </div>
       ) : (
         <>
-          <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
+          {/* Mobile cards */}
+          <div className="flex flex-col gap-3 md:hidden">
+            {entries.map((entry) => {
+              const status = responseStatus(entry);
+
+              return (
+                <div
+                  key={entry.id}
+                  className="rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-white/[0.03]"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-medium truncate">
+                        {entry.event_type}
+                      </p>
+                      <p className="text-xs text-muted-foreground truncate mt-0.5">
+                        {entry.user_id ?? "No user"}
+                      </p>
+                    </div>
+                    {status !== null ? (
+                      <Badge variant={statusVariant(status)}>{status}</Badge>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">--</span>
+                    )}
+                  </div>
+                  {entry.api_key_name && (
+                    <div className="mt-2">
+                      <Badge variant="secondary" className="text-xs">
+                        {entry.api_key_name}
+                      </Badge>
+                    </div>
+                  )}
+                  <div className="mt-3 text-xs text-muted-foreground">
+                    <span>{formatDateTime(entry.created_at)}</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Desktop table */}
+          <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
             <Table>
               <TableHeader>
                 <TableRow>

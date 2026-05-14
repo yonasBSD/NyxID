@@ -7,7 +7,6 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Zap } from "lucide-react";
 import { CopyableField } from "@/components/shared/copyable-field";
 
 interface GatewayInfoCardProps {
@@ -30,18 +29,15 @@ export function GatewayInfoCard({ llmStatus }: GatewayInfoCardProps) {
   }'`;
 
   return (
-    <Card className="border-primary/30 bg-primary/10">
+    <Card>
       <CardHeader className="pb-3">
         <div className="flex items-start justify-between gap-3">
-          <div className="flex min-w-0 items-start gap-2">
-            <Zap className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
-            <div className="min-w-0">
-              <CardTitle className="text-base">LLM Gateway</CardTitle>
-              <CardDescription className="text-xs">
-                Route LLM requests through NyxID with your connected provider
-                credentials.
-              </CardDescription>
-            </div>
+          <div className="min-w-0">
+            <CardTitle className="text-base">LLM Gateway</CardTitle>
+            <CardDescription className="text-xs">
+              Route LLM requests through NyxID with your connected provider
+              credentials.
+            </CardDescription>
           </div>
           <div className="flex shrink-0 items-center gap-2">
             {readyProviders.length > 0 && (
@@ -66,7 +62,7 @@ export function GatewayInfoCard({ llmStatus }: GatewayInfoCardProps) {
       <CardContent className="space-y-4">
         <CopyableField label="Gateway URL" value={gatewayUrl} />
 
-        <div className="rounded-lg border border-border/50 bg-muted/30 p-3">
+        <div className="rounded-xl border border-border/50 bg-muted/30 p-3">
           <p className="text-xs text-muted-foreground">
             The gateway accepts OpenAI-compatible requests and routes them to
             the correct provider based on the model name. Your provider
@@ -97,7 +93,7 @@ export function GatewayInfoCard({ llmStatus }: GatewayInfoCardProps) {
           <p className="mb-1 text-xs font-medium text-muted-foreground">
             Example Request
           </p>
-          <pre className="rounded bg-muted px-3 py-2 text-[11px] overflow-x-auto whitespace-pre-wrap break-all">
+          <pre className="rounded-xl border border-border bg-muted px-3 py-2 text-[11px] overflow-x-auto whitespace-pre-wrap break-all">
             {exampleCurl}
           </pre>
           <p className="mt-1 text-[10px] text-muted-foreground">

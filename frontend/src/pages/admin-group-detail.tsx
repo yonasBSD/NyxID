@@ -17,10 +17,11 @@ import { canAdminWrite } from "@/types/api";
 import { useAuthStore } from "@/stores/auth-store";
 import { formatDate } from "@/lib/utils";
 import { PageHeader } from "@/components/shared/page-header";
+import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 import { DetailSection } from "@/components/shared/detail-section";
 import { DetailRow } from "@/components/shared/detail-row";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import {
@@ -72,6 +73,8 @@ export function AdminGroupDetailPage() {
 
   const members = membersData?.members ?? [];
   const availableRoles = rolesData?.roles ?? [];
+
+  useBreadcrumbLabel(group?.name);
 
   const form = useForm<UpdateGroupFormData>({
     resolver: zodResolver(updateGroupSchema),
@@ -208,16 +211,15 @@ export function AdminGroupDetailPage() {
         actions={
           canWrite ? (
             <>
-              <Button variant="outline" size="sm" onClick={openEditDialog}>
-                <Pencil className="h-3 w-3" />
+              <Button variant="outline" onClick={openEditDialog}>
+                <ButtonIcon><Pencil className="h-3 w-3" /></ButtonIcon>
                 Edit
               </Button>
               <Button
                 variant="destructive"
-                size="sm"
                 onClick={() => setDeleteOpen(true)}
               >
-                <Trash2 className="h-3 w-3" />
+                <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>
                 Delete
               </Button>
             </>

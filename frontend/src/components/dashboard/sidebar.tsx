@@ -64,7 +64,7 @@ export const DEVELOPER_NAV = [
   { to: "/integration-guide", icon: BookMarked, label: "Integration" },
 ] as const;
 
-const ADMIN_NAV = [
+export const ADMIN_NAV = [
   { to: "/admin/users", icon: Users, label: "Users" },
   { to: "/admin/invite-codes", icon: Ticket, label: "Invite Codes" },
   { to: "/admin/audit-log", icon: ClipboardList, label: "Audit Log" },

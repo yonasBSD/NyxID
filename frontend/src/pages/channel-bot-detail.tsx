@@ -25,6 +25,7 @@ import {
 import { ApiError } from "@/lib/api-client";
 import { formatDate, formatRelativeTime } from "@/lib/utils";
 import { PageHeader } from "@/components/shared/page-header";
+import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { DetailSection } from "@/components/shared/detail-section";
 import { DetailRow } from "@/components/shared/detail-row";
@@ -884,6 +885,8 @@ export function ChannelBotDetailPage() {
   const { data: apiKeys } = useApiKeys({ orgId: ownerOrgId });
   const deleteMutation = useDeleteChannelBot();
   const verifyMutation = useVerifyChannelBot();
+
+  useBreadcrumbLabel(bot?.label);
 
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
 

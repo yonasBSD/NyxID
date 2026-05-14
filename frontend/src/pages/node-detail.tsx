@@ -16,6 +16,7 @@ import { ApiError } from "@/lib/api-client";
 import { pushNodeCredentialSchema } from "@/schemas/nodes";
 import { formatDate, formatRelativeTime } from "@/lib/utils";
 import { PageHeader } from "@/components/shared/page-header";
+import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 import { CopyableField } from "@/components/shared/copyable-field";
 import { DetailRow } from "@/components/shared/detail-row";
 import { DetailSection } from "@/components/shared/detail-section";
@@ -164,6 +165,7 @@ export function NodeDetailPage() {
   const [credentialTargetUrl, setCredentialTargetUrl] = useState("");
   const [credentialLabel, setCredentialLabel] = useState("");
 
+  useBreadcrumbLabel(node?.name);
   const canManage = canManageNode(node, currentUserId, admins);
   const { data: pendingCredentials, isLoading: pendingCredentialsLoading } =
     useNodePendingCredentials(nodeId, canManage);

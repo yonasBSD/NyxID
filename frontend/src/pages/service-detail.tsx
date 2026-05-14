@@ -18,6 +18,7 @@ import {
 } from "@/lib/ssh-auth-mode";
 import { formatDate } from "@/lib/utils";
 import { PageHeader } from "@/components/shared/page-header";
+import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 import { DetailSection } from "@/components/shared/detail-section";
 import { DetailRow } from "@/components/shared/detail-row";
 import { CopyableField } from "@/components/shared/copyable-field";
@@ -67,6 +68,8 @@ export function ServiceDetailPage() {
   const testSshMutation = useTestSshConnection();
   const { data: tokens } = useMyProviderTokens();
   const { data: appsData } = useDeveloperApps();
+
+  useBreadcrumbLabel(service?.name);
 
   async function handleDelete() {
     if (!service) return;

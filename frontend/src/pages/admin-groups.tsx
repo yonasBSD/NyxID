@@ -160,7 +160,51 @@ export function AdminGroupsPage() {
           </div>
         </div>
       ) : (
-        <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
+        <>
+        {/* Mobile cards */}
+        <div className="flex flex-col gap-3 md:hidden">
+          {groups.map((group) => (
+            <div
+              key={group.id}
+              className="rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-white/[0.03] cursor-pointer"
+              tabIndex={0}
+              role="link"
+              onClick={() =>
+                void navigate({
+                  to: "/admin/groups/$groupId",
+                  params: { groupId: group.id },
+                })
+              }
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  void navigate({
+                    to: "/admin/groups/$groupId",
+                    params: { groupId: group.id },
+                  });
+                }
+              }}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium truncate">{group.name}</p>
+                  <p className="text-xs text-muted-foreground font-mono truncate mt-0.5">
+                    {group.slug}
+                  </p>
+                </div>
+                <Badge variant="secondary" className="text-xs">
+                  {String(group.member_count)} member{group.member_count !== 1 ? "s" : ""}
+                </Badge>
+              </div>
+              <div className="mt-3 flex items-center gap-3 text-xs text-muted-foreground">
+                <span>Created {formatDate(group.created_at)}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Desktop table */}
+        <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
           <Table>
             <TableHeader>
               <TableRow>
@@ -246,6 +290,7 @@ export function AdminGroupsPage() {
             </TableBody>
           </Table>
         </div>
+        </>
       )}
 
       {/* Create Group Dialog */}
