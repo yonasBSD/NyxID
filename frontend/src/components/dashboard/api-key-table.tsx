@@ -33,7 +33,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { MoreHorizontal, RefreshCw, Trash2, Copy, Check, KeyRound } from "lucide-react";
+import { MoreVertical, RefreshCw, Trash2, Copy, Check, KeyRound } from "lucide-react";
 import { toast } from "sonner";
 
 function parseScopesString(scopes: string): readonly string[] {
@@ -145,7 +145,7 @@ export function ApiKeyTable() {
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
                     <Button variant="ghost" size="icon" className="h-7 w-7">
-                      <MoreHorizontal className="h-3.5 w-3.5" />
+                      <MoreVertical className="h-3.5 w-3.5" />
                     </Button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end">
@@ -278,7 +278,7 @@ export function ApiKeyTable() {
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
                         <Button variant="ghost" size="icon" className="h-7 w-7">
-                          <MoreHorizontal className="h-3.5 w-3.5" aria-hidden="true" />
+                          <MoreVertical className="h-3.5 w-3.5" aria-hidden="true" />
                           <span className="sr-only">Actions for {key.name}</span>
                         </Button>
                       </DropdownMenuTrigger>

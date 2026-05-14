@@ -66,7 +66,7 @@ import {
 import {
   ExternalLink,
   MessageSquare,
-  MoreHorizontal,
+  MoreVertical,
   ShieldCheck,
   Trash2,
 } from "lucide-react";
@@ -195,7 +195,7 @@ function ConversationRow({
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button variant="ghost" size="icon" className="h-7 w-7">
-              <MoreHorizontal className="h-3.5 w-3.5" aria-hidden="true" />
+              <MoreVertical className="h-3.5 w-3.5" aria-hidden="true" />
               <span className="sr-only">Actions</span>
             </Button>
           </DropdownMenuTrigger>
@@ -281,7 +281,7 @@ function ConversationsSection({
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
                         <Button variant="ghost" size="icon" className="h-7 w-7">
-                          <MoreHorizontal className="h-3.5 w-3.5" />
+                          <MoreVertical className="h-3.5 w-3.5" />
                         </Button>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end">

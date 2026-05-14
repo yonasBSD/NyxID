@@ -183,20 +183,24 @@ export function ApprovalGrantsPage() {
               <div className="flex items-center gap-2">
                 <Button
                   variant="outline"
+                  size="icon"
                   disabled={page <= 1}
                   onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  aria-label="Previous page"
                 >
-                  <ChevronLeft className="h-4 w-4" />
+                  <ChevronLeft className="h-3 w-3" />
                 </Button>
-                <span className="text-[12px]">
+                <span className="text-sm text-muted-foreground">
                   Page {String(page)} of {String(totalPages)}
                 </span>
                 <Button
                   variant="outline"
+                  size="icon"
                   disabled={page >= totalPages}
                   onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                  aria-label="Next page"
                 >
-                  <ChevronRight className="h-4 w-4" />
+                  <ChevronRight className="h-3 w-3" />
                 </Button>
               </div>
             </div>

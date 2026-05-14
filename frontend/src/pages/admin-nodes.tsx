@@ -36,12 +36,19 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
   HardDrive,
   Search,
   ChevronLeft,
   ChevronRight,
   Unplug,
   Trash2,
+  MoreVertical,
 } from "lucide-react";
 import { toast } from "sonner";
 import { NodeStatusBadge } from "@/components/shared/node-status-badge";
@@ -200,7 +207,7 @@ export function AdminNodesPage() {
         </div>
       ) : (
         <>
-          <div className="rounded-xl border border-border">
+          <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -262,37 +269,41 @@ export function AdminNodesPage() {
                     </TableCell>
                     <TableCell>
                       {canWrite && (
-                        <div className="flex items-center gap-1">
-                          {node.is_connected && (
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
                             <Button
                               variant="ghost"
                               size="icon"
-                              className="h-8 w-8 text-muted-foreground hover:text-warning"
+                              className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                            >
+                              <MoreVertical className="h-3 w-3" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            {node.is_connected && (
+                              <DropdownMenuItem
+                                onClick={() =>
+                                  setActionTarget({
+                                    node,
+                                    action: "disconnect",
+                                  })
+                                }
+                              >
+                                <Unplug className="h-3 w-3" />
+                                Disconnect
+                              </DropdownMenuItem>
+                            )}
+                            <DropdownMenuItem
+                              className="text-destructive focus:text-destructive"
                               onClick={() =>
-                                setActionTarget({
-                                  node,
-                                  action: "disconnect",
-                                })
+                                setActionTarget({ node, action: "delete" })
                               }
                             >
-                              <Unplug className="h-3 w-3" />
-                              <span className="sr-only">
-                                Disconnect {node.name}
-                              </span>
-                            </Button>
-                          )}
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                            onClick={() =>
-                              setActionTarget({ node, action: "delete" })
-                            }
-                          >
-                            <Trash2 className="h-3 w-3" />
-                            <span className="sr-only">Delete {node.name}</span>
-                          </Button>
-                        </div>
+                              <Trash2 className="h-3 w-3" />
+                              Delete
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
                       )}
                     </TableCell>
                   </TableRow>
@@ -310,23 +321,23 @@ export function AdminNodesPage() {
             <div className="flex items-center gap-2">
               <Button
                 variant="outline"
-                size="sm"
+                size="icon"
                 disabled={page <= 1}
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
+                aria-label="Previous page"
               >
                 <ChevronLeft className="h-3 w-3" />
-                Previous
               </Button>
               <span className="text-sm text-muted-foreground">
                 Page {String(page)} of {String(totalPages)}
               </span>
               <Button
                 variant="outline"
-                size="sm"
+                size="icon"
                 disabled={page >= totalPages}
                 onClick={() => setPage((p) => p + 1)}
+                aria-label="Next page"
               >
-                Next
                 <ChevronRight className="h-3 w-3" />
               </Button>
             </div>

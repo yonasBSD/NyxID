@@ -61,7 +61,7 @@ export function AdminAuditLogPage() {
       />
 
       <form onSubmit={handleSearch} className="flex flex-wrap items-center gap-2">
-        <div className="relative min-w-[220px] flex-1">
+        <div className="relative max-w-xs flex-1">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input
             placeholder="Filter by user ID"
@@ -70,7 +70,7 @@ export function AdminAuditLogPage() {
             className="pl-9"
           />
         </div>
-        <div className="relative min-w-[220px] flex-1">
+        <div className="relative max-w-xs flex-1">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input
             placeholder="Filter by API key ID"
@@ -127,7 +127,7 @@ export function AdminAuditLogPage() {
         </div>
       ) : (
         <>
-          <div className="rounded-xl border border-border">
+          <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -193,23 +193,26 @@ export function AdminAuditLogPage() {
               {" - "}
               {Math.min(page * PER_PAGE, total)} of {total}
             </p>
-            <div className="flex gap-2">
+            <div className="flex items-center gap-2">
               <Button
                 variant="outline"
-                size="sm"
+                size="icon"
                 onClick={() => setPage((current) => Math.max(1, current - 1))}
                 disabled={page <= 1}
+                aria-label="Previous page"
               >
                 <ChevronLeft className="h-3 w-3" />
-                Previous
               </Button>
+              <span className="text-sm text-muted-foreground">
+                Page {String(page)} of {String(totalPages)}
+              </span>
               <Button
                 variant="outline"
-                size="sm"
+                size="icon"
                 onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
                 disabled={page >= totalPages}
+                aria-label="Next page"
               >
-                Next
                 <ChevronRight className="h-3 w-3" />
               </Button>
             </div>

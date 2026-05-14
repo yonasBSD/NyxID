@@ -19,7 +19,6 @@ import { formatDate } from "@/lib/utils";
 import { PageHeader } from "@/components/shared/page-header";
 import { DetailSection } from "@/components/shared/detail-section";
 import { DetailRow } from "@/components/shared/detail-row";
-import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -242,29 +241,27 @@ export function AdminGroupDetailPage() {
         <DetailRow label="Updated" value={formatDate(group.updated_at)} />
       </DetailSection>
 
-      <Separator />
-
       <DetailSection title="Inherited Roles">
-        {group.roles.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            No roles assigned to this group.
-          </p>
-        ) : (
-          <div className="flex flex-wrap gap-2">
-            {group.roles.map((role) => (
-              <Badge key={role.id} variant="secondary">
-                {role.name}
-              </Badge>
-            ))}
-          </div>
-        )}
+        <div className="px-4 py-3">
+          {group.roles.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              No roles assigned to this group.
+            </p>
+          ) : (
+            <div className="flex flex-wrap gap-2">
+              {group.roles.map((role) => (
+                <Badge key={role.id} variant="secondary">
+                  {role.name}
+                </Badge>
+              ))}
+            </div>
+          )}
+        </div>
       </DetailSection>
-
-      <Separator />
 
       <DetailSection title="Members">
         {canWrite && (
-          <div className="mb-3">
+          <div className="px-4 py-3">
             <Button
               size="sm"
               variant="outline"
@@ -283,43 +280,41 @@ export function AdminGroupDetailPage() {
             <p className="text-[12px] text-muted-foreground">No members in this group.</p>
           </div>
         ) : (
-          <div className="rounded-xl border border-border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Email</TableHead>
-                  <TableHead>Name</TableHead>
-                  <TableHead className="w-[60px]" />
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Email</TableHead>
+                <TableHead>Name</TableHead>
+                <TableHead className="w-[60px]" />
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {members.map((member) => (
+                <TableRow key={member.id}>
+                  <TableCell className="font-medium">
+                    {member.email}
+                  </TableCell>
+                  <TableCell>
+                    {member.display_name ?? (
+                      <span className="text-muted-foreground">--</span>
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    {canWrite && (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8"
+                        onClick={() => setRemoveMemberId(member.id)}
+                      >
+                        <UserMinus className="h-3 w-3 text-muted-foreground" />
+                      </Button>
+                    )}
+                  </TableCell>
                 </TableRow>
-              </TableHeader>
-              <TableBody>
-                {members.map((member) => (
-                  <TableRow key={member.id}>
-                    <TableCell className="font-medium">
-                      {member.email}
-                    </TableCell>
-                    <TableCell>
-                      {member.display_name ?? (
-                        <span className="text-muted-foreground">--</span>
-                      )}
-                    </TableCell>
-                    <TableCell>
-                      {canWrite && (
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-8 w-8"
-                          onClick={() => setRemoveMemberId(member.id)}
-                        >
-                          <UserMinus className="h-3 w-3 text-muted-foreground" />
-                        </Button>
-                      )}
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
+              ))}
+            </TableBody>
+          </Table>
         )}
       </DetailSection>
 

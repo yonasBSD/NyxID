@@ -160,7 +160,7 @@ export function AdminGroupsPage() {
           </div>
         </div>
       ) : (
-        <div className="rounded-xl border border-border">
+        <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
           <Table>
             <TableHeader>
               <TableRow>

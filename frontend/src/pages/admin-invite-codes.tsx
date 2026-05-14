@@ -52,7 +52,13 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Ticket, Copy, Check, Ban, Link2 } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Ticket, Copy, Check, Ban, Link2, MoreVertical } from "lucide-react";
 import { toast } from "sonner";
 import type { InviteCode } from "@/types/admin";
 
@@ -69,7 +75,7 @@ export function AdminInviteCodesPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [createdCode, setCreatedCode] = useState<InviteCode | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [copiedLinkId, setCopiedLinkId] = useState<string | null>(null);
+  const [, setCopiedLinkId] = useState<string | null>(null);
   const [deactivateTarget, setDeactivateTarget] = useState<InviteCode | null>(
     null,
   );
@@ -262,7 +268,7 @@ export function AdminInviteCodesPage() {
           </div>
         </div>
       ) : (
-        <div className="rounded-xl border border-border">
+        <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
           <Table>
             <TableHeader>
               <TableRow>
@@ -311,61 +317,50 @@ export function AdminInviteCodesPage() {
                     {formatDate(ic.created_at)}
                   </TableCell>
                   <TableCell>
-                    <div className="flex items-center gap-1">
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-8 w-8 text-muted-foreground hover:text-foreground"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void handleCopyCode(ic.code, ic.id);
-                        }}
-                        aria-label={`Copy ${ic.code} to clipboard`}
-                      >
-                        {copiedId === ic.id ? (
-                          <Check
-                            className="h-3 w-3 text-success"
-                            aria-hidden="true"
-                          />
-                        ) : (
-                          <Copy className="h-3 w-3" aria-hidden="true" />
-                        )}
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-8 w-8 text-muted-foreground hover:text-foreground"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void handleCopyLink(ic.code, ic.id);
-                        }}
-                        aria-label={`Copy invite link for ${ic.code}`}
-                        title="Copy invite link"
-                      >
-                        {copiedLinkId === ic.id ? (
-                          <Check
-                            className="h-3 w-3 text-success"
-                            aria-hidden="true"
-                          />
-                        ) : (
-                          <Link2 className="h-3 w-3" aria-hidden="true" />
-                        )}
-                      </Button>
-                      {canWrite && ic.is_active && (
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
                         <Button
                           variant="ghost"
                           size="icon"
-                          className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                          className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <MoreVertical className="h-3 w-3" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem
                           onClick={(e) => {
                             e.stopPropagation();
-                            setDeactivateTarget(ic);
+                            void handleCopyCode(ic.code, ic.id);
                           }}
-                          aria-label={`Deactivate ${ic.code}`}
                         >
-                          <Ban className="h-3 w-3" aria-hidden="true" />
-                        </Button>
-                      )}
-                    </div>
+                          <Copy className="h-3 w-3" />
+                          Copy code
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void handleCopyLink(ic.code, ic.id);
+                          }}
+                        >
+                          <Link2 className="h-3 w-3" />
+                          Copy invite link
+                        </DropdownMenuItem>
+                        {canWrite && ic.is_active && (
+                          <DropdownMenuItem
+                            className="text-destructive focus:text-destructive"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setDeactivateTarget(ic);
+                            }}
+                          >
+                            <Ban className="h-3 w-3" />
+                            Deactivate
+                          </DropdownMenuItem>
+                        )}
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   </TableCell>
                 </TableRow>
               ))}
