@@ -25,6 +25,7 @@ import {
 import { ApiError } from "@/lib/api-client";
 import { formatDate, formatRelativeTime } from "@/lib/utils";
 import { PageHeader } from "@/components/shared/page-header";
+import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { DetailSection } from "@/components/shared/detail-section";
 import { DetailRow } from "@/components/shared/detail-row";
@@ -66,7 +67,7 @@ import {
 import {
   ExternalLink,
   MessageSquare,
-  MoreHorizontal,
+  MoreVertical,
   ShieldCheck,
   Trash2,
 } from "lucide-react";
@@ -195,7 +196,7 @@ function ConversationRow({
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button variant="ghost" size="icon" className="h-7 w-7">
-              <MoreHorizontal className="h-3.5 w-3.5" aria-hidden="true" />
+              <MoreVertical className="h-3.5 w-3.5" aria-hidden="true" />
               <span className="sr-only">Actions</span>
             </Button>
           </DropdownMenuTrigger>
@@ -262,8 +263,10 @@ function ConversationsSection({
           ))}
         </div>
       ) : !conversations || conversations.length === 0 ? (
-        <div className="flex flex-col items-center justify-center rounded-xl border border-border py-8 text-center">
-          <MessageSquare className="mb-3 h-8 w-8 text-muted-foreground/50" />
+        <div className="flex flex-col items-center justify-center gap-3 py-8 text-center">
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-border">
+            <MessageSquare className="h-4 w-4 text-muted-foreground" />
+          </div>
           <p className="text-[12px] text-muted-foreground">
             No conversation routes configured. Add a route to start relaying
             messages to an AI agent.
@@ -281,7 +284,7 @@ function ConversationsSection({
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
                         <Button variant="ghost" size="icon" className="h-7 w-7">
-                          <MoreHorizontal className="h-3.5 w-3.5" />
+                          <MoreVertical className="h-3.5 w-3.5" />
                         </Button>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end">
@@ -884,6 +887,8 @@ export function ChannelBotDetailPage() {
   const { data: apiKeys } = useApiKeys({ orgId: ownerOrgId });
   const deleteMutation = useDeleteChannelBot();
   const verifyMutation = useVerifyChannelBot();
+
+  useBreadcrumbLabel(bot?.label);
 
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
 

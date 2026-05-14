@@ -214,7 +214,50 @@ export function AdminServiceAccountsPage() {
         </div>
       ) : (
         <>
-          <div className="rounded-xl border">
+          {/* Mobile cards */}
+          <div className="flex flex-col gap-3 md:hidden">
+            {accounts.map((sa) => (
+              <div
+                key={sa.id}
+                className="rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-white/[0.03] cursor-pointer"
+                tabIndex={0}
+                role="link"
+                onClick={() =>
+                  void navigate({
+                    to: "/admin/service-accounts/$saId",
+                    params: { saId: sa.id },
+                  })
+                }
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    void navigate({
+                      to: "/admin/service-accounts/$saId",
+                      params: { saId: sa.id },
+                    });
+                  }
+                }}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium truncate">{sa.name}</p>
+                    <p className="text-xs text-muted-foreground font-mono truncate mt-0.5">
+                      {sa.client_id}
+                    </p>
+                  </div>
+                  <Badge variant={sa.is_active ? "success" : "destructive"}>
+                    {sa.is_active ? "Active" : "Inactive"}
+                  </Badge>
+                </div>
+                <div className="mt-3 flex items-center gap-3 text-xs text-muted-foreground">
+                  <span>Created {formatDate(sa.created_at)}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Desktop table */}
+          <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -285,23 +328,23 @@ export function AdminServiceAccountsPage() {
             <div className="flex items-center gap-2">
               <Button
                 variant="outline"
-                size="sm"
+                size="icon"
                 disabled={page <= 1}
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
+                aria-label="Previous page"
               >
                 <ChevronLeft className="h-3 w-3" />
-                Previous
               </Button>
               <span className="text-sm text-muted-foreground">
                 Page {String(page)} of {String(totalPages)}
               </span>
               <Button
                 variant="outline"
-                size="sm"
+                size="icon"
                 disabled={page >= totalPages}
                 onClick={() => setPage((p) => p + 1)}
+                aria-label="Next page"
               >
-                Next
                 <ChevronRight className="h-3 w-3" />
               </Button>
             </div>

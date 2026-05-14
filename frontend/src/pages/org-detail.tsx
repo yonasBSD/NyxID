@@ -54,6 +54,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { PageHeader } from "@/components/shared/page-header";
+import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 import { ApiError } from "@/lib/api-client";
 import { buildOrgInviteJoinUrl } from "@/lib/org-invite-links";
 import {
@@ -116,6 +117,8 @@ export function OrgDetailPage() {
   const removeMemberMutation = useRemoveMember();
   const cancelInviteMutation = useCancelInvite();
   const deleteOrgMutation = useDeleteOrg();
+
+  useBreadcrumbLabel(org?.display_name);
 
   const [tab, setTab] = useState<TabValue>("members");
   const [inviteOpen, setInviteOpen] = useState(false);

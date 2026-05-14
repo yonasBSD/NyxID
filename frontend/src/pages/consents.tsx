@@ -13,7 +13,6 @@ import { PageHeader } from "@/components/shared/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Dialog,
@@ -311,19 +310,17 @@ function AuthorizationsTab() {
 
   if (bindings.length === 0) {
     return (
-      <Card>
-        <CardContent className="flex flex-col items-center gap-4 py-16">
-          <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
-            <Link2 className="h-6 w-6 text-muted-foreground" />
-          </div>
-          <div className="max-w-md space-y-2 text-center">
-            <p className="text-[12px] font-medium">No Authorizations</p>
-            <p className="text-xs text-muted-foreground">
-              No broker authorizations issued. Apps that hold server-side credentials on your behalf will appear here.
-            </p>
-          </div>
-        </CardContent>
-      </Card>
+      <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
+        <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
+          <Link2 className="h-6 w-6 text-muted-foreground" />
+        </div>
+        <div className="space-y-1">
+          <p className="text-[12px] font-medium">No Authorizations</p>
+          <p className="text-xs text-muted-foreground">
+            No broker authorizations issued. Apps that hold server-side credentials on your behalf will appear here.
+          </p>
+        </div>
+      </div>
     );
   }
 
