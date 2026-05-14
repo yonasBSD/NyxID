@@ -253,7 +253,7 @@ export function AdminInviteCodesPage() {
           <MysteryBoxIcon className="h-64 w-64 text-muted-foreground/30" />
           <div className="space-y-1">
             <p className="text-[12px] font-medium text-muted-foreground/30">Failed to load invite codes</p>
-            <p className="text-xs text-muted-foreground">Please try again later.</p>
+            <p className="text-xs text-muted-foreground/30">Please try again later.</p>
           </div>
         </div>
       ) : inviteCodes.length === 0 ? (

@@ -984,7 +984,7 @@ export function ChannelBotDetailPage() {
           <p className="text-[12px] font-medium text-foreground">
             Pending webhook verification
           </p>
-          <p className="mt-1 text-[12px] text-muted-foreground">
+          <p className="mt-1 text-[12px] text-muted-foreground/30">
             {bot.platform === "lark" || bot.platform === "feishu"
               ? bot.lark_verification_token_configured
                 ? "Once Lark/Feishu delivers a verified inbound message, this bot will automatically move to Active."

@@ -322,7 +322,7 @@ export function BindingsCard({
         ) : (
           <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
             <CrystalLatticeIcon className="h-48 w-48 text-muted-foreground/30" />
-            <p className="text-xs text-muted-foreground">
+            <p className="text-xs text-muted-foreground/30">
               No credential overrides. This agent uses default credentials for
               all services.
             </p>

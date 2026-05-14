@@ -782,7 +782,7 @@ function UserRolesSection({
         )}
 
         {directRoles.length === 0 && inheritedRoles.length === 0 && (
-          <p className="text-sm text-muted-foreground">No roles assigned.</p>
+          <p className="text-sm text-muted-foreground/30">No roles assigned.</p>
         )}
       </div>
 
@@ -845,7 +845,7 @@ function UserGroupsSection({ userId }: { readonly userId: string }) {
     <DetailSection title="Groups">
       <div className="px-4 py-3">
         {groups.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No group memberships.</p>
+          <p className="text-sm text-muted-foreground/30">No group memberships.</p>
         ) : (
           <div className="flex flex-wrap gap-2">
             {groups.map((group) => (

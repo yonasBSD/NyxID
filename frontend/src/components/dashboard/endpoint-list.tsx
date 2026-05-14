@@ -121,7 +121,7 @@ export function EndpointList({ serviceId, hasApiSpecUrl }: EndpointListProps) {
       {!endpoints || endpoints.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 py-8">
           <PowerBoltIcon className="h-48 w-48 text-muted-foreground/30" />
-          <div className="rounded-lg bg-white/[0.03] px-4 py-3 text-[12px] text-muted-foreground">
+          <div className="rounded-lg bg-white/[0.03] px-4 py-3 text-[12px] text-muted-foreground/30">
             No endpoints configured.{" "}
             {hasApiSpecUrl
               ? "Use auto-discover or add one manually."
