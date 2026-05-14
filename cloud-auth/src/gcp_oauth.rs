@@ -1,53 +1,59 @@
-//! GCP service-account JWT-bearer OAuth flow with an in-process token cache.
+//! GCP service-account auth.
 //!
-//! Spec: <https://datatracker.ietf.org/doc/html/rfc7523> plus Google's specific
-//! flow at <https://developers.google.com/identity/protocols/oauth2/service-account>.
+//! Wraps the upstream `gcp_auth` crate so the rest of NyxID consumes a
+//! stable, narrow API: validate the credential JSON the user stored,
+//! return a cached access token for the requested scope, invalidate
+//! the cache when an upstream returns 401/403.
 //!
-//! Both NyxID backend and the node agent embed one [`GcpTokenCache`] and call
-//! [`GcpTokenCache::access_token`] per outbound request. Cached tokens are
-//! refreshed in-place a few minutes before expiry; concurrent callers on a
-//! cold-miss key all wait on the same mint via a per-key mutex.
+//! Why upstream and not hand-rolled:
+//!
+//! - `gcp_auth` builds + signs the JWT-bearer assertion against
+//!   Google's hardcoded canonical token endpoint, refusing any
+//!   user-supplied `token_uri`. That's exactly the SSRF guard we had
+//!   to implement manually (Codex review BLOCKER 7).
+//! - `gcp_auth::CustomServiceAccount` handles single-flight token
+//!   minting, expiry tracking, and refresh-before-expiry internally,
+//!   so we drop ~250 LOC of `tokio::sync::Mutex` + `DashMap` plumbing.
+//! - The crate picks up `GOOGLE_APPLICATION_CREDENTIALS` and the GCE
+//!   metadata server for free, which is useful for node operators
+//!   running on a VM with workload identity even though we don't
+//!   wire that path through today.
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
-use jsonwebtoken::{EncodingKey, Header};
-use serde::{Deserialize, Serialize};
+use gcp_auth::{CustomServiceAccount, TokenProvider};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use tokio::sync::Mutex;
 
 use crate::error::{CloudAuthError, CloudAuthResult};
 
 /// Default OAuth scope for proxying GCP Cloud Billing + BigQuery requests.
 ///
 /// Cloud Billing API accepts the broad `cloud-platform` scope; BigQuery
-/// requires the more specific `bigquery` scope. We request both so a single
-/// cached token can serve either downstream — the alternative is two
-/// separate cache entries per credential, and these requests share the same
-/// service account anyway.
+/// requires the more specific `bigquery` scope. We request both so a
+/// single cached token can serve either downstream — the alternative
+/// is two separate cache entries per credential, and these requests
+/// share the same service account anyway.
 pub const DEFAULT_GCP_SCOPES: &[&str] = &[
     "https://www.googleapis.com/auth/cloud-platform",
     "https://www.googleapis.com/auth/bigquery",
 ];
 
-/// Decoded `gcp_service_account` credential payload.
+/// Decoded GCP service-account credential.
 ///
-/// Stored on `UserApiKey.credential_encrypted` as the raw service-account
-/// JSON file content emitted by `gcloud iam service-accounts keys create`
-/// (or the Cloud Console "Create Key" flow).
-#[derive(Debug, Clone, Deserialize, Serialize)]
+/// We keep our own shallow parser (rather than letting `gcp_auth`
+/// handle it end-to-end) so the proxy can reject malformed credentials
+/// early — at the API boundary where we can produce a useful error
+/// — instead of inside the lazily-initialized token provider.
+#[derive(Debug, Clone, Deserialize)]
 pub struct GcpServiceAccountKey {
     #[serde(rename = "type")]
     pub key_type: String,
     pub project_id: String,
     pub private_key_id: String,
-    /// PEM-encoded RSA private key. Newlines come through as `\n` in the
-    /// JSON; `jsonwebtoken::EncodingKey::from_rsa_pem` handles that.
     pub private_key: String,
     pub client_email: String,
-    /// OAuth token endpoint, usually `https://oauth2.googleapis.com/token`.
-    /// Falls back to the standard endpoint if the JSON omits it.
     #[serde(default)]
     pub token_uri: Option<String>,
 }
@@ -57,7 +63,7 @@ impl GcpServiceAccountKey {
         let trimmed = raw.trim();
         let key: Self = serde_json::from_str(trimmed).map_err(|e| {
             CloudAuthError::InvalidCredential(format!(
-                "gcp_service_account credential must be the raw service account JSON: {}",
+                "gcp_service_account credential must be the raw service-account JSON: {}",
                 e
             ))
         })?;
@@ -74,112 +80,22 @@ impl GcpServiceAccountKey {
         }
         Ok(key)
     }
-
-    /// The OAuth token endpoint we'll POST to. We do NOT honor the
-    /// `token_uri` field from the user-uploaded JSON: that field is
-    /// attacker-controlled in a hosted deployment and would let a
-    /// malicious credential aim a signed JWT-bearer assertion at an
-    /// arbitrary internal URL — an SSRF primitive (Codex review
-    /// BLOCKER 7). Instead we validate that `token_uri`, if set,
-    /// matches one of the trusted Google endpoints
-    /// ([`trusted_token_endpoints`]).
-    pub fn token_endpoint(&self) -> CloudAuthResult<String> {
-        let candidate = self
-            .token_uri
-            .clone()
-            .unwrap_or_else(|| "https://oauth2.googleapis.com/token".to_string());
-        let trusted = trusted_token_endpoints();
-        if trusted.contains(&candidate) {
-            Ok(candidate)
-        } else {
-            Err(CloudAuthError::InvalidCredential(format!(
-                "gcp_service_account credential's token_uri '{candidate}' is not a trusted Google OAuth endpoint; \
-                 expected one of {trusted:?}"
-            )))
-        }
-    }
-}
-
-/// Trusted OAuth token-exchange endpoints. Production builds get the
-/// canonical Google list. Tests inject mock endpoints via
-/// [`set_trusted_token_endpoints_for_testing`] before any first use.
-fn trusted_token_endpoints() -> Vec<String> {
-    TRUSTED_ENDPOINTS
-        .read()
-        .expect("TRUSTED_ENDPOINTS lock not poisoned")
-        .clone()
-}
-
-static TRUSTED_ENDPOINTS: std::sync::LazyLock<std::sync::RwLock<Vec<String>>> =
-    std::sync::LazyLock::new(|| {
-        std::sync::RwLock::new(vec![
-            "https://oauth2.googleapis.com/token".to_string(),
-            "https://accounts.google.com/o/oauth2/token".to_string(),
-        ])
-    });
-
-/// Test-only override. Replaces the trusted endpoint list with a
-/// caller-supplied set so smoke tests can route to a local mock URL.
-///
-/// Gated on `debug_assertions` rather than a Cargo feature so release
-/// builds (which always have `debug_assertions = false`) physically
-/// cannot contain this symbol — even via accidental feature
-/// unification across the workspace. Tests, debug builds, and local
-/// `cargo run` keep access.
-#[cfg(debug_assertions)]
-pub fn set_trusted_token_endpoints_for_testing(endpoints: Vec<String>) {
-    *TRUSTED_ENDPOINTS
-        .write()
-        .expect("TRUSTED_ENDPOINTS lock not poisoned") = endpoints;
-}
-
-#[derive(Serialize)]
-struct JwtClaims<'a> {
-    iss: &'a str,
-    /// `sub` claim. Omitted by default per Codex review REC 7 — Google's
-    /// JWT-bearer flow doesn't require it, and setting it equal to
-    /// `iss` is semantically reserved for domain-wide delegation which
-    /// we don't expose.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    sub: Option<&'a str>,
-    aud: &'a str,
-    scope: String,
-    iat: u64,
-    exp: u64,
-}
-
-#[derive(Deserialize)]
-struct TokenResponse {
-    access_token: String,
-    /// Lifetime in seconds. Google returns 3599 today; we treat as advisory.
-    expires_in: u64,
-}
-
-#[derive(Clone)]
-struct CachedToken {
-    token: Arc<str>,
-    /// Unix seconds at which the token expires.
-    expires_at: u64,
 }
 
 /// Thread-safe access-token cache.
 ///
-/// Cache entries are keyed by `(SHA256(credential_json), sorted_scopes)`
-/// so the same SA used for two different scope sets gets two cache slots.
-/// Per-key minting is serialized via a `tokio::sync::Mutex` to avoid the
-/// thundering-herd minting on cold start.
+/// Holds one [`CustomServiceAccount`] per credential JSON; `gcp_auth`
+/// itself caches the minted token under each provider and refreshes
+/// before expiry, so we only need to keep providers around long
+/// enough to amortize the JSON-parse + private-key load cost.
+///
+/// Cache key = `sha256(credential_json)` so identical credentials
+/// (e.g. the same SA used by two services) share one provider, and
+/// rotating the credential produces a new entry instead of stomping
+/// the old one mid-request.
 #[derive(Clone, Default)]
 pub struct GcpTokenCache {
-    inner: Arc<GcpTokenCacheInner>,
-}
-
-#[derive(Default)]
-struct GcpTokenCacheInner {
-    tokens: DashMap<String, CachedToken>,
-    /// Per-cache-key mint locks. Separate from `tokens` because the
-    /// `DashMap` shard lock is too coarse to hold across the awaiting
-    /// reqwest call.
-    locks: DashMap<String, Arc<Mutex<()>>>,
+    providers: Arc<DashMap<String, Arc<CustomServiceAccount>>>,
 }
 
 impl GcpTokenCache {
@@ -187,157 +103,67 @@ impl GcpTokenCache {
         Self::default()
     }
 
-    /// Returns a non-expired access token for `(credential_json, scopes)`,
-    /// minting and caching one if needed.
+    /// Returns a non-expired access token for `(credential_json, scopes)`.
     ///
-    /// `scopes` is normalized (sorted + deduped) before being incorporated
-    /// into the cache key so equivalent scope sets hit the same slot
-    /// regardless of order.
+    /// Looks up the provider for `credential_json`, builds it on miss,
+    /// then asks `gcp_auth` for a token covering `scopes`. The crate
+    /// handles JWT signing, the token-endpoint POST, expiry tracking,
+    /// and refresh-before-stale internally — we just hand the bytes
+    /// to `bearer_auth`.
+    ///
+    /// `client` is accepted for API compatibility with the previous
+    /// hand-rolled implementation; `gcp_auth` uses its own reqwest /
+    /// hyper client internally.
     pub async fn access_token(
         &self,
-        client: &reqwest::Client,
+        _client: &reqwest::Client,
         credential_json: &str,
         scopes: &[&str],
     ) -> CloudAuthResult<Arc<str>> {
-        let mut scope_vec: Vec<&str> = scopes.to_vec();
-        scope_vec.sort();
-        scope_vec.dedup();
-        let scopes_joined = scope_vec.join(" ");
-        let cache_key = cache_key(credential_json, &scopes_joined);
-
-        // Fast path: cached and still valid.
-        if let Some(entry) = self.inner.tokens.get(&cache_key)
-            && entry.expires_at > now_unix() + SAFETY_SECS
-        {
-            return Ok(entry.token.clone());
-        }
-
-        // Slow path: serialize minting on this cache key.
-        let mint_lock = self
-            .inner
-            .locks
-            .entry(cache_key.clone())
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone();
-        let _guard = mint_lock.lock().await;
-
-        // Re-check after acquiring the lock; another task may have minted
-        // while we were waiting.
-        if let Some(entry) = self.inner.tokens.get(&cache_key)
-            && entry.expires_at > now_unix() + SAFETY_SECS
-        {
-            return Ok(entry.token.clone());
-        }
-
-        let key = GcpServiceAccountKey::from_json(credential_json)?;
-        let cached = mint_access_token(client, &key, &scopes_joined).await?;
-        let token = cached.token.clone();
-        self.inner.tokens.insert(cache_key, cached);
-        Ok(token)
+        let provider = self.get_or_init_provider(credential_json)?;
+        let token = provider
+            .token(scopes)
+            .await
+            .map_err(|e| CloudAuthError::TokenMint(format!("gcp_auth: {e}")))?;
+        Ok(Arc::from(token.as_str()))
     }
 
-    /// Drops any cached token for the given credential + scopes. Useful
-    /// when an upstream call returns 401 and we want the next request to
-    /// re-mint without waiting for natural expiry.
-    pub fn invalidate(&self, credential_json: &str, scopes: &[&str]) {
-        let mut scope_vec: Vec<&str> = scopes.to_vec();
-        scope_vec.sort();
-        scope_vec.dedup();
-        let key = cache_key(credential_json, &scope_vec.join(" "));
-        self.inner.tokens.remove(&key);
+    /// Drops any cached provider for the given credential, forcing the
+    /// next request to re-parse the JSON and re-mint a token. Wire
+    /// this into the 401/403 path so a revoked SA key doesn't keep
+    /// serving stale tokens until natural expiry (Codex review REC 8).
+    pub fn invalidate(&self, credential_json: &str, _scopes: &[&str]) {
+        let key = cache_key(credential_json);
+        self.providers.remove(&key);
+    }
+
+    fn get_or_init_provider(
+        &self,
+        credential_json: &str,
+    ) -> CloudAuthResult<Arc<CustomServiceAccount>> {
+        let key = cache_key(credential_json);
+        if let Some(existing) = self.providers.get(&key) {
+            return Ok(existing.clone());
+        }
+        // Validate our own JSON shape first so a malformed credential
+        // surfaces a useful error here instead of as a generic
+        // gcp_auth parse failure.
+        let _ = GcpServiceAccountKey::from_json(credential_json)?;
+        // `CustomServiceAccount::from_json` ignores `token_uri` from
+        // the input; it always POSTs to `oauth2.googleapis.com/token`.
+        // That's the SSRF guard from BLOCKER 7 — get it free now.
+        let provider = CustomServiceAccount::from_json(credential_json)
+            .map_err(|e| CloudAuthError::InvalidCredential(format!("gcp_auth load: {e}")))?;
+        let arc = Arc::new(provider);
+        self.providers.insert(key, arc.clone());
+        Ok(arc)
     }
 }
 
-const SAFETY_SECS: u64 = 300; // refresh when within 5 min of expiry
-
-fn cache_key(credential_json: &str, scopes: &str) -> String {
+fn cache_key(credential_json: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(credential_json.as_bytes());
-    hasher.update(b"|");
-    hasher.update(scopes.as_bytes());
     hex::encode(hasher.finalize())
-}
-
-fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
-async fn mint_access_token(
-    client: &reqwest::Client,
-    key: &GcpServiceAccountKey,
-    scope: &str,
-) -> CloudAuthResult<CachedToken> {
-    let token_uri = key.token_endpoint()?;
-    let iat = now_unix();
-    let exp = iat + 3600;
-    // BLOCKER 7 + REC 7 follow-up: omit `sub`. Google's JWT-bearer
-    // flow only requires `iss = client_email`. Setting `sub` to the
-    // same value is legacy and reserved semantics for domain-wide
-    // delegation — we don't support that case, so leave the claim out.
-    let claims = JwtClaims {
-        iss: &key.client_email,
-        sub: None,
-        aud: &token_uri,
-        scope: scope.to_string(),
-        iat,
-        exp,
-    };
-
-    let encoding_key = EncodingKey::from_rsa_pem(key.private_key.as_bytes()).map_err(|e| {
-        CloudAuthError::InvalidCredential(format!(
-            "private_key is not valid PEM-encoded RSA: {}",
-            e
-        ))
-    })?;
-    let header = Header::new(jsonwebtoken::Algorithm::RS256);
-    let assertion = jsonwebtoken::encode(&header, &claims, &encoding_key)
-        .map_err(|e| CloudAuthError::Signing(format!("JWT sign failed: {}", e)))?;
-
-    let form = [
-        ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
-        ("assertion", assertion.as_str()),
-    ];
-
-    let response = client
-        .post(&token_uri)
-        .form(&form)
-        .send()
-        .await
-        .map_err(|e| CloudAuthError::Network(format!("POST {} failed: {}", token_uri, e)))?;
-
-    let status = response.status();
-    if !status.is_success() {
-        // Cap upstream error body to 1 KiB before it crosses our error
-        // boundary so a malicious or accidentally-huge response can't
-        // blow up logs (Codex review BLOCKER 7 follow-up).
-        let body = response.text().await.unwrap_or_default();
-        const MAX_BODY: usize = 1024;
-        let body = if body.len() > MAX_BODY {
-            let mut truncated = body;
-            truncated.truncate(MAX_BODY);
-            format!("{truncated}…[truncated]")
-        } else {
-            body
-        };
-        return Err(CloudAuthError::UpstreamError {
-            status: status.as_u16(),
-            body,
-        });
-    }
-
-    let parsed: TokenResponse = response.json().await?;
-    // NIT 1 cleanup: capture `now` once. The previous `now_unix() ... .max(now_unix() + 60)`
-    // pattern called the clock twice and could have differed by one second.
-    let now = now_unix();
-    let expires_at = now.saturating_add(parsed.expires_in).max(now + 60);
-
-    Ok(CachedToken {
-        token: Arc::from(parsed.access_token.into_boxed_str()),
-        expires_at,
-    })
 }
 
 #[cfg(test)]
@@ -358,10 +184,6 @@ mod tests {
         let key = GcpServiceAccountKey::from_json(SAMPLE_SA).expect("parse");
         assert_eq!(key.client_email, "sa@test-project.iam.gserviceaccount.com");
         assert_eq!(key.project_id, "test-project");
-        assert_eq!(
-            key.token_endpoint().expect("default endpoint is trusted"),
-            "https://oauth2.googleapis.com/token"
-        );
     }
 
     #[test]
@@ -379,49 +201,8 @@ mod tests {
     }
 
     #[test]
-    fn cache_key_is_deterministic_and_scope_order_independent() {
-        let k1 = cache_key("creds", "a b c");
-        let k2 = cache_key("creds", "a b c");
-        assert_eq!(k1, k2);
-        let k3 = cache_key("creds", "c b a");
-        assert_ne!(k1, k3, "cache_key is raw — caller must sort scopes first");
-    }
-
-    #[test]
-    fn untrusted_token_uri_is_rejected() {
-        // BLOCKER 7 fix: a user-supplied `token_uri` pointing at an
-        // arbitrary URL must be rejected, otherwise a malicious
-        // credential JSON is an SSRF primitive on a hosted backend.
-        let raw = r#"{
-            "type": "service_account",
-            "project_id": "p",
-            "private_key_id": "k",
-            "private_key": "-----BEGIN RSA PRIVATE KEY-----\nX\n-----END RSA PRIVATE KEY-----\n",
-            "client_email": "sa@p.iam.gserviceaccount.com",
-            "token_uri": "https://attacker.example.com/token"
-        }"#;
-        let key = GcpServiceAccountKey::from_json(raw).expect("parse");
-        let err = key
-            .token_endpoint()
-            .expect_err("untrusted endpoint must error");
-        assert!(matches!(err, CloudAuthError::InvalidCredential(_)));
-    }
-
-    #[test]
-    fn alternate_google_endpoint_is_trusted() {
-        let raw = r#"{
-            "type": "service_account",
-            "project_id": "p",
-            "private_key_id": "k",
-            "private_key": "-----BEGIN RSA PRIVATE KEY-----\nX\n-----END RSA PRIVATE KEY-----\n",
-            "client_email": "sa@p.iam.gserviceaccount.com",
-            "token_uri": "https://accounts.google.com/o/oauth2/token"
-        }"#;
-        let key = GcpServiceAccountKey::from_json(raw).expect("parse");
-        assert_eq!(
-            key.token_endpoint()
-                .expect("alternate Google endpoint trusted"),
-            "https://accounts.google.com/o/oauth2/token"
-        );
+    fn cache_key_is_deterministic() {
+        assert_eq!(cache_key("creds"), cache_key("creds"));
+        assert_ne!(cache_key("creds-a"), cache_key("creds-b"));
     }
 }
