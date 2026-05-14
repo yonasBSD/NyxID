@@ -232,6 +232,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             auth_key_name,
             credential,
             credential_env,
+            credential_file,
             scopes,
             org,
             openapi_spec_url,
@@ -288,7 +289,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             };
             let interactive_output = matches!(auth.output, OutputFormat::Table);
             let explicit_scripted = is_explicit_scripted(
-                credential.is_some(),
+                credential.is_some() || credential_file.is_some(),
                 credential_env.is_some(),
                 oauth,
                 device_code,
@@ -568,6 +569,8 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 } else if let Some(env_var) = &credential_env {
                     std::env::var(env_var)
                         .with_context(|| format!("Environment variable {env_var} not set"))?
+                } else if let Some(path) = credential_file.as_deref() {
+                    read_credential_file(path)?
                 } else if let Some(fields) = token_exchange_fields.as_ref() {
                     // Declarative token_exchange services advertise their
                     // credential fields via the catalog. Prompt for each
@@ -581,7 +584,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 };
                 if cred_value.is_empty() {
                     bail!(
-                        "Credential is required. Pass --credential, --credential-env, or enter interactively."
+                        "Credential is required. Pass --credential, --credential-env, --credential-file, or enter interactively."
                     );
                 }
                 body.insert("credential".into(), Value::String(cred_value));
@@ -1551,6 +1554,37 @@ fn prompt_line_default(prompt: &str, default: &str, flag: &str) -> Result<String
 fn prompt_password(prompt: &str, flag: &str) -> Result<String> {
     ensure_stdin_is_tty(flag)?;
     Ok(rpassword::prompt_password(prompt)?)
+}
+
+/// Read credential bytes from `path`, or from stdin when `path == "-"`.
+///
+/// Used for multi-field credential payloads (aws_sigv4 access-key JSON,
+/// gcp_service_account SA JSON) where typing into rpassword would be
+/// error-prone. Trims surrounding whitespace so a trailing newline from
+/// the file doesn't produce a JSON-parse error on the server. Also
+/// strips a UTF-8 BOM if present (Codex review NIT 3) — JSON parsers
+/// reject U+FEFF in leading position.
+fn read_credential_file(path: &str) -> Result<String> {
+    use std::io::Read;
+    let raw = if path == "-" {
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .context("Reading credential from stdin")?;
+        buf
+    } else {
+        std::fs::read_to_string(path).with_context(|| format!("Reading credential file {path}"))?
+    };
+    let without_bom = raw.strip_prefix('\u{feff}').unwrap_or(&raw);
+    let trimmed = without_bom.trim();
+    if trimmed.is_empty() {
+        if path == "-" {
+            bail!("Credential read from stdin is empty");
+        } else {
+            bail!("Credential file {path} is empty");
+        }
+    }
+    Ok(trimmed.to_string())
 }
 
 /// Returns true when the CLI is running somewhere we can't reasonably
