@@ -327,7 +327,7 @@ export function ServiceDetailPage() {
                       onClick={() => void handleTestSshConnection()}
                       isLoading={testSshMutation.isPending}
                     >
-                      Test connection
+                      Test Connection
                     </Button>
                   </div>
                 )}
@@ -577,9 +577,9 @@ export function ServiceDetailPage() {
                 />
               </div>
             ) : (
-              <p className="text-[12px] text-muted-foreground">
+              <div className="rounded-lg bg-white/[0.03] px-4 py-3 text-[12px] text-muted-foreground">
                 No default headers configured for this service.
-              </p>
+              </div>
             )}
           </DetailSection>
 

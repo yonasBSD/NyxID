@@ -58,7 +58,8 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Ticket, Copy, Check, Ban, Link2, MoreVertical } from "lucide-react";
+import { Copy, Check, Ban, Link2, MoreVertical } from "lucide-react";
+import { MysteryBoxIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 import type { InviteCode } from "@/types/admin";
 
@@ -248,23 +249,19 @@ export function AdminInviteCodesPage() {
           ))}
         </div>
       ) : error ? (
-        <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
-          <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
-            <Ticket className="h-6 w-6 text-muted-foreground" />
-          </div>
+        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+          <MysteryBoxIcon className="h-64 w-64 text-muted-foreground/30" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium">Failed to load invite codes</p>
-            <p className="text-xs text-muted-foreground">Please try again later.</p>
+            <p className="text-[12px] font-medium text-muted-foreground/30">Failed to load invite codes</p>
+            <p className="text-xs text-muted-foreground/30">Please try again later.</p>
           </div>
         </div>
       ) : inviteCodes.length === 0 ? (
-        <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
-          <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
-            <Ticket className="h-6 w-6 text-muted-foreground" />
-          </div>
+        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+          <MysteryBoxIcon className="h-64 w-64 text-muted-foreground/30" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium">No invite codes found</p>
-            <p className="text-xs text-muted-foreground">Create one to allow a new user to register.</p>
+            <p className="text-[12px] font-medium text-muted-foreground/30">No invite codes found</p>
+            <p className="text-xs text-muted-foreground/30">Create one to allow a new user to register.</p>
           </div>
         </div>
       ) : (
@@ -394,7 +391,7 @@ export function AdminInviteCodesPage() {
                   <TableCell>{getStatusBadge(ic)}</TableCell>
                   <TableCell>
                     {ic.note ? (
-                      <span className="text-sm text-muted-foreground">
+                      <span className="text-[11px] text-text-tertiary">
                         {ic.note}
                       </span>
                     ) : (
@@ -765,7 +762,7 @@ export function AdminInviteCodesPage() {
                   </span>
                 </div>
                 {selectedCode.usages.length === 0 ? (
-                  <div className="rounded-md border border-dashed border-border py-8 text-center text-sm text-muted-foreground">
+                  <div className="rounded-md border border-dashed border-border py-8 text-center text-[11px] text-text-tertiary">
                     No redemptions yet.
                   </div>
                 ) : (

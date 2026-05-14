@@ -42,7 +42,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
-  HardDrive,
   Search,
   ChevronLeft,
   ChevronRight,
@@ -50,6 +49,7 @@ import {
   Trash2,
   MoreVertical,
 } from "lucide-react";
+import { MagicBoxIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { NodeStatusBadge } from "@/components/shared/node-status-badge";
@@ -183,23 +183,19 @@ export function AdminNodesPage() {
           ))}
         </div>
       ) : error ? (
-        <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
-          <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
-            <HardDrive className="h-6 w-6 text-muted-foreground" />
-          </div>
+        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+          <MagicBoxIcon className="h-64 w-64 text-muted-foreground/30" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium">Failed to load nodes</p>
-            <p className="text-xs text-muted-foreground">Please try again later.</p>
+            <p className="text-[12px] font-medium text-muted-foreground/30">Failed to load nodes</p>
+            <p className="text-xs text-muted-foreground/30">Please try again later.</p>
           </div>
         </div>
       ) : nodes.length === 0 ? (
-        <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
-          <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
-            <HardDrive className="h-6 w-6 text-muted-foreground" />
-          </div>
+        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+          <MagicBoxIcon className="h-64 w-64 text-muted-foreground/30" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium">No nodes found</p>
-            <p className="text-xs text-muted-foreground">
+            <p className="text-[12px] font-medium text-muted-foreground/30">No nodes found</p>
+            <p className="text-xs text-muted-foreground/30">
               {search || statusFilter
                 ? "No nodes match your filters."
                 : "No credential nodes registered."}
@@ -320,7 +316,7 @@ export function AdminNodesPage() {
                       </div>
                     </TableCell>
                     <TableCell>
-                      <span className="text-sm text-muted-foreground">
+                      <span className="text-[11px] text-text-tertiary">
                         {node.user_email ?? node.user_id}
                       </span>
                     </TableCell>
@@ -396,7 +392,7 @@ export function AdminNodesPage() {
           </div>
 
           <div className="flex items-center justify-between">
-            <p className="text-sm text-muted-foreground">
+            <p className="text-[11px] text-text-tertiary">
               Showing {String((page - 1) * PER_PAGE + 1)}-
               {String(Math.min(page * PER_PAGE, total))} of {String(total)}{" "}
               nodes
@@ -411,7 +407,7 @@ export function AdminNodesPage() {
               >
                 <ChevronLeft className="h-3 w-3" />
               </Button>
-              <span className="text-sm text-muted-foreground">
+              <span className="text-[11px] text-text-tertiary">
                 Page {String(page)} of {String(totalPages)}
               </span>
               <Button

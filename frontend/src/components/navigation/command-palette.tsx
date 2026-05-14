@@ -50,7 +50,7 @@ export const ALL_ITEMS = [
   { icon: Layers, label: "Groups", to: "/admin/groups", group: "admin" },
   { icon: Server, label: "Services", to: "/services", group: "admin" },
   { icon: Plug, label: "Providers", to: "/providers", group: "admin" },
-  { icon: Plus, label: "Connect a service", to: "/keys", group: "action" },
+  { icon: Plus, label: "Connect a Service", to: "/keys", group: "action" },
   { icon: KeyRound, label: "Create API key", to: "/keys?tab=nyxid", group: "action" },
   { icon: ShieldCheck, label: "Review approvals", to: "/approvals/history", group: "action" },
 ] as const;

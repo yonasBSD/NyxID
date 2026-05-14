@@ -329,7 +329,7 @@ function OnboardingTakeover({
           <ButtonIcon variant="primary">
             <ArrowRight className="h-4 w-4" />
           </ButtonIcon>
-          Connect a service
+          Connect a Service
         </Button>
 
         {/* Trust signals */}
@@ -369,7 +369,7 @@ function OnboardingChecklist({
   const steps = [
     {
       done: serviceConnected,
-      title: "Connect a service",
+      title: "Connect a Service",
       description: "Add an API service to proxy through NyxID.",
       icon: <Cable className="h-4 w-4" />,
       href: "/keys?action=add-service",
@@ -381,7 +381,7 @@ function OnboardingChecklist({
       description: "Generate a scoped key for your AI agent.",
       icon: <KeyRound className="h-4 w-4" />,
       href: "/keys?tab=nyxid&action=create-key",
-      cta: "Create key",
+      cta: "Create Key",
     },
     {
       done: false,
@@ -826,7 +826,7 @@ function ApprovalsCard() {
             <ButtonIcon className="border-white/20 bg-white/10">
               <Smartphone className="h-3 w-3" />
             </ButtonIcon>
-            Get app
+            Get App
           </a>
         </Button>
       </div>
