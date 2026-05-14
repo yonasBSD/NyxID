@@ -38,7 +38,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { ShieldCheck, Trash2 } from "lucide-react";
+import { Trash2 } from "lucide-react";
+import { SmartRemoteIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 import { Checkbox } from "@/components/ui/checkbox";
 
@@ -137,23 +138,19 @@ export function AdminRolesPage() {
           ))}
         </div>
       ) : error ? (
-        <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
-          <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
-            <ShieldCheck className="h-6 w-6 text-muted-foreground" />
-          </div>
+        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+          <SmartRemoteIcon className="h-64 w-64 text-muted-foreground/30" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium">Failed to load roles</p>
+            <p className="text-[12px] font-medium text-muted-foreground/30">Failed to load roles</p>
             <p className="text-xs text-muted-foreground">Please try again later.</p>
           </div>
         </div>
       ) : roles.length === 0 ? (
-        <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
-          <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
-            <ShieldCheck className="h-6 w-6 text-muted-foreground" />
-          </div>
+        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+          <SmartRemoteIcon className="h-64 w-64 text-muted-foreground/30" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium">No roles found</p>
-            <p className="text-xs text-muted-foreground">There are no roles to display.</p>
+            <p className="text-[12px] font-medium text-muted-foreground/30">No roles found</p>
+            <p className="text-xs text-muted-foreground/30">There are no roles to display.</p>
           </div>
         </div>
       ) : (

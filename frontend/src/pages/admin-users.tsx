@@ -46,13 +46,13 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
-  Users,
   Search,
   ChevronLeft,
   ChevronRight,
   Eye,
   EyeOff,
 } from "lucide-react";
+import { BiometricIdentityIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 
 const PER_PAGE = 20;
@@ -167,23 +167,19 @@ export function AdminUsersPage() {
           ))}
         </div>
       ) : error ? (
-        <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
-          <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
-            <Users className="h-6 w-6 text-muted-foreground" />
-          </div>
+        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+          <BiometricIdentityIcon className="h-64 w-64 text-muted-foreground/30" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium">Failed to load users</p>
+            <p className="text-[12px] font-medium text-muted-foreground/30">Failed to load users</p>
             <p className="text-xs text-muted-foreground">Please try again later.</p>
           </div>
         </div>
       ) : users.length === 0 ? (
-        <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
-          <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
-            <Users className="h-6 w-6 text-muted-foreground" />
-          </div>
+        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+          <BiometricIdentityIcon className="h-64 w-64 text-muted-foreground/30" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium">No users found</p>
-            <p className="text-xs text-muted-foreground">
+            <p className="text-[12px] font-medium text-muted-foreground/30">No users found</p>
+            <p className="text-xs text-muted-foreground/30">
               {search ? "No users match your search." : "There are no users to display."}
             </p>
           </div>
@@ -310,7 +306,7 @@ export function AdminUsersPage() {
           </div>
 
           <div className="flex items-center justify-between">
-            <p className="text-sm text-muted-foreground">
+            <p className="text-[11px] text-text-tertiary">
               Showing {String((page - 1) * PER_PAGE + 1)}-
               {String(Math.min(page * PER_PAGE, total))} of {String(total)}{" "}
               users
@@ -325,7 +321,7 @@ export function AdminUsersPage() {
               >
                 <ChevronLeft className="h-3 w-3" />
               </Button>
-              <span className="text-sm text-muted-foreground">
+              <span className="text-[11px] text-text-tertiary">
                 Page {String(page)} of {String(totalPages)}
               </span>
               <Button

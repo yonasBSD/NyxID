@@ -74,8 +74,8 @@ import {
   MailCheck,
   LogOut,
   AlertCircle,
-  Monitor,
 } from "lucide-react";
+import { BiometricIdentityIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 
 type ConfirmAction =
@@ -439,11 +439,9 @@ export function AdminUserDetailPage() {
 
       <DetailSection title="Sessions">
         {sessions.length === 0 ? (
-          <div className="flex flex-col items-center justify-center gap-3 py-8 text-center">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-border">
-              <Monitor className="h-4 w-4 text-muted-foreground" />
-            </div>
-            <p className="text-[12px] text-muted-foreground">No sessions found.</p>
+          <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
+            <BiometricIdentityIcon className="h-48 w-48 text-muted-foreground/30" />
+            <p className="text-[12px] text-muted-foreground/30">No sessions found.</p>
           </div>
         ) : (
           <Table>

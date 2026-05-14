@@ -430,7 +430,7 @@ function ApiKeySection({
           {showRotateInHeader && (
             <Button variant="outline" onClick={() => setRotating(true)}>
               <ButtonIcon><RefreshCw className="h-3 w-3" /></ButtonIcon>
-              Rotate Credential
+              Rotate Credentials
             </Button>
           )}
         </div>

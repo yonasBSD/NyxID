@@ -43,7 +43,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Users, Trash2 } from "lucide-react";
+import { Trash2 } from "lucide-react";
+import { HierarchyIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 
 export function AdminGroupsPage() {
@@ -140,23 +141,19 @@ export function AdminGroupsPage() {
           ))}
         </div>
       ) : error ? (
-        <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
-          <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
-            <Users className="h-6 w-6 text-muted-foreground" />
-          </div>
+        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+          <HierarchyIcon className="h-64 w-64 text-muted-foreground/30" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium">Failed to load groups</p>
+            <p className="text-[12px] font-medium text-muted-foreground/30">Failed to load groups</p>
             <p className="text-xs text-muted-foreground">Please try again later.</p>
           </div>
         </div>
       ) : groups.length === 0 ? (
-        <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
-          <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
-            <Users className="h-6 w-6 text-muted-foreground" />
-          </div>
+        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+          <HierarchyIcon className="h-64 w-64 text-muted-foreground/30" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium">No groups found</p>
-            <p className="text-xs text-muted-foreground">There are no groups to display.</p>
+            <p className="text-[12px] font-medium text-muted-foreground/30">No groups found</p>
+            <p className="text-xs text-muted-foreground/30">There are no groups to display.</p>
           </div>
         </div>
       ) : (

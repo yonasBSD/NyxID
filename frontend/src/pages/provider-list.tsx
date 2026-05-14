@@ -51,7 +51,8 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
-import { Plus, Plug, Shield } from "lucide-react";
+import { Plus, Plug } from "lucide-react";
+import { DishAntennaIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 
 const PROVIDER_TYPE_LABELS: Readonly<Record<string, string>> = {
@@ -747,13 +748,11 @@ export function ProviderListPage() {
           ))}
         </div>
       ) : !providers || providers.length === 0 ? (
-        <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
-          <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
-            <Shield className="h-6 w-6 text-muted-foreground" />
-          </div>
+        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+          <DishAntennaIcon className="h-64 w-64 text-muted-foreground/30" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium">No Providers</p>
-            <p className="text-xs text-muted-foreground">
+            <p className="text-[12px] font-medium text-muted-foreground/30">No Providers</p>
+            <p className="text-xs text-muted-foreground/30">
               Add a provider to get started.
             </p>
           </div>

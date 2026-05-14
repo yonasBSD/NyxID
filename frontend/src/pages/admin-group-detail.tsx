@@ -48,7 +48,9 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Pencil, Trash2, AlertCircle, UserPlus, UserMinus, Users } from "lucide-react";
+import { Pencil, Trash2, AlertCircle, UserPlus, UserMinus } from "lucide-react";
+import { BenchesIcon } from "@/components/icons/empty-state";
+import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { toast } from "sonner";
 
 export function AdminGroupDetailPage() {
@@ -264,22 +266,13 @@ export function AdminGroupDetailPage() {
       <DetailSection title="Members">
         {canWrite && (
           <div className="px-4 py-3">
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => setAddMemberOpen(true)}
-            >
-              <UserPlus className="h-3 w-3" />
-              Add Member
-            </Button>
+            <AddCtaButton label="Add Member" onClick={() => setAddMemberOpen(true)} icon={UserPlus} />
           </div>
         )}
         {members.length === 0 ? (
-          <div className="flex flex-col items-center justify-center gap-3 py-8 text-center">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-border">
-              <Users className="h-4 w-4 text-muted-foreground" />
-            </div>
-            <p className="text-[12px] text-muted-foreground">No members in this group.</p>
+          <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
+            <BenchesIcon className="h-48 w-48 text-muted-foreground/30" />
+            <p className="text-[12px] text-muted-foreground/30">No members in this group.</p>
           </div>
         ) : (
           <Table>

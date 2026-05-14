@@ -14,7 +14,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { ClipboardList, ChevronLeft, ChevronRight, Search } from "lucide-react";
+import { ChevronLeft, ChevronRight, Search } from "lucide-react";
+import { SeoKeywordIcon } from "@/components/icons/empty-state";
 
 const PER_PAGE = 25;
 
@@ -106,23 +107,19 @@ export function AdminAuditLogPage() {
           ))}
         </div>
       ) : error ? (
-        <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
-          <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
-            <ClipboardList className="h-6 w-6 text-muted-foreground" />
-          </div>
+        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+          <SeoKeywordIcon className="h-64 w-64 text-muted-foreground/30" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium">Failed to load audit log</p>
+            <p className="text-[12px] font-medium text-muted-foreground/30">Failed to load audit log</p>
             <p className="text-xs text-muted-foreground">Please try again later.</p>
           </div>
         </div>
       ) : entries.length === 0 ? (
-        <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
-          <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
-            <ClipboardList className="h-6 w-6 text-muted-foreground" />
-          </div>
+        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+          <SeoKeywordIcon className="h-64 w-64 text-muted-foreground/30" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium">No audit events found</p>
-            <p className="text-xs text-muted-foreground">No audit events match the current filters.</p>
+            <p className="text-[12px] font-medium text-muted-foreground/30">No audit events found</p>
+            <p className="text-xs text-muted-foreground/30">No audit events match the current filters.</p>
           </div>
         </div>
       ) : (
@@ -229,7 +226,7 @@ export function AdminAuditLogPage() {
           </div>
 
           <div className="flex items-center justify-between">
-            <p className="text-sm text-muted-foreground">
+            <p className="text-[11px] text-text-tertiary">
               Showing {(page - 1) * PER_PAGE + 1}
               {" - "}
               {Math.min(page * PER_PAGE, total)} of {total}
@@ -244,7 +241,7 @@ export function AdminAuditLogPage() {
               >
                 <ChevronLeft className="h-3 w-3" />
               </Button>
-              <span className="text-sm text-muted-foreground">
+              <span className="text-[11px] text-text-tertiary">
                 Page {String(page)} of {String(totalPages)}
               </span>
               <Button
