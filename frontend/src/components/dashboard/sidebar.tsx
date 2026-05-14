@@ -12,7 +12,7 @@ import {
   Code,
   Users,
   ShieldCheck,
-  UsersRound,
+  Layers,
   Bell,
   ClipboardList,
   Lock,
@@ -20,7 +20,6 @@ import {
   Building2,
   Radio,
   KeyRound,
-  Link2,
   Bot,
   Network,
   Ticket,
@@ -48,7 +47,6 @@ export const MAIN_NAV = [
   { to: "/channel-bots", icon: Radio, label: "Channel Bots" },
   { to: "/settings", icon: Settings, label: "Settings" },
   { to: "/settings/consents", icon: KeyRound, label: "Access & Auth" },
-  { to: "/settings/authorizations", icon: Link2, label: "Authorizations" },
   { to: "/guide", icon: BookOpen, label: "Guide" },
 ] as const;
 
@@ -70,7 +68,7 @@ export const ADMIN_NAV = [
   { to: "/admin/audit-log", icon: ClipboardList, label: "Audit Log" },
   { to: "/admin/service-accounts", icon: Bot, label: "Service Accounts" },
   { to: "/admin/roles", icon: ShieldCheck, label: "Roles" },
-  { to: "/admin/groups", icon: UsersRound, label: "Groups" },
+  { to: "/admin/groups", icon: Layers, label: "Groups" },
   { to: "/admin/nodes", icon: Network, label: "Node Registry" },
   { to: "/services", icon: Server, label: "Services" },
   { to: "/providers", icon: Plug, label: "Providers" },

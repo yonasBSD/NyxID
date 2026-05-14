@@ -263,8 +263,10 @@ function ConversationsSection({
           ))}
         </div>
       ) : !conversations || conversations.length === 0 ? (
-        <div className="flex flex-col items-center justify-center rounded-xl border border-border py-8 text-center">
-          <MessageSquare className="mb-3 h-8 w-8 text-muted-foreground/50" />
+        <div className="flex flex-col items-center justify-center gap-3 py-8 text-center">
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-border">
+            <MessageSquare className="h-4 w-4 text-muted-foreground" />
+          </div>
           <p className="text-[12px] text-muted-foreground">
             No conversation routes configured. Add a route to start relaying
             messages to an AI agent.

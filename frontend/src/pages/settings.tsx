@@ -854,8 +854,8 @@ function SessionsTab() {
       </CardHeader>
       <CardContent>
         {!sessions || sessions.length === 0 ? (
-          <div className="flex flex-col items-center justify-center gap-2 py-8 text-center">
-            <div className="flex h-8 w-8 items-center justify-center rounded-xl border border-border">
+          <div className="flex flex-col items-center justify-center gap-3 py-8 text-center">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-border">
               <Monitor className="h-4 w-4 text-muted-foreground" />
             </div>
             <p className="text-[12px] font-medium">No Active Sessions</p>
