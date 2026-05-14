@@ -566,7 +566,7 @@ function StatusCell({
         {icon}
       </div>
       <div className="min-w-0">
-        <p className="text-[10px] font-semibold uppercase tracking-wider text-text-tertiary">
+        <p className="truncate text-[10px] font-semibold uppercase tracking-wider text-text-tertiary">
           {label}
         </p>
         {loading ? (
