@@ -310,6 +310,7 @@ export function NodeDetailPage() {
             <div className="flex gap-2">
               <Button
                 variant="outline"
+                className="text-text-tertiary hover:text-muted-foreground"
                 onClick={() => {
                   setTransferOwnerId(null);
                   setTransferConfirmed(false);
@@ -321,6 +322,7 @@ export function NodeDetailPage() {
               </Button>
               <Button
                 variant="outline"
+                className="text-text-tertiary hover:text-muted-foreground"
                 onClick={() => setShowRotateDialog(true)}
               >
                 <ButtonIcon><KeyRound className="h-3 w-3" /></ButtonIcon>

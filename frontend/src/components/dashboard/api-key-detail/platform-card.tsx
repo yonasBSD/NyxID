@@ -100,13 +100,13 @@ export function PlatformCard({
           </div>
         ) : (
           <div className="flex items-center justify-between">
-            <Badge variant={platform ? "secondary" : "secondary"}>
+            <Badge variant="secondary">
               {platform ?? "Not set"}
             </Badge>
             <Button
               size="icon"
               variant="ghost"
-              className="h-6 w-6"
+              className="h-6 w-6 shrink-0"
               onClick={() => setEditing(true)}
             >
               <Pencil className="h-3 w-3" />

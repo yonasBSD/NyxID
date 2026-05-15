@@ -73,6 +73,7 @@ export function OidcCredentialsSection({
         <div className="pt-2">
           <Button
             variant="outline"
+            className="text-text-tertiary hover:text-muted-foreground"
             onClick={() => setShowCredentials(true)}
           >
             <ButtonIcon><Eye className="h-3 w-3" /></ButtonIcon>

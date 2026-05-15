@@ -213,6 +213,7 @@ export function DefaultHeadersEditor({
         <Button
           type="button"
           variant="outline"
+          className="text-text-tertiary hover:text-muted-foreground"
           onClick={addRow}
           disabled={!canAdd}
         >

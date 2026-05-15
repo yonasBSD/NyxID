@@ -66,6 +66,7 @@ export function ApiKeyDetailPage() {
           <div className="flex gap-2">
             <Button
               variant="outline"
+              className="text-text-tertiary hover:text-muted-foreground"
               onClick={() => setRotateOpen(true)}
               disabled={!apiKey.is_active}
             >

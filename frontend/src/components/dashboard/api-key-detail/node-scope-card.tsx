@@ -76,20 +76,9 @@ export function NodeScopeCard({
   return (
     <Card>
       <CardHeader className="pb-3">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <HardDrive className="h-4 w-4 text-primary" />
-            <CardTitle className="text-[15px]">Node Scope</CardTitle>
-          </div>
-          {!editing && (
-            <Button
-              size="icon"
-              variant="ghost"
-              onClick={() => setEditing(true)}
-            >
-              <Pencil className="h-4 w-4" />
-            </Button>
-          )}
+        <div className="flex items-center gap-2">
+          <HardDrive className="h-4 w-4 text-primary" />
+          <CardTitle className="text-[15px]">Node Scope</CardTitle>
         </div>
         <CardDescription>
           Which nodes this key can route through
@@ -157,20 +146,30 @@ export function NodeScopeCard({
             </div>
           </div>
         ) : (
-          <div className="space-y-2">
-            {allowAllNodes ? (
-              <Badge variant="secondary">All nodes</Badge>
-            ) : allowedNodes.length > 0 ? (
-              <div className="flex flex-wrap gap-1">
-                {allowedNodes.map((n) => (
-                  <Badge key={n.id} variant="secondary" className="text-xs">
-                    {n.name}
-                  </Badge>
-                ))}
-              </div>
-            ) : (
-              <Badge variant="secondary">Direct only (no nodes)</Badge>
-            )}
+          <div className="flex items-center justify-between">
+            <div>
+              {allowAllNodes ? (
+                <Badge variant="secondary">All nodes</Badge>
+              ) : allowedNodes.length > 0 ? (
+                <div className="flex flex-wrap gap-1">
+                  {allowedNodes.map((n) => (
+                    <Badge key={n.id} variant="secondary" className="text-xs">
+                      {n.name}
+                    </Badge>
+                  ))}
+                </div>
+              ) : (
+                <Badge variant="secondary">Direct only (no nodes)</Badge>
+              )}
+            </div>
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-6 w-6 shrink-0"
+              onClick={() => setEditing(true)}
+            >
+              <Pencil className="h-3 w-3" />
+            </Button>
           </div>
         )}
       </CardContent>

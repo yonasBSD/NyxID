@@ -90,7 +90,7 @@ export function RoutingSection({
             <CardTitle className="text-[15px]">{title}</CardTitle>
           </div>
           {!readOnly && !picking && (
-            <Button variant="outline" onClick={() => setPicking(true)}>
+            <Button variant="outline" className="text-text-tertiary hover:text-muted-foreground" onClick={() => setPicking(true)}>
               <ButtonIcon><Router className="h-3 w-3" /></ButtonIcon>
               {nodeId ? "Change Route" : "Route via Node"}
             </Button>
