@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useRouterState } from "@tanstack/react-router";
+import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { useMyConsents, useRevokeConsent } from "@/hooks/use-consents";
 import {
   type BrokerBindingExternalSubject,
@@ -11,6 +11,11 @@ import { formatDate } from "@/lib/utils";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { PageHeader } from "@/components/shared/page-header";
 import { type ViewMode, ViewToggle, useViewMode } from "@/components/shared/view-toggle";
+import {
+  CONSENTS_TABS,
+  CONSENTS_TAB_DEFAULT,
+  parseTab,
+} from "@/lib/url-tabs";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -47,11 +52,14 @@ function formatExternalSubject(
 
 export function ConsentsPage() {
   const searchParams = useRouterState({ select: (s) => s.location.search as Record<string, unknown> });
-  const tabParam = typeof searchParams.tab === "string" ? searchParams.tab : undefined;
-  const defaultTab = tabParam === "authorizations" ? "authorizations" : "apps";
-  const [activeTab, setActiveTab] = useState(defaultTab);
+  const navigate = useNavigate();
+  const currentTab = parseTab(searchParams.tab, CONSENTS_TABS, CONSENTS_TAB_DEFAULT);
   const [appsViewMode, setAppsViewMode] = useViewMode("consents-apps");
   const [authViewMode, setAuthViewMode] = useViewMode("consents-auth");
+
+  function handleTabChange(value: string) {
+    void navigate({ to: "/settings/consents", search: { tab: value }, replace: true });
+  }
 
   return (
     <div className="space-y-8">
@@ -60,7 +68,7 @@ export function ConsentsPage() {
         description="Manage apps with access to your account and credentials held on your behalf."
       />
 
-      <Tabs defaultValue={defaultTab} className="space-y-6" onValueChange={setActiveTab}>
+      <Tabs value={currentTab} onValueChange={handleTabChange} className="space-y-6">
         <div className="flex items-end justify-between gap-4">
           <TabsList>
             <TabsTrigger value="apps">Authorized Apps</TabsTrigger>
@@ -68,8 +76,8 @@ export function ConsentsPage() {
           </TabsList>
           <div className="pb-1">
             <ViewToggle
-              viewMode={activeTab === "apps" ? appsViewMode : authViewMode}
-              onViewModeChange={activeTab === "apps" ? setAppsViewMode : setAuthViewMode}
+              viewMode={currentTab === "apps" ? appsViewMode : authViewMode}
+              onViewModeChange={currentTab === "apps" ? setAppsViewMode : setAuthViewMode}
             />
           </div>
         </div>
