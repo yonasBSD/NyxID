@@ -1,18 +1,15 @@
 use axum::{
     body::Body,
-    body::to_bytes,
-    extract::{ConnectInfo, Extension, State},
+    extract::Extension,
     http::{HeaderMap, Request},
     middleware::Next,
     response::Response,
 };
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use governor::{
     Quota, RateLimiter,
     clock::DefaultClock,
     state::{InMemoryState, NotKeyed},
 };
-use mongodb::{Database, bson::doc};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroU32;
@@ -20,7 +17,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::errors::AppError;
-use crate::models::device_code::{COLLECTION_NAME as DEVICE_CODES, DeviceCode};
 
 /// A shared rate limiter instance for global fallback.
 /// Uses a token-bucket algorithm via the `governor` crate.
@@ -132,73 +128,6 @@ impl PerAgentRateLimiter {
 }
 
 pub type SharedPerAgentRateLimiter = Arc<PerAgentRateLimiter>;
-
-/// Per-device-code rate limiter keyed by Ed25519 public key bytes.
-///
-/// The device authorization endpoints need a much stricter bucket than the
-/// general API limiter because both user-code approval and poll verification
-/// are security-sensitive. This bucket is intentionally keyed by the factory
-/// public key rather than `device_code`, so leaking an opaque device code does
-/// not give an attacker a fresh rate-limit identity.
-#[derive(Clone)]
-pub struct PerPubkeyRateLimiter {
-    state: Arc<Mutex<HashMap<[u8; 32], AgentBucket>>>,
-    tokens_per_second: f64,
-    burst: u32,
-}
-
-impl PerPubkeyRateLimiter {
-    pub fn new() -> Self {
-        Self::new_with_rate(5.0 / 60.0, 5)
-    }
-
-    fn new_with_rate(tokens_per_second: f64, burst: u32) -> Self {
-        Self {
-            state: Arc::new(Mutex::new(HashMap::new())),
-            tokens_per_second,
-            burst,
-        }
-    }
-
-    /// Check if a request from the given device public key should be allowed.
-    /// Returns true if allowed, false if rate limited.
-    pub fn check(&self, pubkey: &[u8; 32]) -> bool {
-        let now = Instant::now();
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let entry = state.entry(*pubkey).or_insert(AgentBucket {
-            tokens: self.burst as f64,
-            last_refill: now,
-        });
-
-        let elapsed_secs = now.duration_since(entry.last_refill).as_secs_f64();
-        entry.tokens =
-            (entry.tokens + elapsed_secs * self.tokens_per_second).min(self.burst as f64);
-        entry.last_refill = now;
-
-        if entry.tokens < 1.0 {
-            return false;
-        }
-        entry.tokens -= 1.0;
-        true
-    }
-
-    /// Remove stale entries to prevent unbounded memory growth.
-    pub fn cleanup(&self) {
-        let now = Instant::now();
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.retain(|_, bucket| now.duration_since(bucket.last_refill).as_secs() < 120);
-    }
-}
-
-pub type SharedPerPubkeyRateLimiter = Arc<PerPubkeyRateLimiter>;
-
-#[derive(Clone)]
-pub struct DeviceCodeRateLimiters {
-    pub per_ip: SharedPerIpRateLimiter,
-    pub per_pubkey: SharedPerPubkeyRateLimiter,
-    pub db: Option<Database>,
-    pub trusted_proxies: Arc<Vec<IpAddr>>,
-}
 
 /// Per-message edit limiter keyed by upstream platform message ID.
 /// Used by the channel relay edit endpoint so progressive updates on one
@@ -368,20 +297,6 @@ pub fn create_per_ip_rate_limiter(max_requests: u32, window_secs: u64) -> Shared
     Arc::new(PerIpRateLimiter::new(max_requests, window_secs))
 }
 
-/// Create a per-pubkey limiter for device authorization endpoints.
-pub fn create_per_pubkey_rate_limiter() -> SharedPerPubkeyRateLimiter {
-    Arc::new(PerPubkeyRateLimiter::new())
-}
-
-#[allow(dead_code)]
-pub fn device_code_rate_limit_layer(limiters: DeviceCodeRateLimiters) -> impl Clone + 'static {
-    axum::middleware::from_fn_with_state::<
-        _,
-        DeviceCodeRateLimiters,
-        (State<DeviceCodeRateLimiters>, Request<Body>),
-    >(limiters, device_code_rate_limit_middleware)
-}
-
 /// Resolve the client IP for per-IP rate-limit keying behind a
 /// configurable trusted-proxy allowlist.
 ///
@@ -528,102 +443,10 @@ pub async fn rate_limit_middleware(
     Ok(next.run(request).await)
 }
 
-pub async fn device_code_rate_limit_middleware(
-    State(limiters): State<DeviceCodeRateLimiters>,
-    request: Request<Body>,
-    next: Next,
-) -> Result<Response, AppError> {
-    if !request.uri().path().starts_with("/api/v1/devices/code/") {
-        return Ok(next.run(request).await);
-    }
-
-    let peer = request
-        .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|ConnectInfo(peer)| *peer);
-    enforce_device_code_ip_rate_limit(&limiters, request.headers(), peer, request.uri().path())?;
-
-    let (parts, body) = request.into_parts();
-    let bytes = to_bytes(body, 64 * 1024)
-        .await
-        .map_err(|_| AppError::BadRequest("Unable to read request body".to_string()))?;
-
-    if let Some(pubkey) = extract_device_pubkey_for_rate_limit(limiters.db.as_ref(), &bytes).await
-        && !limiters.per_pubkey.check(&pubkey)
-    {
-        tracing::warn!(
-            path = %parts.uri.path(),
-            device_pubkey = %hex::encode(pubkey),
-            "Device-code per-pubkey rate limit exceeded"
-        );
-        return Err(AppError::DeviceCodeRateLimited);
-    }
-
-    let request = Request::from_parts(parts, Body::from(bytes));
-    Ok(next.run(request).await)
-}
-
-fn enforce_device_code_ip_rate_limit(
-    limiters: &DeviceCodeRateLimiters,
-    headers: &HeaderMap,
-    peer: Option<SocketAddr>,
-    path: &str,
-) -> Result<Option<IpAddr>, AppError> {
-    let Some(client_ip) =
-        resolve_client_ip_for_rate_limit(headers, peer, limiters.trusted_proxies.as_slice())
-    else {
-        tracing::debug!(
-            path = %path,
-            "Skipping device-code per-IP rate limit because no trusted peer IP is available"
-        );
-        return Ok(None);
-    };
-
-    if !limiters.per_ip.check(client_ip) {
-        tracing::warn!(
-            path = %path,
-            ip = %client_ip,
-            "Device-code per-IP rate limit exceeded"
-        );
-        return Err(AppError::DeviceCodeRateLimited);
-    }
-
-    Ok(Some(client_ip))
-}
-
-async fn extract_device_pubkey_for_rate_limit(
-    db: Option<&Database>,
-    bytes: &[u8],
-) -> Option<[u8; 32]> {
-    if let Some(pubkey) = extract_device_pubkey_from_json(bytes) {
-        return Some(pubkey);
-    }
-
-    let db = db?;
-    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-    let raw_device_code = value.get("device_code")?.as_str()?;
-    let row = db
-        .collection::<DeviceCode>(DEVICE_CODES)
-        .find_one(doc! {
-            "device_code_hash": crate::crypto::token::hash_token(raw_device_code),
-        })
-        .await
-        .ok()??;
-    row.device_pubkey.try_into().ok()
-}
-
-fn extract_device_pubkey_from_json(bytes: &[u8]) -> Option<[u8; 32]> {
-    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-    let raw = value.get("device_pubkey")?.as_str()?;
-    let decoded = BASE64_STANDARD.decode(raw).ok()?;
-    decoded.try_into().ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-    use std::sync::Arc;
 
     #[test]
     fn per_ip_allows_under_limit() {
@@ -767,71 +590,6 @@ mod tests {
     }
 
     #[test]
-    fn per_pubkey_allows_five_requests_per_window() {
-        let limiter = PerPubkeyRateLimiter::new();
-        let pubkey = [7u8; 32];
-
-        for _ in 0..5 {
-            assert!(limiter.check(&pubkey));
-        }
-        assert!(!limiter.check(&pubkey));
-    }
-
-    #[test]
-    fn per_pubkey_isolates_distinct_public_keys() {
-        let limiter = PerPubkeyRateLimiter::new();
-        let pubkey_a = [1u8; 32];
-        let pubkey_b = [2u8; 32];
-
-        for _ in 0..5 {
-            assert!(limiter.check(&pubkey_a));
-        }
-        assert!(!limiter.check(&pubkey_a));
-        assert!(limiter.check(&pubkey_b));
-    }
-
-    #[test]
-    fn per_pubkey_refills_over_time() {
-        let limiter = PerPubkeyRateLimiter::new_with_rate(100.0, 1);
-        let pubkey = [3u8; 32];
-
-        assert!(limiter.check(&pubkey));
-        assert!(!limiter.check(&pubkey));
-        std::thread::sleep(std::time::Duration::from_millis(30));
-        assert!(limiter.check(&pubkey));
-    }
-
-    #[test]
-    fn extracts_device_pubkey_from_base64_json() {
-        let pubkey = [9u8; 32];
-        let body = serde_json::json!({
-            "device_pubkey": BASE64_STANDARD.encode(pubkey),
-        });
-
-        assert_eq!(
-            extract_device_pubkey_from_json(&serde_json::to_vec(&body).unwrap()),
-            Some(pubkey)
-        );
-    }
-
-    #[test]
-    fn rejects_missing_or_wrong_length_device_pubkey_for_rate_limit_keying() {
-        let missing = serde_json::json!({ "hw_id": "esp32" });
-        let short = serde_json::json!({
-            "device_pubkey": BASE64_STANDARD.encode([1u8; 31]),
-        });
-
-        assert_eq!(
-            extract_device_pubkey_from_json(&serde_json::to_vec(&missing).unwrap()),
-            None
-        );
-        assert_eq!(
-            extract_device_pubkey_from_json(&serde_json::to_vec(&short).unwrap()),
-            None
-        );
-    }
-
-    #[test]
     fn per_channel_limiter_allows_up_to_burst() {
         let limiter = PerChannelEventLimiter::new(100, 3);
         assert!(limiter.check("conv-a"));
@@ -956,60 +714,6 @@ mod tests {
             &[IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))],
         );
         assert!(resolved.is_none());
-    }
-
-    #[test]
-    fn device_code_ip_limiter_skips_ip_bucket_without_peer() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-for", "198.51.100.4".parse().unwrap());
-        let limiters = DeviceCodeRateLimiters {
-            per_ip: Arc::new(PerIpRateLimiter::new(0, 60)),
-            per_pubkey: Arc::new(PerPubkeyRateLimiter::new()),
-            db: None,
-            trusted_proxies: Arc::new(vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))]),
-        };
-
-        let result = enforce_device_code_ip_rate_limit(
-            &limiters,
-            &headers,
-            None,
-            "/api/v1/devices/code/poll",
-        )
-        .expect("missing peer should skip IP bucket");
-
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn device_code_ip_limiter_honors_xff_only_from_trusted_proxy() {
-        let proxy_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-        let client_ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 4));
-        let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-for", client_ip.to_string().parse().unwrap());
-        let limiters = DeviceCodeRateLimiters {
-            per_ip: Arc::new(PerIpRateLimiter::new(1, 60)),
-            per_pubkey: Arc::new(PerPubkeyRateLimiter::new()),
-            db: None,
-            trusted_proxies: Arc::new(vec![proxy_ip]),
-        };
-
-        let first = enforce_device_code_ip_rate_limit(
-            &limiters,
-            &headers,
-            Some(socket(proxy_ip)),
-            "/api/v1/devices/code/request",
-        )
-        .expect("first request allowed");
-        let second = enforce_device_code_ip_rate_limit(
-            &limiters,
-            &headers,
-            Some(socket(proxy_ip)),
-            "/api/v1/devices/code/request",
-        )
-        .expect_err("second request should be rate-limited by forwarded client IP");
-
-        assert_eq!(first, Some(client_ip));
-        assert!(matches!(second, AppError::DeviceCodeRateLimited));
     }
 
     #[test]

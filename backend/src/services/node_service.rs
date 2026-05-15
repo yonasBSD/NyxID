@@ -4,7 +4,6 @@ use chrono::{DateTime, Duration, Utc};
 use futures::TryStreamExt;
 use mongodb::bson::{self, doc};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::crypto::aes::EncryptionKeys;
@@ -69,17 +68,6 @@ pub struct TransferNodeResult {
     pub cleared_user_service_count: u64,
     pub deactivated_pending_credentials_count: u64,
 }
-
-#[derive(Clone, Debug)]
-pub struct DeviceNodeInput<'a> {
-    pub user_id: &'a str,
-    pub api_key_id: &'a str,
-    pub hw_id: &'a str,
-    pub label: &'a str,
-    pub device_pubkey: &'a [u8; 32],
-}
-
-const DEVICE_CODE_PROVISIONING_SOURCE: &str = "device-code";
 
 /// Create a one-time registration token for a new node.
 /// Returns (token_id, raw_token, expires_at). The raw token is shown once and never stored.
@@ -228,70 +216,6 @@ pub async fn register_node(
     );
 
     Ok((node, raw_auth_token, raw_signing_secret))
-}
-
-/// Create a Node row for a device-code-provisioned device.
-///
-/// Device-code devices receive their scoped NyxID API key through the poll
-/// endpoint and authenticate through the proxy API, not the node WebSocket
-/// protocol. This creates a discriminator-bearing stub row with empty auth
-/// fields rather than fabricating auth-token/signing-secret hashes whose
-/// plaintext is not held by any device.
-pub async fn create_for_device(
-    db: &mongodb::Database,
-    input: DeviceNodeInput<'_>,
-) -> AppResult<Node> {
-    if input.hw_id.trim().is_empty() || input.hw_id.len() > 256 {
-        return Err(AppError::ValidationError(
-            "hw_id must be between 1 and 256 characters".to_string(),
-        ));
-    }
-    if input.label.trim().is_empty() || input.label.len() > 200 {
-        return Err(AppError::ValidationError(
-            "Device label must be between 1 and 200 characters".to_string(),
-        ));
-    }
-
-    let now = Utc::now();
-    let node_id = uuid::Uuid::new_v4().to_string();
-    let pubkey_digest = Sha256::digest(input.device_pubkey);
-    let pubkey_fingerprint = hex::encode(&pubkey_digest[..8]);
-
-    let node = Node {
-        id: node_id.clone(),
-        user_id: input.user_id.to_string(),
-        name: device_node_name(input.label, &node_id),
-        status: NodeStatus::Offline,
-        auth_token_hash: String::new(),
-        signing_secret_encrypted: None,
-        signing_secret_hash: String::new(),
-        last_heartbeat_at: None,
-        connected_at: None,
-        metadata: Some(NodeMetadata {
-            agent_version: None,
-            os: None,
-            arch: None,
-            ip_address: None,
-            provisioning_source: Some(DEVICE_CODE_PROVISIONING_SOURCE.to_string()),
-        }),
-        metrics: crate::models::node::NodeMetrics::default(),
-        is_active: true,
-        created_at: now,
-        updated_at: now,
-    };
-
-    db.collection::<Node>(NODES).insert_one(&node).await?;
-
-    tracing::info!(
-        node_id = %node.id,
-        user_id = %node.user_id,
-        api_key_id = %input.api_key_id,
-        hw_id = %input.hw_id,
-        device_pubkey_fingerprint = %pubkey_fingerprint,
-        "Device-code node created"
-    );
-
-    Ok(node)
 }
 
 /// Get a single node by ID without ownership check.
@@ -590,33 +514,6 @@ fn validate_node_metadata(meta: &NodeMetadata) -> AppResult<()> {
     Ok(())
 }
 
-fn device_node_name(label: &str, node_id: &str) -> String {
-    let suffix: String = node_id.chars().take(8).collect();
-    let max_base_len = 64_usize.saturating_sub(suffix.len() + 1);
-    let mut base = String::with_capacity(max_base_len);
-    let mut last_dash = false;
-
-    for c in label.chars() {
-        if c.is_ascii_alphanumeric() {
-            if base.len() == max_base_len {
-                break;
-            }
-            base.push(c.to_ascii_lowercase());
-            last_dash = false;
-        } else if !last_dash && !base.is_empty() {
-            if base.len() == max_base_len {
-                break;
-            }
-            base.push('-');
-            last_dash = true;
-        }
-    }
-
-    let base = base.trim_matches('-');
-    let base = if base.is_empty() { "device" } else { base };
-    format!("{base}-{suffix}")
-}
-
 /// Update last_heartbeat_at and optionally metadata.
 pub async fn update_heartbeat(
     db: &mongodb::Database,
@@ -750,11 +647,7 @@ pub async fn update_binding_priority(
     Ok(())
 }
 
-/// Admin: list active operational nodes (no user filter).
-///
-/// Device-code provisioning creates node-shaped stubs for ownership linkage,
-/// but those devices authenticate with API keys and cannot connect to the node
-/// WebSocket protocol, so the operational admin list excludes them.
+/// Admin: list all active nodes (no user filter). Supports pagination and optional filters.
 pub async fn list_all_nodes(
     db: &mongodb::Database,
     page: u64,
@@ -762,10 +655,7 @@ pub async fn list_all_nodes(
     status_filter: Option<&str>,
     user_id_filter: Option<&str>,
 ) -> AppResult<(Vec<Node>, u64)> {
-    let mut filter = doc! {
-        "is_active": true,
-        "metadata.provisioning_source": { "$ne": DEVICE_CODE_PROVISIONING_SOURCE },
-    };
+    let mut filter = doc! { "is_active": true };
     if let Some(status) = status_filter {
         filter.insert("status", status);
     }
@@ -1324,82 +1214,6 @@ mod tests {
         fn can_write(self) -> bool {
             matches!(self, Self::Direct | Self::AsOrgAdmin)
         }
-    }
-
-    #[test]
-    fn device_node_name_sanitizes_and_keeps_uuid_suffix() {
-        let node_id = "12345678-aaaa-bbbb-cccc-123456789012";
-
-        assert_eq!(
-            device_node_name("Kitchen Camera 01", node_id),
-            "kitchen-camera-01-12345678"
-        );
-        assert_eq!(device_node_name("!!!", node_id), "device-12345678");
-        assert!(device_node_name(&"A".repeat(200), node_id).len() <= 64);
-    }
-
-    #[tokio::test]
-    async fn create_for_device_creates_api_key_only_stub_without_node_auth_secrets() {
-        let Some(db) = connect_test_database("node_device_code_stub").await else {
-            return;
-        };
-        let owner_id = Uuid::new_v4().to_string();
-
-        let node = create_for_device(
-            &db,
-            DeviceNodeInput {
-                user_id: &owner_id,
-                api_key_id: "api-key-1",
-                hw_id: "esp32-p4-cam",
-                label: "Kitchen Camera",
-                device_pubkey: &[7u8; 32],
-            },
-        )
-        .await
-        .expect("create device stub");
-
-        assert_eq!(node.auth_token_hash, "");
-        assert_eq!(node.signing_secret_hash, "");
-        assert!(node.signing_secret_encrypted.is_none());
-        assert_eq!(
-            node.metadata
-                .as_ref()
-                .and_then(|metadata| metadata.provisioning_source.as_deref()),
-            Some(DEVICE_CODE_PROVISIONING_SOURCE)
-        );
-    }
-
-    #[tokio::test]
-    async fn list_all_nodes_excludes_device_code_stubs_from_operational_view() {
-        let Some(db) = connect_test_database("node_device_code_stub_admin_list").await else {
-            return;
-        };
-        let owner_id = Uuid::new_v4().to_string();
-        let operational_node = make_node(&owner_id, "operational-node");
-        db.collection::<Node>(NODES)
-            .insert_one(&operational_node)
-            .await
-            .expect("insert operational node");
-        create_for_device(
-            &db,
-            DeviceNodeInput {
-                user_id: &owner_id,
-                api_key_id: "api-key-1",
-                hw_id: "esp32-p4-cam",
-                label: "Kitchen Camera",
-                device_pubkey: &[7u8; 32],
-            },
-        )
-        .await
-        .expect("create device stub");
-
-        let (nodes, total) = list_all_nodes(&db, 1, 50, None, None)
-            .await
-            .expect("list nodes");
-
-        assert_eq!(total, 1);
-        assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].id, operational_node.id);
     }
 
     struct NodeAclFixture {
