@@ -4022,7 +4022,6 @@ dependencies = [
  "constant_time_eq 0.4.2",
  "directories",
  "dirs",
- "ed25519-dalek",
  "flate2",
  "futures",
  "hex",
