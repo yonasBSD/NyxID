@@ -288,7 +288,7 @@ function CopyableCode({ children }: { readonly children: string }) {
 
   return (
     <div className="relative">
-      <pre className="overflow-x-auto rounded-lg bg-muted p-3 pr-10 font-mono text-xs leading-relaxed">
+      <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-xs leading-relaxed">
         {children}
       </pre>
       <Button

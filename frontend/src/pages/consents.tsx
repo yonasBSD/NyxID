@@ -10,6 +10,7 @@ import { ApiError } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { PageHeader } from "@/components/shared/page-header";
+import { type ViewMode, ViewToggle, useViewMode } from "@/components/shared/view-toggle";
 import {
   CONSENTS_TABS,
   CONSENTS_TAB_DEFAULT,
@@ -53,6 +54,8 @@ export function ConsentsPage() {
   const searchParams = useRouterState({ select: (s) => s.location.search as Record<string, unknown> });
   const navigate = useNavigate();
   const currentTab = parseTab(searchParams.tab, CONSENTS_TABS, CONSENTS_TAB_DEFAULT);
+  const [appsViewMode, setAppsViewMode] = useViewMode("consents-apps");
+  const [authViewMode, setAuthViewMode] = useViewMode("consents-auth");
 
   function handleTabChange(value: string) {
     void navigate({ to: "/settings/consents", search: { tab: value }, replace: true });
@@ -66,23 +69,31 @@ export function ConsentsPage() {
       />
 
       <Tabs value={currentTab} onValueChange={handleTabChange} className="space-y-6">
-        <TabsList>
-          <TabsTrigger value="apps">Authorized Apps</TabsTrigger>
-          <TabsTrigger value="authorizations">Authorizations</TabsTrigger>
-        </TabsList>
+        <div className="flex items-end justify-between gap-4">
+          <TabsList>
+            <TabsTrigger value="apps">Authorized Apps</TabsTrigger>
+            <TabsTrigger value="authorizations">Authorizations</TabsTrigger>
+          </TabsList>
+          <div className="pb-1">
+            <ViewToggle
+              viewMode={currentTab === "apps" ? appsViewMode : authViewMode}
+              onViewModeChange={currentTab === "apps" ? setAppsViewMode : setAuthViewMode}
+            />
+          </div>
+        </div>
 
         <TabsContent value="apps">
-          <AuthorizedAppsTab />
+          <AuthorizedAppsTab viewMode={appsViewMode} />
         </TabsContent>
         <TabsContent value="authorizations">
-          <AuthorizationsTab />
+          <AuthorizationsTab viewMode={authViewMode} />
         </TabsContent>
       </Tabs>
     </div>
   );
 }
 
-function AuthorizedAppsTab() {
+function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
   const { data, isLoading, error, refetch } = useMyConsents();
   const revokeMutation = useRevokeConsent();
   const [revokeClientId, setRevokeClientId] = useState<string | null>(null);
@@ -180,60 +191,107 @@ function AuthorizedAppsTab() {
         ))}
       </div>
 
-      {/* Desktop table view */}
-      <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Application</TableHead>
-              <TableHead>Scopes</TableHead>
-              <TableHead>Granted</TableHead>
-              <TableHead>Expires</TableHead>
-              <TableHead className="w-[60px]">Actions</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {consents.map((consent) => (
-              <TableRow key={consent.id}>
-                <TableCell className="font-medium">
-                  {consent.client_name}
-                </TableCell>
-                <TableCell>
-                  <div className="flex flex-wrap gap-1">
-                    {consent.scopes.split(" ").map((scope) => (
-                      <Badge
-                        key={scope}
-                        variant="secondary"
-                        className="text-xs"
-                      >
-                        {scope}
-                      </Badge>
-                    ))}
-                  </div>
-                </TableCell>
-                <TableCell className="text-muted-foreground">
+      {/* Desktop grid view */}
+      {viewMode === "grid" && (
+        <div className="hidden md:grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+          {consents.map((consent) => (
+            <div
+              key={consent.id}
+              className="relative rounded-xl border border-border/50 bg-card p-4"
+            >
+              <div className="absolute right-3 top-3">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8"
+                  onClick={() => setRevokeClientId(consent.client_id)}
+                >
+                  <Trash2 className="h-4 w-4 text-destructive" />
+                </Button>
+              </div>
+              <p className="pr-10 text-[13px] font-bold">
+                {consent.client_name}
+              </p>
+              <div className="mt-2 flex flex-wrap gap-1">
+                {consent.scopes.split(" ").map((scope) => (
+                  <Badge key={scope} variant="secondary" className="text-xs">
+                    {scope}
+                  </Badge>
+                ))}
+              </div>
+              <div className="mt-3 space-y-1">
+                <p className="text-[11px] text-muted-foreground">
+                  <span className="font-medium">Granted:</span>{" "}
                   {formatDate(consent.granted_at)}
-                </TableCell>
-                <TableCell className="text-muted-foreground">
+                </p>
+                <p className="text-[11px] text-muted-foreground">
+                  <span className="font-medium">Expires:</span>{" "}
                   {consent.expires_at
                     ? formatDate(consent.expires_at)
                     : "Never"}
-                </TableCell>
-                <TableCell>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-8 w-8"
-                    onClick={() => setRevokeClientId(consent.client_id)}
-                  >
-                    <Trash2 className="h-4 w-4 text-destructive" />
-                  </Button>
-                </TableCell>
+                </p>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Desktop table view */}
+      {viewMode === "table" && (
+        <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Application</TableHead>
+                <TableHead>Scopes</TableHead>
+                <TableHead>Granted</TableHead>
+                <TableHead>Expires</TableHead>
+                <TableHead className="w-[60px]">Actions</TableHead>
               </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </div>
+            </TableHeader>
+            <TableBody>
+              {consents.map((consent) => (
+                <TableRow key={consent.id}>
+                  <TableCell className="font-medium">
+                    {consent.client_name}
+                  </TableCell>
+                  <TableCell>
+                    <div className="flex flex-wrap gap-1">
+                      {consent.scopes.split(" ").map((scope) => (
+                        <Badge
+                          key={scope}
+                          variant="secondary"
+                          className="text-xs"
+                        >
+                          {scope}
+                        </Badge>
+                      ))}
+                    </div>
+                  </TableCell>
+                  <TableCell className="text-muted-foreground">
+                    {formatDate(consent.granted_at)}
+                  </TableCell>
+                  <TableCell className="text-muted-foreground">
+                    {consent.expires_at
+                      ? formatDate(consent.expires_at)
+                      : "Never"}
+                  </TableCell>
+                  <TableCell>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8"
+                      onClick={() => setRevokeClientId(consent.client_id)}
+                    >
+                      <Trash2 className="h-4 w-4 text-destructive" />
+                    </Button>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
 
       <Dialog
         open={revokeClientId !== null}
@@ -271,7 +329,7 @@ function AuthorizedAppsTab() {
   );
 }
 
-function AuthorizationsTab() {
+function AuthorizationsTab({ viewMode }: { readonly viewMode: ViewMode }) {
   const { data, isLoading, error, refetch } = useMyBrokerBindings();
   const revokeMutation = useRevokeBrokerBinding();
   const [revokeBindingHash, setRevokeBindingHash] = useState<string | null>(
@@ -384,70 +442,126 @@ function AuthorizationsTab() {
         ))}
       </div>
 
-      {/* Desktop table view */}
-      <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Application</TableHead>
-              <TableHead>External account</TableHead>
-              <TableHead>Scopes</TableHead>
-              <TableHead>Created</TableHead>
-              <TableHead>Last used</TableHead>
-              <TableHead className="w-[60px]">Actions</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {bindings.map((binding) => (
-              <TableRow key={binding.binding_hash}>
-                <TableCell className="font-medium">
-                  {binding.client_name ?? binding.client_id}
-                </TableCell>
-                <TableCell
-                  className={
-                    binding.external_subject
-                      ? undefined
-                      : "text-muted-foreground"
-                  }
+      {/* Desktop grid view */}
+      {viewMode === "grid" && (
+        <div className="hidden md:grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+          {bindings.map((binding) => (
+            <div
+              key={binding.binding_hash}
+              className="relative rounded-xl border border-border/50 bg-card p-4"
+            >
+              <div className="absolute right-3 top-3">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8"
+                  onClick={() => setRevokeBindingHash(binding.binding_hash)}
                 >
-                  {formatExternalSubject(binding.external_subject)}
-                </TableCell>
-                <TableCell>
-                  <div className="flex flex-wrap gap-1">
-                    {binding.scopes.map((scope) => (
-                      <Badge
-                        key={scope}
-                        variant="secondary"
-                        className="text-xs"
-                      >
-                        {scope}
-                      </Badge>
-                    ))}
-                  </div>
-                </TableCell>
-                <TableCell className="text-muted-foreground">
+                  <Trash2 className="h-4 w-4 text-destructive" />
+                </Button>
+              </div>
+              <p className="pr-10 text-[13px] font-bold">
+                {binding.client_name ?? binding.client_id}
+              </p>
+              <p
+                className={`mt-1 text-[11px] ${
+                  binding.external_subject
+                    ? "text-foreground"
+                    : "text-muted-foreground"
+                }`}
+              >
+                {formatExternalSubject(binding.external_subject)}
+              </p>
+              <div className="mt-2 flex flex-wrap gap-1">
+                {binding.scopes.map((scope) => (
+                  <Badge key={scope} variant="secondary" className="text-xs">
+                    {scope}
+                  </Badge>
+                ))}
+              </div>
+              <div className="mt-3 space-y-1">
+                <p className="text-[11px] text-muted-foreground">
+                  <span className="font-medium">Created:</span>{" "}
                   {formatDate(binding.created_at)}
-                </TableCell>
-                <TableCell className="text-muted-foreground">
+                </p>
+                <p className="text-[11px] text-muted-foreground">
+                  <span className="font-medium">Last used:</span>{" "}
                   {binding.last_used_at
                     ? formatDate(binding.last_used_at)
                     : "—"}
-                </TableCell>
-                <TableCell>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-8 w-8"
-                    onClick={() => setRevokeBindingHash(binding.binding_hash)}
-                  >
-                    <Trash2 className="h-4 w-4 text-destructive" />
-                  </Button>
-                </TableCell>
+                </p>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Desktop table view */}
+      {viewMode === "table" && (
+        <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Application</TableHead>
+                <TableHead>External account</TableHead>
+                <TableHead>Scopes</TableHead>
+                <TableHead>Created</TableHead>
+                <TableHead>Last used</TableHead>
+                <TableHead className="w-[60px]">Actions</TableHead>
               </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </div>
+            </TableHeader>
+            <TableBody>
+              {bindings.map((binding) => (
+                <TableRow key={binding.binding_hash}>
+                  <TableCell className="font-medium">
+                    {binding.client_name ?? binding.client_id}
+                  </TableCell>
+                  <TableCell
+                    className={
+                      binding.external_subject
+                        ? undefined
+                        : "text-muted-foreground"
+                    }
+                  >
+                    {formatExternalSubject(binding.external_subject)}
+                  </TableCell>
+                  <TableCell>
+                    <div className="flex flex-wrap gap-1">
+                      {binding.scopes.map((scope) => (
+                        <Badge
+                          key={scope}
+                          variant="secondary"
+                          className="text-xs"
+                        >
+                          {scope}
+                        </Badge>
+                      ))}
+                    </div>
+                  </TableCell>
+                  <TableCell className="text-muted-foreground">
+                    {formatDate(binding.created_at)}
+                  </TableCell>
+                  <TableCell className="text-muted-foreground">
+                    {binding.last_used_at
+                      ? formatDate(binding.last_used_at)
+                      : "—"}
+                  </TableCell>
+                  <TableCell>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8"
+                      onClick={() => setRevokeBindingHash(binding.binding_hash)}
+                    >
+                      <Trash2 className="h-4 w-4 text-destructive" />
+                    </Button>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
 
       <Dialog
         open={revokeBindingHash !== null}

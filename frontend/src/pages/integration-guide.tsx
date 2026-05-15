@@ -40,7 +40,7 @@ function CodeBlock({
         {label}
       </Badge>
       <div className="relative">
-        <pre className="overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-border bg-muted px-4 py-3 pr-12 font-mono text-xs leading-relaxed text-foreground">
+        <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-12 min-h-[44px] font-mono text-xs leading-relaxed text-foreground">
           {code}
         </pre>
         <Button

@@ -123,7 +123,7 @@ export function McpConnectionInfo() {
           </Badge>
         </div>
         <div className="relative">
-          <pre className="rounded bg-muted px-3 py-2 pr-10 text-xs overflow-x-auto">
+          <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] text-xs">
             {cursorConfig}
           </pre>
           <CopyButton text={cursorConfig} label="Cursor config" />
@@ -140,7 +140,7 @@ export function McpConnectionInfo() {
           </Badge>
         </div>
         <div className="relative">
-          <pre className="rounded bg-muted px-3 py-2 pr-10 text-xs overflow-x-auto">
+          <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] text-xs">
             {claudeCodeConfig}
           </pre>
           <CopyButton text={claudeCodeConfig} label="Claude Code config" />
@@ -157,7 +157,7 @@ export function McpConnectionInfo() {
           </Badge>
         </div>
         <div className="relative">
-          <pre className="rounded bg-muted px-3 py-2 pr-10 text-xs overflow-x-auto">
+          <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] text-xs">
             {codexConfig}
           </pre>
           <CopyButton text={codexConfig} label="Codex config" />

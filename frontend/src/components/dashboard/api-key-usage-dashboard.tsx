@@ -1,4 +1,4 @@
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { Area, AreaChart } from "recharts";
 import { useApiKeysUsage } from "@/hooks/use-api-keys";
 import { ErrorBanner } from "@/components/shared/error-banner";
@@ -9,6 +9,14 @@ import {
   Card,
   CardContent,
 } from "@/components/ui/card";
+import {
+  Table,
+  TableHeader,
+  TableBody,
+  TableRow,
+  TableHead,
+  TableCell,
+} from "@/components/ui/table";
 import { Activity } from "lucide-react";
 import {
   type ChartConfig,
@@ -63,7 +71,12 @@ function MiniLineChart({
   );
 }
 
-export function ApiKeyUsageDashboard() {
+export function ApiKeyUsageDashboard({
+  viewMode = "grid",
+}: {
+  readonly viewMode?: "grid" | "table";
+} = {}) {
+  const navigate = useNavigate();
   const { data, isLoading, error, refetch } = useApiKeysUsage(7);
 
   if (isLoading) {
@@ -104,44 +117,92 @@ export function ApiKeyUsageDashboard() {
         <Activity className="h-4 w-4 text-muted-foreground" />
         <h3 className="text-[13px] font-semibold text-foreground">Agent Activity</h3>
       </div>
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {data.map((usage) => (
-          <Link
-            key={usage.api_key_id}
-            to="/keys/api-key/$keyId"
-            params={{ keyId: usage.api_key_id }}
-          >
-            <Card className="h-full transition-colors duration-300 hover:border-white/[0.15] hover:bg-accent/30">
-              <CardContent className="space-y-3 p-4">
-                <div className="flex items-center justify-between gap-2">
-                  <p className="truncate text-[12px] font-medium text-foreground">
-                    {usage.api_key_name}
-                  </p>
-                  <Badge variant={usage.platform ? "secondary" : "secondary"}>
-                    {usage.platform ?? "agent"}
-                  </Badge>
-                </div>
 
-                <div className="flex items-baseline gap-1.5">
-                  <span className="text-[24px] font-bold leading-none text-foreground">
+      {viewMode === "table" ? (
+        <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
+          <Table>
+            <TableHeader>
+              <TableRow className="border-border/50 hover:bg-transparent">
+                <TableHead className="w-[25%]">Agent</TableHead>
+                <TableHead className="w-[15%]">Platform</TableHead>
+                <TableHead className="w-[15%]">Requests</TableHead>
+                <TableHead className="w-[30%]">Trend</TableHead>
+                <TableHead className="w-[15%]">Last Used</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {data.map((usage) => (
+                <TableRow
+                  key={usage.api_key_id}
+                  className="border-border/30 cursor-pointer hover:bg-white/[0.03]"
+                  onClick={() => void navigate({ to: "/keys/api-key/$keyId", params: { keyId: usage.api_key_id } })}
+                >
+                  <TableCell>
+                    <p className="truncate font-medium text-foreground">
+                      {usage.api_key_name}
+                    </p>
+                  </TableCell>
+                  <TableCell>
+                    <Badge variant="secondary">
+                      {usage.platform ?? "agent"}
+                    </Badge>
+                  </TableCell>
+                  <TableCell className="text-foreground font-semibold">
                     {usage.request_count}
-                  </span>
-                  <span className="text-[11px] text-muted-foreground">requests</span>
-                </div>
+                  </TableCell>
+                  <TableCell>
+                    <MiniLineChart buckets={usage.daily_buckets} />
+                  </TableCell>
+                  <TableCell className="text-muted-foreground">
+                    {usage.last_used_at
+                      ? formatRelativeTime(usage.last_used_at)
+                      : "never"}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      ) : (
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {data.map((usage) => (
+            <Link
+              key={usage.api_key_id}
+              to="/keys/api-key/$keyId"
+              params={{ keyId: usage.api_key_id }}
+            >
+              <Card className="h-full transition-colors duration-300 hover:border-white/[0.15] hover:bg-accent/30">
+                <CardContent className="space-y-3 p-4">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="truncate text-[12px] font-medium text-foreground">
+                      {usage.api_key_name}
+                    </p>
+                    <Badge variant={usage.platform ? "secondary" : "secondary"}>
+                      {usage.platform ?? "agent"}
+                    </Badge>
+                  </div>
 
-                <MiniLineChart buckets={usage.daily_buckets} />
+                  <div className="flex items-baseline gap-1.5">
+                    <span className="text-[24px] font-bold leading-none text-foreground">
+                      {usage.request_count}
+                    </span>
+                    <span className="text-[11px] text-muted-foreground">requests</span>
+                  </div>
 
-                <p className="text-[11px] text-muted-foreground">
-                  Last used{" "}
-                  {usage.last_used_at
-                    ? formatRelativeTime(usage.last_used_at)
-                    : "never"}
-                </p>
-              </CardContent>
-            </Card>
-          </Link>
-        ))}
-      </div>
+                  <MiniLineChart buckets={usage.daily_buckets} />
+
+                  <p className="text-[11px] text-muted-foreground">
+                    Last used{" "}
+                    {usage.last_used_at
+                      ? formatRelativeTime(usage.last_used_at)
+                      : "never"}
+                  </p>
+                </CardContent>
+              </Card>
+            </Link>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

@@ -17,10 +17,12 @@ import { CallbackUrlCard } from "@/components/dashboard/api-key-detail/callback-
 import { RateLimitCard } from "@/components/dashboard/api-key-detail/rate-limit-card";
 import { BindingsCard } from "@/components/dashboard/api-key-detail/bindings-card";
 import { UsageStatsCard } from "@/components/dashboard/api-key-detail/usage-stats-card";
+import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 
 export function ApiKeyDetailPage() {
   const { keyId } = useParams({ strict: false }) as { keyId: string };
   const { data: apiKey, isLoading, error, refetch } = useApiKey(keyId);
+  useBreadcrumbLabel(apiKey?.name);
   const [rotateOpen, setRotateOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
 

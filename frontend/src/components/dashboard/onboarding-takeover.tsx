@@ -1,10 +1,17 @@
 import { useState } from "react";
+import { useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
-import { ArrowRight, Cable, KeyRound, ShieldCheck } from "lucide-react";
+import { ArrowRight, Cable, Github, KeyRound, ShieldCheck, User } from "lucide-react";
 import { useAuthStore } from "@/stores/auth-store";
 import { useCompleteOnboarding } from "@/hooks/use-onboarding";
 import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
 import { Button, ButtonIcon } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 /**
  * First-run AI-services onboarding. Rendered by `DashboardLayout` in place
@@ -41,8 +48,66 @@ export function OnboardingTakeover() {
     if (!open) void markComplete();
   }
 
+  const navigate = useNavigate();
+  const logout = useAuthStore((s) => s.logout);
+
+  async function handleLogout() {
+    await logout();
+    void navigate({ to: "/login" });
+  }
+
   return (
-    <div className="flex min-h-dvh flex-col items-center justify-start bg-background px-6 pt-[12vh] pb-12">
+    <div className="flex min-h-dvh flex-col bg-background">
+      {/* Top bar */}
+      <div className="flex shrink-0 items-center justify-between px-6 py-4 sm:px-10">
+        <img
+          src="/nyxid-coloured-logo.svg"
+          alt="NyxID"
+          className="h-6 w-auto"
+        />
+        <div className="flex items-center gap-2">
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/[0.08] text-text-tertiary transition-colors duration-300 hover:border-white/[0.15] hover:text-muted-foreground focus-visible:outline-none"
+                aria-label="User menu"
+              >
+                <User className="h-[14px] w-[14px]" />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-48 p-2">
+              <div className="px-2 py-1.5">
+                <p className="text-[12px] font-medium text-foreground">{user?.display_name ?? "User"}</p>
+                <p className="text-[11px] text-text-tertiary">{user?.email ?? ""}</p>
+              </div>
+              <DropdownMenuItem
+                onClick={() => void navigate({ to: "/settings" as string })}
+                className="rounded-md text-[12px]"
+              >
+                Settings
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onClick={() => void handleLogout()}
+                className="rounded-md text-[12px] text-destructive focus:text-destructive"
+              >
+                Log out
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+          <a
+            href="https://github.com/ChronoAIProject"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/[0.08] text-text-tertiary transition-colors duration-300 hover:border-white/[0.15] hover:text-muted-foreground"
+            aria-label="GitHub"
+          >
+            <Github className="h-[14px] w-[14px]" />
+          </a>
+        </div>
+      </div>
+
+      <div className="flex flex-1 flex-col items-center justify-start px-6 pt-[8vh] pb-12">
       <div className="flex w-full max-w-md flex-col items-center gap-8 text-center">
         {/* Brand mark */}
         <div className="flex h-16 w-16 items-center justify-center rounded-2xl border border-nyx-500/30 bg-nyx-500/10">
@@ -101,6 +166,7 @@ export function OnboardingTakeover() {
       </div>
 
       <AddKeyDialog open={addServiceOpen} onOpenChange={handleDialogChange} />
+      </div>
     </div>
   );
 }

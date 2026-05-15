@@ -51,6 +51,7 @@ import {
 import { Check, Copy, Trash2 } from "lucide-react";
 import { RobotIcon, SmartSpeakerIcon } from "@/components/icons/empty-state";
 import { AddCtaButton } from "@/components/shared/add-cta-button";
+import { type ViewMode, ViewToggle, useViewMode } from "@/components/shared/view-toggle";
 import { toast } from "sonner";
 import type {
   ChannelBotItem,
@@ -196,40 +197,53 @@ function BotCard({
 function BotsTable({
   bots,
   onDelete,
+  viewMode,
 }: {
   readonly bots: readonly ChannelBotItem[];
   readonly onDelete: (id: string) => void;
+  readonly viewMode: ViewMode;
 }) {
   return (
     <>
-      {/* Mobile card view */}
+      {/* Mobile card view (always cards) */}
       <div className="flex flex-col gap-3 md:hidden">
         {bots.map((bot) => (
           <BotCard key={bot.id} bot={bot} onDelete={onDelete} />
         ))}
       </div>
 
+      {/* Desktop grid view */}
+      {viewMode === "grid" && (
+        <div className="hidden md:grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+          {bots.map((bot) => (
+            <BotCard key={bot.id} bot={bot} onDelete={onDelete} />
+          ))}
+        </div>
+      )}
+
       {/* Desktop table view */}
-      <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Platform</TableHead>
-              <TableHead>Bot Username</TableHead>
-              <TableHead>Label</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead>Webhook</TableHead>
-              <TableHead>Created</TableHead>
-              <TableHead className="w-[60px]">Actions</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {bots.map((bot) => (
-              <BotRow key={bot.id} bot={bot} onDelete={onDelete} />
-            ))}
-          </TableBody>
-        </Table>
-      </div>
+      {viewMode === "table" && (
+        <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Platform</TableHead>
+                <TableHead>Bot Username</TableHead>
+                <TableHead>Label</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>Webhook</TableHead>
+                <TableHead>Created</TableHead>
+                <TableHead className="w-[60px]">Actions</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {bots.map((bot) => (
+                <BotRow key={bot.id} bot={bot} onDelete={onDelete} />
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
     </>
   );
 }
@@ -928,9 +942,11 @@ function DeviceChannelRow({
 function DeviceChannelsSection({
   orgId,
   onAdd,
+  viewMode,
 }: {
   readonly orgId: string | null;
   readonly onAdd: () => void;
+  readonly viewMode: ViewMode;
 }) {
   const { data: conversations, isLoading } = useChannelConversations({ orgId });
   const deleteConversation = useDeleteChannelConversation();
@@ -983,7 +999,7 @@ function DeviceChannelsSection({
         </div>
       ) : (
         <>
-          {/* Mobile card view */}
+          {/* Mobile card view (always cards) */}
           <div className="flex flex-col gap-3 md:hidden">
             {devices.map((conversation) => (
               <DeviceChannelCard
@@ -994,33 +1010,48 @@ function DeviceChannelsSection({
             ))}
           </div>
 
+          {/* Desktop grid view */}
+          {viewMode === "grid" && (
+            <div className="hidden md:grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+              {devices.map((conversation) => (
+                <DeviceChannelCard
+                  key={conversation.id}
+                  conversation={conversation}
+                  onDelete={handleDelete}
+                />
+              ))}
+            </div>
+          )}
+
           {/* Desktop table view */}
-          <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead title="NyxID conversation _id — path parameter for POST /api/v1/channel-events/{id}">
-                    ID
-                  </TableHead>
-                  <TableHead>Channel Name</TableHead>
-                  <TableHead>Type</TableHead>
-                  <TableHead>Agent Key</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Created</TableHead>
-                  <TableHead className="w-[60px]">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {devices.map((conversation) => (
-                  <DeviceChannelRow
-                    key={conversation.id}
-                    conversation={conversation}
-                    onDelete={handleDelete}
-                  />
-                ))}
-              </TableBody>
-            </Table>
-          </div>
+          {viewMode === "table" && (
+            <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead title="NyxID conversation _id — path parameter for POST /api/v1/channel-events/{id}">
+                      ID
+                    </TableHead>
+                    <TableHead>Channel Name</TableHead>
+                    <TableHead>Type</TableHead>
+                    <TableHead>Agent Key</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead>Created</TableHead>
+                    <TableHead className="w-[60px]">Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {devices.map((conversation) => (
+                    <DeviceChannelRow
+                      key={conversation.id}
+                      conversation={conversation}
+                      onDelete={handleDelete}
+                    />
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          )}
         </>
       )}
     </div>
@@ -1033,6 +1064,7 @@ export function ChannelBotsPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [createDeviceOpen, setCreateDeviceOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useViewMode("channel-bots");
 
   return (
     <div className="space-y-8">
@@ -1045,6 +1077,7 @@ export function ChannelBotsPage() {
             <div className="w-36 sm:w-48">
               <OrgScopeSelect value={scopeOrgId} onChange={setScopeOrgId} />
             </div>
+            <ViewToggle viewMode={viewMode} onViewModeChange={setViewMode} />
             <AddCtaButton label="Add Bot" onClick={() => setCreateOpen(true)} />
           </div>
         }
@@ -1057,12 +1090,13 @@ export function ChannelBotsPage() {
       ) : !bots || bots.length === 0 ? (
         <EmptyState />
       ) : (
-        <BotsTable bots={bots} onDelete={setDeleteTarget} />
+        <BotsTable bots={bots} onDelete={setDeleteTarget} viewMode={viewMode} />
       )}
 
       <DeviceChannelsSection
         orgId={scopeOrgId}
         onAdd={() => setCreateDeviceOpen(true)}
+        viewMode={viewMode}
       />
 
       <CreateBotDialog

@@ -38,7 +38,7 @@ function CodeBlock({
         </Badge>
       )}
       <div className="relative">
-        <pre className="rounded-lg border border-border bg-muted px-4 py-3 pr-12 font-mono text-xs overflow-x-auto leading-relaxed">
+        <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-12 min-h-[44px] font-mono text-xs leading-relaxed">
           {children}
         </pre>
         <Button
