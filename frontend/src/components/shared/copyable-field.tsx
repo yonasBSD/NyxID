@@ -32,7 +32,8 @@ export function CopyableField({
   const textSize = size === "sm" ? "text-[10px]" : "text-xs";
   const labelSize = size === "sm" ? "text-[10px]" : "text-xs";
   const btnSize = size === "sm" ? "h-7 w-7" : "h-8 w-8";
-  const padding = size === "sm" ? "px-2 py-1" : "px-2 py-1.5";
+  const padding = size === "sm" ? "px-3 py-2" : "px-4 py-3.5";
+  const minH = size === "sm" ? "min-h-[36px]" : "min-h-[44px]";
 
   return (
     <div>
@@ -41,7 +42,7 @@ export function CopyableField({
       </p>
       <div className="relative">
         <code
-          className={`block rounded-xl border border-border bg-muted font-mono ${padding} pr-10 ${textSize} break-all text-foreground`}
+          className={`flex items-center rounded-xl border border-border bg-muted font-mono ${padding} pr-10 ${minH} ${textSize} break-all text-foreground`}
         >
           {value}
         </code>

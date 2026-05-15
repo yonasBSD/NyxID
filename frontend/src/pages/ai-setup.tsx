@@ -48,7 +48,7 @@ function CodeBlock({
         {label}
       </Badge>
       <div className="relative">
-        <pre className="whitespace-pre-wrap break-words rounded-lg border border-border bg-muted px-4 py-3 pr-12 font-mono text-xs leading-relaxed text-foreground">
+        <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-12 min-h-[44px] font-mono text-xs leading-relaxed text-foreground">
           {code}
         </pre>
         <Button
@@ -140,7 +140,7 @@ function AiSkillSetupCard({
             <TabsContent key={id} value={id}>
               <div className="space-y-4">
                 <div className="relative">
-                  <pre className="whitespace-pre-wrap break-words rounded-lg border border-border bg-muted p-4 pr-10 font-mono text-xs leading-relaxed">
+                  <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-xs leading-relaxed">
                     {setupPrompt}
                   </pre>
                   <Button

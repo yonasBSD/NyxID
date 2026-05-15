@@ -733,7 +733,7 @@ function McpTab() {
               </Badge>
             </div>
             <div className="relative">
-              <pre className="rounded-lg border border-border bg-muted px-4 py-3 pr-10 font-mono text-xs overflow-x-auto leading-relaxed">
+              <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-xs leading-relaxed">
                 {cursorConfig}
               </pre>
               <CopyInlineButton text={cursorConfig} label="Cursor config" />
@@ -768,7 +768,7 @@ function McpTab() {
               </Badge>
             </div>
             <div className="relative">
-              <pre className="rounded-lg border border-border bg-muted px-4 py-3 pr-10 font-mono text-xs overflow-x-auto leading-relaxed">
+              <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-xs leading-relaxed">
                 {claudeConfig}
               </pre>
               <CopyInlineButton
@@ -806,7 +806,7 @@ function McpTab() {
               </Badge>
             </div>
             <div className="relative">
-              <pre className="rounded-lg border border-border bg-muted px-4 py-3 pr-10 font-mono text-xs overflow-x-auto leading-relaxed">
+              <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-xs leading-relaxed">
                 {codexConfig}
               </pre>
               <CopyInlineButton text={codexConfig} label="Codex config" />

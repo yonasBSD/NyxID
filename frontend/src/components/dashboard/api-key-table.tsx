@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { useNavigate } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import {
   useAllAdminedApiKeys,
   useDeleteApiKey,
@@ -34,6 +34,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { MoreVertical, RefreshCw, Trash2, Copy, Check } from "lucide-react";
+import { Card, CardContent } from "@/components/ui/card";
 import { CogsIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 
@@ -53,7 +54,11 @@ function scopeBadgeVariant(scope: string): "info" | "warning" {
   return scope === "write" || scope === "delete" ? "warning" : "info";
 }
 
-export function ApiKeyTable() {
+export function ApiKeyTable({
+  viewMode = "table",
+}: {
+  readonly viewMode?: "grid" | "table";
+} = {}) {
   const navigate = useNavigate();
   const { data: apiKeys, isLoading } = useAllAdminedApiKeys();
   const deleteMutation = useDeleteApiKey();
@@ -123,7 +128,85 @@ export function ApiKeyTable() {
     );
   }
 
-  return (
+  function renderActions(key: ApiKey) {
+    return (
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button variant="ghost" size="icon" className="h-7 w-7">
+            <MoreVertical className="h-3.5 w-3.5" aria-hidden="true" />
+            <span className="sr-only">Actions for {key.name}</span>
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          <DropdownMenuItem
+            onClick={() => void handleRotate(key)}
+            disabled={!key.is_active}
+          >
+            <RefreshCw className="mr-2 h-4 w-4" aria-hidden="true" />
+            Rotate
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            onClick={() => setDeleteTarget(key)}
+            className="text-destructive focus:text-destructive"
+            disabled={!key.is_active}
+          >
+            <Trash2 className="mr-2 h-4 w-4 text-destructive" aria-hidden="true" />
+            Revoke
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    );
+  }
+
+  const gridView = (
+    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      {apiKeys.map((key) => {
+        const scopesList = parseScopesString(key.scopes);
+        const source = key.credential_source;
+        const isOrg = source?.type === "org";
+        const ownerLabel = isOrg ? source.org_name : "Personal";
+        return (
+          <div key={key.id} className="relative h-full">
+            <div
+              className="absolute right-3 top-3 z-10"
+              onClick={(e) => e.stopPropagation()}
+              onKeyDown={(e) => e.stopPropagation()}
+            >
+              {renderActions(key)}
+            </div>
+            <Link to="/keys/api-key/$keyId" params={{ keyId: key.id }} className="h-full block">
+              <Card className="h-full transition-colors duration-300 hover:border-white/[0.15] hover:bg-accent/30">
+                <CardContent className="flex h-full min-h-[140px] flex-col gap-3 p-4">
+                  <div className="flex items-start justify-between gap-2 pr-8">
+                    <div className="min-w-0">
+                      <p className="truncate text-[12px] font-medium text-foreground">{key.name}</p>
+                      <code className="text-[11px] font-mono text-muted-foreground">{key.key_prefix}••••••••</code>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-1">
+                    {key.platform && <Badge variant="secondary">{key.platform}</Badge>}
+                    {scopesList.map((scope) => (
+                      <Badge key={scope} variant={scopeBadgeVariant(scope)}>
+                        {scope.charAt(0).toUpperCase() + scope.slice(1)}
+                      </Badge>
+                    ))}
+                  </div>
+                  <div className="mt-auto flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+                    <span>{ownerLabel}</span>
+                    <span>{servicesSummary(key)}</span>
+                    <span>{key.bindings_count > 0 ? `${String(key.bindings_count)} binding${key.bindings_count === 1 ? "" : "s"}` : "No bindings"}</span>
+                    <span>{key.last_used_at ? `Used ${formatRelativeTime(key.last_used_at)}` : "Never used"}</span>
+                  </div>
+                </CardContent>
+              </Card>
+            </Link>
+          </div>
+        );
+      })}
+    </div>
+  );
+
+  const tableView = (
     <>
       {/* Mobile card view */}
       <div className="flex flex-col gap-3 md:hidden">
@@ -141,21 +224,7 @@ export function ApiKeyTable() {
               className="relative rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-white/[0.03] cursor-pointer"
             >
               <div className="absolute right-3 top-3" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button variant="ghost" size="icon" className="h-7 w-7">
-                      <MoreVertical className="h-3.5 w-3.5" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end">
-                    <DropdownMenuItem onClick={() => void handleRotate(key)} disabled={!key.is_active}>
-                      <RefreshCw className="mr-2 h-4 w-4" /> Rotate
-                    </DropdownMenuItem>
-                    <DropdownMenuItem onClick={() => setDeleteTarget(key)} className="text-destructive focus:text-destructive" disabled={!key.is_active}>
-                      <Trash2 className="mr-2 h-4 w-4 text-destructive" /> Revoke
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
+                {renderActions(key)}
               </div>
               <p className="pr-10 text-[13px] font-semibold text-foreground truncate">{key.name}</p>
               <code className="text-[11px] font-mono text-muted-foreground">{key.key_prefix}••••••••</code>
@@ -274,31 +343,7 @@ export function ApiKeyTable() {
                   </TableCell>
 
                   <TableCell onClick={(e) => e.stopPropagation()}>
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button variant="ghost" size="icon" className="h-7 w-7">
-                          <MoreVertical className="h-3.5 w-3.5" aria-hidden="true" />
-                          <span className="sr-only">Actions for {key.name}</span>
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
-                        <DropdownMenuItem
-                          onClick={() => void handleRotate(key)}
-                          disabled={!key.is_active}
-                        >
-                          <RefreshCw className="mr-2 h-4 w-4" aria-hidden="true" />
-                          Rotate
-                        </DropdownMenuItem>
-                        <DropdownMenuItem
-                          onClick={() => setDeleteTarget(key)}
-                          className="text-destructive focus:text-destructive"
-                          disabled={!key.is_active}
-                        >
-                          <Trash2 className="mr-2 h-4 w-4 text-destructive" aria-hidden="true" />
-                          Revoke
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
+                    {renderActions(key)}
                   </TableCell>
                 </TableRow>
               );
@@ -306,6 +351,12 @@ export function ApiKeyTable() {
           </TableBody>
         </Table>
       </div>
+    </>
+  );
+
+  return (
+    <>
+      {viewMode === "grid" ? gridView : tableView}
 
       <Dialog
         open={deleteTarget !== null}

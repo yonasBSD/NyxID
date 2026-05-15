@@ -10,6 +10,14 @@ import { ErrorBanner } from "@/components/shared/error-banner";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
+  Table,
+  TableHeader,
+  TableBody,
+  TableRow,
+  TableHead,
+  TableCell,
+} from "@/components/ui/table";
+import {
   Globe,
   KeyRound,
   KeySquare,
@@ -22,6 +30,7 @@ import { MagicKeyIcon } from "@/components/icons/empty-state";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { useNodes } from "@/hooks/use-nodes";
+import { ViewToggle, useViewMode, type ViewMode } from "@/components/shared/view-toggle";
 import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
 import { ApiKeyTable } from "@/components/dashboard/api-key-table";
 import { ApiKeyCreateDialog } from "@/components/dashboard/api-key-create-dialog";
@@ -92,44 +101,42 @@ function KeyCardContent({ keyInfo, source }: KeyCardProps) {
       aria-disabled={isBlocked ? true : undefined}
     >
       <CardContent className="flex h-full min-h-[140px] flex-col gap-3 p-4">
-        <div className="flex items-start justify-between gap-2">
-          <div className="min-w-0">
-            <p className="truncate text-[12px] font-medium text-foreground">
-              {keyInfo.label}
+        <div className="min-w-0">
+          <p className="truncate text-[12px] font-medium text-foreground">
+            {keyInfo.label}
+          </p>
+          {keyInfo.catalog_service_name && (
+            <p className="truncate text-xs text-muted-foreground">
+              {keyInfo.catalog_service_name}
             </p>
-            {keyInfo.catalog_service_name && (
-              <p className="text-xs text-muted-foreground">
-                {keyInfo.catalog_service_name}
-              </p>
-            )}
-          </div>
-          <div className="flex shrink-0 items-center gap-2">
-            {isOrgInherited && (
-              <Badge variant="info">Org</Badge>
-            )}
-            {isBlocked && (
-              <Badge variant="secondary">Read-Only</Badge>
-            )}
-            {isReadOnly && !isBlocked && (
-              <Badge variant="secondary">View-Only</Badge>
-            )}
-            {keyInfo.auto_connected && (
-              <Badge variant="secondary">
-                {keyInfo.source_app_name
-                  ? `Via ${keyInfo.source_app_name}`
-                  : "Auto-connected"}
-              </Badge>
-            )}
-            {isSsh && <Badge variant="secondary">SSH</Badge>}
-            <Badge variant={statusVariant(keyInfo.status)}>
-              {keyInfo.status.charAt(0).toUpperCase() + keyInfo.status.slice(1)}
+          )}
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          {isOrgInherited && (
+            <Badge variant="info">Org</Badge>
+          )}
+          {isBlocked && (
+            <Badge variant="secondary">Read-Only</Badge>
+          )}
+          {isReadOnly && !isBlocked && (
+            <Badge variant="secondary">View-Only</Badge>
+          )}
+          <Badge variant={statusVariant(keyInfo.status)}>
+            {keyInfo.status.charAt(0).toUpperCase() + keyInfo.status.slice(1)}
+          </Badge>
+          {isSsh && <Badge variant="secondary">SSH</Badge>}
+          {keyInfo.auto_connected && (
+            <Badge variant="secondary">
+              {keyInfo.source_app_name
+                ? `Via ${keyInfo.source_app_name}`
+                : "Auto-connected"}
             </Badge>
-            {!keyInfo.is_active && <Badge variant="secondary">Inactive</Badge>}
-          </div>
+          )}
+          {!keyInfo.is_active && <Badge variant="secondary">Inactive</Badge>}
         </div>
 
-        <div className="grid grid-cols-2 gap-x-4 gap-y-3 text-xs text-muted-foreground">
-          <div className="flex items-center gap-1.5">
+        <div className="mt-auto grid grid-cols-2 gap-x-4 gap-y-3 text-xs text-muted-foreground">
+          <div className="flex min-w-0 items-center gap-1.5">
             {isSsh ? (
               <Terminal className="h-3 w-3 shrink-0" />
             ) : (
@@ -137,13 +144,13 @@ function KeyCardContent({ keyInfo, source }: KeyCardProps) {
             )}
             <span className="truncate">{displayUrl}</span>
           </div>
-          <div className="flex items-center justify-end gap-1.5">
+          <div className="flex min-w-0 items-center justify-end gap-1.5">
             {keyInfo.auto_connected ? (
               <Zap className="h-3 w-3 shrink-0" />
             ) : (
               <KeyRound className="h-3 w-3 shrink-0" />
             )}
-            <span>
+            <span className="truncate">
               {keyInfo.auto_connected
                 ? "No auth required"
                 : isSsh
@@ -153,13 +160,13 @@ function KeyCardContent({ keyInfo, source }: KeyCardProps) {
                   : keyInfo.credential_type}
             </span>
           </div>
-          <div className="flex items-center gap-1.5">
+          <div className="flex min-w-0 items-center gap-1.5">
             <Server className="h-3 w-3 shrink-0" />
-            <span>
+            <span className="truncate">
               {isSsh ? keyInfo.slug : `/proxy/s/${keyInfo.slug}`}
             </span>
           </div>
-          <div className="flex items-center justify-end gap-1.5">
+          <div className="flex min-w-0 items-center justify-end gap-1.5">
             <Router className="h-3 w-3 shrink-0" />
             <span className="truncate">
               {nodeName ? `→ ${nodeName}` : "Direct"}
@@ -187,6 +194,137 @@ function KeyCard({ keyInfo, source }: KeyCardProps) {
     <Link to="/keys/$keyId" params={{ keyId: keyInfo.id }} className="h-full">
       <KeyCardContent keyInfo={keyInfo} source={source} />
     </Link>
+  );
+}
+
+function ServiceTableRow({
+  keyInfo,
+  source,
+}: KeyCardProps) {
+  const navigate = useNavigate();
+  const isSsh = keyInfo.service_type === "ssh";
+  const hasSshCertificateAuth = isSsh && keyInfo.ssh_ca_public_key !== null;
+  const { data: nodes } = useNodes();
+  const nodeName = keyInfo.node_id
+    ? (nodes?.find((n) => n.id === keyInfo.node_id)?.name ??
+      keyInfo.node_id.slice(0, 8))
+    : null;
+
+  const isOrgInherited = source?.type === "org";
+  const isBlocked = source?.type === "org" && !source.allowed;
+  const isReadOnly =
+    source?.type === "org" && source.allowed && source.role !== "admin";
+
+  const displayUrl = isSsh
+    ? `${keyInfo.ssh_host ?? "unknown"}:${keyInfo.ssh_port ?? 22}`
+    : keyInfo.endpoint_url;
+
+  const authLabel = keyInfo.auto_connected
+    ? "No auth"
+    : isSsh
+      ? hasSshCertificateAuth
+        ? "certificate"
+        : "ssh tunnel"
+      : keyInfo.credential_type;
+
+  return (
+    <TableRow
+      className={`border-border/30 cursor-pointer hover:bg-white/[0.03] ${isBlocked ? "opacity-60" : ""}`}
+      onClick={() => void navigate({ to: "/keys/$keyId", params: { keyId: keyInfo.id } })}
+    >
+      <TableCell className="h-[60px]">
+        <p className="truncate font-medium text-foreground">{keyInfo.label}</p>
+        <p className="truncate text-[11px] text-text-tertiary mt-0.5">
+          {keyInfo.catalog_service_name ?? " "}
+        </p>
+      </TableCell>
+
+      <TableCell className="h-[60px]">
+        <span className="truncate text-muted-foreground text-[11px] font-mono">
+          {displayUrl}
+        </span>
+      </TableCell>
+
+      <TableCell className="h-[60px] text-muted-foreground">{authLabel}</TableCell>
+
+      <TableCell className="h-[60px]">
+        <span className="truncate text-muted-foreground text-[11px] font-mono">
+          {isSsh ? keyInfo.slug : `/proxy/s/${keyInfo.slug}`}
+        </span>
+      </TableCell>
+
+      <TableCell className="h-[60px] text-muted-foreground">
+        {nodeName ? `→ ${nodeName}` : "Direct"}
+      </TableCell>
+
+      <TableCell className="h-[60px]">
+        <div className="flex flex-wrap gap-1">
+          {isOrgInherited && <Badge variant="info">Org</Badge>}
+          {isBlocked && <Badge variant="secondary">Read-Only</Badge>}
+          {isReadOnly && !isBlocked && <Badge variant="secondary">View-Only</Badge>}
+          <Badge variant={statusVariant(keyInfo.status)}>
+            {keyInfo.status.charAt(0).toUpperCase() + keyInfo.status.slice(1)}
+          </Badge>
+          {isSsh && <Badge variant="secondary">SSH</Badge>}
+        </div>
+      </TableCell>
+    </TableRow>
+  );
+}
+
+function ServiceTableView({
+  groups,
+}: {
+  readonly groups: readonly ServiceGroup[];
+}) {
+  return (
+    <div className="space-y-8">
+      {groups.map((group) => (
+        <section key={group.key} className="space-y-3">
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2">
+              {group.icon === "org" ? (
+                <OrgAvatar
+                  avatarUrl={group.avatarUrl}
+                  displayName={group.title}
+                  className="h-6 w-6 text-[0.625rem]"
+                />
+              ) : (
+                <Globe className="h-4 w-4 text-muted-foreground" />
+              )}
+              <h3 className="text-[13px] font-semibold text-foreground">
+                {group.title}
+              </h3>
+            </div>
+            {group.role && <RoleBadge role={group.role} />}
+            {group.subtitle && (
+              <span className="text-xs text-muted-foreground">
+                {group.subtitle}
+              </span>
+            )}
+          </div>
+          <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
+            <Table>
+              <TableHeader>
+                <TableRow className="border-border/50 hover:bg-transparent">
+                  <TableHead className="w-[20%]">Name</TableHead>
+                  <TableHead className="w-[22%]">Endpoint</TableHead>
+                  <TableHead className="w-[10%]">Auth</TableHead>
+                  <TableHead className="w-[20%]">Proxy Slug</TableHead>
+                  <TableHead className="w-[10%]">Routing</TableHead>
+                  <TableHead className="w-[18%]">Status</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {group.keys.map(({ keyInfo, source }) => (
+                  <ServiceTableRow key={keyInfo.id} keyInfo={keyInfo} source={source} />
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        </section>
+      ))}
+    </div>
   );
 }
 
@@ -306,9 +444,11 @@ function LoadingSkeleton() {
 function ExternalServicesTab({
   onAdd,
   showAutoConnected,
+  viewMode,
 }: {
   readonly onAdd: () => void;
   readonly showAutoConnected: boolean;
+  readonly viewMode: ViewMode;
 }) {
   const { data: keys, isLoading, error, refetch } = useKeys();
   // user-services carries credential_source for both personal and
@@ -346,6 +486,10 @@ function ExternalServicesTab({
   }
 
   const groups = groupKeysBySource(visibleKeys, sourceById);
+
+  if (viewMode === "table") {
+    return <ServiceTableView groups={groups} />;
+  }
 
   // If only personal services exist, skip section headers to preserve the
   // current flat-grid look-and-feel.
@@ -400,9 +544,11 @@ function ExternalServicesTab({
 function NyxIdApiKeysTab({
   createKeyOpen,
   onCreateKeyOpenChange,
+  viewMode,
 }: {
   readonly createKeyOpen?: boolean;
   readonly onCreateKeyOpenChange?: (open: boolean) => void;
+  readonly viewMode: ViewMode;
 }) {
   return (
     <div className="space-y-6">
@@ -411,9 +557,9 @@ function NyxIdApiKeysTab({
           <KeySquare className="h-4 w-4 text-muted-foreground" />
           <h3 className="text-[13px] font-semibold text-foreground">Agent Keys</h3>
         </div>
-        <ApiKeyTable />
+        <ApiKeyTable viewMode={viewMode} />
       </div>
-      <ApiKeyUsageDashboard />
+      <ApiKeyUsageDashboard viewMode={viewMode} />
       <ApiKeyCreateDialog
         externalOpen={createKeyOpen}
         onExternalOpenChange={onCreateKeyOpenChange}
@@ -474,6 +620,8 @@ export function KeysPage() {
   const [addServiceOpen, setAddServiceOpen] = useState(false);
   const [createKeyOpen, setCreateKeyOpen] = useState(false);
   const [showAutoConnected, setShowAutoConnected] = useState(false);
+  const [servicesViewMode, setServicesViewMode] = useViewMode("keys-services");
+  const [agentKeysViewMode, setAgentKeysViewMode] = useViewMode("keys-agent");
   const [pendingPrefillSlug, setPendingPrefillSlug] = useState<string | null>(null);
   const appliedSlugRef = useRef<string | null>(null);
   const appliedActionRef = useRef<string | null>(null);
@@ -562,6 +710,10 @@ export function KeysPage() {
                 count={autoCount}
               />
             )}
+            <ViewToggle
+              viewMode={tab === "services" ? servicesViewMode : agentKeysViewMode}
+              onViewModeChange={tab === "services" ? setServicesViewMode : setAgentKeysViewMode}
+            />
             <AddButton
               tab={tab}
               onAddService={() => setAddServiceOpen(true)}
@@ -574,6 +726,7 @@ export function KeysPage() {
           <ExternalServicesTab
             onAdd={() => setAddServiceOpen(true)}
             showAutoConnected={showAutoConnected}
+            viewMode={servicesViewMode}
           />
         </TabsContent>
 
@@ -581,6 +734,7 @@ export function KeysPage() {
           <NyxIdApiKeysTab
             createKeyOpen={createKeyOpen}
             onCreateKeyOpenChange={handleCreateKeyOpenChange}
+            viewMode={agentKeysViewMode}
           />
         </TabsContent>
       </Tabs>

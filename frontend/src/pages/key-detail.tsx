@@ -779,7 +779,7 @@ function NodeSetupHelper({
           Recommended (auto-detects requirements):
         </p>
         <div className="relative">
-          <pre className="overflow-x-auto rounded-lg bg-muted p-3 font-mono text-xs leading-relaxed">
+          <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 min-h-[44px] font-mono text-xs leading-relaxed">
             {setupCommand}
           </pre>
           <Button
@@ -793,7 +793,7 @@ function NodeSetupHelper({
         </div>
         <p className="text-[11px] font-medium text-muted-foreground">Manual:</p>
         <div className="relative">
-          <pre className="overflow-x-auto rounded-lg bg-muted p-3 font-mono text-xs leading-relaxed">
+          <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 min-h-[44px] font-mono text-xs leading-relaxed">
             {manualCommand}
           </pre>
           <Button
@@ -882,22 +882,22 @@ function SshConnectionSection({
 
         {caPublicKey && (
           <div>
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-medium text-muted-foreground">
-                CA Public Key
-              </span>
+            <span className="text-xs font-medium text-muted-foreground">
+              CA Public Key
+            </span>
+            <div className="relative mt-1">
+              <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-xs leading-relaxed">
+                {caPublicKey}
+              </pre>
               <Button
+                size="icon"
                 variant="ghost"
+                className="absolute right-2 top-2 h-7 w-7"
                 onClick={handleCopyCa}
-                className="h-6 px-2"
               >
-                <ButtonIcon><Copy className="h-3 w-3" /></ButtonIcon>
-                <span className="text-xs">Copy</span>
+                <Copy className="h-3.5 w-3.5" />
               </Button>
             </div>
-            <pre className="mt-1 overflow-x-auto rounded-lg bg-muted p-3 font-mono text-xs leading-relaxed">
-              {caPublicKey}
-            </pre>
           </div>
         )}
 
@@ -1123,7 +1123,7 @@ function ApiUsageSection({
             Base URL
           </p>
           <div className="relative">
-            <pre className="overflow-x-auto rounded-lg bg-muted p-3 pr-10 font-mono text-[12px]">
+            <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-[12px]">
               {proxyUrl}
             </pre>
             <Button
@@ -1207,7 +1207,7 @@ function ApiUsageSection({
               </p>
             )}
             <div className="relative">
-              <pre className="overflow-x-auto rounded-lg bg-muted p-3 pr-10 font-mono text-xs leading-relaxed">
+              <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-xs leading-relaxed">
                 {apiKeyExample}
               </pre>
               <Button
@@ -1234,7 +1234,7 @@ function ApiUsageSection({
                 most users, prefer the API Key example above.
               </p>
               <div className="relative">
-                <pre className="overflow-x-auto rounded-lg bg-muted p-3 pr-10 font-mono text-xs leading-relaxed">
+                <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-xs leading-relaxed">
                   {bearerTokenExample}
                 </pre>
                 <Button

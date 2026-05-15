@@ -5,6 +5,7 @@ const AUTH_IMAGES = [
   "/auth-hero.png",
   "/auth-hero-2.png",
   "/auth-hero-3.png",
+  "/auth-hero-4.png",
 ];
 
 const INTERVAL_MS = 6000;
