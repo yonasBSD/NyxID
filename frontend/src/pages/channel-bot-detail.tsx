@@ -961,6 +961,7 @@ export function ChannelBotDetailPage() {
           <div className="flex gap-2">
             <Button
               variant="outline"
+              className="text-text-tertiary hover:text-muted-foreground"
               onClick={() => void handleVerify()}
               disabled={verifyMutation.isPending}
             >

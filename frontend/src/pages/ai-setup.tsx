@@ -67,20 +67,12 @@ function CodeBlock({
 
 function EmptyState() {
   return (
-    <Card>
-      <CardContent className="flex flex-col items-center gap-1 py-12">
-        <BrainIcon className="h-48 w-48 text-muted-foreground/30" />
-        <p className="text-[12px] text-muted-foreground/30">
-          Create an OAuth client first to generate AI setup configs.
-        </p>
-        <Button asChild variant="outline">
-          <Link to="/developer/apps">
-            <ButtonIcon><Plus className="h-3 w-3" /></ButtonIcon>
-            Create Developer App
-          </Link>
-        </Button>
-      </CardContent>
-    </Card>
+    <div className="flex flex-col items-center gap-1 py-12">
+      <BrainIcon className="h-48 w-48 text-muted-foreground/30" />
+      <p className="text-[12px] text-muted-foreground/30">
+        Create an OAuth client first to generate AI setup configs.
+      </p>
+    </div>
   );
 }
 
@@ -277,7 +269,17 @@ export function AiSetupPage() {
       <Separator />
 
       {clients.length === 0 ? (
-        <EmptyState />
+        <div className="space-y-6">
+          <div className="flex justify-end">
+            <Button asChild variant="outline" className="text-text-tertiary hover:text-muted-foreground">
+              <Link to="/developer/apps">
+                <ButtonIcon><Plus className="h-3 w-3" /></ButtonIcon>
+                Create Developer App
+              </Link>
+            </Button>
+          </div>
+          <EmptyState />
+        </div>
       ) : (
         <div className="space-y-6">
           <Card>

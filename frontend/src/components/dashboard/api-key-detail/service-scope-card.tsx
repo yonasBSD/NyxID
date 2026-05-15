@@ -107,20 +107,9 @@ export function ServiceScopeCard({
   return (
     <Card>
       <CardHeader className="pb-3">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Shield className="h-4 w-4 text-primary" />
-            <CardTitle className="text-[15px]">Service Scope</CardTitle>
-          </div>
-          {!editing && (
-            <Button
-              size="icon"
-              variant="ghost"
-              onClick={() => setEditing(true)}
-            >
-              <Pencil className="h-4 w-4" />
-            </Button>
-          )}
+        <div className="flex items-center gap-2">
+          <Shield className="h-4 w-4 text-primary" />
+          <CardTitle className="text-[15px]">Service Scope</CardTitle>
         </div>
         <CardDescription>
           Which external services this key can access via proxy
@@ -184,20 +173,30 @@ export function ServiceScopeCard({
             </div>
           </div>
         ) : (
-          <div className="space-y-2">
-            {allowAllServices ? (
-              <Badge variant="secondary">All services</Badge>
-            ) : allowedServices.length > 0 ? (
-              <div className="flex flex-wrap gap-1">
-                {allowedServices.map((s) => (
-                  <Badge key={s.id} variant="secondary" className="text-xs">
-                    {s.label} ({s.slug})
-                  </Badge>
-                ))}
-              </div>
-            ) : (
-              <Badge variant="destructive">No services (auth-only)</Badge>
-            )}
+          <div className="flex items-center justify-between">
+            <div>
+              {allowAllServices ? (
+                <Badge variant="secondary">All services</Badge>
+              ) : allowedServices.length > 0 ? (
+                <div className="flex flex-wrap gap-1">
+                  {allowedServices.map((s) => (
+                    <Badge key={s.id} variant="secondary" className="text-xs">
+                      {s.label} ({s.slug})
+                    </Badge>
+                  ))}
+                </div>
+              ) : (
+                <Badge variant="destructive">No services (auth-only)</Badge>
+              )}
+            </div>
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-6 w-6 shrink-0"
+              onClick={() => setEditing(true)}
+            >
+              <Pencil className="h-3 w-3" />
+            </Button>
           </div>
         )}
       </CardContent>

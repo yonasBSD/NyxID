@@ -3,6 +3,7 @@ import { useUpdateApiKey } from "@/hooks/use-api-keys";
 import { ApiError } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
 import {
   Card,
   CardContent,
@@ -114,7 +115,7 @@ export function CallbackUrlCard({
                 {callbackUrl}
               </code>
             ) : (
-              <span className="text-[12px] text-muted-foreground">Not set</span>
+              <Badge variant="secondary">Not set</Badge>
             )}
             <div className="flex shrink-0 gap-1">
               <Button

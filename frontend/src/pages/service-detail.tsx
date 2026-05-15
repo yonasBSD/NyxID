@@ -142,6 +142,7 @@ export function ServiceDetailPage() {
             {terminalSupported && (
               <Button
                 variant="outline"
+                className="text-text-tertiary hover:text-muted-foreground"
                 onClick={() =>
                   void navigate({
                     to: "/ssh/$serviceId/terminal",
@@ -158,6 +159,7 @@ export function ServiceDetailPage() {
             )}
             <Button
               variant="outline"
+              className="text-text-tertiary hover:text-muted-foreground"
               onClick={() =>
                 void navigate({
                   to: "/services/$serviceId/edit",
@@ -646,7 +648,7 @@ function YourRoutingSection({
             <Router className="h-4 w-4 text-primary" />
             <CardTitle className="text-[15px]">Your Routing</CardTitle>
           </div>
-          <Button variant="outline" onClick={onBindClick}>
+          <Button variant="outline" className="text-text-tertiary hover:text-muted-foreground" onClick={onBindClick}>
             {count === 0 ? "Bind in AI Services" : "Manage in AI Services"}
             <ButtonIcon><ExternalLink className="h-3 w-3" /></ButtonIcon>
           </Button>

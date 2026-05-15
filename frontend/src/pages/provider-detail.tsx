@@ -89,6 +89,7 @@ export function ProviderDetailPage() {
           <>
             <Button
               variant="outline"
+              className="text-text-tertiary hover:text-muted-foreground"
               onClick={() =>
                 void navigate({
                   to: "/providers/$providerId/edit",

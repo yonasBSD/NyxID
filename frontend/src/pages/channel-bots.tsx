@@ -234,7 +234,7 @@ function BotsTable({
   );
 }
 
-function EmptyState({ onAdd }: { readonly onAdd: () => void }) {
+function EmptyState() {
   return (
     <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
       <RobotIcon className="h-64 w-64 text-muted-foreground/30" />
@@ -244,7 +244,6 @@ function EmptyState({ onAdd }: { readonly onAdd: () => void }) {
           Add a messaging platform bot to relay conversations to your AI agents.
         </p>
       </div>
-      <AddCtaButton label="Add Bot" onClick={onAdd} />
     </div>
   );
 }
@@ -1056,7 +1055,7 @@ export function ChannelBotsPage() {
       ) : error ? (
         <ErrorBanner message="Failed to load channel bots. Please try again." onRetry={refetch} />
       ) : !bots || bots.length === 0 ? (
-        <EmptyState onAdd={() => setCreateOpen(true)} />
+        <EmptyState />
       ) : (
         <BotsTable bots={bots} onDelete={setDeleteTarget} />
       )}

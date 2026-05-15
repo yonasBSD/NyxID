@@ -142,6 +142,7 @@ const SIDEBAR_ITEMS: Record<string, string> = {
   "/admin/roles": "Roles",
   "/admin/groups": "Groups",
   "/admin/invite-codes": "Invite Codes",
+  "/admin/nodes": "Nodes",
   "/admin/services": "Services",
   "/admin/providers": "Providers",
   "/design-system": "Design System",
@@ -343,7 +344,7 @@ function TopBar({
           <span>GitHub</span>
         </a>
 
-        {/* Mobile: profile + menu */}
+        {/* Mobile: profile */}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button
@@ -373,6 +374,18 @@ function TopBar({
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
+
+        {/* Mobile: GitHub */}
+        <a
+          href="https://github.com/ChronoAIProject"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="flex md:hidden h-8 w-8 items-center justify-center rounded-lg border border-white/[0.08] text-text-tertiary transition-colors duration-300 hover:border-white/[0.15] hover:text-muted-foreground"
+          aria-label="GitHub"
+        >
+          <Github className="h-[14px] w-[14px]" />
+        </a>
+
         {onMobileMenu && (
         <button
           type="button"

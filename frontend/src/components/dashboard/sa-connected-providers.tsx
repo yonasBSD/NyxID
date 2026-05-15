@@ -240,7 +240,7 @@ function ConnectProviderDropdown({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="outline">
+        <Button variant="outline" className="text-text-tertiary hover:text-muted-foreground">
           <ButtonIcon><Plug className="h-3 w-3" /></ButtonIcon>
           Connect Provider
         </Button>

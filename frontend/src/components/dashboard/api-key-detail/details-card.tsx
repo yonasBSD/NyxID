@@ -155,9 +155,10 @@ export function DetailsCard({
             <Button
               size="icon"
               variant="ghost"
+              className="h-6 w-6 shrink-0"
               onClick={() => setEditingName(true)}
             >
-              <Pencil className="h-4 w-4" />
+              <Pencil className="h-3 w-3" />
             </Button>
           </div>
         )}

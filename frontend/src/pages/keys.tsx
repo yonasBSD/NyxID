@@ -91,7 +91,7 @@ function KeyCardContent({ keyInfo, source }: KeyCardProps) {
       }`}
       aria-disabled={isBlocked ? true : undefined}
     >
-      <CardContent className="flex h-full flex-col gap-3 p-4">
+      <CardContent className="flex h-full min-h-[140px] flex-col gap-3 p-4">
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">
             <p className="truncate text-[12px] font-medium text-foreground">
@@ -128,7 +128,7 @@ function KeyCardContent({ keyInfo, source }: KeyCardProps) {
           </div>
         </div>
 
-        <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs text-muted-foreground">
+        <div className="grid grid-cols-2 gap-x-4 gap-y-3 text-xs text-muted-foreground">
           <div className="flex items-center gap-1.5">
             {isSsh ? (
               <Terminal className="h-3 w-3 shrink-0" />
@@ -137,7 +137,7 @@ function KeyCardContent({ keyInfo, source }: KeyCardProps) {
             )}
             <span className="truncate">{displayUrl}</span>
           </div>
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center justify-end gap-1.5">
             {keyInfo.auto_connected ? (
               <Zap className="h-3 w-3 shrink-0" />
             ) : (
@@ -159,7 +159,7 @@ function KeyCardContent({ keyInfo, source }: KeyCardProps) {
               {isSsh ? keyInfo.slug : `/proxy/s/${keyInfo.slug}`}
             </span>
           </div>
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center justify-end gap-1.5">
             <Router className="h-3 w-3 shrink-0" />
             <span className="truncate">
               {nodeName ? `→ ${nodeName}` : "Direct"}

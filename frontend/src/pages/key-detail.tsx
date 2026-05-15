@@ -228,15 +228,16 @@ function EndpointSection({
             </Button>
           </div>
         ) : isEmpty && nodeRouted ? (
-          <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
-            <span>Resolved by node agent</span>
+          <div className="flex items-center justify-between gap-2">
+            <Badge variant="secondary">Resolved by node agent</Badge>
             {!readOnly && (
               <Button
                 size="icon"
                 variant="ghost"
+                className="h-6 w-6 shrink-0"
                 onClick={() => setEditing(true)}
               >
-                <Pencil className="h-4 w-4" />
+                <Pencil className="h-3 w-3" />
               </Button>
             )}
           </div>
@@ -249,9 +250,10 @@ function EndpointSection({
               <Button
                 size="icon"
                 variant="ghost"
+                className="h-6 w-6 shrink-0"
                 onClick={() => setEditing(true)}
               >
-                <Pencil className="h-4 w-4" />
+                <Pencil className="h-3 w-3" />
               </Button>
             )}
           </div>
@@ -347,17 +349,17 @@ function OpenApiSpecSection({
               {specUrl}
             </code>
             {!readOnly && (
-              <Button size="icon" variant="ghost" onClick={handleEdit}>
-                <Pencil className="h-4 w-4" />
+              <Button size="icon" variant="ghost" className="h-6 w-6 shrink-0" onClick={handleEdit}>
+                <Pencil className="h-3 w-3" />
               </Button>
             )}
           </div>
         ) : (
-          <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
-            <span>Not set</span>
+          <div className="flex items-center justify-between gap-2">
+            <Badge variant="secondary">Not set</Badge>
             {!readOnly && (
-              <Button size="icon" variant="ghost" onClick={handleEdit}>
-                <Pencil className="h-4 w-4" />
+              <Button size="icon" variant="ghost" className="h-6 w-6 shrink-0" onClick={handleEdit}>
+                <Pencil className="h-3 w-3" />
               </Button>
             )}
           </div>
@@ -428,7 +430,7 @@ function ApiKeySection({
             <CardTitle className="text-[15px]">API Key</CardTitle>
           </div>
           {showRotateInHeader && (
-            <Button variant="outline" onClick={() => setRotating(true)}>
+            <Button variant="outline" className="text-text-tertiary hover:text-muted-foreground" onClick={() => setRotating(true)}>
               <ButtonIcon><RefreshCw className="h-3 w-3" /></ButtonIcon>
               Rotate Credentials
             </Button>
@@ -678,19 +680,17 @@ function ServiceSection({
               </Button>
             </div>
           ) : (
-            <div className="flex items-center gap-2">
+            <div className="flex items-center justify-between gap-2">
               <span className="text-xs">
                 {customUserAgent || (
-                  <span className="text-muted-foreground">
-                    Passthrough (default)
-                  </span>
+                  <Badge variant="secondary">Passthrough (default)</Badge>
                 )}
               </span>
               {!readOnly && (
                 <Button
                   size="icon"
                   variant="ghost"
-                  className="h-6 w-6"
+                  className="h-6 w-6 shrink-0"
                   onClick={() => {
                     setUaDraft(customUserAgent ?? "");
                     setEditingUa(true);
@@ -763,7 +763,7 @@ function NodeSetupHelper({
   }
 
   return (
-    <Card className="md:col-span-2">
+    <Card className="min-w-0 md:col-span-2">
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
           <Terminal className="h-4 w-4 text-primary" />
@@ -1107,7 +1107,7 @@ function ApiUsageSection({
   }
 
   return (
-    <Card className="md:col-span-2">
+    <Card className="min-w-0 md:col-span-2">
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
           <Code className="h-4 w-4 text-primary" />
@@ -1117,7 +1117,7 @@ function ApiUsageSection({
           How to connect to this service through NyxID proxy
         </CardDescription>
       </CardHeader>
-      <CardContent className="space-y-4">
+      <CardContent className="min-w-0 space-y-4">
         <div>
           <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">
             Base URL
@@ -1505,8 +1505,8 @@ function DefaultHeadersSection({
               Your headers
             </p>
             {!readOnly && !editing && (
-              <Button size="icon" variant="ghost" onClick={handleEdit}>
-                <Pencil className="h-4 w-4" />
+              <Button size="icon" variant="ghost" className="h-6 w-6 shrink-0" onClick={handleEdit}>
+                <Pencil className="h-3 w-3" />
               </Button>
             )}
           </div>
@@ -1617,8 +1617,8 @@ function WsFrameInjectionsSection({
           </p>
         </div>
         {!editing && (
-          <Button size="icon" variant="ghost" onClick={handleEdit}>
-            <Pencil className="h-4 w-4" />
+          <Button size="icon" variant="ghost" className="h-6 w-6 shrink-0" onClick={handleEdit}>
+            <Pencil className="h-3 w-3" />
           </Button>
         )}
       </div>
@@ -1803,6 +1803,7 @@ export function KeyDetailPage() {
             {hasCertAuth && sshServiceId && (
               <Button
                 variant="outline"
+                className="text-text-tertiary hover:text-muted-foreground"
                 onClick={() =>
                   void navigate({
                     to: "/ssh/$serviceId/terminal",

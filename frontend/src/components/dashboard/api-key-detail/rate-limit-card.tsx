@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useUpdateApiKey } from "@/hooks/use-api-keys";
 import { ApiError } from "@/lib/api-client";
-import { Button, ButtonIcon } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -117,7 +117,7 @@ export function RateLimitCard({
             </div>
           </div>
         ) : (
-          <div className="space-y-2">
+          <div className="flex items-center justify-between">
             <div className="grid grid-cols-2 gap-2 text-xs">
               <div>
                 <span className="text-muted-foreground">Per second: </span>
@@ -133,11 +133,12 @@ export function RateLimitCard({
               </div>
             </div>
             <Button
-              variant="outline"
+              size="icon"
+              variant="ghost"
+              className="h-6 w-6 shrink-0"
               onClick={() => setEditing(true)}
             >
-              <ButtonIcon><Pencil className="h-3 w-3" /></ButtonIcon>
-              Edit Limits
+              <Pencil className="h-3 w-3" />
             </Button>
           </div>
         )}
