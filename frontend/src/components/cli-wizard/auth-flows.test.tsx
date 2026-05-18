@@ -387,12 +387,13 @@ describe("OAuthFlow polling integration", () => {
     resetFlowMocks();
   });
 
-  // Skipped: the UI consistency sweep (5f9a67e) reverted the
-  // cancelledRef-in-cleanup fix from PR #723. The effect cleanup now
-  // sets cancelledRef.current = true on phase change, which aborts
-  // polling before the first GET fires. Re-enable once the production
-  // fix for issue #653 is re-applied.
-  it.skip(
+  // Regression guard: the UI consistency sweep (5f9a67e / PR #733)
+  // reverted the cancelledRef-in-cleanup fix from PR #723 (issue #653
+  // root cause). The fix is restored on this branch — the [phase]-deps
+  // useEffect cleanup must NOT flip `cancelledRef.current` (only the
+  // unmount-only effect does), otherwise setPhase("waiting") aborts
+  // polling before the first GET fires.
+  it(
     "actually fires GET /keys/<id> while the placeholder is pending_auth (issue #653 root cause)",
     async () => {
       // Override defaults: POST /keys returns pending_auth so the
@@ -412,9 +413,14 @@ describe("OAuthFlow polling integration", () => {
         throw new Error(`unexpected POST ${path}`);
       });
       mockGet.mockImplementation(async (path: string) => {
+        // The wizard now also threads the placeholder's id into the
+        // initiate URL as `&key_id=<id>` (multi-connection routing —
+        // tells the backend callback which UserApiKey to write the
+        // tokens onto). Match either shape so the test doesn't have
+        // to mirror that detail.
         if (
           path.startsWith("/providers/") &&
-          path.endsWith("/oauth?redirect_path=%2Fkeys%2Fkey-1")
+          path.includes("/oauth?redirect_path=%2Fkeys%2Fkey-1")
         ) {
           return { authorization_url: "https://example.com/oauth" };
         }

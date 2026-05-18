@@ -478,6 +478,34 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     oauth_states
         .create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
         .await?;
+    // Multi-connection: a placeholder `UserApiKey.connection_id` should
+    // back AT MOST one in-flight `OAuthState`. Two parallel initiates
+    // for the same placeholder (e.g. double-clicked "Connect" + a
+    // retry) would otherwise produce duplicate state rows; both
+    // callbacks could land valid token writes, and the second one
+    // would overwrite the first's freshly-rotated refresh_token.
+    //
+    // `OAuthState.connection_id` is `Option<String>` and serializes
+    // `None` as BSON `null` (not as a missing field), so the partial
+    // filter uses `$gt: null` rather than `$exists: true` to exclude
+    // legacy single-tenant rows from the uniqueness constraint.
+    // MongoDB orders `null < string`, so `$gt: null` selects only the
+    // string values we want covered.
+    oauth_states
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "connection_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .partial_filter_expression(doc! {
+                            "connection_id": { "$gt": mongodb::bson::Bson::Null }
+                        })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
 
     // ── roles ──
     let roles = db.collection::<mongodb::bson::Document>("roles");
@@ -924,6 +952,55 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                         .unique(true)
                         .partial_filter_expression(doc! {
                             "source_id": { "$type": "string" }
+                        })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
+    // Multi-connection OAuth: partial unique on `connection_id` where the
+    // field exists. The field is mint-once-per-add (UUID v4) for new
+    // OAuth/device-code services that need independent per-connection
+    // tokens. Existing rows (created before the multi-connection rollout)
+    // have no `connection_id` and are excluded by the partial filter, so
+    // the index is purely additive — no backfill, no row mutation.
+    //
+    // Defense-in-depth: UUID collisions are astronomically unlikely, but
+    // a duplicate non-null value would indicate a code bug. The pre-check
+    // audit below refuses to create the index if duplicates are present.
+    let pre_check = user_api_keys
+        .aggregate(vec![
+            doc! { "$match": { "connection_id": { "$exists": true, "$ne": null } } },
+            doc! { "$group": { "_id": "$connection_id", "n": { "$sum": 1 } } },
+            doc! { "$match": { "n": { "$gt": 1 } } },
+            doc! { "$limit": 5 },
+        ])
+        .await?;
+    let dupes: Vec<mongodb::bson::Document> = pre_check.try_collect().await?;
+    if !dupes.is_empty() {
+        let sample: Vec<String> = dupes
+            .iter()
+            .filter_map(|d| d.get_str("_id").ok().map(String::from))
+            .collect();
+        tracing::error!(
+            duplicates = ?sample,
+            "user_api_keys has duplicate connection_id values; refusing to create unique index. \
+             Investigate the offending rows before redeploying."
+        );
+        return Err(mongodb::error::Error::custom(
+            "user_api_keys.connection_id has duplicates; partial unique index cannot be created",
+        ));
+    }
+    user_api_keys
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "connection_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .partial_filter_expression(doc! {
+                            "connection_id": { "$exists": true }
                         })
                         .build(),
                 )
@@ -2075,6 +2152,7 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
             token_scopes: token.token_scopes.clone(),
             expires_at: token.expires_at,
             provider_config_id: Some(token.provider_config_id.clone()),
+            connection_id: token.connection_id.clone(),
             user_oauth_client_id_encrypted: user_creds
                 .as_ref()
                 .and_then(|c| c.client_id_encrypted.clone()),
@@ -2315,6 +2393,7 @@ async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::e
             token_scopes: None,
             expires_at: None,
             provider_config_id: None,
+            connection_id: None,
             user_oauth_client_id_encrypted: None,
             user_oauth_client_secret_encrypted: None,
             status: "active".to_string(),
@@ -2567,6 +2646,7 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
             token_scopes: None,
             expires_at: None,
             provider_config_id: None,
+            connection_id: None,
             user_oauth_client_id_encrypted: None,
             user_oauth_client_secret_encrypted: None,
             status: "active".to_string(),

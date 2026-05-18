@@ -7,7 +7,6 @@ import {
   useInitiateOAuth,
   useInitiateDeviceCode,
   usePollDeviceCode,
-  useSetProviderCredentials,
 } from "@/hooks/use-providers";
 import { ApiError, api } from "@/lib/api-client";
 import { hardRedirect } from "@/lib/navigation";
@@ -1258,6 +1257,14 @@ function OAuthStep({
         providerId: catalogEntry.provider_config_id,
         redirectPath: `/keys/${key.id}`,
         additionalScopes,
+        // Multi-connection: thread the placeholder's id so the OAuth
+        // callback writes the resulting tokens straight onto THIS
+        // `UserApiKey` (via its `connection_id`) instead of taking
+        // the legacy `user_provider_tokens` path. Without this, a
+        // second add to the same provider would leave the freshly-
+        // minted placeholder stuck in `pending_auth` while the token
+        // landed on the legacy row.
+        keyId: key.id,
         ...(targetOrgId ? { targetOrgId } : {}),
       });
       hardRedirect(response.authorization_url);
@@ -1514,6 +1521,12 @@ function DeviceCodeStep({
       const response = await initiateMutation.mutateAsync({
         providerId: catalogEntry.provider_config_id,
         additionalScopes,
+        // Multi-connection: same rationale as the OAuth step — thread
+        // the placeholder id so the device-code completion writes onto
+        // THIS `UserApiKey` instead of the legacy `user_provider_tokens`
+        // row. Required for `nyxid service add codex` to actually mint
+        // a distinct second connection.
+        keyId: key.id,
         ...(targetOrgId ? { targetOrgId } : {}),
       });
       if (!isMountedRef.current) return;
@@ -1776,31 +1789,37 @@ function OAuthCredentialsStep({
 }: {
   readonly catalogEntry: CatalogEntry;
   readonly onBack: () => void;
-  readonly onComplete: () => void;
+  /**
+   * Fired after the user enters Custom App credentials. Carries the
+   * trimmed plaintext up to the parent so the eventual `POST /keys`
+   * for this add can include them as `oauth_client_id` /
+   * `oauth_client_secret` (multi-connection BYO write path).
+   *
+   * Important — this step does NOT call `PUT /providers/{id}/credentials`.
+   * That endpoint writes to the single-row-per-`(user, provider)`
+   * `user_provider_credentials` table. If a user already has a legacy
+   * single-connection (`connection_id: null`) credential for this
+   * provider, a PUT here would overwrite its Custom App secret with
+   * the new one — silently breaking the legacy connection's refresh
+   * path (`oauth_flow::refresh_oauth_token` reads from
+   * `user_provider_credentials`). Multi-connection refresh reads BYO
+   * directly off the `UserApiKey`, so the legacy table doesn't need
+   * to be touched at all for the new add. The legacy PUT endpoint
+   * remains available for callers that explicitly want to manage the
+   * shared row (admin tooling, the legacy `connect provider` page).
+   */
+  readonly onComplete: (clientId: string, clientSecret: string) => void;
 }) {
   const [clientId, setClientId] = useState("");
   const [clientSecret, setClientSecret] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const setCredentials = useSetProviderCredentials();
 
-  async function handleSave() {
+  function handleSave() {
     if (!catalogEntry.provider_config_id) return;
     setError(null);
-
-    try {
-      await setCredentials.mutateAsync({
-        providerId: catalogEntry.provider_config_id,
-        client_id: clientId.trim(),
-        client_secret: clientSecret.trim() || undefined,
-      });
-      onComplete();
-    } catch (err) {
-      const message =
-        err instanceof ApiError
-          ? err.message
-          : "Failed to save OAuth credentials";
-      setError(message);
-    }
+    const trimmedId = clientId.trim();
+    const trimmedSecret = clientSecret.trim();
+    onComplete(trimmedId, trimmedSecret);
   }
 
   return (
@@ -1871,10 +1890,10 @@ function OAuthCredentialsStep({
       <Button
         variant="primary"
         className="w-full"
-        onClick={() => void handleSave()}
-        disabled={setCredentials.isPending || !clientId.trim()}
+        onClick={handleSave}
+        disabled={!clientId.trim()}
       >
-        {setCredentials.isPending ? "Saving..." : "Continue to Authentication"}
+        Continue to Authentication
       </Button>
     </div>
   );
@@ -1942,6 +1961,17 @@ export function AddKeyDialog({
   const [form, setForm] = useState<FormState>(INITIAL_FORM);
   const [authKey, setAuthKey] = useState<KeyInfo | null>(null);
   const [targetOrgId, setTargetOrgId] = useState<string | null>(null);
+  // Multi-connection BYO: hold the user-typed Custom App credentials
+  // from the `oauth_credentials` step so they can ride along on the
+  // subsequent `POST /keys`. Without this, the dashboard would only
+  // PUT them to the legacy `user_provider_credentials` row — which
+  // can hold a single Custom App per (user, provider) — leaving the
+  // new `UserApiKey.user_oauth_client_*_encrypted` empty. Refresh
+  // would then fail at ~2h because the per-connection refresh path
+  // has no client_id to use. See `designs/multi-connection-custom-
+  // app-credentials.md` §6.1.
+  const [byoOAuthClientId, setByoOAuthClientId] = useState<string | null>(null);
+  const [byoOAuthClientSecret, setByoOAuthClientSecret] = useState<string | null>(null);
   // Guards `prefillSlug` against running its auto-select more than
   // once per dialog open. Without this, re-renders would re-select
   // the catalog entry and snap the user back to the routing step
@@ -1954,6 +1984,8 @@ export function AddKeyDialog({
     setForm(INITIAL_FORM);
     setAuthKey(null);
     setTargetOrgId(null);
+    setByoOAuthClientId(null);
+    setByoOAuthClientSecret(null);
     appliedPrefillRef.current = null;
   }
 
@@ -2083,6 +2115,18 @@ export function AddKeyDialog({
         ? { openapi_spec_url: form.openapiSpecUrl.trim() }
         : {}),
       ...(targetOrgId ? { target_org_id: targetOrgId } : {}),
+      // Multi-connection BYO: include the user-typed Custom App
+      // credentials in the same `POST /keys` so the new `UserApiKey`
+      // carries its own encrypted copy. Either both halves or
+      // neither — the backend rejects an unpaired submission.
+      // Captured by `OAuthCredentialsStep` and stored on the parent
+      // before this builder runs.
+      ...(byoOAuthClientId && byoOAuthClientSecret
+        ? {
+            oauth_client_id: byoOAuthClientId,
+            oauth_client_secret: byoOAuthClientSecret,
+          }
+        : {}),
     };
   }
 
@@ -2301,7 +2345,24 @@ export function AddKeyDialog({
           <OAuthCredentialsStep
             catalogEntry={selectedEntry}
             onBack={() => setStep("routing")}
-            onComplete={handleCredentialsSaved}
+            onComplete={(clientId, clientSecret) => {
+              // Multi-connection: cache the user-typed Custom App
+              // credentials on the parent so the eventual `POST /keys`
+              // for this add can include them as `oauth_client_id` /
+              // `oauth_client_secret`. `OAuthCredentialsStep` itself
+              // intentionally does NOT call
+              // `PUT /providers/{id}/credentials` (see the doc on the
+              // `onComplete` prop at line 1798) — that legacy endpoint
+              // writes to the single-row-per-`(user, provider)`
+              // `user_provider_credentials` table, so PUT-ing from a
+              // new BYO add would silently overwrite any pre-existing
+              // single-connection user's Custom App secret. Refresh
+              // for multi-connection keys reads BYO straight off the
+              // `UserApiKey`, so the legacy table is left untouched.
+              setByoOAuthClientId(clientId);
+              setByoOAuthClientSecret(clientSecret);
+              handleCredentialsSaved();
+            }}
           />
         )}
 
