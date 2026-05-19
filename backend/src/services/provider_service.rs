@@ -3010,7 +3010,7 @@ pub async fn seed_default_services(
     }
 
     // NyxID#778: the gcp-cloud-billing / gcp-bigquery-billing catalog entries
-    // (and their gcp_service_account auth) have been removed in favor of the
+    // (and their legacy service-account auth) have been removed in favor of the
     // generic `api-google-cloud` + `google-cloud` OAuth flow. Any existing
     // UserService rows that auto-provisioned from those old slugs now point
     // at non-existent catalog entries and have invalid credentials. We do
