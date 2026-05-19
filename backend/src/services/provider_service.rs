@@ -1503,11 +1503,10 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
-    // Cloud billing providers (NyxID#716). Pair with the
-    // aws-cost-explorer / gcp-cloud-billing / gcp-bigquery-billing
-    // service seeds below. The credential is stored directly on
-    // UserApiKey (not provider-delegated), so these providers are
-    // mostly catalog metadata + install-instructions for the user.
+    // Cloud billing providers (NyxID#716, #778). AWS uses direct sigv4
+    // injection (non-delegated). Google Cloud uses the standard OAuth2
+    // delegated flow via the new `google-cloud` provider + `api-google-cloud`
+    // service (user supplies --endpoint-url per add).
     if !slug_exists!("aws-billing") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -1567,46 +1566,42 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
-    if !slug_exists!("gcp-billing") {
+    // Google Cloud (OAuth2) — replaces the old gcp-billing / gcp-bigquery
+    // service-account seeds (NyxID#778). One provider entry; users pick the
+    // actual Google API host per `nyxid service add` via --endpoint-url.
+    // Default scope is the read-only umbrella; --scope can add others.
+    if !slug_exists!("google-cloud") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
-            slug: "gcp-billing".to_string(),
-            name: "GCP Cloud Billing".to_string(),
+            slug: "google-cloud".to_string(),
+            name: "Google Cloud".to_string(),
             description: Some(
-                "GCP Cloud Billing API — billing account metadata, project \
-                 associations, SKU catalog. Authenticates via a service-account \
-                 JSON key."
+                "Google Cloud APIs (Cloud Billing, BigQuery, Compute, etc.) via \
+                 OAuth 2.0 user accounts. Supply the concrete API host via \
+                 --endpoint-url when adding the service (e.g. \
+                 https://cloudbilling.googleapis.com). A single OAuth token \
+                 (from this provider) is reused across any number of Google API \
+                 hosts. Default scope: cloud-platform.read-only."
                     .to_string(),
             ),
-            provider_type: "api_key".to_string(),
-            authorization_url: None,
-            token_url: None,
-            revocation_url: None,
-            default_scopes: None,
+            provider_type: "oauth2".to_string(),
+            authorization_url: Some("https://accounts.google.com/o/oauth2/v2/auth".to_string()),
+            token_url: Some("https://oauth2.googleapis.com/token".to_string()),
+            revocation_url: Some("https://oauth2.googleapis.com/revoke".to_string()),
+            default_scopes: Some(vec![
+                "https://www.googleapis.com/auth/cloud-platform.read-only".to_string(),
+            ]),
             client_id_encrypted: None,
             client_secret_encrypted: None,
-            supports_pkce: false,
+            supports_pkce: true,
             device_code_url: None,
             device_token_url: None,
             device_verification_url: None,
             hosted_callback_url: None,
-            api_key_instructions: Some(
-                "Create a service account with `roles/billing.viewer` (org or \
-                 billing-account scope) plus `roles/bigquery.dataViewer` on the \
-                 billing export dataset and `roles/bigquery.jobUser` on the \
-                 project. Generate a JSON key and paste its entire content as \
-                 the credential. The SA's IAM roles enforce read-only — NyxID \
-                 does not mediate that boundary."
-                    .to_string(),
-            ),
-            api_key_url: Some(
-                "https://console.cloud.google.com/iam-admin/serviceaccounts".to_string(),
-            ),
+            api_key_instructions: None,
+            api_key_url: None,
             icon_url: None,
-            documentation_url: Some(
-                "https://cloud.google.com/billing/docs/how-to/export-data-bigquery-tables/standard-usage"
-                    .to_string(),
-            ),
+            documentation_url: Some("https://cloud.google.com/docs/authentication".to_string()),
             is_active: true,
             credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
@@ -1620,68 +1615,25 @@ pub async fn seed_default_providers(
         };
         collection.insert_one(&provider).await?;
         tracing::info!(
-            slug = "gcp-billing",
-            "Seeded default provider: GCP Cloud Billing"
+            slug = "google-cloud",
+            "Seeded default provider: Google Cloud"
         );
         seeded_count += 1;
     }
 
-    if !slug_exists!("gcp-bigquery") {
-        let provider = ProviderConfig {
-            id: Uuid::new_v4().to_string(),
-            slug: "gcp-bigquery".to_string(),
-            name: "GCP BigQuery (Billing Export)".to_string(),
-            description: Some(
-                "GCP BigQuery — used here to query the billing export dataset \
-                 for line-item cost data. Same SA-JSON credential shape as \
-                 gcp-billing; the dataset itself must already be created via \
-                 GCP's billing-export setup."
-                    .to_string(),
-            ),
-            provider_type: "api_key".to_string(),
-            authorization_url: None,
-            token_url: None,
-            revocation_url: None,
-            default_scopes: None,
-            client_id_encrypted: None,
-            client_secret_encrypted: None,
-            supports_pkce: false,
-            device_code_url: None,
-            device_token_url: None,
-            device_verification_url: None,
-            hosted_callback_url: None,
-            api_key_instructions: Some(
-                "Reuse the service-account JSON key from gcp-billing (the IAM \
-                 roles needed include `roles/billing.viewer` plus \
-                 `roles/bigquery.dataViewer` on the billing export dataset and \
-                 `roles/bigquery.jobUser` on the host project). Paste the \
-                 full JSON content as the credential."
-                    .to_string(),
-            ),
-            api_key_url: Some(
-                "https://console.cloud.google.com/iam-admin/serviceaccounts".to_string(),
-            ),
-            icon_url: None,
-            documentation_url: Some(
-                "https://cloud.google.com/billing/docs/how-to/bq-examples".to_string(),
-            ),
-            is_active: true,
-            credential_mode: "user".to_string(),
-            token_endpoint_auth_method: "client_secret_post".to_string(),
-            extra_auth_params: None,
-            device_code_format: "rfc8628".to_string(),
-            client_id_param_name: None,
-            requires_gateway_url: false,
-            created_by: "system".to_string(),
-            created_at: now,
-            updated_at: now,
-        };
-        collection.insert_one(&provider).await?;
-        tracing::info!(
-            slug = "gcp-bigquery",
-            "Seeded default provider: GCP BigQuery"
+    // Warn once per startup if the google-cloud OAuth client is not yet
+    // configured (common for fresh deploys). Admins configure via the
+    // existing provider PATCH API or admin UI before users can --oauth.
+    if let Some(gc) = collection.find_one(doc! { "slug": "google-cloud" }).await?
+        && gc.client_id_encrypted.is_none()
+    {
+        tracing::warn!(
+            slug = "google-cloud",
+            "google-cloud OAuth provider has no client_id/secret configured; \
+             admins must set them via PATCH /api/v1/providers/google-cloud \
+             (or the admin UI) before users can connect services via --oauth. \
+             Until then the catalog entry exists but OAuth flows will fail."
         );
-        seeded_count += 1;
     }
 
     if seeded_count > 0 {
@@ -2193,10 +2145,11 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         description: None,
         default_request_headers: None,
     },
-    // Cloud-billing catalog entries (NyxID#716). All three use direct
-    // (non-delegated) credential injection so no ServiceProviderRequirement
-    // is created — the proxy signs requests with the stored IAM access
-    // key (AWS) or service-account JSON (GCP).
+    // Cloud-billing catalog entries (NyxID#716, #778). AWS uses direct
+    // (non-delegated) sigv4 injection. Google Cloud uses delegated OAuth
+    // via the `google-cloud` provider (service_auth_method=None so a
+    // ServiceProviderRequirement is created; user supplies host via
+    // --endpoint-url on `nyxid service add`, matching llm-openclaw pattern).
     DefaultServiceSeed {
         provider_slug: "aws-billing",
         service_slug: "aws-cost-explorer",
@@ -2218,38 +2171,25 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         default_request_headers: None,
     },
     DefaultServiceSeed {
-        provider_slug: "gcp-billing",
-        service_slug: "gcp-cloud-billing",
-        service_name: "GCP Cloud Billing API",
-        base_url: "https://cloudbilling.googleapis.com",
+        provider_slug: "google-cloud",
+        service_slug: "api-google-cloud",
+        service_name: "Google Cloud API",
+        // Placeholder: each user provides their own Google API host when
+        // connecting (via --endpoint-url). Matches the llm-openclaw pattern.
+        // The OAuth token from the `google-cloud` provider is reused across
+        // any number of hosts (Cloud Billing, BigQuery, Compute, ...).
+        base_url: "https://googleapis.invalid",
         injection_method: "bearer",
         injection_key: "Authorization",
-        service_auth_method: Some("gcp_service_account"),
+        service_auth_method: None,
         service_auth_key_name: None,
         description: Some(
-            "GCP Cloud Billing REST API — billing-account metadata, project-to-\
-             billing-account associations, SKUs, and pricing catalog. NOTE: this \
-             API does NOT expose historical cost data; for spend-by-project / day \
-             queries use gcp-bigquery-billing against the billing export dataset.",
-        ),
-        default_request_headers: None,
-    },
-    DefaultServiceSeed {
-        provider_slug: "gcp-bigquery",
-        service_slug: "gcp-bigquery-billing",
-        service_name: "GCP BigQuery (Billing Export)",
-        base_url: "https://bigquery.googleapis.com",
-        injection_method: "bearer",
-        injection_key: "Authorization",
-        service_auth_method: Some("gcp_service_account"),
-        service_auth_key_name: None,
-        description: Some(
-            "GCP BigQuery — used to query the billing export dataset \
-             (gcp_billing_export_v1_<billing_account_id>) for actual cost line \
-             items grouped by project / label / SKU / day. POST SQL queries to \
-             /bigquery/v2/projects/<project_id>/queries; the same service-account \
-             credential as gcp-cloud-billing works for both because the default \
-             token scopes cover both APIs.",
+            "Generic Google Cloud API endpoint. Supply the real host via \
+             --endpoint-url at add time (e.g. https://cloudbilling.googleapis.com, \
+             https://bigquery.googleapis.com, https://compute.googleapis.com). \
+             One OAuth user token (google-cloud provider) works for any Google \
+             API host. Default scope cloud-platform.read-only; extend with \
+             --scope for write APIs.",
         ),
         default_request_headers: None,
     },
@@ -3066,6 +3006,29 @@ pub async fn seed_default_services(
         tracing::info!(
             count = migrated_count,
             "Catalog service description migration complete"
+        );
+    }
+
+    // NyxID#778: the gcp-cloud-billing / gcp-bigquery-billing catalog entries
+    // (and their gcp_service_account auth) have been removed in favor of the
+    // generic `api-google-cloud` + `google-cloud` OAuth flow. Any existing
+    // UserService rows that auto-provisioned from those old slugs now point
+    // at non-existent catalog entries and have invalid credentials. We do
+    // NOT auto-rewrite them (the stored SA JSON is gone from the new model).
+    // Log a one-time warning at startup with a hint for affected users.
+    let removed_gcp_slugs = ["gcp-cloud-billing", "gcp-bigquery-billing"];
+    let orphaned = db
+        .collection::<mongodb::bson::Document>(USER_SERVICES)
+        .count_documents(doc! { "slug": { "$in": &removed_gcp_slugs[..] } })
+        .await?;
+    if orphaned > 0 {
+        tracing::warn!(
+            count = orphaned,
+            slugs = ?removed_gcp_slugs,
+            "NyxID#778: found orphaned UserService rows for removed GCP service-account \
+             catalog entries. These users must re-add the services via the new OAuth flow: \
+             `nyxid service add api-google-cloud --oauth --endpoint-url <google-api-host>`. \
+             Old service-account credentials are no longer supported."
         );
     }
 
