@@ -47,7 +47,7 @@ nyxid service add --custom                                # add custom endpoint 
 
 > For API key services, just run `nyxid service add <slug>` without flags. The CLI securely prompts for the key (input hidden). Never ask the user to paste secrets into chat or set environment variables manually.
 > For automation/scripting only: `--credential-env <VAR>` reads from an environment variable.
-> For multi-field credentials (AWS access-key JSON, GCP service-account JSON): `--credential-file <PATH>` reads the credential bytes from a file. Pass `-` to read from stdin.
+> For multi-field credentials such as AWS access-key JSON: `--credential-file <PATH>` reads the credential bytes from a file. Pass `-` to read from stdin.
 
 ## Slug rules for `service add`
 
@@ -285,25 +285,22 @@ When users need API keys, direct them to the right place:
 | OpenAI | https://platform.openai.com/api-keys | `OPENAI_KEY` |
 | Anthropic | https://console.anthropic.com/settings/keys | `ANTHROPIC_KEY` |
 | GitHub | https://github.com/settings/tokens | `GITHUB_TOKEN` |
-| Google Cloud | https://console.cloud.google.com/apis/credentials | `GOOGLE_KEY` |
 | Groq | https://console.groq.com/keys | `GROQ_KEY` |
 
 For services not listed here, check `nyxid catalog show <slug> --output json` for the provider's documentation URL.
 
-### Cloud-billing services: AWS Cost Explorer + GCP Cloud Billing / BigQuery
+### Cloud-billing services: AWS Cost Explorer + Google Cloud APIs
 
-Three catalog entries surface cloud cost data for `/daily`-style P&L
-work (NyxID#716):
+Two catalog entries cover the cloud cost and Google API paths used for
+`/daily`-style P&L work (NyxID#716 / NyxID#778):
 
 | Slug | What it proxies | Credential shape |
 |------|-----------------|------------------|
 | `aws-cost-explorer` | AWS Cost Explorer JSON-RPC API (`ce.us-east-1.amazonaws.com`). Use `X-Amz-Target` to pick the operation (e.g. `AWSInsightsServiceV20210101.GetCostAndUsage`). | JSON: `{"access_key_id","secret_access_key","region","service"}` |
-| `gcp-cloud-billing` | GCP Cloud Billing REST (`cloudbilling.googleapis.com`) — billing-account metadata, projects, SKUs. **No historical cost data here.** | The full service-account JSON key file |
-| `gcp-bigquery-billing` | GCP BigQuery — the only path to spend-by-project / day. SQL queries against `gcp_billing_export_v1_<billing_account_id>`. | Same SA JSON as `gcp-cloud-billing` (default scopes cover both) |
+| `api-google-cloud` | Generic Google Cloud OAuth user-account proxy. Pick the concrete Google API host at add time with `--endpoint-url`: common hosts include `https://cloudbilling.googleapis.com`, `https://bigquery.googleapis.com`, and `https://compute.googleapis.com`. | OAuth browser sign-in. Default scope: `https://www.googleapis.com/auth/cloud-platform.read-only`; add write/admin scopes with `--scope` when needed. |
 
-Auth methods used (`aws_sigv4` / `gcp_service_account`) take their
-credential as a JSON blob on the existing `credential` field — pass it
-in via `--credential-file`:
+AWS SigV4 takes its credential as a JSON blob on the existing
+`credential` field -- pass it in via `--credential-file`:
 
 ```bash
 # AWS — write the access-key JSON to a temp file (or pipe via stdin: -)
@@ -312,10 +309,38 @@ cat > /tmp/aws-cred.json <<'EOF'
 EOF
 nyxid service add aws-cost-explorer --credential-file /tmp/aws-cred.json
 rm /tmp/aws-cred.json
+```
 
-# GCP — service-account JSON downloaded from the Cloud Console
-nyxid service add gcp-cloud-billing --credential-file ~/Downloads/sa-key.json
-nyxid service add gcp-bigquery-billing --credential-file ~/Downloads/sa-key.json
+Google Cloud uses the normal OAuth provider flow. There is no
+service-account JSON paste path for `api-google-cloud`; the user signs in
+with a Google account and NyxID stores the delegated OAuth token. The
+catalog base URL is only a placeholder, so every useful add should supply
+the concrete Google API host:
+
+```bash
+# Generic shape
+nyxid service add api-google-cloud --oauth --endpoint-url <google-api-host>
+
+# Cloud Billing metadata: billing accounts, projects, SKUs.
+# This API does not expose historical spend totals.
+nyxid service add api-google-cloud --oauth \
+  --endpoint-url https://cloudbilling.googleapis.com \
+  --slug google-cloud-billing
+
+# BigQuery billing export queries for spend-by-project / day.
+nyxid service add api-google-cloud --oauth \
+  --endpoint-url https://bigquery.googleapis.com \
+  --slug google-bigquery
+
+# Other Google APIs use the same catalog entry with a different host.
+nyxid service add api-google-cloud --oauth \
+  --endpoint-url https://compute.googleapis.com \
+  --slug google-compute
+
+# Add extra scopes when the Google API operation needs more than read-only.
+nyxid service add api-google-cloud --oauth \
+  --endpoint-url https://compute.googleapis.com \
+  --scope https://www.googleapis.com/auth/cloud-platform
 ```
 
 **Required IAM (enforced by the cloud, not NyxID):**
@@ -323,25 +348,28 @@ nyxid service add gcp-bigquery-billing --credential-file ~/Downloads/sa-key.json
 - AWS: the IAM user / role must be in the AWS **Organization management
   (payer) account** — linked-account credentials return `AccessDenied`.
   Minimum policy: `ce:GetCostAndUsage`, `ce:GetCostAndUsageWithResources`.
-- GCP: `roles/billing.viewer` (org or billing-account scope) + on the
-  BigQuery host project `roles/bigquery.dataViewer` (billing-export
-  dataset) + `roles/bigquery.jobUser`. None of these grant spend-money
-  capability.
+- Google Cloud: the signed-in user still needs IAM for the target
+  project / billing account. Typical read-only billing setup is
+  `roles/billing.viewer` (org or billing-account scope) plus, for
+  BigQuery billing export queries, `roles/bigquery.dataViewer` on the
+  export dataset and `roles/bigquery.jobUser` on the host project.
+  OAuth scopes and IAM both have to allow the operation.
 
 **Operational requirements before this works end-to-end:**
 
 - AWS cost allocation tags activated for the dimensions you want to
   group by (e.g. `project`, `namespace`) — `GroupBy: TAG:project` returns
   empty data otherwise.
-- GCP billing-export to BigQuery must already be enabled and the
-  dataset name known. See `nyxid catalog show gcp-bigquery-billing
-  --output json` for the upstream documentation link.
+- Google Cloud billing-export to BigQuery must already be enabled and
+  the dataset name known before spend-by-project SQL works. Use
+  `nyxid catalog show api-google-cloud --output json` for the upstream
+  documentation link.
 
-**Caching:** these two auth methods share an in-process response cache
-(default TTL 5 min, env `CLOUD_RESPONSE_CACHE_TTL_SECS`). Identical
-proxy bodies in a short window replay from memory — AWS Cost Explorer
-charges $0.01 per paginated request and BigQuery billing data only
-updates every few hours, so the cache saves both budget and latency.
+**Caching:** AWS Cost Explorer requests using `aws_sigv4` can use the
+in-process response cache (default disabled; set
+`CLOUD_RESPONSE_CACHE_TTL_SECS` to enable). Identical proxy bodies in a
+short window replay from memory, which helps avoid repeated Cost
+Explorer charges for polling-style dashboards.
 
 ### Tips for non-technical users
 
