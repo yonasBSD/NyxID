@@ -30,9 +30,8 @@ use std::sync::Arc;
 /// Called once at startup; no-op if a provider is already installed
 /// (e.g. by a library that lost the race to ours).
 ///
-/// Without this, rustls panics on first TLS use because both `aws_lc_rs`
-/// and `ring` are present in the dependency graph (NyxID#716 + the
-/// pre-existing `gcp-kms` transitive chain).
+/// Without this, rustls can panic on first TLS use when feature
+/// unification leaves multiple crypto providers in the dependency graph.
 fn install_rustls_crypto_provider() {
     if rustls::crypto::CryptoProvider::get_default().is_some() {
         return;
@@ -156,14 +155,11 @@ enum Commands {
 
 #[tokio::main]
 async fn main() {
-    // Pick a rustls `CryptoProvider` explicitly before ANY TLS use. With
-    // both `aws_lc_rs` (via `gcp_auth` -> `hyper-rustls/aws-lc-rs`) and
-    // `ring` (via `google-cloud-kms` -> `tonic` -> jsonwebtoken 9.x +
-    // reqwest's transitively-enabled `__rustls-ring`) compiled into the
-    // backend, rustls cannot auto-select and panics on first TLS use
-    // (rustls/src/crypto/mod.rs:249) — observed first deployment after
-    // NyxID#716 merged. The CLI hit this same trap; see cli/src/main.rs
-    // for the canonical pattern.
+    // Pick a rustls `CryptoProvider` explicitly before ANY TLS use.
+    // Feature unification can compile multiple providers into the
+    // backend (notably aws_lc_rs and ring), and rustls cannot
+    // auto-select in that state. The CLI uses the same pattern; see
+    // cli/src/main.rs for the canonical version.
     install_rustls_crypto_provider();
 
     let cli = Cli::parse();

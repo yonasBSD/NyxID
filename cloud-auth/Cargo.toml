@@ -5,7 +5,7 @@ edition = "2024"
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Shared AWS SigV4 + GCP service-account signing primitives for the NyxID backend and node agent."
+description = "Shared AWS SigV4 signing primitives for the NyxID backend and node agent."
 
 [lib]
 name = "nyxid_cloud_auth"
@@ -29,10 +29,6 @@ aws-sigv4 = { version = "1.4", default-features = false, features = ["sign-http"
 # (via `aws-smithy-runtime-api`), declared explicitly so we get a
 # stable import path.
 aws-credential-types = "1.2"
-# GCP service-account auth. `aws-lc-rs` feature pins the rustls crypto
-# provider so we don't enable both `ring` and `aws-lc-rs` via feature
-# unification (the same trap documented in `cli/Cargo.toml`).
-gcp_auth = { version = "0.12", default-features = false, features = ["aws-lc-rs"] }
 thiserror = "2"
 dashmap = "6"
 tracing = { workspace = true }
