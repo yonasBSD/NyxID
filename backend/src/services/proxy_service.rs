@@ -29,7 +29,6 @@ use crate::services::{
     agent_binding_service, user_api_key_service, user_service_service, user_token_service,
 };
 use nyxid_cloud_auth::aws_sigv4::{self, AwsCredentials};
-use nyxid_cloud_auth::gcp_oauth::{DEFAULT_GCP_SCOPES, GcpTokenCache};
 
 /// Default User-Agent injected at the proxy boundary when neither the
 /// caller nor the resolved service supplies one. Resolved at compile
@@ -159,9 +158,7 @@ pub(crate) fn credential_header_name(target: &ProxyTarget) -> Option<String> {
                 Some(trimmed.to_string())
             }
         }
-        "bearer" | "bot_bearer" | "basic" | "gcp_service_account" => {
-            Some("authorization".to_string())
-        }
+        "bearer" | "bot_bearer" | "basic" => Some("authorization".to_string()),
         // SigV4 sets Authorization plus several `X-Amz-*` headers; the only
         // one a caller-supplied or catalog default header could collide with
         // is `Authorization`, so we strip just that. The `X-Amz-*` headers
@@ -1974,8 +1971,6 @@ pub async fn forward_request(
     caller_token: Option<&str>,
     // Shared generic token exchange cache (used by `token_exchange`).
     token_exchange_cache: &TokenExchangeCache,
-    // GCP service-account access-token cache (used by `gcp_service_account`).
-    gcp_token_cache: &GcpTokenCache,
     // In-memory response cache for cloud-billing auth methods (NyxID#716).
     cloud_response_cache: &CloudResponseCache,
 ) -> AppResult<reqwest::Response> {
@@ -2312,19 +2307,6 @@ pub async fn forward_request(
                 request = request.header(&header.name, &header.value);
             }
         }
-        "gcp_service_account" => {
-            // GCP service-account JWT-bearer OAuth. Token cache lives in
-            // AppState; refreshes 5 min before expiry. Same access token
-            // is shared across `gcp-cloud-billing` and `gcp-bigquery-billing`
-            // because the default scopes cover both.
-            let token = gcp_token_cache
-                .access_token(client, &target.credential, DEFAULT_GCP_SCOPES)
-                .await
-                .map_err(|e| {
-                    AppError::Internal(format!("gcp_service_account token mint failed: {e}"))
-                })?;
-            request = request.bearer_auth(token.as_ref());
-        }
         _ => {
             return Err(AppError::Internal(format!(
                 "Unknown auth method: {}",
@@ -2383,21 +2365,6 @@ pub async fn forward_request(
         tracing::error!("Proxy request to {} failed: {e}", target.base_url);
         AppError::Internal("Proxy request failed".to_string())
     })?;
-
-    // GCP-specific: if the upstream rejects our bearer token as
-    // expired / revoked (401 or 403), drop the cached access token so
-    // the next request mints a fresh one instead of replaying the
-    // stale one until natural TTL expiry. Codex review REC 8.
-    if target.auth_method == "gcp_service_account"
-        && matches!(response.status().as_u16(), 401 | 403)
-    {
-        gcp_token_cache.invalidate(&target.credential, DEFAULT_GCP_SCOPES);
-        tracing::warn!(
-            base_url = %target.base_url,
-            status = response.status().as_u16(),
-            "gcp_service_account: upstream rejected token, invalidated cached access token"
-        );
-    }
 
     // Cache successful billing-API responses so a follow-up request
     // with the same body replays from memory. Non-2xx responses are
@@ -2568,10 +2535,6 @@ mod tests {
     /// `provider_token_exchange_service::tests`.
     fn empty_token_cache() -> TokenExchangeCache {
         TokenExchangeCache::new()
-    }
-
-    fn empty_gcp_cache() -> GcpTokenCache {
-        GcpTokenCache::new()
     }
 
     fn empty_response_cache() -> CloudResponseCache {
@@ -2886,7 +2849,6 @@ mod tests {
             vec![],
             None,
             &empty_token_cache(),
-            &empty_gcp_cache(),
             &empty_response_cache(),
         )
         .await
@@ -2936,7 +2898,6 @@ mod tests {
             vec![],
             None,
             &empty_token_cache(),
-            &empty_gcp_cache(),
             &empty_response_cache(),
         )
         .await
@@ -2989,7 +2950,6 @@ mod tests {
             vec![],
             None,
             &empty_token_cache(),
-            &empty_gcp_cache(),
             &empty_response_cache(),
         )
         .await
@@ -3045,7 +3005,6 @@ mod tests {
             vec![],
             None,
             &empty_token_cache(),
-            &empty_gcp_cache(),
             &empty_response_cache(),
         )
         .await
@@ -3095,7 +3054,6 @@ mod tests {
             }],
             None,
             &empty_token_cache(),
-            &empty_gcp_cache(),
             &empty_response_cache(),
         )
         .await
@@ -3166,7 +3124,6 @@ mod tests {
             vec![],
             None,
             &empty_token_cache(),
-            &empty_gcp_cache(),
             &empty_response_cache(),
         )
         .await
@@ -3222,7 +3179,6 @@ mod tests {
                 vec![],
                 None,
                 &empty_token_cache(),
-                &empty_gcp_cache(),
                 &empty_response_cache(),
             )
             .await
@@ -3262,7 +3218,6 @@ mod tests {
             vec![],
             None,
             &empty_token_cache(),
-            &empty_gcp_cache(),
             &empty_response_cache(),
         )
         .await
@@ -3295,7 +3250,6 @@ mod tests {
             }],
             None,
             &empty_token_cache(),
-            &empty_gcp_cache(),
             &empty_response_cache(),
         )
         .await
@@ -3327,7 +3281,6 @@ mod tests {
                 }],
                 None,
                 &empty_token_cache(),
-                &empty_gcp_cache(),
                 &empty_response_cache(),
             )
             .await
@@ -3359,7 +3312,6 @@ mod tests {
             }],
             None,
             &empty_token_cache(),
-            &empty_gcp_cache(),
             &empty_response_cache(),
         )
         .await
@@ -3391,7 +3343,6 @@ mod tests {
                 }],
                 None,
                 &empty_token_cache(),
-                &empty_gcp_cache(),
                 &empty_response_cache(),
             )
             .await
@@ -3423,7 +3374,6 @@ mod tests {
             }],
             None,
             &empty_token_cache(),
-            &empty_gcp_cache(),
             &empty_response_cache(),
         )
         .await
@@ -3480,7 +3430,6 @@ mod tests {
             }],
             None,
             &empty_token_cache(),
-            &empty_gcp_cache(),
             &empty_response_cache(),
         )
         .await
@@ -3734,7 +3683,6 @@ mod tests {
             vec![],
             None,
             &cache,
-            &empty_gcp_cache(),
             &empty_response_cache(),
         )
         .await
@@ -3769,7 +3717,6 @@ mod tests {
             vec![],
             None,
             &cache,
-            &empty_gcp_cache(),
             &empty_response_cache(),
         )
         .await
@@ -3788,7 +3735,6 @@ mod tests {
             vec![],
             None,
             &cache,
-            &empty_gcp_cache(),
             &empty_response_cache(),
         )
         .await
@@ -3820,7 +3766,6 @@ mod tests {
             vec![],
             None,
             &TokenExchangeCache::new(),
-            &empty_gcp_cache(),
             &empty_response_cache(),
         )
         .await
@@ -4024,7 +3969,6 @@ mod tests {
             vec![],
             None,
             &empty_token_cache(),
-            &empty_gcp_cache(),
             &empty_response_cache(),
         )
         .await
@@ -4100,7 +4044,6 @@ mod tests {
             vec![],
             None,
             &empty_token_cache(),
-            &empty_gcp_cache(),
             &empty_response_cache(),
         )
         .await
@@ -4300,7 +4243,6 @@ mod tests {
             vec![],
             None,
             &empty_token_cache(),
-            &empty_gcp_cache(),
             &empty_response_cache(),
         )
         .await
@@ -4383,7 +4325,6 @@ mod tests {
                 vec![],
                 None,
                 &empty_token_cache(),
-                &empty_gcp_cache(),
                 &cache,
             )
             .await

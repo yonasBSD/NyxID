@@ -30,9 +30,8 @@ use std::sync::Arc;
 /// Called once at startup; no-op if a provider is already installed
 /// (e.g. by a library that lost the race to ours).
 ///
-/// Without this, rustls panics on first TLS use because both `aws_lc_rs`
-/// and `ring` are present in the dependency graph (NyxID#716 + the
-/// pre-existing `gcp-kms` transitive chain).
+/// Without this, rustls can panic on first TLS use when feature
+/// unification leaves multiple crypto providers in the dependency graph.
 fn install_rustls_crypto_provider() {
     if rustls::crypto::CryptoProvider::get_default().is_some() {
         return;
@@ -122,16 +121,10 @@ pub struct AppState {
     /// tenant tokens, OAuth 2.0 client_credentials, etc.) and the channel
     /// bot adapter's outbound replies.
     pub token_exchange_cache: Arc<TokenExchangeCache>,
-    /// GCP service-account access-token cache. Backs the
-    /// `gcp_service_account` proxy auth method (Cloud Billing API,
-    /// BigQuery billing exports). Tokens are minted on demand from the
-    /// stored SA JSON and refreshed 5 minutes before expiry. NyxID#716.
-    pub gcp_token_cache: Arc<nyxid_cloud_auth::gcp_oauth::GcpTokenCache>,
-    /// Response cache for the `aws_sigv4` and `gcp_service_account`
-    /// auth methods. AWS Cost Explorer charges per request and BigQuery
-    /// billing-export data only updates every few hours, so identical
-    /// proxy calls in a short window get replayed from cache. TTL is
-    /// driven by `cloud_response_cache_ttl_secs`. NyxID#716.
+    /// Response cache for the `aws_sigv4` auth method. AWS Cost Explorer
+    /// charges per request, so identical proxy calls in a short window get
+    /// replayed from cache. TTL is driven by
+    /// `cloud_response_cache_ttl_secs`. NyxID#716.
     pub cloud_response_cache: Arc<crate::services::cloud_response_cache::CloudResponseCache>,
     /// Vendor-neutral telemetry client. `None` when no DSN is configured
     /// (the default hard-off state — see `docs/TELEMETRY.md` §3).
@@ -162,14 +155,11 @@ enum Commands {
 
 #[tokio::main]
 async fn main() {
-    // Pick a rustls `CryptoProvider` explicitly before ANY TLS use. With
-    // both `aws_lc_rs` (via `gcp_auth` -> `hyper-rustls/aws-lc-rs`) and
-    // `ring` (via `google-cloud-kms` -> `tonic` -> jsonwebtoken 9.x +
-    // reqwest's transitively-enabled `__rustls-ring`) compiled into the
-    // backend, rustls cannot auto-select and panics on first TLS use
-    // (rustls/src/crypto/mod.rs:249) — observed first deployment after
-    // NyxID#716 merged. The CLI hit this same trap; see cli/src/main.rs
-    // for the canonical pattern.
+    // Pick a rustls `CryptoProvider` explicitly before ANY TLS use.
+    // Feature unification can compile multiple providers into the
+    // backend (notably aws_lc_rs and ring), and rustls cannot
+    // auto-select in that state. The CLI uses the same pattern; see
+    // cli/src/main.rs for the canonical version.
     install_rustls_crypto_provider();
 
     let cli = Cli::parse();
@@ -487,7 +477,6 @@ async fn main() {
         dpop_jti_cache,
         ws_passthrough_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         token_exchange_cache: Arc::new(TokenExchangeCache::new()),
-        gcp_token_cache: Arc::new(nyxid_cloud_auth::gcp_oauth::GcpTokenCache::new()),
         cloud_response_cache: Arc::new(
             services::cloud_response_cache::CloudResponseCache::with_bounds(
                 config.cloud_response_cache_ttl_secs,

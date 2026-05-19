@@ -318,34 +318,6 @@ impl CredentialConfig {
             oauth_client_id_param_name: None,
         }
     }
-
-    /// Create a GCP service-account credential config. The encrypted SA
-    /// JSON key file content lives in `header_value_encrypted` for
-    /// file-backed nodes; on the keychain backend the value is `None`
-    /// and the credential lives in the OS keyring. NyxID#716.
-    pub fn new_gcp_service_account(
-        credential_json_encrypted: Option<String>,
-        target_url: Option<String>,
-    ) -> Self {
-        Self {
-            injection_method: "gcp_service_account".to_string(),
-            target_url,
-            header_name: None,
-            header_value_encrypted: credential_json_encrypted,
-            param_name: None,
-            param_value_encrypted: None,
-            oauth_managed: false,
-            oauth_token_url: None,
-            oauth_access_token_encrypted: None,
-            oauth_refresh_token_encrypted: None,
-            oauth_token_expires_at: None,
-            oauth_client_id_encrypted: None,
-            oauth_client_secret_encrypted: None,
-            oauth_scopes: None,
-            oauth_token_endpoint_auth_method: None,
-            oauth_client_id_param_name: None,
-        }
-    }
 }
 
 impl NodeConfig {
@@ -590,26 +562,6 @@ impl NodeConfig {
         Ok(())
     }
 
-    /// Add a GCP service-account credential using the configured
-    /// secret backend. The encrypted blob is the SA JSON key file
-    /// content — see `nyxid_cloud_auth::gcp_oauth::GcpServiceAccountKey`.
-    /// NyxID#716 + Codex review BLOCKER 6.
-    pub fn add_gcp_service_account_credential_via(
-        &mut self,
-        service_slug: &str,
-        credential_json: &str,
-        target_url: Option<&str>,
-        backend: &SecretBackend,
-    ) -> Result<()> {
-        let encrypted = backend.store_credential_value(service_slug, credential_json)?;
-        let resolved_target_url = self.resolve_target_url(service_slug, target_url);
-        self.credentials.insert(
-            service_slug.to_string(),
-            CredentialConfig::new_gcp_service_account(encrypted, resolved_target_url),
-        );
-        Ok(())
-    }
-
     /// Set a no-auth placeholder entry for a service: preserves (or
     /// resolves) the target URL but drops any previously-stored
     /// secret. Used when NyxID pushes a `credential_update` after the
@@ -701,6 +653,9 @@ mod tests {
 
     #[test]
     fn config_dir_default_profile() {
+        let _guard = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
         let dir_none = resolve_config_dir_with_profile(None, None).unwrap();
         let dir_default = resolve_config_dir_with_profile(None, Some("default")).unwrap();
         assert_eq!(dir_none, dir_default);

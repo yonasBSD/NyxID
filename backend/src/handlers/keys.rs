@@ -23,7 +23,7 @@ use crate::services::{
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
-/// At-creation probe for cloud-billing auth methods. Resolves the
+/// At-creation probe for AWS cloud-billing auth methods. Resolves the
 /// effective `(auth_method, base_url)` for the create request — from
 /// the catalog if a `service_slug` is supplied, else from the inline
 /// `auth_method` + `endpoint_url` overrides — and pings the upstream
@@ -73,15 +73,6 @@ async fn verify_cloud_credential_against_catalog(
         "aws_sigv4" => {
             cloud_credential_verify::verify_aws_sigv4(&state.http_client, credential, &base_url)
                 .await
-        }
-        "gcp_service_account" => {
-            cloud_credential_verify::verify_gcp_service_account(
-                &state.http_client,
-                &state.gcp_token_cache,
-                credential,
-                &base_url,
-            )
-            .await
         }
         _ => Ok(()),
     }

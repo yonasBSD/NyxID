@@ -1885,8 +1885,8 @@ fn prompt_password(prompt: &str, flag: &str) -> Result<String> {
 
 /// Read credential bytes from `path`, or from stdin when `path == "-"`.
 ///
-/// Used for multi-field credential payloads (aws_sigv4 access-key JSON,
-/// gcp_service_account SA JSON) where typing into rpassword would be
+/// Used for multi-field credential payloads (aws_sigv4 access-key JSON)
+/// where typing into rpassword would be
 /// error-prone. Trims surrounding whitespace so a trailing newline from
 /// the file doesn't produce a JSON-parse error on the server. Also
 /// strips a UTF-8 BOM if present (Codex review NIT 3) — JSON parsers

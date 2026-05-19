@@ -1,5 +1,5 @@
-//! In-process response cache for the `aws_sigv4` and `gcp_service_account`
-//! proxy auth methods (NyxID#716).
+//! In-process response cache for the `aws_sigv4` proxy auth method
+//! (NyxID#716).
 //!
 //! AWS Cost Explorer charges $0.01 per paginated API request. A `/daily`-
 //! style skill that polls cost-by-namespace from a handful of windows
@@ -8,19 +8,14 @@
 //! data than the underlying ~6h billing-data latency. The cache
 //! short-circuits repeat-identical proxy requests at the NyxID boundary.
 //!
-//! BigQuery responses are also cached even though there's no per-call
-//! charge — a large billing-export query takes 5-10 seconds and the
-//! same query in two consecutive `/daily` runs returns the same data.
-//!
 //! Lifetime + scoping:
 //! - Keys include `(auth_method, sha256(credential), base_url, method,
 //!   path+query, sha256(canonicalized response-affecting headers),
 //!   sha256(body))`. The credential fingerprint scopes per user — two
 //!   users hitting the same catalog endpoint with different stored
 //!   credentials get different entries. The headers hash captures the
-//!   AWS `X-Amz-Target` (JSON-RPC operation dispatch) and GCP
-//!   `X-Goog-*` routing headers so a different operation on the same
-//!   path doesn't replay the previous response.
+//!   AWS `X-Amz-Target` (JSON-RPC operation dispatch) so a different
+//!   operation on the same path doesn't replay the previous response.
 //! - Default TTL is 0 (disabled); set `CLOUD_RESPONSE_CACHE_TTL_SECS`
 //!   to enable. Once Codex review finding REC 11 — the cache safety
 //!   review — has been independently validated, operators can flip it
@@ -43,7 +38,7 @@ use sha2::{Digest, Sha256};
 
 /// Auth methods that participate in this cache. Others bypass it.
 pub fn is_cacheable_auth_method(auth_method: &str) -> bool {
-    matches!(auth_method, "aws_sigv4" | "gcp_service_account")
+    matches!(auth_method, "aws_sigv4")
 }
 
 /// Default per-entry size cap (1 MiB). Responses larger than this are
@@ -372,8 +367,8 @@ mod tests {
             &[],
             b"",
         );
-        let gcp = CloudResponseCache::key(
-            "gcp_service_account",
+        let bearer = CloudResponseCache::key(
+            "bearer",
             &CloudResponseCache::credential_fingerprint("c"),
             "https://x",
             "GET",
@@ -381,13 +376,12 @@ mod tests {
             &[],
             b"",
         );
-        assert_ne!(aws, gcp);
+        assert_ne!(aws, bearer);
     }
 
     #[test]
     fn is_cacheable_recognizes_new_methods_only() {
         assert!(is_cacheable_auth_method("aws_sigv4"));
-        assert!(is_cacheable_auth_method("gcp_service_account"));
         assert!(!is_cacheable_auth_method("bearer"));
         assert!(!is_cacheable_auth_method("none"));
         assert!(!is_cacheable_auth_method("token_exchange"));

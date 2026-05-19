@@ -89,7 +89,6 @@ const AUTH_METHOD_DEFAULTS: Record<string, string> = {
   bot_bearer: "Authorization",
   token_exchange: "",
   aws_sigv4: "",
-  gcp_service_account: "",
   none: "",
 };
 
@@ -189,12 +188,6 @@ function getCredentialFieldMeta(
       placeholder: "Use the structured fields below",
     };
   }
-  if (authMethod === "gcp_service_account") {
-    return {
-      label: "Service Account JSON",
-      placeholder: "Paste the full service-account JSON key",
-    };
-  }
   return { label: "API Key / Credential", placeholder: "sk-..." };
 }
 
@@ -249,8 +242,7 @@ function shouldShowAuthKeyName(authMethod: string): boolean {
     authMethod !== "oauth2" &&
     authMethod !== "bot_bearer" &&
     authMethod !== "token_exchange" &&
-    authMethod !== "aws_sigv4" &&
-    authMethod !== "gcp_service_account"
+    authMethod !== "aws_sigv4"
   );
 }
 
@@ -757,26 +749,6 @@ function KeyForm({
               </>
             );
           })()
-        ) : form.authMethod === "gcp_service_account" ? (
-          <div className="space-y-1.5">
-            <Label htmlFor="add-key-gcp-json">
-              Service Account JSON
-              {requiresCredential && <span className="text-destructive"> *</span>}
-            </Label>
-            <textarea
-              id="add-key-gcp-json"
-              className="flex min-h-[160px] w-full rounded-[10px] border border-input bg-transparent px-[14px] py-2 font-mono text-[12px] text-foreground ring-offset-background transition-colors placeholder:text-text-tertiary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-              placeholder='{ "type": "service_account", "project_id": "...", "private_key": "-----BEGIN ...", "client_email": "..." }'
-              value={form.credential}
-              onChange={(e) => onChange({ credential: e.target.value })}
-              spellCheck={false}
-            />
-            <p className="text-[11px] text-muted-foreground">
-              Paste the entire JSON content of the service-account key file.
-              Stored encrypted; NyxID mints short-lived access tokens from it
-              on demand and caches them in memory.
-            </p>
-          </div>
         ) : (
           <div className="space-y-1.5">
             <Label htmlFor="add-key-credential">
@@ -2093,8 +2065,8 @@ export function AddKeyDialog({
     const match = catalogEntries.find((e) => e.slug === prefillSlug);
     if (!match) return;
     appliedPrefillRef.current = prefillSlug;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- prefill selection is guarded to run once per slug
     handleSelectCatalog(match);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- handleSelectCatalog is stable via the ref guard
   }, [open, prefillSlug, catalogEntries]);
 
   function handleSelectCustom() {

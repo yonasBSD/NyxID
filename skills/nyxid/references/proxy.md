@@ -143,16 +143,27 @@ nyxid proxy request aws-cost-explorer / -m POST \
   -H "X-Amz-Target: AWSInsightsServiceV20210101.GetCostAndUsage" \
   -d '{"TimePeriod":{"Start":"2026-04-13","End":"2026-05-13"},"Granularity":"DAILY","Metrics":["UnblendedCost"],"GroupBy":[{"Type":"DIMENSION","Key":"LINKED_ACCOUNT"},{"Type":"TAG","Key":"project"}]}'
 
-# GCP Cloud Billing (base: https://cloudbilling.googleapis.com) -- list
-# billing accounts. NyxID mints + caches a Google OAuth token from the
-# stored service-account JSON.
-nyxid proxy request gcp-cloud-billing /v1/billingAccounts -m GET
+# Google Cloud APIs use the generic api-google-cloud catalog entry.
+# Add one UserService per Google API host; the default OAuth scope is
+# https://www.googleapis.com/auth/cloud-platform.read-only.
+nyxid service add api-google-cloud --oauth \
+  --endpoint-url https://cloudbilling.googleapis.com \
+  --slug google-cloud-billing
 
-# GCP BigQuery billing export (base: https://bigquery.googleapis.com) --
+# Cloud Billing (base: https://cloudbilling.googleapis.com) -- list
+# billing accounts. The API covers billing metadata, not historical
+# spend totals.
+nyxid proxy request google-cloud-billing /v1/billingAccounts -m GET
+
+nyxid service add api-google-cloud --oauth \
+  --endpoint-url https://bigquery.googleapis.com \
+  --slug google-bigquery
+
+# BigQuery billing export (base: https://bigquery.googleapis.com) --
 # query the billing export dataset for spend-by-project. Replace
 # `<PROJECT>` / `<DATASET>` / `<BILLING_ACCOUNT_ID>` with the actual
-# values from GCP's billing-export setup.
-nyxid proxy request gcp-bigquery-billing /bigquery/v2/projects/<PROJECT>/queries -m POST \
+# values from Google Cloud's billing-export setup.
+nyxid proxy request google-bigquery /bigquery/v2/projects/<PROJECT>/queries -m POST \
   -d '{"useLegacySql":false,"query":"SELECT DATE(usage_start_time) AS day, project.id AS project, SUM(cost) - SUM((SELECT IFNULL(SUM(c.amount),0) FROM UNNEST(credits) c)) AS net_cost FROM `<PROJECT>.<DATASET>.gcp_billing_export_v1_<BILLING_ACCOUNT_ID>` WHERE DATE(usage_start_time) >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY) GROUP BY day, project ORDER BY day DESC, net_cost DESC"}'
 
 # Discover all available proxy services
@@ -161,13 +172,13 @@ nyxid proxy discover --output json
 
 NyxID injects the user's credentials automatically. Do not ask for or log raw downstream credentials.
 
-For the cloud-billing services above, identical proxy bodies in a short
-window are served from an in-process response cache (default 5 min TTL,
-env `CLOUD_RESPONSE_CACHE_TTL_SECS`). AWS Cost Explorer charges $0.01
-per paginated request and BigQuery billing data only updates every few
-hours, so the cache saves both budget and latency for `/daily`-style
-polling. Successful (2xx) responses only — error responses are passed
-through so permission-misconfig errors aren't masked.
+For AWS Cost Explorer above, identical proxy bodies can be served from
+an in-process response cache when operators enable
+`CLOUD_RESPONSE_CACHE_TTL_SECS` (default disabled). AWS Cost Explorer
+charges $0.01 per paginated request, so the cache can save budget and
+latency for polling-style dashboards. Successful (2xx) responses only
+-- error responses are passed through so permission-misconfig errors
+aren't masked.
 
 ## WebSocket-authenticated services
 

@@ -1,9 +1,6 @@
-use std::sync::OnceLock;
-
 use base64::Engine;
 use futures::StreamExt;
 use nyxid_cloud_auth::aws_sigv4::{self, AwsCredentials};
-use nyxid_cloud_auth::gcp_oauth::{DEFAULT_GCP_SCOPES, GcpTokenCache};
 use reqwest::Client;
 use tokio::sync::mpsc;
 
@@ -12,15 +9,6 @@ use super::error::Result;
 use super::metrics::NodeMetrics;
 use super::signing::{self, ReplayGuard};
 use super::ws_client::NodeWsMessage;
-
-/// Process-wide GCP access-token cache for the `gcp_service_account`
-/// auth method. Mirrors `AppState.gcp_token_cache` on the backend so a
-/// node serving multiple proxy requests for the same SA reuses the
-/// minted token until natural expiry. Initialized on first use.
-fn gcp_token_cache() -> &'static GcpTokenCache {
-    static CACHE: OnceLock<GcpTokenCache> = OnceLock::new();
-    CACHE.get_or_init(GcpTokenCache::new)
-}
 
 /// Maximum chunk size for streaming responses (64 KB raw bytes).
 const MAX_CHUNK_SIZE: usize = 64 * 1024;
@@ -286,56 +274,16 @@ pub async fn execute_proxy_request(
         }
     }
 
-    // 6b. GCP service-account: mint + cache an access token from the SA
-    //     JSON and inject as a Bearer token.
-    if let Some(sa_json) = cred.gcp_service_account_credential() {
-        let token = match gcp_token_cache()
-            .access_token(http_client, sa_json, DEFAULT_GCP_SCOPES)
-            .await
-        {
-            Ok(t) => t,
-            Err(e) => {
-                metrics.record_error();
-                let _ = send_ws_message(
-                    tx,
-                    proxy_error_response(
-                        request_id,
-                        &format!("gcp_service_account token mint failed: {e}"),
-                        502,
-                        false,
-                    ),
-                )
-                .await;
-                return;
-            }
-        };
-        req_builder = req_builder.bearer_auth(token.as_ref());
-    }
-
-    // 6c. Attach the body now that any signing pass that needed to read
+    // 6b. Attach the body now that any signing pass that needed to read
     //     it has run.
     if let Some(bytes) = body_bytes {
         req_builder = req_builder.body(bytes);
     }
 
     // 7. Execute request
-    let gcp_credential_for_invalidation: Option<String> =
-        cred.gcp_service_account_credential().map(|s| s.to_string());
     match req_builder.send().await {
         Ok(response) => {
             let status = response.status().as_u16();
-            // GCP-specific: drop the cached access token on 401/403 so
-            // the next request re-mints. Codex review REC 8.
-            if let Some(creds_json) = gcp_credential_for_invalidation.as_deref()
-                && matches!(status, 401 | 403)
-            {
-                gcp_token_cache().invalidate(creds_json, DEFAULT_GCP_SCOPES);
-                tracing::warn!(
-                    service_slug = %service_slug,
-                    status,
-                    "gcp_service_account: upstream rejected token, invalidated cached access token"
-                );
-            }
             let is_streaming = should_stream_response(&response, status);
 
             if is_streaming {
