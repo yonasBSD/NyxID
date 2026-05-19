@@ -653,6 +653,9 @@ mod tests {
 
     #[test]
     fn config_dir_default_profile() {
+        let _guard = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
         let dir_none = resolve_config_dir_with_profile(None, None).unwrap();
         let dir_default = resolve_config_dir_with_profile(None, Some("default")).unwrap();
         assert_eq!(dir_none, dir_default);
