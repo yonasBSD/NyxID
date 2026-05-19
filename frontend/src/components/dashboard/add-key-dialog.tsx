@@ -1992,8 +1992,8 @@ export function AddKeyDialog({
     const match = catalogEntries.find((e) => e.slug === prefillSlug);
     if (!match) return;
     appliedPrefillRef.current = prefillSlug;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- prefill selection is guarded to run once per slug
     handleSelectCatalog(match);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- handleSelectCatalog is stable via the ref guard
   }, [open, prefillSlug, catalogEntries]);
 
   function handleSelectCustom() {
