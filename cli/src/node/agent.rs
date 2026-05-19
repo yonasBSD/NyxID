@@ -1557,15 +1557,14 @@ fn migrate_config(
         let encrypted = target.store_credential_value(slug, value)?;
         if let Some(cred_config) = updated.credentials.get_mut(slug) {
             match injection_method.as_str() {
-                // path_prefix and the two cloud-billing methods all
-                // store the encrypted credential on
-                // `header_value_encrypted` (Codex review REC 10). The
-                // pre-NyxID#716 migration code only knew about
-                // `"header"` and `"query_param"`, so a backend switch
-                // from file → keychain (or vice versa) on a node with
-                // a path-prefix or cloud-billing credential would
+                // path_prefix and AWS SigV4 both store the encrypted
+                // credential on `header_value_encrypted` (Codex review
+                // REC 10). The pre-NyxID#716 migration code only knew
+                // about `"header"` and `"query_param"`, so a backend
+                // switch from file → keychain (or vice versa) on a node
+                // with a path-prefix or cloud-billing credential would
                 // silently drop the encrypted-payload pointer.
-                "header" | "path_prefix" | "aws_sigv4" | "gcp_service_account" => {
+                "header" | "path_prefix" | "aws_sigv4" => {
                     cred_config.header_value_encrypted = encrypted;
                 }
                 "query_param" => cred_config.param_value_encrypted = encrypted,
@@ -2181,7 +2180,7 @@ async fn cmd_credentials_setup(
                 );
             }
 
-            let is_cloud_billing = matches!(auth_method, "aws_sigv4" | "gcp_service_account");
+            let is_cloud_billing = auth_method == "aws_sigv4";
             if is_cloud_billing {
                 println!(
                     "This service uses {auth_method}. Paste the JSON credential payload \
@@ -2201,7 +2200,7 @@ async fn cmd_credentials_setup(
             // Cloud-billing credentials are multi-line JSON blobs and
             // can't be entered safely through rpassword (which masks
             // input and strips newlines). Read from stdin until EOF so
-            // the user can paste the full SA JSON / access-key JSON.
+            // the user can paste the full access-key JSON.
             // NyxID#716 + Codex review BLOCKER 6.
             let secret = if is_cloud_billing {
                 use std::io::Read;
@@ -2243,13 +2242,6 @@ async fn cmd_credentials_setup(
                 )?;
             } else if auth_method == "aws_sigv4" {
                 node_config.add_aws_sigv4_credential_via(
-                    service,
-                    &secret,
-                    target_url.as_deref(),
-                    &backend,
-                )?;
-            } else if auth_method == "gcp_service_account" {
-                node_config.add_gcp_service_account_credential_via(
                     service,
                     &secret,
                     target_url.as_deref(),

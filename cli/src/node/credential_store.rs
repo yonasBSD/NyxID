@@ -40,10 +40,6 @@ pub enum CredentialInjection {
     /// region, service}`. The node agent signs the outgoing request
     /// locally so the access key never crosses NyxID. NyxID#716.
     AwsSigv4 { credential_json: Zeroizing<String> },
-    /// GCP service-account JWT-bearer OAuth — the encrypted blob is the
-    /// raw service-account JSON key file content. The node mints + caches
-    /// access tokens locally; the SA key never crosses NyxID. NyxID#716.
-    GcpServiceAccount { credential_json: Zeroizing<String> },
 }
 
 /// A single service's decrypted credential.
@@ -56,14 +52,13 @@ pub struct ServiceCredential {
 
 impl ServiceCredential {
     /// The injection method as a string ("header", "query_param",
-    /// "path_prefix", "aws_sigv4", "gcp_service_account", or "none").
+    /// "path_prefix", "aws_sigv4", or "none").
     pub fn injection_method(&self) -> &str {
         match &self.injection {
             CredentialInjection::Header { .. } => "header",
             CredentialInjection::QueryParam { .. } => "query_param",
             CredentialInjection::PathPrefix { .. } => "path_prefix",
             CredentialInjection::AwsSigv4 { .. } => "aws_sigv4",
-            CredentialInjection::GcpServiceAccount { .. } => "gcp_service_account",
             CredentialInjection::NoAuth => "none",
         }
     }
@@ -75,7 +70,6 @@ impl ServiceCredential {
             CredentialInjection::QueryParam { name, .. } => name,
             CredentialInjection::PathPrefix { prefix, .. } => prefix,
             CredentialInjection::AwsSigv4 { .. } => "(AWS SigV4)",
-            CredentialInjection::GcpServiceAccount { .. } => "(GCP SA token)",
             CredentialInjection::NoAuth => "(no auth)",
         }
     }
@@ -112,13 +106,11 @@ impl ServiceCredential {
             CredentialInjection::Header { value, .. } => Some(value),
             CredentialInjection::QueryParam { value, .. } => Some(value),
             CredentialInjection::PathPrefix { credential, .. } => Some(credential),
-            // SigV4 / GCP SA credentials are structured JSON blobs, not
-            // raw token strings — surfacing them via WS frame templates
-            // would leak the underlying secret material verbatim. Return
-            // `None` so the WS frame injector skips substitution for
-            // these auth methods.
+            // SigV4 credentials are structured JSON blobs, not raw token
+            // strings — surfacing them via WS frame templates would leak
+            // the underlying secret material verbatim. Return `None` so
+            // the WS frame injector skips substitution for this auth method.
             CredentialInjection::AwsSigv4 { .. } => None,
-            CredentialInjection::GcpServiceAccount { .. } => None,
             CredentialInjection::NoAuth => None,
         }
     }
@@ -127,14 +119,6 @@ impl ServiceCredential {
     pub fn aws_sigv4_credential(&self) -> Option<&str> {
         match &self.injection {
             CredentialInjection::AwsSigv4 { credential_json } => Some(credential_json),
-            _ => None,
-        }
-    }
-
-    /// For GCP service-account injection: returns the raw SA JSON blob.
-    pub fn gcp_service_account_credential(&self) -> Option<&str> {
-        match &self.injection {
-            CredentialInjection::GcpServiceAccount { credential_json } => Some(credential_json),
             _ => None,
         }
     }
@@ -258,26 +242,6 @@ impl CredentialStore {
                         },
                     );
                 }
-                "gcp_service_account" => {
-                    let encrypted = cred_config
-                        .header_value_encrypted
-                        .as_deref()
-                        .ok_or_else(|| {
-                            Error::Config(format!(
-                                "Credential '{slug}' has gcp_service_account injection but no header_value_encrypted"
-                            ))
-                        })?;
-                    let json = enc.decrypt(encrypted)?;
-                    map.insert(
-                        slug.clone(),
-                        ServiceCredential {
-                            injection: CredentialInjection::GcpServiceAccount {
-                                credential_json: Zeroizing::new(json),
-                            },
-                            target_url: cred_config.target_url.clone(),
-                        },
-                    );
-                }
                 other => {
                     return Err(Error::Config(format!(
                         "Unknown injection method '{other}' for credential '{slug}'"
@@ -373,21 +337,6 @@ impl CredentialStore {
                         slug.clone(),
                         ServiceCredential {
                             injection: CredentialInjection::AwsSigv4 {
-                                credential_json: Zeroizing::new(json),
-                            },
-                            target_url: cred_config.target_url.clone(),
-                        },
-                    );
-                }
-                "gcp_service_account" => {
-                    let json = backend.load_credential_value(
-                        slug,
-                        cred_config.header_value_encrypted.as_deref(),
-                    )?;
-                    map.insert(
-                        slug.clone(),
-                        ServiceCredential {
-                            injection: CredentialInjection::GcpServiceAccount {
                                 credential_json: Zeroizing::new(json),
                             },
                             target_url: cred_config.target_url.clone(),
@@ -513,7 +462,7 @@ mod tests {
     /// the store; the proxy_executor is responsible for JSON-parsing it
     /// at request time.
     #[test]
-    fn load_cloud_billing_credentials() {
+    fn load_aws_sigv4_credentials() {
         use crate::node::config::CredentialConfig;
         let dir = tempfile::tempdir().unwrap();
         let enc = LocalEncryption::load_or_generate(dir.path()).unwrap();
@@ -532,28 +481,13 @@ mod tests {
             ),
         );
 
-        let gcp_blob = r#"{"type":"service_account","client_email":"sa@p.iam.gserviceaccount.com","private_key":"x","project_id":"p","private_key_id":"k"}"#;
-        let gcp_enc = enc.encrypt(gcp_blob).unwrap();
-        config.credentials.insert(
-            "gcp-cloud-billing".to_string(),
-            CredentialConfig::new_gcp_service_account(
-                Some(gcp_enc),
-                Some("https://cloudbilling.googleapis.com".into()),
-            ),
-        );
-
         let store = CredentialStore::from_config(&config, &enc).unwrap();
-        assert_eq!(store.count(), 2);
+        assert_eq!(store.count(), 1);
 
         let aws = store.get("aws-cost-explorer").unwrap();
         assert_eq!(aws.injection_method(), "aws_sigv4");
         assert_eq!(aws.aws_sigv4_credential().unwrap(), aws_blob);
         // SigV4 credentials must not be exposed via the WS-frame helper.
         assert!(aws.raw_credential().is_none());
-
-        let gcp = store.get("gcp-cloud-billing").unwrap();
-        assert_eq!(gcp.injection_method(), "gcp_service_account");
-        assert_eq!(gcp.gcp_service_account_credential().unwrap(), gcp_blob);
-        assert!(gcp.raw_credential().is_none());
     }
 }
