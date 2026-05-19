@@ -1628,18 +1628,25 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
-    // Warn once per startup if the google-cloud OAuth client is not yet
-    // configured (common for fresh deploys). Admins configure via the
-    // existing provider PATCH API or admin UI before users can --oauth.
+    // Note once per startup that the google-cloud provider has no
+    // platform-level OAuth client configured. This is the default fresh-deploy
+    // state. It is NOT a hard error: with credential_mode=user (the seeded
+    // default), users can still connect by passing --oauth-client-id /
+    // --oauth-client-secret-env on `nyxid service add api-google-cloud
+    // --oauth`. Admins who want a platform default can PATCH
+    // /api/v1/providers/google-cloud with a client_id/secret and switch
+    // credential_mode to "admin" or "both".
     if let Some(gc) = collection.find_one(doc! { "slug": "google-cloud" }).await?
         && gc.client_id_encrypted.is_none()
     {
-        tracing::warn!(
+        tracing::info!(
             slug = "google-cloud",
-            "google-cloud OAuth provider has no client_id/secret configured; \
-             admins must set them via PATCH /api/v1/providers/google-cloud \
-             (or the admin UI) before users can connect services via --oauth. \
-             Until then the catalog entry exists but OAuth flows will fail."
+            "google-cloud provider has no platform OAuth client configured. \
+             Users can still connect via BYO credentials \
+             (--oauth-client-id / --oauth-client-secret-env on \
+             `nyxid service add api-google-cloud --oauth`). To set a platform \
+             default, PATCH /api/v1/providers/google-cloud with a \
+             client_id/secret and flip credential_mode to \"admin\" or \"both\"."
         );
     }
 
