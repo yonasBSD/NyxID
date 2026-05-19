@@ -1605,7 +1605,14 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
-            extra_auth_params: None,
+            // Google only returns a refresh_token when the auth request carries
+            // access_type=offline + prompt=consent. Without these the user gets
+            // a 1-hour access token and broker calls start failing the moment
+            // it expires. Matches the seeded `google` provider above.
+            extra_auth_params: Some(HashMap::from([
+                ("access_type".to_string(), "offline".to_string()),
+                ("prompt".to_string(), "consent".to_string()),
+            ])),
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
             requires_gateway_url: false,

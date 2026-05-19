@@ -315,10 +315,59 @@ Google Cloud uses the normal OAuth provider flow. There is no
 service-account JSON paste path for `api-google-cloud`; the user signs in
 with a Google account and NyxID stores the delegated OAuth token. The
 catalog base URL is only a placeholder, so every useful add should supply
-the concrete Google API host:
+the concrete Google API host.
+
+**Operator setup (must be done once before users can `--oauth`):**
+
+The seeded `google-cloud` provider ships with `credential_mode=user` and
+no platform-level client_id / client_secret. Until those are configured,
+every `--oauth` add has to supply BYO OAuth client credentials. There
+are two ways to satisfy this:
+
+1. **Platform-default (recommended for multi-user deployments).** An
+   admin registers a Google OAuth web client in the Google Cloud Console,
+   then PATCHes the provider with the resulting client_id / secret and
+   sets `credential_mode` to `admin` (or `both` to keep BYO as fallback):
+
+   ```bash
+   curl -X PATCH "$BASE_URL/api/v1/providers/google-cloud" \
+     -H "Authorization: Bearer $ADMIN_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "client_id": "<GOOGLE_OAUTH_CLIENT_ID>",
+       "client_secret": "<GOOGLE_OAUTH_CLIENT_SECRET>",
+       "credential_mode": "both"
+     }'
+   ```
+
+   The admin UI exposes the same field. After this, users can
+   `nyxid service add api-google-cloud --oauth ...` with no extra flags.
+
+2. **BYO per user.** Each user registers their own Google OAuth web
+   client and passes it on the add command:
+
+   ```bash
+   nyxid service add api-google-cloud --oauth \
+     --endpoint-url https://cloudbilling.googleapis.com \
+     --slug google-cloud-billing \
+     --oauth-client-id "$GOOGLE_OAUTH_CLIENT_ID" \
+     --oauth-client-secret-env GOOGLE_OAUTH_CLIENT_SECRET
+   ```
+
+In **both** cases the Google OAuth client must list this as an
+authorized redirect URI:
+
+```
+<BASE_URL>/api/v1/providers/callback
+```
+
+The provider seed also requests `access_type=offline` + `prompt=consent`
+on every authorize call so Google returns a refresh token; without these
+Google only issues a 1-hour access token and proxy calls start failing
+the moment it expires.
 
 ```bash
-# Generic shape
+# Generic shape (platform-default credentials configured)
 nyxid service add api-google-cloud --oauth --endpoint-url <google-api-host>
 
 # Cloud Billing metadata: billing accounts, projects, SKUs.
