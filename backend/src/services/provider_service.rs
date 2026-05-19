@@ -3024,21 +3024,89 @@ pub async fn seed_default_services(
     }
 
     // NyxID#778: the gcp-cloud-billing / gcp-bigquery-billing catalog entries
-    // (and their legacy service-account auth) have been removed in favor of the
-    // generic `api-google-cloud` + `google-cloud` OAuth flow. Any existing
-    // UserService rows that auto-provisioned from those old slugs now point
-    // at non-existent catalog entries and have invalid credentials. We do
-    // NOT auto-rewrite them (the stored SA JSON is gone from the new model).
-    // Log a one-time warning at startup with a hint for affected users.
-    let removed_gcp_slugs = ["gcp-cloud-billing", "gcp-bigquery-billing"];
+    // (and their gcp-billing / gcp-bigquery providers) were superseded by the
+    // generic `api-google-cloud` + `google-cloud` OAuth flow. The seed code
+    // for these was removed, but pre-existing rows from earlier deployments
+    // remain and still surface in the admin catalog UI. Drop them on
+    // startup: catalog rows are admin-owned seed data and are useless once
+    // their auth method (`gcp_service_account`) no longer exists. Per-user
+    // data (UserService, UserProviderToken) is preserved and a warning is
+    // logged so affected users can re-add via the new OAuth flow.
+    let removed_gcp_service_slugs = ["gcp-cloud-billing", "gcp-bigquery-billing"];
+    let removed_gcp_provider_slugs = ["gcp-billing", "gcp-bigquery"];
+
+    let service_ids_to_remove: Vec<String> = service_col
+        .find(doc! { "slug": { "$in": &removed_gcp_service_slugs[..] } })
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+
+    let provider_ids_to_remove: Vec<String> = provider_col
+        .find(doc! { "slug": { "$in": &removed_gcp_provider_slugs[..] } })
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?
+        .into_iter()
+        .map(|p| p.id)
+        .collect();
+
+    if !service_ids_to_remove.is_empty() || !provider_ids_to_remove.is_empty() {
+        let mut requirement_query = doc! {};
+        if !service_ids_to_remove.is_empty() {
+            requirement_query.insert("service_id", doc! { "$in": &service_ids_to_remove });
+        }
+        if !provider_ids_to_remove.is_empty() {
+            let provider_clause = doc! { "provider_config_id": { "$in": &provider_ids_to_remove } };
+            if requirement_query.is_empty() {
+                requirement_query = provider_clause;
+            } else {
+                requirement_query = doc! {
+                    "$or": [requirement_query, provider_clause]
+                };
+            }
+        }
+        let requirements_removed = req_col.delete_many(requirement_query).await?.deleted_count;
+
+        let services_removed = if service_ids_to_remove.is_empty() {
+            0
+        } else {
+            service_col
+                .delete_many(doc! { "_id": { "$in": &service_ids_to_remove } })
+                .await?
+                .deleted_count
+        };
+
+        let providers_removed = if provider_ids_to_remove.is_empty() {
+            0
+        } else {
+            provider_col
+                .delete_many(doc! { "_id": { "$in": &provider_ids_to_remove } })
+                .await?
+                .deleted_count
+        };
+
+        tracing::info!(
+            services_removed,
+            providers_removed,
+            requirements_removed,
+            service_slugs = ?removed_gcp_service_slugs,
+            provider_slugs = ?removed_gcp_provider_slugs,
+            "NyxID#778: removed legacy GCP catalog services + providers \
+             (superseded by api-google-cloud + google-cloud OAuth)"
+        );
+    }
+
     let orphaned = db
         .collection::<mongodb::bson::Document>(USER_SERVICES)
-        .count_documents(doc! { "slug": { "$in": &removed_gcp_slugs[..] } })
+        .count_documents(doc! { "slug": { "$in": &removed_gcp_service_slugs[..] } })
         .await?;
     if orphaned > 0 {
         tracing::warn!(
             count = orphaned,
-            slugs = ?removed_gcp_slugs,
+            slugs = ?removed_gcp_service_slugs,
             "NyxID#778: found orphaned UserService rows for removed GCP service-account \
              catalog entries. These users must re-add the services via the new OAuth flow: \
              `nyxid service add api-google-cloud --oauth --endpoint-url <google-api-host>`. \
