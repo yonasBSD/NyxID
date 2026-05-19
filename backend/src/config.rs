@@ -233,15 +233,13 @@ pub struct AppConfig {
     /// Event dedup TTL in seconds (default 300 = 5 minutes).
     pub channel_event_dedup_ttl_secs: u64,
 
-    /// Response-cache TTL (seconds) for the `aws_sigv4` and
-    /// `gcp_service_account` proxy auth methods. AWS Cost Explorer
-    /// charges $0.01 per paginated request and BigQuery billing-export
-    /// data only updates every few hours, so identical proxy requests
-    /// in a short window get served from cache. **Defaults to 0
-    /// (disabled).** Operators should review the cache scoping
-    /// (per-credential + per-operation-header keying via
-    /// `CloudResponseCache::key`) and the bounds below before enabling.
-    /// See NyxID#716 + Codex review REC 11.
+    /// Response-cache TTL (seconds) for the `aws_sigv4` proxy auth
+    /// method. AWS Cost Explorer charges $0.01 per paginated request,
+    /// so identical proxy requests in a short window get served from
+    /// cache. **Defaults to 0 (disabled).** Operators should review
+    /// the cache scoping (per-credential + per-operation-header keying
+    /// via `CloudResponseCache::key`) and the bounds below before
+    /// enabling. See NyxID#716 + Codex review REC 11.
     pub cloud_response_cache_ttl_secs: u64,
     /// Maximum bytes for a single cacheable response. Larger responses
     /// are forwarded uncached. Default 1 MiB. Override via

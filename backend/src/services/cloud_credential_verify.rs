@@ -1,12 +1,11 @@
 //! At-creation credential verification for cloud-billing auth methods.
 //!
-//! When a user adds a key for `aws_sigv4` / `gcp_service_account`,
-//! make one cheap probe call upstream so we can fail-fast with a
-//! useful error message if the credential is malformed, attached to
-//! the wrong account, or missing required IAM grants. Without this
-//! the user only discovers misconfiguration when a `/daily` skill
-//! runs hours later and the proxy returns the cloud's raw
-//! `AccessDenied` blob.
+//! When a user adds a key for `aws_sigv4`, make one cheap probe call
+//! upstream so we can fail-fast with a useful error message if the
+//! credential is malformed, attached to the wrong account, or missing
+//! required IAM grants. Without this the user only discovers
+//! misconfiguration when a `/daily` skill runs hours later and the
+//! proxy returns the cloud's raw `AccessDenied` blob.
 //!
 //! Probe choice per auth method:
 //!
@@ -17,27 +16,15 @@
 //!   is from a linked account (Cost Explorer can only be called from
 //!   the management/payer account).
 //!
-//! - **GCP Cloud Billing API** (`gcp_service_account` +
-//!   `cloudbilling.googleapis.com`): `GET /v1/billingAccounts`. Lists
-//!   billing accounts visible to the SA; the empty-list case is fine,
-//!   the 401/403 case is what we want to catch.
-//!
-//! - **GCP BigQuery** (`gcp_service_account` +
-//!   `bigquery.googleapis.com`): `GET /bigquery/v2/projects`. Lists
-//!   projects the SA can read; surfaces missing
-//!   `roles/bigquery.dataViewer` or `roles/bigquery.jobUser` at
-//!   add-time.
-//!
 //! A 5xx or network failure is treated as "couldn't verify, but
 //! credential is plausibly fine" and the add proceeds with a warning
-//! logged. That preserves the credential-store add when AWS/GCP is
-//! itself flaky.
+//! logged. That preserves the credential-store add when AWS is itself
+//! flaky.
 
 use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, Utc};
 use nyxid_cloud_auth::aws_sigv4::{self, AwsCredentials};
-use nyxid_cloud_auth::gcp_oauth::{DEFAULT_GCP_SCOPES, GcpServiceAccountKey, GcpTokenCache};
 
 use crate::errors::{AppError, AppResult};
 
@@ -146,105 +133,6 @@ pub async fn verify_aws_sigv4(
     )))
 }
 
-/// Probe a `gcp_service_account` credential against the catalog
-/// endpoint. Behavior mirrors the AWS case: hard-fail on 4xx with a
-/// hint, soft-warn on 5xx / network / timeout.
-pub async fn verify_gcp_service_account(
-    http_client: &reqwest::Client,
-    gcp_token_cache: &GcpTokenCache,
-    credential_json: &str,
-    base_url: &str,
-) -> AppResult<()> {
-    // Validate the JSON shape up front so the user gets a clear
-    // error before we hit Google's mint endpoint.
-    let _ = GcpServiceAccountKey::from_json(credential_json)
-        .map_err(|e| AppError::BadRequest(format!("GCP service account JSON is malformed: {e}")))?;
-
-    let token = match tokio::time::timeout(
-        VERIFY_TIMEOUT,
-        gcp_token_cache.access_token(http_client, credential_json, DEFAULT_GCP_SCOPES),
-    )
-    .await
-    {
-        Ok(Ok(t)) => t,
-        Ok(Err(e)) => {
-            return Err(AppError::BadRequest(format!(
-                "GCP rejected the service account credential while minting an access token: {e}. \
-                 Verify the private_key matches the client_email and that the SA hasn't been disabled."
-            )));
-        }
-        Err(_) => {
-            tracing::warn!(
-                base_url = %base_url,
-                timeout = ?VERIFY_TIMEOUT,
-                "GCP credential verify token-mint timed out; allowing add"
-            );
-            return Ok(());
-        }
-    };
-
-    let probe_path = if base_url.contains("bigquery.googleapis.com") {
-        "/bigquery/v2/projects"
-    } else {
-        // cloudbilling.googleapis.com — billingAccounts is a top-level
-        // resource that lists what the SA can see.
-        "/v1/billingAccounts"
-    };
-    let probe_url = format!("{}{}", base_url.trim_end_matches('/'), probe_path);
-
-    let response = match tokio::time::timeout(
-        VERIFY_TIMEOUT,
-        http_client
-            .get(&probe_url)
-            .bearer_auth(token.as_ref())
-            .send(),
-    )
-    .await
-    {
-        Ok(Ok(r)) => r,
-        Ok(Err(e)) => {
-            tracing::warn!(
-                error = %e,
-                base_url = %base_url,
-                "GCP credential verify probe network error; allowing add"
-            );
-            return Ok(());
-        }
-        Err(_) => {
-            tracing::warn!(
-                base_url = %base_url,
-                timeout = ?VERIFY_TIMEOUT,
-                "GCP credential verify probe timed out; allowing add"
-            );
-            return Ok(());
-        }
-    };
-
-    let status = response.status();
-    if status.is_success() {
-        return Ok(());
-    }
-    if status.is_server_error() {
-        tracing::warn!(
-            status = %status,
-            base_url = %base_url,
-            "GCP credential verify hit 5xx; allowing add"
-        );
-        return Ok(());
-    }
-
-    let body = response.text().await.unwrap_or_default();
-    let snippet: String = body.chars().take(400).collect();
-    let hint = if probe_path == "/bigquery/v2/projects" {
-        " — verify the service account has `roles/bigquery.dataViewer` on the billing-export dataset and `roles/bigquery.jobUser` on the project."
-    } else {
-        " — verify the service account has `roles/billing.viewer` at the organization or billing-account scope."
-    };
-    Err(AppError::BadRequest(format!(
-        "GCP rejected the credential ({status}){hint} Response: {snippet}"
-    )))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,26 +235,6 @@ mod tests {
             mock.hits.load(Ordering::SeqCst),
             0,
             "should not hit AWS for a malformed credential"
-        );
-    }
-
-    #[tokio::test]
-    async fn gcp_verify_rejects_malformed_credential_json_without_hitting_network() {
-        let (base_url, mock) = start_aws_mock(200, "[]").await;
-        let client = reqwest::Client::new();
-        let cache = GcpTokenCache::new();
-        let err = verify_gcp_service_account(&client, &cache, "not even json", &base_url)
-            .await
-            .unwrap_err();
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("malformed"),
-            "expected malformed-credential error, got: {msg}"
-        );
-        assert_eq!(
-            mock.hits.load(Ordering::SeqCst),
-            0,
-            "should not hit GCP for a malformed credential"
         );
     }
 }

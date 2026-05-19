@@ -2211,7 +2211,6 @@ async fn execute_proxy_inner(
         delegated,
         caller_token.as_deref(),
         &state.token_exchange_cache,
-        &state.gcp_token_cache,
         &state.cloud_response_cache,
     )
     .await?;
