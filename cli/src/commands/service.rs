@@ -694,16 +694,17 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                     .or(result["service_slug"].as_str())
                     .unwrap_or("-");
                 eprintln!();
-                eprintln!("Next step: configure the credential on node {node_id}.");
+                eprintln!(
+                    "Next step: SSH to the machine running node {node_id} and configure the credential:"
+                );
                 if custom {
-                    eprintln!(
-                        "  Run `nyxid node credentials add ... --service {result_slug}` on that node."
-                    );
+                    eprintln!("  nyxid node credentials add ... --service {result_slug}");
                 } else {
-                    eprintln!(
-                        "  Run `nyxid node credentials setup --service {result_slug}` on that node."
-                    );
+                    eprintln!("  nyxid node credentials setup --service {result_slug}");
                 }
+                eprintln!(
+                    "  `nyxid node credentials` is node-side only, not available on the user-side CLI."
+                );
             }
             Ok(())
         }
@@ -1313,9 +1314,12 @@ async fn run_oauth_add(
         // extra scopes (see `cli/src/node/agent.rs::cmd_credentials_setup`).
         print_add_result(api, &key_result, auth.output)?;
         eprintln!();
-        eprintln!("Next step: run this on the node that owns the credential:");
+        eprintln!("Next step: SSH to the node-agent machine, then run:");
         let scope_suffix = format_scope_suffix(options.additional_scopes);
         eprintln!("  nyxid node credentials setup --service {slug}{scope_suffix}");
+        eprintln!(
+            "  `nyxid node credentials` is node-side only, not available on the user-side CLI."
+        );
         return Ok(());
     }
 
@@ -1477,9 +1481,12 @@ async fn run_device_code_add(
     if options.via_node.is_some() {
         print_add_result(api, &key_result, auth.output)?;
         eprintln!();
-        eprintln!("Next step: run this on the node that owns the credential:");
+        eprintln!("Next step: SSH to the node-agent machine, then run:");
         let scope_suffix = format_scope_suffix(options.additional_scopes);
         eprintln!("  nyxid node credentials setup --service {slug}{scope_suffix}");
+        eprintln!(
+            "  `nyxid node credentials` is node-side only, not available on the user-side CLI."
+        );
         return Ok(());
     }
 
