@@ -10,6 +10,8 @@
 
 use crate::errors::{AppError, AppResult};
 
+pub const MAX_URL_LEN: usize = 2048;
+
 /// Validate a user-supplied URL that will be stored and later shown to a
 /// remote operator. Unlike `validate_base_url`, this rejects private,
 /// loopback, link-local, CGNAT, unspecified, and metadata targets because
@@ -76,6 +78,34 @@ pub async fn validate_public_http_url(url: &str, field_name: &str) -> AppResult<
             "{field_name} must not resolve to private or internal IP addresses"
         )));
     }
+
+    Ok(())
+}
+
+/// Validate a user-supplied advisory URL that is stored as display metadata.
+///
+/// This intentionally does not perform DNS resolution or IP range checks. Use
+/// it only for URLs that NyxID will not fetch server-side.
+pub fn validate_advisory_http_url(url: &str, field_name: &str, max_len: usize) -> AppResult<()> {
+    if url.len() > max_len {
+        return Err(AppError::ValidationError(format!(
+            "{field_name} must not exceed {max_len} characters"
+        )));
+    }
+
+    let parsed = url::Url::parse(url)
+        .map_err(|_| AppError::ValidationError(format!("{field_name} must be a valid URL")))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(AppError::ValidationError(format!(
+            "{field_name} must use http or https"
+        )));
+    }
+    if parsed.host_str().is_none() {
+        return Err(AppError::ValidationError(format!(
+            "{field_name} must include a hostname"
+        )));
+    }
+    reject_url_userinfo(&parsed)?;
 
     Ok(())
 }
@@ -255,8 +285,8 @@ fn is_rfc6598_cgnat(ipv4: std::net::Ipv4Addr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        reject_url_userinfo, validate_base_url, validate_optional_spec_url,
-        validate_public_http_url, validate_user_endpoint_url,
+        MAX_URL_LEN, reject_url_userinfo, validate_advisory_http_url, validate_base_url,
+        validate_optional_spec_url, validate_public_http_url, validate_user_endpoint_url,
     };
 
     #[test]
@@ -340,6 +370,36 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[test]
+    fn validate_advisory_http_url_accepts_node_local_targets() {
+        assert!(
+            validate_advisory_http_url("http://192.168.1.1/", "target_url", MAX_URL_LEN).is_ok()
+        );
+        assert!(
+            validate_advisory_http_url(
+                "https://homeassistant.local.hass.io:8123/",
+                "target_url",
+                MAX_URL_LEN
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_advisory_http_url("http://127.0.0.1:1883/", "target_url", MAX_URL_LEN).is_ok()
+        );
+        assert!(validate_advisory_http_url("http://[::1]/", "target_url", MAX_URL_LEN).is_ok());
+    }
+
+    #[test]
+    fn validate_advisory_http_url_rejects_invalid_shapes() {
+        assert!(validate_advisory_http_url("not-a-url", "target_url", MAX_URL_LEN).is_err());
+        assert!(
+            validate_advisory_http_url("ftp://example.com/", "target_url", MAX_URL_LEN).is_err()
+        );
+
+        let overlong = format!("http://example.com/{}", "a".repeat(MAX_URL_LEN));
+        assert!(validate_advisory_http_url(&overlong, "target_url", MAX_URL_LEN).is_err());
     }
 
     #[tokio::test]
