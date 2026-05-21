@@ -9,6 +9,18 @@ export function LandingFooter() {
           &copy; {new Date().getFullYear()} Chrono AI. All rights reserved.
         </p>
         <div className="flex items-center gap-4">
+          <a
+            href="/docs"
+            className="font-mono text-xs text-gray-500 transition-colors hover:text-white"
+          >
+            Docs
+          </a>
+          <a
+            href="/docs/cli/getting-started/install"
+            className="font-mono text-xs text-gray-500 transition-colors hover:text-white"
+          >
+            CLI
+          </a>
           <Link
             to="/terms"
             className="text-xs text-text-tertiary transition-colors hover:text-foreground"
