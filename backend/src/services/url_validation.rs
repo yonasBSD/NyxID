@@ -212,10 +212,16 @@ pub fn validate_base_url(url: &str) -> AppResult<()> {
 
 /// Returns true if the hostname is a known cloud metadata endpoint.
 fn is_cloud_metadata_host(host: &str) -> bool {
-    let normalized = host.trim_end_matches('.').to_ascii_lowercase();
+    let normalized = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
     normalized == "metadata.google.internal"
         || normalized == "169.254.169.254"
-        || normalized == "[fd00:ec2::254]"
+        || normalized == "fd00:ec2::254"
+        || normalized == "100.100.100.200"
+        || normalized == "168.63.129.16"
 }
 
 /// Validate an optional documentation spec URL.
@@ -317,6 +323,9 @@ mod tests {
     fn validate_base_url_rejects_cloud_metadata() {
         assert!(validate_base_url("http://metadata.google.internal").is_err());
         assert!(validate_base_url("http://169.254.169.254").is_err());
+        assert!(validate_base_url("http://[fd00:ec2::254]").is_err());
+        assert!(validate_base_url("http://100.100.100.200").is_err());
+        assert!(validate_base_url("http://168.63.129.16").is_err());
     }
 
     #[test]
@@ -438,6 +447,17 @@ mod tests {
                 MAX_URL_LEN
             )
             .is_err()
+        );
+        assert!(
+            validate_advisory_http_url("http://[fd00:ec2::254]/", "target_url", MAX_URL_LEN)
+                .is_err()
+        );
+        assert!(
+            validate_advisory_http_url("http://100.100.100.200/", "target_url", MAX_URL_LEN)
+                .is_err()
+        );
+        assert!(
+            validate_advisory_http_url("http://168.63.129.16/", "target_url", MAX_URL_LEN).is_err()
         );
     }
 
