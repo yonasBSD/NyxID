@@ -85,7 +85,10 @@ pub async fn validate_public_http_url(url: &str, field_name: &str) -> AppResult<
 /// Validate a user-supplied advisory URL that is stored as display metadata.
 ///
 /// This intentionally does not perform DNS resolution or IP range checks. Use
-/// it only for URLs that NyxID will not fetch server-side.
+/// it only for URLs that NyxID will not fetch server-side. Cloud metadata
+/// hostnames are still rejected because the node agent forwards proxy
+/// requests to this URL and reaching the local metadata endpoint would leak
+/// IAM credentials.
 pub fn validate_advisory_http_url(url: &str, field_name: &str, max_len: usize) -> AppResult<()> {
     if url.len() > max_len {
         return Err(AppError::ValidationError(format!(
@@ -100,9 +103,14 @@ pub fn validate_advisory_http_url(url: &str, field_name: &str, max_len: usize) -
             "{field_name} must use http or https"
         )));
     }
-    if parsed.host_str().is_none() {
+    let Some(host) = parsed.host_str() else {
         return Err(AppError::ValidationError(format!(
             "{field_name} must include a hostname"
+        )));
+    };
+    if is_cloud_metadata_host(host) {
+        return Err(AppError::ValidationError(format!(
+            "{field_name} must not point to a cloud metadata endpoint"
         )));
     }
     reject_url_userinfo(&parsed)?;
@@ -400,6 +408,45 @@ mod tests {
 
         let overlong = format!("http://example.com/{}", "a".repeat(MAX_URL_LEN));
         assert!(validate_advisory_http_url(&overlong, "target_url", MAX_URL_LEN).is_err());
+    }
+
+    #[test]
+    fn validate_advisory_http_url_rejects_cloud_metadata_endpoints() {
+        // Node agents fetch target_url at proxy time, so even though the
+        // server only stores this value, a malicious metadata endpoint
+        // would leak IAM credentials from the node host.
+        assert!(
+            validate_advisory_http_url(
+                "http://169.254.169.254/latest/meta-data/",
+                "target_url",
+                MAX_URL_LEN
+            )
+            .is_err()
+        );
+        assert!(
+            validate_advisory_http_url(
+                "http://metadata.google.internal/computeMetadata/v1/",
+                "target_url",
+                MAX_URL_LEN
+            )
+            .is_err()
+        );
+        assert!(
+            validate_advisory_http_url(
+                "https://METADATA.GOOGLE.INTERNAL./",
+                "target_url",
+                MAX_URL_LEN
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn validate_advisory_http_url_rejects_userinfo() {
+        assert!(
+            validate_advisory_http_url("http://user:pass@example.com/", "target_url", MAX_URL_LEN)
+                .is_err()
+        );
     }
 
     #[tokio::test]
