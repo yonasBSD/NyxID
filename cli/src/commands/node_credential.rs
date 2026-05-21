@@ -46,7 +46,10 @@ pub async fn run(command: NodeCredentialAdminCommands) -> Result<()> {
                     eprintln!("  field name: {field}");
                     eprintln!();
                     eprintln!(
-                        "The VM operator should run `nyxid node credentials pending`, then `nyxid node credentials accept {slug}`."
+                        "The VM operator must SSH to the node-agent machine and run `nyxid node credentials pending`, then `nyxid node credentials accept {slug}`."
+                    );
+                    eprintln!(
+                        "`nyxid node credentials` is node-side only; it is not available on the user-side CLI."
                     );
                     eprintln!("Do not send the secret value; it is entered on the VM.");
                 }
