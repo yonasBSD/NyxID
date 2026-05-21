@@ -27,6 +27,8 @@ export interface KeyInfo {
   readonly catalog_service_name: string | null;
   readonly node_id: string | null;
   readonly node_priority: number;
+  readonly node_status?: string | null;
+  readonly node_last_heartbeat_at?: string | null;
   readonly is_active: boolean;
   readonly custom_user_agent?: string | null;
   /**

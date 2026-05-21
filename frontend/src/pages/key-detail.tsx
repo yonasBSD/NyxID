@@ -24,7 +24,6 @@ import {
   type WsFrameInjection,
 } from "@/schemas/services";
 import { ApiError } from "@/lib/api-client";
-import { deriveServiceBadge } from "@/lib/service-status";
 import { copyToClipboard } from "@/lib/utils";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { PageHeader } from "@/components/shared/page-header";
@@ -522,6 +521,8 @@ function ServiceSection({
   hasCredential,
   serviceId,
   customUserAgent,
+  nodeId,
+  nodeStatus,
   readOnly = false,
 }: {
   readonly slug: string;
@@ -538,14 +539,69 @@ function ServiceSection({
   readonly hasCredential: boolean;
   readonly serviceId: string;
   readonly customUserAgent?: string | null;
+  readonly nodeId?: string | null;
+  readonly nodeStatus?: string | null;
   readonly readOnly?: boolean;
 }) {
   const updateService = useUpdateUserService();
   const [editingUa, setEditingUa] = useState(false);
   const [uaDraft, setUaDraft] = useState(customUserAgent ?? "");
 
-  const { variant: badgeVariant, label: badgeLabel, credentialBlocked } =
-    deriveServiceBadge({ isActive, credentialStatus, hasCredential });
+  const isNodeBound = nodeId !== undefined && nodeId !== null && nodeId !== "";
+
+  let badgeVariant: "success" | "secondary" | "destructive" = "secondary";
+  let badgeLabel = "Inactive";
+  let credentialBlocked = false;
+  let nodeWarning: string | null = null;
+  let nodeHint: string | null = null;
+
+  if (!isActive) {
+    badgeVariant = "secondary";
+    badgeLabel = "Inactive";
+  } else if (isNodeBound) {
+    switch (nodeStatus) {
+      case "unknown":
+        badgeVariant = "destructive";
+        badgeLabel = "Node Deleted";
+        nodeWarning = "Bound node was not found on the server. The binding is broken. Use Routing section to re-bind this service to a valid node.";
+        break;
+      case "inaccessible":
+        badgeVariant = "secondary";
+        badgeLabel = "Inaccessible";
+        nodeHint = "Binding points at a node you do not have permission to introspect. The proxy connection may still function normally.";
+        break;
+      case "offline":
+        badgeVariant = "destructive";
+        badgeLabel = "Offline";
+        nodeWarning = "Bound node is offline or has a stale heartbeat. Use Routing section to re-bind this service to an online node.";
+        break;
+      case "draining":
+        badgeVariant = "secondary";
+        badgeLabel = "Draining";
+        nodeWarning = "Bound node is draining. Use Routing section to re-bind this service to an online node.";
+        break;
+      case "online":
+      default:
+        credentialBlocked = hasCredential && credentialStatus !== "" && credentialStatus !== "active";
+        if (credentialBlocked) {
+          badgeVariant = "secondary";
+          badgeLabel = "Unavailable";
+        } else {
+          badgeVariant = "success";
+          badgeLabel = "Active";
+        }
+        break;
+    }
+  } else {
+    credentialBlocked = hasCredential && credentialStatus !== "" && credentialStatus !== "active";
+    if (credentialBlocked) {
+      badgeVariant = "secondary";
+      badgeLabel = "Unavailable";
+    } else {
+      badgeVariant = "success";
+      badgeLabel = "Active";
+    }
+  }
 
   function toggleActive() {
     updateService.mutate(
@@ -633,6 +689,17 @@ function ServiceSection({
               {credentialStatus}
             </span>
             . Real requests will fail until the credential is restored.
+          </p>
+        )}
+
+        {nodeWarning && (
+          <p className="text-xs text-destructive font-medium">
+            {nodeWarning}
+          </p>
+        )}
+        {nodeHint && (
+          <p className="text-xs text-muted-foreground font-medium">
+            {nodeHint}
           </p>
         )}
 
@@ -1975,6 +2042,8 @@ export function KeyDetailPage() {
                 hasCredential={keyInfo.api_key_id !== null && keyInfo.api_key_id !== undefined}
                 serviceId={keyInfo.id}
                 customUserAgent={keyInfo.custom_user_agent}
+                nodeId={keyInfo.node_id}
+                nodeStatus={keyInfo.node_status}
                 readOnly={readOnly}
               />
             </div>

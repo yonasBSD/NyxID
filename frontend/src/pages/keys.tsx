@@ -54,12 +54,18 @@ function statusVariant(
 ): "success" | "secondary" | "destructive" {
   switch (status) {
     case "active":
+    case "online":
       return "success";
     case "expired":
+    case "inaccessible":
+    case "draining":
       return "secondary";
     case "revoked":
     case "failed":
     case "refresh_failed":
+    case "offline":
+    case "node_deleted":
+    case "unknown":
       return "destructive";
     default:
       return "secondary";
@@ -98,6 +104,15 @@ function KeyCardContent({ keyInfo, source }: KeyCardProps) {
   const isReadOnly =
     source?.type === "org" && source.allowed && source.role !== "admin";
 
+  const displayStatus = keyInfo.node_id && keyInfo.node_status
+    ? (keyInfo.node_status === "unknown" ? "node_deleted" : keyInfo.node_status)
+    : keyInfo.status;
+
+  const displayStatusLabel =
+    displayStatus === "node_deleted"
+      ? "Node Deleted"
+      : displayStatus.charAt(0).toUpperCase() + displayStatus.slice(1);
+
   return (
     <Card
       className={`h-full transition-colors duration-300 ${
@@ -128,8 +143,8 @@ function KeyCardContent({ keyInfo, source }: KeyCardProps) {
           {isReadOnly && !isBlocked && (
             <Badge variant="secondary">View-Only</Badge>
           )}
-          <Badge variant={statusVariant(keyInfo.status)}>
-            {keyInfo.status.charAt(0).toUpperCase() + keyInfo.status.slice(1)}
+          <Badge variant={statusVariant(displayStatus)}>
+            {displayStatusLabel}
           </Badge>
           {isSsh && <Badge variant="secondary">SSH</Badge>}
           {keyInfo.auto_connected && (
@@ -222,6 +237,15 @@ function ServiceTableRow({
   const isReadOnly =
     source?.type === "org" && source.allowed && source.role !== "admin";
 
+  const displayStatus = keyInfo.node_id && keyInfo.node_status
+    ? (keyInfo.node_status === "unknown" ? "node_deleted" : keyInfo.node_status)
+    : keyInfo.status;
+
+  const displayStatusLabel =
+    displayStatus === "node_deleted"
+      ? "Node Deleted"
+      : displayStatus.charAt(0).toUpperCase() + displayStatus.slice(1);
+
   const displayUrl = isSsh
     ? `${keyInfo.ssh_host ?? "unknown"}:${keyInfo.ssh_port ?? 22}`
     : keyInfo.endpoint_url;
@@ -269,8 +293,8 @@ function ServiceTableRow({
           {isOrgInherited && <Badge variant="info">Org</Badge>}
           {isBlocked && <Badge variant="secondary">Read-Only</Badge>}
           {isReadOnly && !isBlocked && <Badge variant="secondary">View-Only</Badge>}
-          <Badge variant={statusVariant(keyInfo.status)}>
-            {keyInfo.status.charAt(0).toUpperCase() + keyInfo.status.slice(1)}
+          <Badge variant={statusVariant(displayStatus)}>
+            {displayStatusLabel}
           </Badge>
           {isSsh && <Badge variant="secondary">SSH</Badge>}
         </div>

@@ -1036,7 +1036,7 @@ async fn ensure_node_writable_by_access(
     }
 }
 
-fn node_access_can_read(access: &OwnerAccess) -> bool {
+pub(crate) fn node_access_can_read(access: &OwnerAccess) -> bool {
     match access {
         OwnerAccess::Direct | OwnerAccess::AsOrgAdmin { .. } => true,
         OwnerAccess::AsOrgMember { role, .. } => matches!(role, OrgRole::Member),

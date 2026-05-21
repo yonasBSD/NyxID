@@ -399,6 +399,10 @@ pub struct KeyResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
     pub node_priority: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_last_heartbeat_at: Option<String>,
     pub service_type: String,
     pub ssh_auth_mode: SshAuthMode,
     pub ssh_node_keys_stale: bool,
@@ -928,6 +932,14 @@ pub async fn create_key(
     .await;
     response.permission_setup_url = permission_url;
     response.permission_setup_scopes = permission_scopes;
+    enrich_key_response(
+        &state.db,
+        &state.node_ws_manager,
+        &actor,
+        state.config.node_heartbeat_timeout_secs,
+        &mut response,
+    )
+    .await?;
 
     Ok(Json(response))
 }
@@ -953,7 +965,18 @@ pub async fn list_keys(
 
     let views =
         unified_key_service::list_keys(&state.db, &state.encryption_keys, &user_id_str).await?;
-    let keys = views.into_iter().map(key_response_from_view).collect();
+    let mut keys = views
+        .into_iter()
+        .map(key_response_from_view)
+        .collect::<Vec<_>>();
+    enrich_key_responses(
+        &state.db,
+        &state.node_ws_manager,
+        &user_id_str,
+        state.config.node_heartbeat_timeout_secs,
+        &mut keys,
+    )
+    .await?;
     Ok(Json(KeyListResponse { keys }))
 }
 
@@ -1032,6 +1055,14 @@ pub async fn get_key(
     .await;
     response.permission_setup_url = permission_url;
     response.permission_setup_scopes = permission_scopes;
+    enrich_key_response(
+        &state.db,
+        &state.node_ws_manager,
+        &actor,
+        state.config.node_heartbeat_timeout_secs,
+        &mut response,
+    )
+    .await?;
     Ok(Json(response))
 }
 
@@ -1885,6 +1916,14 @@ pub async fn update_key(
     .await;
     response.permission_setup_url = permission_url;
     response.permission_setup_scopes = permission_scopes;
+    enrich_key_response(
+        &state.db,
+        &state.node_ws_manager,
+        &actor,
+        state.config.node_heartbeat_timeout_secs,
+        &mut response,
+    )
+    .await?;
     Ok(Json(response))
 }
 
@@ -2010,6 +2049,8 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
         catalog_service_name: None,
         node_id: result.service.node_id.clone(),
         node_priority: result.service.node_priority,
+        node_status: None,
+        node_last_heartbeat_at: None,
         service_type: result.service.service_type.clone(),
         ssh_auth_mode: result.service.ssh_auth_mode,
         ssh_node_keys_stale: result.service.ssh_node_keys_stale,
@@ -2083,6 +2124,8 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         catalog_service_name: view.catalog_service_name,
         node_id: view.node_id,
         node_priority: view.node_priority,
+        node_status: None,
+        node_last_heartbeat_at: None,
         service_type: view.service_type,
         ssh_auth_mode: view.ssh_auth_mode,
         ssh_node_keys_stale: view.ssh_node_keys_stale,
@@ -2119,6 +2162,73 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         permission_setup_url: None,
         permission_setup_scopes: None,
     }
+}
+
+async fn enrich_key_responses(
+    db: &mongodb::Database,
+    ws_manager: &crate::services::node_ws_manager::NodeWsManager,
+    actor_user_id: &str,
+    heartbeat_timeout_secs: u64,
+    keys: &mut [KeyResponse],
+) -> AppResult<()> {
+    for key in keys {
+        if let Some(ref node_id) = key.node_id {
+            if node_id.is_empty() {
+                continue;
+            }
+            let node_opt = node_service::get_node_by_id(db, node_id).await?;
+            if let Some(node) = node_opt {
+                let access =
+                    org_service::resolve_owner_access(db, actor_user_id, &node.user_id).await?;
+                if !node_service::node_access_can_read(&access) {
+                    key.node_status = Some("inaccessible".to_string());
+                } else {
+                    key.node_last_heartbeat_at = node.last_heartbeat_at.map(|dt| dt.to_rfc3339());
+
+                    let is_connected = ws_manager.is_connected(&node.id);
+                    let is_stale = if let Some(last_hb) = node.last_heartbeat_at {
+                        chrono::Utc::now()
+                            .signed_duration_since(last_hb)
+                            .num_seconds()
+                            > heartbeat_timeout_secs as i64
+                    } else {
+                        true
+                    };
+
+                    let status = if !is_connected || is_stale {
+                        "offline"
+                    } else {
+                        match node.status {
+                            crate::models::node::NodeStatus::Draining => "draining",
+                            crate::models::node::NodeStatus::Offline => "offline",
+                            crate::models::node::NodeStatus::Online => "online",
+                        }
+                    };
+                    key.node_status = Some(status.to_string());
+                }
+            } else {
+                key.node_status = Some("unknown".to_string());
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn enrich_key_response(
+    db: &mongodb::Database,
+    ws_manager: &crate::services::node_ws_manager::NodeWsManager,
+    actor_user_id: &str,
+    heartbeat_timeout_secs: u64,
+    key: &mut KeyResponse,
+) -> AppResult<()> {
+    enrich_key_responses(
+        db,
+        ws_manager,
+        actor_user_id,
+        heartbeat_timeout_secs,
+        std::slice::from_mut(key),
+    )
+    .await
 }
 
 #[cfg(test)]
