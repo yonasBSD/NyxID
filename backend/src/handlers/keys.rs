@@ -2171,40 +2171,64 @@ async fn enrich_key_responses(
     heartbeat_timeout_secs: u64,
     keys: &mut [KeyResponse],
 ) -> AppResult<()> {
+    let mut distinct_node_ids = Vec::new();
+    for key in keys.iter() {
+        if let Some(node_id) = key
+            .node_id
+            .as_ref()
+            .filter(|s| !s.is_empty() && !distinct_node_ids.contains(*s))
+        {
+            distinct_node_ids.push(node_id.clone());
+        }
+    }
+
+    let nodes = node_service::get_nodes_by_ids(db, &distinct_node_ids).await?;
+    let node_map: std::collections::HashMap<String, &crate::models::node::Node> =
+        nodes.iter().map(|node| (node.id.clone(), node)).collect();
+
+    let mut owner_access_map = std::collections::HashMap::new();
+    for node in nodes.iter() {
+        if !owner_access_map.contains_key(&node.user_id) {
+            let access =
+                org_service::resolve_owner_access(db, actor_user_id, &node.user_id).await?;
+            owner_access_map.insert(node.user_id.clone(), access);
+        }
+    }
+
     for key in keys {
         if let Some(ref node_id) = key.node_id {
             if node_id.is_empty() {
                 continue;
             }
-            let node_opt = node_service::get_node_by_id(db, node_id).await?;
-            if let Some(node) = node_opt {
-                let access =
-                    org_service::resolve_owner_access(db, actor_user_id, &node.user_id).await?;
-                if !node_service::node_access_can_read(&access) {
-                    key.node_status = Some("inaccessible".to_string());
-                } else {
-                    key.node_last_heartbeat_at = node.last_heartbeat_at.map(|dt| dt.to_rfc3339());
-
-                    let is_connected = ws_manager.is_connected(&node.id);
-                    let is_stale = if let Some(last_hb) = node.last_heartbeat_at {
-                        chrono::Utc::now()
-                            .signed_duration_since(last_hb)
-                            .num_seconds()
-                            > heartbeat_timeout_secs as i64
+            if let Some(node) = node_map.get(node_id) {
+                if let Some(access) = owner_access_map.get(&node.user_id) {
+                    if !node_service::node_access_can_read(access) {
+                        key.node_status = Some("inaccessible".to_string());
                     } else {
-                        true
-                    };
+                        key.node_last_heartbeat_at =
+                            node.last_heartbeat_at.map(|dt| dt.to_rfc3339());
 
-                    let status = if !is_connected || is_stale {
-                        "offline"
-                    } else {
-                        match node.status {
-                            crate::models::node::NodeStatus::Draining => "draining",
-                            crate::models::node::NodeStatus::Offline => "offline",
-                            crate::models::node::NodeStatus::Online => "online",
-                        }
-                    };
-                    key.node_status = Some(status.to_string());
+                        let is_connected = ws_manager.is_connected(&node.id);
+                        let is_stale = if let Some(last_hb) = node.last_heartbeat_at {
+                            chrono::Utc::now()
+                                .signed_duration_since(last_hb)
+                                .num_seconds()
+                                > heartbeat_timeout_secs as i64
+                        } else {
+                            true
+                        };
+
+                        let status = if !is_connected || is_stale {
+                            "offline"
+                        } else {
+                            match node.status {
+                                crate::models::node::NodeStatus::Draining => "draining",
+                                crate::models::node::NodeStatus::Offline => "offline",
+                                crate::models::node::NodeStatus::Online => "online",
+                            }
+                        };
+                        key.node_status = Some(status.to_string());
+                    }
                 }
             } else {
                 key.node_status = Some("unknown".to_string());

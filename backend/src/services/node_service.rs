@@ -228,6 +228,20 @@ pub async fn get_node_by_id(db: &mongodb::Database, node_id: &str) -> AppResult<
     Ok(node)
 }
 
+/// Get multiple active nodes by their IDs without ownership checks.
+pub async fn get_nodes_by_ids(db: &mongodb::Database, node_ids: &[String]) -> AppResult<Vec<Node>> {
+    if node_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let filter = doc! {
+        "_id": { "$in": node_ids },
+        "is_active": true
+    };
+    let cursor = db.collection::<Node>(NODES).find(filter).await?;
+    let nodes: Vec<Node> = cursor.try_collect().await?;
+    Ok(nodes)
+}
+
 /// Decrypt and decode a node's HMAC signing secret.
 pub async fn get_node_signing_secret(
     db: &mongodb::Database,
