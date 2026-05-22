@@ -132,6 +132,37 @@ pub async fn run(command: NodeCommands) -> Result<()> {
                     eprintln!("Last Seen:  {last_seen}");
                     eprintln!("Version:    {version}");
 
+                    let source_ip = node
+                        .get("metadata")
+                        .and_then(|m| m["ip_address"].as_str())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("unknown");
+
+                    let connected_str = if let Some(conn_at_str) = node["connected_at"].as_str() {
+                        if let Ok(conn_at) = chrono::DateTime::parse_from_rfc3339(conn_at_str) {
+                            let duration = chrono::Utc::now()
+                                .signed_duration_since(conn_at.with_timezone(&chrono::Utc));
+                            let seconds = duration.num_seconds().max(0);
+                            let formatted = if seconds < 86_400 {
+                                let h = seconds / 3600;
+                                let m = (seconds % 3600) / 60;
+                                format!("{}h {}m", h, m)
+                            } else {
+                                let d = seconds / 86_400;
+                                let h = (seconds % 86_400) / 3600;
+                                format!("{}d {}h", d, h)
+                            };
+                            format!("{} (since {})", formatted, conn_at_str)
+                        } else {
+                            "-".to_string()
+                        }
+                    } else {
+                        "-".to_string()
+                    };
+
+                    eprintln!("Source IP:  {source_ip}");
+                    eprintln!("Connected:  {connected_str}");
+
                     let admin_items = admins
                         .get("admins")
                         .and_then(|v| v.as_array())
