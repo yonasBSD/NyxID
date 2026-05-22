@@ -132,6 +132,15 @@ pub async fn run(command: NodeCommands) -> Result<()> {
                     eprintln!("Last Seen:  {last_seen}");
                     eprintln!("Version:    {version}");
 
+                    let source_ip = format_source_ip(node.get("metadata"));
+                    let connected_str = format_connected_duration(
+                        node["connected_at"].as_str(),
+                        chrono::Utc::now(),
+                    );
+
+                    eprintln!("Source IP:  {source_ip}");
+                    eprintln!("Connected:  {connected_str}");
+
                     let admin_items = admins
                         .get("admins")
                         .and_then(|v| v.as_array())
@@ -894,10 +903,87 @@ fn find_dockerfile() -> Result<std::path::PathBuf> {
     );
 }
 
+fn format_source_ip(node_metadata: Option<&serde_json::Value>) -> String {
+    node_metadata
+        .and_then(|m| m.get("ip_address"))
+        .and_then(|ip| ip.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+fn format_connected_duration(
+    connected_at: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    if let Some(conn_at_str) = connected_at {
+        if let Ok(conn_at) = chrono::DateTime::parse_from_rfc3339(conn_at_str) {
+            let duration = now.signed_duration_since(conn_at.with_timezone(&chrono::Utc));
+            let seconds = duration.num_seconds().max(0);
+            let formatted = if seconds < 86_400 {
+                let h = seconds / 3600;
+                let m = (seconds % 3600) / 60;
+                format!("{h}h {m}m")
+            } else {
+                let d = seconds / 86_400;
+                let h = (seconds % 86_400) / 3600;
+                format!("{d}d {h}h")
+            };
+            format!("{formatted} (since {conn_at_str})")
+        } else {
+            "-".to_string()
+        }
+    } else {
+        "-".to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn test_format_source_ip() {
+        assert_eq!(format_source_ip(None), "unknown");
+        assert_eq!(format_source_ip(Some(&json!({}))), "unknown");
+        assert_eq!(
+            format_source_ip(Some(&json!({"ip_address": ""}))),
+            "unknown"
+        );
+        assert_eq!(
+            format_source_ip(Some(&json!({"ip_address": "203.0.113.42"}))),
+            "203.0.113.42"
+        );
+    }
+
+    #[test]
+    fn test_format_connected_duration() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-05-22T11:59:01Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        assert_eq!(format_connected_duration(None, now), "-");
+        assert_eq!(format_connected_duration(Some("not-a-timestamp"), now), "-");
+
+        let t_zero = chrono::DateTime::parse_from_rfc3339("2026-05-22T11:59:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let d_zero = format_connected_duration(Some("2026-05-22T11:59:00Z"), t_zero);
+        assert!(d_zero.starts_with("0h 0m"));
+
+        let t_skew = chrono::DateTime::parse_from_rfc3339("2026-05-22T11:59:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let d_skew = format_connected_duration(Some("2026-05-22T12:00:00Z"), t_skew);
+        assert!(d_skew.starts_with("0h 0m"));
+
+        let d_normal = format_connected_duration(Some("2026-05-22T08:35:01Z"), now);
+        assert!(d_normal.starts_with("3h 24m"));
+
+        let d_gt24 = format_connected_duration(Some("2026-05-20T08:35:01Z"), now);
+        assert!(d_gt24.starts_with("2d 3h"));
+    }
 
     #[test]
     fn uuid_shape_is_detected() {
