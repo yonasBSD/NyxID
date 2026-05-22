@@ -33,21 +33,21 @@ export function LandingNavbar() {
         <div className="flex items-center gap-3">
           <a
             href="/docs"
-            className="hidden text-sm font-medium text-gray-300 transition-colors hover:text-white sm:inline-block"
+            className="hidden text-sm font-medium text-gray-300 transition-colors hover:text-white sm:inline-flex sm:h-9 sm:items-center px-2"
           >
             {t("nav.docs")}
           </a>
-          <GitHubButton className="text-text-tertiary hover:text-foreground" />
+          <GitHubButton className="h-9 text-text-tertiary hover:text-foreground px-2" />
           <LanguageSwitcher />
           <a
             href={loginHref}
-            className="rounded-lg border border-white/[0.08] px-5 py-2 text-sm font-medium text-foreground transition-colors hover:border-white/[0.15] hover:bg-white/[0.03]"
+            className="inline-flex h-9 items-center justify-center rounded-lg border border-white/[0.08] px-5 text-sm font-medium text-foreground transition-colors hover:border-white/[0.15] hover:bg-white/[0.03]"
           >
             {t("nav.login")}
           </a>
           <a
             href={registerHref}
-            className="hidden rounded-lg nyx-gradient-vivid px-5 py-2 text-sm font-medium text-white shadow-[0_0_12px_rgba(90,42,241,0.25)] transition-all hover:shadow-[0_0_18px_rgba(90,42,241,0.35)] hover:brightness-110 md:inline-block"
+            className="hidden md:inline-flex h-9 items-center justify-center rounded-lg nyx-gradient-vivid px-5 text-sm font-medium text-white shadow-[0_0_12px_rgba(90,42,241,0.25)] transition-all hover:shadow-[0_0_18px_rgba(90,42,241,0.35)] hover:brightness-110"
           >
             {t("nav.register")}
           </a>
