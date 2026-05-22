@@ -906,7 +906,18 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                                 .unwrap_or("-");
                             let label = svc["label"].as_str().unwrap_or("-");
                             let endpoint = svc["endpoint_url"].as_str().unwrap_or("-");
-                            let status = svc["status"].as_str().unwrap_or("active");
+                            let status = if svc["node_id"].is_string() {
+                                match svc["node_status"].as_str() {
+                                    Some("unknown") => "node_deleted",
+                                    Some("inaccessible") => "inaccessible",
+                                    Some("offline") => "offline",
+                                    Some("draining") => "draining",
+                                    Some("online") => svc["status"].as_str().unwrap_or("active"),
+                                    _ => svc["status"].as_str().unwrap_or("active"),
+                                }
+                            } else {
+                                svc["status"].as_str().unwrap_or("active")
+                            };
                             let node = svc["node_id"].as_str().unwrap_or("--");
                             table.add_row([id, slug, label, endpoint, status, node]);
                         }
@@ -935,7 +946,18 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                         .or(svc["service_slug"].as_str())
                         .unwrap_or("-");
                     let svc_id = svc["id"].as_str().or(svc["_id"].as_str()).unwrap_or(&id);
-                    let status = svc["status"].as_str().unwrap_or("active");
+                    let status = if svc["node_id"].is_string() {
+                        match svc["node_status"].as_str() {
+                            Some("unknown") => "node_deleted",
+                            Some("inaccessible") => "inaccessible",
+                            Some("offline") => "offline",
+                            Some("draining") => "draining",
+                            Some("online") => svc["status"].as_str().unwrap_or("active"),
+                            _ => svc["status"].as_str().unwrap_or("active"),
+                        }
+                    } else {
+                        svc["status"].as_str().unwrap_or("active")
+                    };
                     let endpoint = svc["endpoint_url"].as_str().unwrap_or("-");
                     let auth_method = svc["auth_method"].as_str().unwrap_or("-");
                     let auth_key = svc["auth_key_name"].as_str().unwrap_or("-");
@@ -952,6 +974,43 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                     eprintln!("Endpoint:   {endpoint}");
                     eprintln!("Auth:       {auth_method} / {auth_key}");
                     eprintln!("Node:       {node}");
+
+                    if svc["node_id"].is_string() {
+                        match svc["node_status"].as_str() {
+                            Some("unknown") => {
+                                eprintln!(
+                                    "WARNING: Bound node {node} was not found on the server. The binding is broken."
+                                );
+                                eprintln!(
+                                    "         Use `nyxid service route` to re-bind this service to a valid node."
+                                );
+                            }
+                            Some("inaccessible") => {
+                                eprintln!(
+                                    "HINT: Binding points at a node you do not have permission to introspect."
+                                );
+                                eprintln!(
+                                    "      The proxy connection may still function normally."
+                                );
+                            }
+                            Some("offline") => {
+                                eprintln!(
+                                    "WARNING: Bound node {node} is offline or has a stale heartbeat."
+                                );
+                                eprintln!(
+                                    "         Use `nyxid service route` to re-bind this service to an online node."
+                                );
+                            }
+                            Some("draining") => {
+                                eprintln!("WARNING: Bound node {node} is draining.");
+                                eprintln!(
+                                    "         Use `nyxid service route` to re-bind this service to an online node."
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+
                     if let Some(spec) = svc["openapi_spec_url"].as_str() {
                         eprintln!("OpenAPI:    {spec}");
                     }
