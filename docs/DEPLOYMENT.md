@@ -137,8 +137,9 @@ Production Dockerfiles are provided for both backend and frontend with multi-sta
 # Build backend (context is the repo root for workspace Cargo.toml)
 docker build -f backend/Dockerfile -t nyxid-backend .
 
-# Build frontend
-docker build -f frontend/Dockerfile -t nyxid-frontend frontend/
+# Build frontend (context is the repo root so the build can read docs/site,
+# the source for the in-app docs pages)
+docker build -f frontend/Dockerfile -t nyxid-frontend .
 ```
 
 The **backend Dockerfile** (`backend/Dockerfile`) uses a two-stage build:
