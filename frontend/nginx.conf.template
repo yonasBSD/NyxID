@@ -2,6 +2,9 @@ server {
     listen 8080;
     server_name _;
 
+    # Disable absolute redirects to prevent internal port leaks in reverse proxy setups (e.g. :8080)
+    absolute_redirect off;
+
     root /usr/share/nginx/html;
     index index.html;
 

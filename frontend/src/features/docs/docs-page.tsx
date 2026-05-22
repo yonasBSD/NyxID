@@ -57,7 +57,12 @@ export function DocsPage() {
   // derive cleanly from render without cascading setState.
   const [loaded, setLoaded] = useState<LoadedDoc | null>(null);
   const [toc, setToc] = useState<TocItem[]>([]);
-  const [activeId, setActiveId] = useState<string | null>(null);
+  const [activeId, setActiveId] = useState<string | null>(() => {
+    if (typeof window !== "undefined") {
+      return decodeURIComponent(window.location.hash.replace(/^#/, "")) || null;
+    }
+    return null;
+  });
   const contentRef = useRef<HTMLDivElement>(null);
   // Tracks the slug we've already handled an incoming `#hash` for, so the
   // load-time deep-link scroll fires exactly once per page.
@@ -81,6 +86,13 @@ export function DocsPage() {
       cancelled = true;
     };
   }, [slug, known]);
+
+  // Reset activeId when transitioning to a new page (adjust state during render to avoid cascading effects)
+  const [prevSlug, setPrevSlug] = useState<string>(slug);
+  if (slug !== prevSlug) {
+    setPrevSlug(slug);
+    setActiveId(decodeURIComponent(window.location.hash.replace(/^#/, "")) || null);
+  }
 
   // Unknown slugs are a 404 immediately; otherwise show the fetched doc once it
   // matches the current slug, and "loading" until it catches up.
@@ -158,18 +170,6 @@ export function DocsPage() {
         window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 2;
       const next = atBottom ? (headings[headings.length - 1]?.id ?? null) : (current ?? headings[0]?.id ?? null);
       setActiveId(next);
-      // Mirror the section being read into the URL so it stays the shareable
-      // source of truth for the active heading. replaceState (not pushState)
-      // keeps the back button clean; an empty hash above the first section
-      // keeps a freshly-loaded URL untouched until the reader scrolls in.
-      const desiredHash = (atBottom || current) && next ? `#${next}` : "";
-      if (desiredHash !== window.location.hash) {
-        window.history.replaceState(
-          window.history.state,
-          "",
-          `${window.location.pathname}${window.location.search}${desiredHash}`,
-        );
-      }
     };
     recompute();
     const observer = new IntersectionObserver(recompute, {
