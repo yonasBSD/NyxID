@@ -974,6 +974,22 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                     eprintln!("Endpoint:   {endpoint}");
                     eprintln!("Auth:       {auth_method} / {auth_key}");
                     eprintln!("Node:       {node}");
+                    let credential_type = svc["credential_type"].as_str().unwrap_or("direct");
+                    if credential_type == "node_managed" {
+                        let node_id_val = svc["node_id"]
+                            .as_str()
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or("—");
+                        eprintln!("Credential: node_managed (lives on node {node_id_val})");
+                        eprintln!(
+                            "            To update: nyxid node-credential push <node-id> --slug {slug} ..."
+                        );
+                        eprintln!(
+                            "            Then have the node operator accept the pending credential."
+                        );
+                    } else {
+                        eprintln!("Credential: {credential_type}");
+                    }
 
                     if svc["node_id"].is_string() {
                         match svc["node_status"].as_str() {
