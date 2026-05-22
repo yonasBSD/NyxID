@@ -975,20 +975,9 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                     eprintln!("Auth:       {auth_method} / {auth_key}");
                     eprintln!("Node:       {node}");
                     let credential_type = svc["credential_type"].as_str().unwrap_or("direct");
-                    if credential_type == "node_managed" {
-                        let node_id_val = svc["node_id"]
-                            .as_str()
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or("—");
-                        eprintln!("Credential: node_managed (lives on node {node_id_val})");
-                        eprintln!(
-                            "            To update: nyxid node-credential push <node-id> --slug {slug} ..."
-                        );
-                        eprintln!(
-                            "            Then have the node operator accept the pending credential."
-                        );
-                    } else {
-                        eprintln!("Credential: {credential_type}");
+                    let node_id = svc["node_id"].as_str();
+                    for line in format_credential_lines(credential_type, node_id, slug) {
+                        eprintln!("{line}");
                     }
 
                     if svc["node_id"].is_string() {
@@ -2227,9 +2216,58 @@ fn prompt_token_exchange_credential(fields: &[TokenExchangeField]) -> Result<Str
     Ok(Value::Object(payload).to_string())
 }
 
+fn format_credential_lines(
+    credential_type: &str,
+    node_id: Option<&str>,
+    slug: &str,
+) -> Vec<String> {
+    if credential_type == "node_managed" {
+        let node_id_val = node_id.filter(|s| !s.is_empty()).unwrap_or("—");
+        vec![
+            format!("Credential: node_managed (lives on node {node_id_val})"),
+            format!(
+                "            To update: nyxid node-credential push <node-id> --slug {slug} ..."
+            ),
+            "            Then have the node operator accept the pending credential.".to_string(),
+        ]
+    } else {
+        vec![format!("Credential: {credential_type}")]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_format_credential_lines() {
+        let lines1 = format_credential_lines("node_managed", Some("abc-123"), "home-assistant");
+        assert_eq!(lines1.len(), 3);
+        assert_eq!(
+            lines1[0],
+            "Credential: node_managed (lives on node abc-123)"
+        );
+        assert_eq!(
+            lines1[1],
+            "            To update: nyxid node-credential push <node-id> --slug home-assistant ..."
+        );
+        assert_eq!(
+            lines1[2],
+            "            Then have the node operator accept the pending credential."
+        );
+
+        let lines2 = format_credential_lines("node_managed", None, "home-assistant");
+        assert_eq!(lines2.len(), 3);
+        assert_eq!(lines2[0], "Credential: node_managed (lives on node —)");
+
+        let lines3 = format_credential_lines("direct", Some("abc"), "x");
+        assert_eq!(lines3.len(), 1);
+        assert_eq!(lines3[0], "Credential: direct");
+
+        let lines4 = format_credential_lines("oauth", None, "x");
+        assert_eq!(lines4.len(), 1);
+        assert_eq!(lines4[0], "Credential: oauth");
+    }
 
     #[test]
     fn none_auth_skips_auth_key_name_and_credential_prompts() {
