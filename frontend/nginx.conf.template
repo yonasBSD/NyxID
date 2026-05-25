@@ -74,8 +74,14 @@ server {
         try_files $uri =404;
     }
 
-    # SPA fallback -- serve index.html for all non-file routes
+    # SPA fallback -- serve index.html for all non-file routes.
+    # Do NOT add `$uri/`: the build mirrors `docs/site/**` into `public/docs/`,
+    # so a real `/docs/` directory exists. With `$uri/`, a request to `/docs`
+    # matches that directory and nginx 301-redirects to `/docs/`, leaking the
+    # internal :8080 listen port into the Location URL and never reaching the
+    # SPA router. Real doc assets (`/docs/*.md`, `/docs/search-index.json`) are
+    # still served by the `$uri` match; client routes fall through to index.html.
     location / {
-        try_files $uri $uri/ /index.html;
+        try_files $uri /index.html;
     }
 }
