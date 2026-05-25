@@ -237,6 +237,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             oauth_client_id,
             oauth_client_secret,
             oauth_client_secret_env,
+            copy_oauth_client_from,
             org,
             openapi_spec_url,
             ws_frame_preset,
@@ -437,11 +438,12 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             // would discard the BYO fields silently. Reject up front so the
             // user gets a clear error instead of an unusable connection that
             // refresh would later fail to recover.
-            if oauth_client_id.is_some() && via_node.is_some() {
+            if (oauth_client_id.is_some() || copy_oauth_client_from.is_some()) && via_node.is_some()
+            {
                 bail!(
-                    "--oauth-client-id / --oauth-client-secret are not supported with --via-node \
-                     (node-routed services manage their own Custom App credentials via \
-                     `nyxid node credentials setup`)"
+                    "--oauth-client-id / --copy-oauth-client-from are not supported with \
+                     --via-node (node-routed services manage their own Custom App credentials \
+                     via `nyxid node credentials setup`)"
                 );
             }
             // Device-code providers today are all `credential_mode: "admin"`
@@ -454,6 +456,12 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                     "--oauth-client-id / --oauth-client-secret are only used with --oauth \
                      (device-code providers use admin-configured credentials)"
                 );
+            }
+            if copy_oauth_client_from.is_some() && oauth_client_id.is_some() {
+                bail!("--copy-oauth-client-from and --oauth-client-id are mutually exclusive");
+            }
+            if copy_oauth_client_from.is_some() && !oauth {
+                bail!("--copy-oauth-client-from is only used with --oauth");
             }
 
             // OAuth flow
@@ -470,6 +478,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                         ws_frame_injections: ws_frame_injections.as_ref(),
                         oauth_client_id: oauth_client_id.as_deref(),
                         oauth_client_secret: resolved_oauth_client_secret.as_deref(),
+                        copy_oauth_client_from: copy_oauth_client_from.as_deref(),
                     },
                     &auth,
                 )
@@ -496,6 +505,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                         // shape on the `device-code/initiate` path.
                         oauth_client_id: oauth_client_id.as_deref(),
                         oauth_client_secret: resolved_oauth_client_secret.as_deref(),
+                        copy_oauth_client_from: None,
                     },
                     &auth,
                 )
@@ -1364,6 +1374,36 @@ async fn run_oauth_add(
             "oauth_client_secret".into(),
             Value::String(client_secret.to_string()),
         );
+    } else if let Some(source) = options.copy_oauth_client_from {
+        // The backend expects a `user_api_keys._id`. The CLI flag
+        // advertises KEY_ID_OR_SLUG for ergonomics. If the value
+        // looks like a UUID we pass it through; otherwise we resolve
+        // the slug to its api_key_id via GET /keys.
+        let api_key_id = if uuid::Uuid::try_parse(source).is_ok() {
+            source.to_string()
+        } else {
+            let keys_resp: Value = api.get("/keys").await?;
+            let keys = keys_resp["keys"]
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("Unexpected /keys response shape"))?;
+            let matched = keys
+                .iter()
+                .find(|k| {
+                    k["slug"].as_str() == Some(source) && k["status"].as_str() == Some("active")
+                })
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "No active service with slug '{source}' found for --copy-oauth-client-from"
+                    )
+                })?;
+            matched["api_key_id"]
+                .as_str()
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Service '{source}' has no api_key_id (no credential attached)")
+                })?
+                .to_string()
+        };
+        key_body.insert("copy_oauth_client_from".into(), Value::String(api_key_id));
     }
     let key_result: Value = api.post("/keys", &Value::Object(key_body)).await?;
     let key_id = key_result["id"]
@@ -2144,6 +2184,10 @@ struct CatalogAddFlowOptions<'a> {
     /// Companion secret for `oauth_client_id`. Resolved at parse time
     /// from `--oauth-client-secret` / `--oauth-client-secret-env`.
     oauth_client_secret: Option<&'a str>,
+    /// Clone encrypted OAuth client credentials from an existing key
+    /// instead of re-pasting raw credentials. Mutually exclusive with
+    /// `oauth_client_id` / `oauth_client_secret`.
+    copy_oauth_client_from: Option<&'a str>,
 }
 
 /// Parse the `token_exchange_credential_fields` array out of a raw catalog
@@ -3015,6 +3059,7 @@ mod command_tests {
             oauth_client_id: None,
             oauth_client_secret: None,
             oauth_client_secret_env: None,
+            copy_oauth_client_from: None,
             org: None,
             openapi_spec_url: None,
             ws_frame_preset: None,
@@ -3259,6 +3304,7 @@ mod branch_tests {
             oauth_client_id: None,
             oauth_client_secret: None,
             oauth_client_secret_env: None,
+            copy_oauth_client_from: None,
             org: None,
             openapi_spec_url: None,
             ws_frame_preset: None,
@@ -3549,6 +3595,7 @@ mod branch_tests {
             oauth_client_id: None,
             oauth_client_secret: None,
             oauth_client_secret_env: None,
+            copy_oauth_client_from: None,
             org: Some(NODE_UUID.to_string()),
             openapi_spec_url: None,
             ws_frame_preset: None,

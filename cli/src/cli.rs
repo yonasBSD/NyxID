@@ -688,6 +688,12 @@ pub enum ServiceCommands {
         /// `--oauth-client-secret`. Only used with `--oauth`.
         #[arg(long, value_name = "VAR")]
         oauth_client_secret_env: Option<String>,
+        /// Clone encrypted OAuth client credentials from an existing
+        /// connection (by its key ID or slug) instead of re-pasting
+        /// `--oauth-client-id` / `--oauth-client-secret`. Mutually
+        /// exclusive with those flags. Only used with `--oauth`.
+        #[arg(long, value_name = "KEY_ID_OR_SLUG")]
+        copy_oauth_client_from: Option<String>,
         /// Create this key under the given org (you must be an admin of that org).
         /// Every member of the org will see the resulting service in their
         /// `nyxid service list` and can proxy through it using their own
