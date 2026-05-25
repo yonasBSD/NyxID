@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { formatStepLabel, resolveStep } from "./step-label"
+import { ENTER_CODE_STEP, formatStepLabel, resolveStep } from "./step-label"
 
 /** [current, total, label] — the shape resolveStep returns, flattened for the table. */
 type WizardStepTuple = readonly [number, number, string]
@@ -13,19 +13,17 @@ type WizardStepTuple = readonly [number, number, string]
 // total changes per flow, and the Recovery break-out) rather than just
 // "it returns an object".
 
-describe("resolveStep — pre-flow / enter-code", () => {
-  it("returns a neutral 'Step 1 of 3 · enter code' before any flow is known", () => {
-    expect(resolveStep("enter-code")).toEqual({
-      current: 1,
-      total: 3,
-      label: "enter code",
-    })
-  })
-
-  it("uses the enter-code fallback when flow is undefined even past enter-code", () => {
-    // No flow yet → cannot resolve a real step; falls back to enter-code
-    // regardless of the phase passed in.
-    expect(resolveStep("claimed", undefined)).toEqual({
+describe("ENTER_CODE_STEP — the sole pre-flow step", () => {
+  // NyxID#734: `enter-code` is the ONLY phase that legitimately has no
+  // flow, so its label is a constant the caller renders directly rather
+  // than a (flow, phase) lookup. resolveStep now requires a WizardFlow for
+  // every other phase, which makes the old "flow undefined past enter-code"
+  // fallback — the bug behind #734 — a compile error instead of a silent
+  // neutral label. The prohibited calls (`resolveStep("enter-code")`,
+  // `resolveStep("claimed", undefined)`) are therefore intentionally
+  // un-testable here: TypeScript rejects them at the call site.
+  it("is the neutral 'Step 1 of 3 · enter code' shown before any flow is known", () => {
+    expect(ENTER_CODE_STEP).toEqual({
       current: 1,
       total: 3,
       label: "enter code",

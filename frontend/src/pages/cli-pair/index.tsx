@@ -21,9 +21,9 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { WizardShell } from "@/components/cli-wizard/shell";
 import { DisconnectBanner } from "@/components/cli-wizard/disconnect-banner";
 import {
+  ENTER_CODE_STEP,
   resolveStep,
   type WizardFlow,
-  type WizardPhase,
 } from "@/components/cli-wizard/step-label";
 import type {
   AckPayload,
@@ -169,7 +169,20 @@ type Stage =
       readonly ack: AckPayload;
       readonly completeError: string | null;
     }
-  | { readonly phase: "done" };
+  | {
+      /**
+       * Terminal success/close screen. Carries the flow it completed so
+       * the shared step resolver can render the flow's final
+       * "Step N of N · done" step. Without this the done stage had no
+       * flow and the resolver fell back to the pre-flow "enter code"
+       * label, contradicting the "Pairing complete" panel (NyxID#734).
+       */
+      readonly phase: "done";
+      readonly flow: WizardFlow;
+    };
+
+/** Every stage except the pre-flow `enter-code` — see `stageFlow`. */
+type PostClaimStage = Exclude<Stage, { readonly phase: "enter-code" }>;
 
 export function CliPairPage() {
   const { isAuthenticated, isLoading } = useAuthStore();
@@ -299,7 +312,7 @@ function StageRouter() {
         `/cli-pairings/${encodeURIComponent(claim.id)}/complete`,
         { ack },
       );
-      setStage({ phase: "done" });
+      setStage({ phase: "done", flow: claim.kind as WizardFlow });
     } catch (e) {
       setStage({
         phase: "resending-ack",
@@ -343,7 +356,7 @@ function StageRouter() {
       // poll will see Completed. For DisplayOnce flows we now show
       // the secret; for ai-key we go straight to the done screen.
       if (result.kind === "ai-key") {
-        setStage({ phase: "done" });
+        setStage({ phase: "done", flow: claim.kind as WizardFlow });
       } else {
         setStage({ phase: "secret", claim, result });
       }
@@ -372,9 +385,13 @@ function StageRouter() {
     }
   }
 
-  const flow = stageFlow(stage);
-  const phase = stagePhase(stage);
-  const step = resolveStep(phase, flow);
+  // `enter-code` is the only phase without a known flow, so it renders the
+  // constant pre-flow step; every other stage carries its flow (NyxID#734),
+  // letting the resolver land on the right "Step N of N · …" copy.
+  const step =
+    stage.phase === "enter-code"
+      ? ENTER_CODE_STEP
+      : resolveStep(stage.phase, stageFlow(stage));
 
   return (
     <WizardShell context="pair" step={step}>
@@ -491,7 +508,7 @@ function StageRouter() {
         <SecretPanel
           result={stage.result}
           onAcknowledged={() => {
-            setStage({ phase: "done" });
+            setStage({ phase: "done", flow: stage.claim.kind as WizardFlow });
           }}
         />
       );
@@ -516,7 +533,7 @@ function StageRouter() {
         <ResumedCreateWarningPanel
           claim={stage.claim}
           onAcknowledged={() => {
-            setStage({ phase: "done" });
+            setStage({ phase: "done", flow: stage.claim.kind as WizardFlow });
           }}
         />
       );
@@ -547,7 +564,7 @@ function StageRouter() {
             } catch {
               // Ignored — worst case the CLI times out.
             }
-            setStage({ phase: "done" });
+            setStage({ phase: "done", flow: stage.claim.kind as WizardFlow });
           }}
         />
       );
@@ -574,19 +591,18 @@ function StageRouter() {
 }
 
 /**
- * Extract the `WizardFlow` for a stage, if the claim is known yet.
- * `enter-code` is pre-claim — no flow chosen, so the step label falls
- * back to the neutral pre-flow copy.
+ * The `WizardFlow` for a post-claim stage. Every non-`enter-code` stage
+ * either carries the `claim` (whose `kind` is the flow) or, for the
+ * terminal `done` stage, the flow captured at completion — so the flow is
+ * always known here by construction. `enter-code` has no flow and is
+ * handled by the caller via `ENTER_CODE_STEP`, so it never reaches this
+ * function (the `PostClaimStage` parameter makes that a type error).
  */
-function stageFlow(stage: Stage): WizardFlow | undefined {
-  if ("claim" in stage) {
-    return stage.claim.kind as WizardFlow;
+function stageFlow(stage: PostClaimStage): WizardFlow {
+  if (stage.phase === "done") {
+    return stage.flow;
   }
-  return undefined;
-}
-
-function stagePhase(stage: Stage): WizardPhase {
-  return stage.phase;
+  return stage.claim.kind as WizardFlow;
 }
 
 // ── Step 1: enter code ──────────────────────────────────────────────
@@ -1395,3 +1411,21 @@ function extractErrorMessage(e: unknown): string {
 
 // Keep the unused type reference so PairingKind stays exported.
 export type { PairingKind };
+
+// Compile-time guard for the `claim.kind as WizardFlow` casts (in
+// `stageFlow` and every transition into `done`). Those casts are sound only
+// while PairingKind (the kinds the backend can send) and WizardFlow (the
+// kinds the wizard chrome can render) stay identical. If they diverge,
+// `resolveStep`'s exhaustive `switch (flow)` would fall through to
+// `undefined` at runtime for the unmapped kind — exactly the kind of silent
+// gap NyxID#734 was about. This turns adding a kind to one union but not the
+// other into a build error instead. The exported alias keeps the helpers
+// "used"; it has no runtime footprint.
+type _UnionEquals<X, Y> =
+  (<T>() => T extends X ? 1 : 2) extends (<T>() => T extends Y ? 1 : 2)
+    ? true
+    : false;
+type _ExpectTrue<T extends true> = T;
+export type _PairingKindMatchesWizardFlow = _ExpectTrue<
+  _UnionEquals<PairingKind, WizardFlow>
+>;
