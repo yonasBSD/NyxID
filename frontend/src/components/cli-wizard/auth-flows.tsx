@@ -772,24 +772,25 @@ export function OAuthFlow({
     // already has a connection to this provider with BYO creds.
     void (async () => {
       try {
-        const keys = await api.get<
-          Array<{
-            id: string;
+        const res = await api.get<{
+          keys: Array<{
+            api_key_id?: string | null;
             slug: string;
             catalog_service_slug?: string;
-            oauth_client_id?: string;
+            oauth_client_id?: string | null;
             status: string;
-          }>
-        >("/keys");
-        const candidates = keys.filter(
+          }>;
+        }>("/keys");
+        const candidates = (res.keys ?? []).filter(
           (k) =>
             k.status === "active" &&
             k.oauth_client_id &&
+            k.api_key_id &&
             k.catalog_service_slug === slug,
         );
         setExistingConnections(
           candidates.map((k) => ({
-            id: k.id,
+            id: k.api_key_id!,
             slug: k.slug,
             oauthClientId: k.oauth_client_id!,
           })),

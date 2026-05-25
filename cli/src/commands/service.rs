@@ -438,11 +438,12 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             // would discard the BYO fields silently. Reject up front so the
             // user gets a clear error instead of an unusable connection that
             // refresh would later fail to recover.
-            if oauth_client_id.is_some() && via_node.is_some() {
+            if (oauth_client_id.is_some() || copy_oauth_client_from.is_some()) && via_node.is_some()
+            {
                 bail!(
-                    "--oauth-client-id / --oauth-client-secret are not supported with --via-node \
-                     (node-routed services manage their own Custom App credentials via \
-                     `nyxid node credentials setup`)"
+                    "--oauth-client-id / --copy-oauth-client-from are not supported with \
+                     --via-node (node-routed services manage their own Custom App credentials \
+                     via `nyxid node credentials setup`)"
                 );
             }
             // Device-code providers today are all `credential_mode: "admin"`
@@ -1374,10 +1375,35 @@ async fn run_oauth_add(
             Value::String(client_secret.to_string()),
         );
     } else if let Some(source) = options.copy_oauth_client_from {
-        key_body.insert(
-            "copy_oauth_client_from".into(),
-            Value::String(source.to_string()),
-        );
+        // The backend expects a `user_api_keys._id`. The CLI flag
+        // advertises KEY_ID_OR_SLUG for ergonomics. If the value
+        // looks like a UUID we pass it through; otherwise we resolve
+        // the slug to its api_key_id via GET /keys.
+        let api_key_id = if uuid::Uuid::try_parse(source).is_ok() {
+            source.to_string()
+        } else {
+            let keys_resp: Value = api.get("/keys").await?;
+            let keys = keys_resp["keys"]
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("Unexpected /keys response shape"))?;
+            let matched = keys
+                .iter()
+                .find(|k| {
+                    k["slug"].as_str() == Some(source) && k["status"].as_str() == Some("active")
+                })
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "No active service with slug '{source}' found for --copy-oauth-client-from"
+                    )
+                })?;
+            matched["api_key_id"]
+                .as_str()
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Service '{source}' has no api_key_id (no credential attached)")
+                })?
+                .to_string()
+        };
+        key_body.insert("copy_oauth_client_from".into(), Value::String(api_key_id));
     }
     let key_result: Value = api.post("/keys", &Value::Object(key_body)).await?;
     let key_id = key_result["id"]
