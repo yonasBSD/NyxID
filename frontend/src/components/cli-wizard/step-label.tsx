@@ -41,10 +41,31 @@ export type WizardPhase =
   | "resumed-create-warning"
   | "resending-ack"
 
+/**
+ * Every phase except the pre-flow `enter-code`. Once a code is claimed the
+ * flow is always known, so `resolveStep` requires a `WizardFlow` for these
+ * phases. Modeling the absence of a flow past `enter-code` as a compile
+ * error (rather than silently rendering the neutral label) is what closes
+ * NyxID#734 at the type level instead of one call site at a time.
+ */
+export type PostClaimPhase = Exclude<WizardPhase, "enter-code">
+
 export interface WizardStep {
   readonly current: number
   readonly total: number
   readonly label: string
+}
+
+/**
+ * The sole pre-flow step. `enter-code` is the only phase that legitimately
+ * has no `WizardFlow` yet — the user hasn't claimed a code — so its label is
+ * a constant the shell can render directly, not a (flow, phase) lookup.
+ * Every other phase resolves through `resolveStep`, which requires a flow.
+ */
+export const ENTER_CODE_STEP: WizardStep = {
+  current: 1,
+  total: 3,
+  label: "enter code",
 }
 
 /**
@@ -75,9 +96,13 @@ const TOTALS: Record<WizardFlow, number> = {
 /**
  * Resolve the (flow, phase) pair to "Step X of Y · label" copy.
  *
- * `enter-code` is pre-flow (no `WizardFlow` known yet) so it gets a neutral
- * "Step 1 of 3 · enter code" label that fits any flow — once the user
- * submits the code and the claim returns, the actual flow takes over.
+ * The pre-flow `enter-code` phase is handled by the caller via
+ * `ENTER_CODE_STEP` — it's the only phase that has no `WizardFlow`, so it
+ * never reaches here. Every phase this function accepts is post-claim and
+ * therefore has a known flow (`PostClaimPhase` + required `flow`); there is
+ * deliberately no `flow === undefined` fallback, so a lost-flow state is a
+ * type error rather than a silent "Step 1 of 3 · enter code" on a screen
+ * that is not asking for a code (NyxID#734).
  *
  * For the ai-key flow, the confirm panel has two sub-states (catalog
  * pick vs credential form). The `slugPicked` flag (tracked upstream)
@@ -90,14 +115,10 @@ const TOTALS: Record<WizardFlow, number> = {
  * a normal step.
  */
 export function resolveStep(
-  phase: WizardPhase,
-  flow?: WizardFlow,
+  phase: PostClaimPhase,
+  flow: WizardFlow,
   opts?: { readonly slugPicked?: boolean },
 ): WizardStep {
-  if (phase === "enter-code" || flow === undefined) {
-    return { current: 1, total: 3, label: "enter code" }
-  }
-
   const total = TOTALS[flow]
 
   if (phase === "resumed-rotation-choice") {

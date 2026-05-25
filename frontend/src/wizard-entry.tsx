@@ -35,8 +35,8 @@ import "./app.css"
 import { WizardShell } from "@/components/cli-wizard/shell"
 import {
   resolveStep,
+  type PostClaimPhase,
   type WizardFlow,
-  type WizardPhase,
 } from "@/components/cli-wizard/step-label"
 import {
   DisplayOncePanel,
@@ -391,10 +391,12 @@ function ackPayloadFor(result: ActionResult): Record<string, unknown> {
   }
 }
 
-function toWizardPhase(phase: ModeAPhase["phase"]): WizardPhase {
-  // Mode A only uses a subset of the full WizardPhase union; the
-  // "cancelled" and "wizard-lost" phases collapse to "done" for
-  // step-label purposes (nothing to track; the CLI is gone).
+function toWizardPhase(phase: ModeAPhase["phase"]): PostClaimPhase {
+  // Mode A is always post-claim (it bootstraps straight into a known
+  // flow, with no enter-code phase), so it only uses a subset of the
+  // PostClaimPhase union; the "cancelled" and "wizard-lost" phases
+  // collapse to "done" for step-label purposes (nothing to track; the
+  // CLI is gone).
   if (phase === "claimed") return "claimed"
   if (phase === "secret") return "secret"
   if (phase === "acking") return "acking"

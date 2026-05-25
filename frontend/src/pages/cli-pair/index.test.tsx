@@ -437,18 +437,19 @@ describe("CliPairPage DisplayOnce complete wiring", () => {
     expect(secret).toHaveAttribute("data-secret", "nyxid_ak_secret");
     expect(stepState.current?.label).toBe("save the value");
 
-    // Acknowledging advances to the done screen. The done stage carries
-    // no claim, so the flow is unknown and the step resolver falls back
-    // to the neutral pre-flow label (the DonePanel heading is the real
-    // terminal signal here).
+    // Acknowledging advances to the done screen. The done stage now
+    // carries the flow it completed (NyxID#734), so the resolver lands on
+    // the flow's terminal "Step 3 of 3 · done" instead of falling back to
+    // the pre-flow "enter code" label — matching the "Pairing complete"
+    // panel rather than contradicting it.
     await user.click(screen.getByTestId("ack-secret"));
     expect(
       await screen.findByRole("heading", { name: /Pairing complete/i }),
     ).toBeInTheDocument();
     expect(stepState.current).toEqual({
-      current: 1,
+      current: 3,
       total: 3,
-      label: "enter code",
+      label: "done",
     });
   });
 
@@ -542,6 +543,13 @@ describe("CliPairPage ai-key acking wiring", () => {
     expect(
       await screen.findByRole("heading", { name: /Pairing complete/i }),
     ).toBeInTheDocument();
+    // ai-key is a 3-step flow; its done stage carries the flow so the
+    // header reads the terminal step (NyxID#734), not the pre-flow label.
+    expect(stepState.current).toEqual({
+      current: 3,
+      total: 3,
+      label: "done",
+    });
   });
 
   it("surfaces the ai-key ack failure with a retry that re-posts /complete", async () => {
@@ -616,6 +624,10 @@ describe("CliPairPage resumed recovery branches", () => {
     expect(
       await screen.findByRole("heading", { name: /Pairing complete/i }),
     ).toBeInTheDocument();
+    // The recovery-resend done stage carries the rotation flow (2-step),
+    // so the header lands on its terminal step, not the pre-flow label
+    // (NyxID#734 — the flow must survive every transition into done).
+    expect(stepState.current).toEqual({ current: 2, total: 2, label: "done" });
   });
 
   it("cancels the pairing when the user reports the rotation did NOT succeed", async () => {
@@ -650,6 +662,11 @@ describe("CliPairPage resumed recovery branches", () => {
     expect(
       await screen.findByRole("heading", { name: /Pairing complete/i }),
     ).toBeInTheDocument();
+    // Even on the cancel path the done stage carries the (2-step) flow, so
+    // the header reads its terminal step rather than the pre-flow label.
+    // (The "Pairing complete" copy on a cancel is a separate, pre-existing
+    // follow-up — see DonePanel — not introduced by NyxID#734.)
+    expect(stepState.current).toEqual({ current: 2, total: 2, label: "done" });
   });
 
   it("routes a resumed+action_started CREATE claim to the warning panel (no ack reconstructable)", async () => {
@@ -708,6 +725,8 @@ describe("CliPairPage resumed recovery branches", () => {
     expect(
       await screen.findByRole("heading", { name: /Pairing complete/i }),
     ).toBeInTheDocument();
+    // create-warning cancel → done carries the (2-step) node-register flow.
+    expect(stepState.current).toEqual({ current: 2, total: 2, label: "done" });
   });
 
   it("treats a resumed claim WITHOUT action_started as a normal confirm (recoverable refresh)", async () => {
