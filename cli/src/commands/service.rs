@@ -237,6 +237,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             oauth_client_id,
             oauth_client_secret,
             oauth_client_secret_env,
+            copy_oauth_client_from,
             org,
             openapi_spec_url,
             ws_frame_preset,
@@ -455,6 +456,12 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                      (device-code providers use admin-configured credentials)"
                 );
             }
+            if copy_oauth_client_from.is_some() && oauth_client_id.is_some() {
+                bail!("--copy-oauth-client-from and --oauth-client-id are mutually exclusive");
+            }
+            if copy_oauth_client_from.is_some() && !oauth {
+                bail!("--copy-oauth-client-from is only used with --oauth");
+            }
 
             // OAuth flow
             if oauth {
@@ -470,6 +477,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                         ws_frame_injections: ws_frame_injections.as_ref(),
                         oauth_client_id: oauth_client_id.as_deref(),
                         oauth_client_secret: resolved_oauth_client_secret.as_deref(),
+                        copy_oauth_client_from: copy_oauth_client_from.as_deref(),
                     },
                     &auth,
                 )
@@ -496,6 +504,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                         // shape on the `device-code/initiate` path.
                         oauth_client_id: oauth_client_id.as_deref(),
                         oauth_client_secret: resolved_oauth_client_secret.as_deref(),
+                        copy_oauth_client_from: None,
                     },
                     &auth,
                 )
@@ -1364,6 +1373,11 @@ async fn run_oauth_add(
             "oauth_client_secret".into(),
             Value::String(client_secret.to_string()),
         );
+    } else if let Some(source) = options.copy_oauth_client_from {
+        key_body.insert(
+            "copy_oauth_client_from".into(),
+            Value::String(source.to_string()),
+        );
     }
     let key_result: Value = api.post("/keys", &Value::Object(key_body)).await?;
     let key_id = key_result["id"]
@@ -2144,6 +2158,10 @@ struct CatalogAddFlowOptions<'a> {
     /// Companion secret for `oauth_client_id`. Resolved at parse time
     /// from `--oauth-client-secret` / `--oauth-client-secret-env`.
     oauth_client_secret: Option<&'a str>,
+    /// Clone encrypted OAuth client credentials from an existing key
+    /// instead of re-pasting raw credentials. Mutually exclusive with
+    /// `oauth_client_id` / `oauth_client_secret`.
+    copy_oauth_client_from: Option<&'a str>,
 }
 
 /// Parse the `token_exchange_credential_fields` array out of a raw catalog
@@ -3015,6 +3033,7 @@ mod command_tests {
             oauth_client_id: None,
             oauth_client_secret: None,
             oauth_client_secret_env: None,
+            copy_oauth_client_from: None,
             org: None,
             openapi_spec_url: None,
             ws_frame_preset: None,
@@ -3259,6 +3278,7 @@ mod branch_tests {
             oauth_client_id: None,
             oauth_client_secret: None,
             oauth_client_secret_env: None,
+            copy_oauth_client_from: None,
             org: None,
             openapi_spec_url: None,
             ws_frame_preset: None,
@@ -3549,6 +3569,7 @@ mod branch_tests {
             oauth_client_id: None,
             oauth_client_secret: None,
             oauth_client_secret_env: None,
+            copy_oauth_client_from: None,
             org: Some(NODE_UUID.to_string()),
             openapi_spec_url: None,
             ws_frame_preset: None,
