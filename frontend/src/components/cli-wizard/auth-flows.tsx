@@ -29,6 +29,7 @@ import {
   rewindPairingAction,
 } from "@/pages/cli-pair/reserve-action";
 import { pollOAuthKeyUntilActive } from "./auth-flow-polling";
+import { OAuthCallbackGuidance } from "@/components/shared/twitter-oauth-guidance";
 
 interface FlowProps {
   readonly providerId: string;
@@ -1004,6 +1005,12 @@ export function OAuthFlow({
             </a>
           ) : null}
         </div>
+
+        {/* OAuthFlow is the authorization-code flow (DeviceCodeFlow
+            handles device codes), so it always redirects through NyxID's
+            callback. Surface the redirect URI the user must register in
+            their just-created OAuth app's developer console. */}
+        <OAuthCallbackGuidance slug={slug} />
 
         <div className="flex flex-col gap-3">
           <div className="flex flex-col gap-1.5">

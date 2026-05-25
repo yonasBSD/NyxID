@@ -15,7 +15,7 @@ import { Button, ButtonIcon } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { OrgScopeSelect } from "@/components/shared/org-scope-select";
-import { TwitterOAuthGuidance } from "@/components/shared/twitter-oauth-guidance";
+import { OAuthCallbackGuidance } from "@/components/shared/twitter-oauth-guidance";
 import {
   Dialog,
   DialogContent,
@@ -1897,7 +1897,13 @@ function OAuthCredentialsStep({
         </a>
       )}
 
-      <TwitterOAuthGuidance slug={catalogEntry.slug} />
+      {/* Authorization-code OAuth flows redirect through NyxID's
+          callback, so the user must register that URL in their provider
+          app. Device-code BYO providers reach this same step but never
+          use a redirect URI, so skip the callback for them. */}
+      {catalogEntry.provider_type === "oauth2" && (
+        <OAuthCallbackGuidance slug={catalogEntry.slug} />
+      )}
 
       {error && (
         <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
