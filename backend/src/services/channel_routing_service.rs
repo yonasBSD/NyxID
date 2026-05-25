@@ -333,3 +333,277 @@ pub async fn touch_conversation(db: &mongodb::Database, conversation_id: &str) -
         .await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::*;
+
+    fn make_api_key(key_id: &str, user_id: &str, callback_url: Option<&str>) -> ApiKey {
+        ApiKey {
+            id: key_id.to_string(),
+            user_id: user_id.to_string(),
+            name: "test-agent".to_string(),
+            key_prefix: "nyxid_ag".to_string(),
+            key_hash: "deadbeef".repeat(8),
+            scopes: "read write".to_string(),
+            last_used_at: None,
+            expires_at: None,
+            is_active: true,
+            created_at: Utc::now(),
+            description: None,
+            allowed_service_ids: vec![],
+            allowed_node_ids: vec![],
+            allow_all_services: true,
+            allow_all_nodes: true,
+            rate_limit_per_second: None,
+            rate_limit_burst: None,
+            platform: None,
+            callback_url: callback_url.map(String::from),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_conversation() {
+        let Some(db) = connect_test_database("chan_route_create").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let bot_id = uuid::Uuid::new_v4().to_string();
+        let key_id = uuid::Uuid::new_v4().to_string();
+
+        db.collection::<ApiKey>(API_KEYS)
+            .insert_one(make_api_key(
+                &key_id,
+                &user_id,
+                Some("https://agent.test/callback"),
+            ))
+            .await
+            .unwrap();
+
+        let conv = create_conversation(
+            &db,
+            &user_id,
+            Some(&bot_id),
+            "telegram",
+            "chat_123",
+            "private",
+            None,
+            &key_id,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(conv.user_id, user_id);
+        assert_eq!(conv.channel_bot_id.as_deref(), Some(bot_id.as_str()));
+        assert_eq!(conv.platform, "telegram");
+        assert_eq!(conv.platform_conversation_id, "chat_123");
+        assert!(conv.is_active);
+        assert!(!conv.default_agent);
+    }
+
+    #[tokio::test]
+    async fn test_create_conversation_no_callback_url_rejected() {
+        let Some(db) = connect_test_database("chan_route_nocb").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let bot_id = uuid::Uuid::new_v4().to_string();
+        let key_id = uuid::Uuid::new_v4().to_string();
+
+        db.collection::<ApiKey>(API_KEYS)
+            .insert_one(make_api_key(&key_id, &user_id, None))
+            .await
+            .unwrap();
+
+        let err = create_conversation(
+            &db,
+            &user_id,
+            Some(&bot_id),
+            "telegram",
+            "chat_456",
+            "private",
+            None,
+            &key_id,
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_agent_exact_conversation_match() {
+        let Some(db) = connect_test_database("chan_route_exact").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let bot_id = uuid::Uuid::new_v4().to_string();
+        let key_id = uuid::Uuid::new_v4().to_string();
+
+        db.collection::<ApiKey>(API_KEYS)
+            .insert_one(make_api_key(
+                &key_id,
+                &user_id,
+                Some("https://agent.test/hook"),
+            ))
+            .await
+            .unwrap();
+
+        let conv = create_conversation(
+            &db,
+            &user_id,
+            Some(&bot_id),
+            "telegram",
+            "chat_789",
+            "group",
+            None,
+            &key_id,
+            false,
+        )
+        .await
+        .unwrap();
+
+        let route = resolve_agent(&db, &bot_id, "chat_789", None).await.unwrap();
+        assert!(route.is_some());
+        let route = route.unwrap();
+        assert_eq!(route.conversation.id, conv.id);
+        assert_eq!(route.callback_url, "https://agent.test/hook");
+        assert_eq!(route.api_key_id, key_id);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_agent_default_fallback() {
+        let Some(db) = connect_test_database("chan_route_default").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let bot_id = uuid::Uuid::new_v4().to_string();
+        let key_id = uuid::Uuid::new_v4().to_string();
+
+        db.collection::<ApiKey>(API_KEYS)
+            .insert_one(make_api_key(
+                &key_id,
+                &user_id,
+                Some("https://default.test/cb"),
+            ))
+            .await
+            .unwrap();
+
+        create_conversation(
+            &db,
+            &user_id,
+            Some(&bot_id),
+            "telegram",
+            "*",
+            "private",
+            None,
+            &key_id,
+            true,
+        )
+        .await
+        .unwrap();
+
+        let route = resolve_agent(&db, &bot_id, "unknown_chat", None)
+            .await
+            .unwrap();
+        assert!(route.is_some());
+        assert_eq!(route.unwrap().callback_url, "https://default.test/cb");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_agent_no_route() {
+        let Some(db) = connect_test_database("chan_route_none").await else {
+            return;
+        };
+        let bot_id = uuid::Uuid::new_v4().to_string();
+
+        let route = resolve_agent(&db, &bot_id, "nonexistent", None)
+            .await
+            .unwrap();
+        assert!(route.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_list_and_delete_conversation() {
+        let Some(db) = connect_test_database("chan_route_list_del").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let bot_id = uuid::Uuid::new_v4().to_string();
+        let key_id = uuid::Uuid::new_v4().to_string();
+
+        db.collection::<ApiKey>(API_KEYS)
+            .insert_one(make_api_key(&key_id, &user_id, Some("https://x.test/cb")))
+            .await
+            .unwrap();
+
+        let conv = create_conversation(
+            &db,
+            &user_id,
+            Some(&bot_id),
+            "discord",
+            "guild_1",
+            "group",
+            None,
+            &key_id,
+            false,
+        )
+        .await
+        .unwrap();
+
+        let list = list_conversations(&db, &user_id, Some(&bot_id))
+            .await
+            .unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, conv.id);
+
+        delete_conversation(&db, &conv.id, &user_id).await.unwrap();
+
+        let list_after = list_conversations(&db, &user_id, Some(&bot_id))
+            .await
+            .unwrap();
+        assert!(list_after.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_touch_conversation() {
+        let Some(db) = connect_test_database("chan_route_touch").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let bot_id = uuid::Uuid::new_v4().to_string();
+        let key_id = uuid::Uuid::new_v4().to_string();
+
+        db.collection::<ApiKey>(API_KEYS)
+            .insert_one(make_api_key(&key_id, &user_id, Some("https://t.test/cb")))
+            .await
+            .unwrap();
+
+        let conv = create_conversation(
+            &db,
+            &user_id,
+            Some(&bot_id),
+            "lark",
+            "chat_t",
+            "private",
+            None,
+            &key_id,
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(conv.last_message_at.is_none());
+
+        touch_conversation(&db, &conv.id).await.unwrap();
+
+        let updated = db
+            .collection::<ChannelConversation>(COLLECTION_NAME)
+            .find_one(doc! { "_id": &conv.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(updated.last_message_at.is_some());
+    }
+}

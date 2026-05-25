@@ -3758,4 +3758,86 @@ mod tests {
             other => panic!("unexpected close chunk: {other:?}"),
         }
     }
+
+    #[test]
+    fn total_connection_count_includes_pending_auth() {
+        let mgr = NodeWsManager::new(30, 100);
+        assert_eq!(mgr.total_connection_count(), 0);
+
+        mgr.increment_pending_auth();
+        assert_eq!(mgr.total_connection_count(), 1);
+
+        let (tx, _rx) = mpsc::channel(256);
+        mgr.register_connection("node-1", tx);
+        mgr.decrement_pending_auth();
+        assert_eq!(mgr.total_connection_count(), 1);
+
+        mgr.unregister_connection("node-1");
+        assert_eq!(mgr.total_connection_count(), 0);
+    }
+
+    #[test]
+    fn max_connections_returns_configured_value() {
+        let mgr = NodeWsManager::new(30, 42);
+        assert_eq!(mgr.max_connections(), 42);
+    }
+
+    #[test]
+    fn credential_update_fails_for_disconnected_node() {
+        let mgr = NodeWsManager::new(30, 100);
+        let params = CredentialUpdateParams {
+            service_slug: "openai".to_string(),
+            injection_method: "bearer".to_string(),
+            header_name: Some("Authorization".to_string()),
+            header_value: Some("Bearer sk-test".to_string()),
+            param_name: None,
+            param_value: None,
+            target_url: None,
+        };
+        let err = mgr
+            .send_credential_update("unknown-node", &params)
+            .expect_err("should fail for disconnected node");
+        assert!(matches!(err, AppError::NodeOffline(_)));
+    }
+
+    #[test]
+    fn credential_remove_fails_for_disconnected_node() {
+        let mgr = NodeWsManager::new(30, 100);
+        let err = mgr
+            .send_credential_remove("unknown-node", "openai")
+            .expect_err("should fail for disconnected node");
+        assert!(matches!(err, AppError::NodeOffline(_)));
+    }
+
+    #[test]
+    fn capability_recording_and_querying() {
+        let mgr = NodeWsManager::new(30, 100);
+        let (tx, _rx) = mpsc::channel(256);
+        mgr.register_connection("node-cap", tx);
+
+        assert!(!mgr.supports_credential_ack_correlation("node-cap"));
+
+        mgr.record_capabilities(
+            "node-cap",
+            &NodeCapabilitiesMsg {
+                credential_ack_correlation: true,
+            },
+        );
+        assert!(mgr.supports_credential_ack_correlation("node-cap"));
+
+        assert!(!mgr.supports_credential_ack_correlation("nonexistent"));
+    }
+
+    #[test]
+    fn map_retryable_node_failure_distinguishes_credential_missing() {
+        let err =
+            map_retryable_node_failure("missing cred".to_string(), Some("credential_missing"));
+        assert!(matches!(err, AppError::NodeCredentialMissing(_)));
+
+        let err2 = map_retryable_node_failure("offline".to_string(), None);
+        assert!(matches!(err2, AppError::NodeOffline(_)));
+
+        let err3 = map_retryable_node_failure("other".to_string(), Some("other_reason"));
+        assert!(matches!(err3, AppError::NodeOffline(_)));
+    }
 }

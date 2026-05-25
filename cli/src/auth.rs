@@ -999,6 +999,51 @@ mod tests {
     }
 
     #[test]
+    fn jwt_exp_from_token_extracts_expiry() {
+        let token = build_jwt(&serde_json::json!({"exp": 1700000000i64}));
+        let exp = super::jwt_exp_from_token(&token).unwrap();
+        assert_eq!(exp.timestamp(), 1700000000);
+    }
+
+    #[test]
+    fn jwt_exp_from_token_returns_none_for_malformed() {
+        assert!(super::jwt_exp_from_token("bad").is_none());
+    }
+
+    #[test]
+    fn jwt_claim_string_from_token_extracts_arbitrary_claim() {
+        let token = build_jwt(&serde_json::json!({"sub": "user-1", "iss": "nyxid", "exp": 999}));
+        assert_eq!(
+            super::jwt_claim_string_from_token(&token, "iss").as_deref(),
+            Some("nyxid")
+        );
+    }
+
+    #[test]
+    fn jwt_claim_string_from_token_returns_none_for_missing_claim() {
+        let token = build_jwt(&serde_json::json!({"exp": 999}));
+        assert!(super::jwt_claim_string_from_token(&token, "iss").is_none());
+    }
+
+    #[test]
+    fn dead_session_reason_headline_no_token() {
+        assert!(
+            super::DeadSessionReason::NoToken
+                .headline()
+                .contains("not logged in")
+        );
+    }
+
+    #[test]
+    fn dead_session_reason_headline_expired() {
+        assert!(
+            super::DeadSessionReason::Expired
+                .headline()
+                .contains("expired")
+        );
+    }
+
+    #[test]
     fn save_tokens_clears_stale_user_id_when_new_token_has_no_sub() {
         use std::env;
         use tempfile::tempdir;

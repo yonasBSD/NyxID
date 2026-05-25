@@ -4612,6 +4612,149 @@ mod tests {
             "origin should still be forwarded on WS",
         );
     }
+
+    #[test]
+    fn extract_via_service_returns_none_when_absent() {
+        let request = Request::builder()
+            .uri("/api/v1/proxy/s/openai/v1/chat/completions")
+            .body(Body::empty())
+            .unwrap();
+        assert!(super::extract_via_service(&request).is_none());
+    }
+
+    #[test]
+    fn extract_via_service_returns_value_when_present() {
+        let request = Request::builder()
+            .uri("/api/v1/proxy/s/openai/v1/chat/completions?_nyxid_via=us-123&foo=bar")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            super::extract_via_service(&request).as_deref(),
+            Some("us-123")
+        );
+    }
+
+    #[test]
+    fn strip_internal_query_params_removes_nyxid_via() {
+        let result = super::strip_internal_query_params("_nyxid_via=us-123&foo=bar&baz=1");
+        assert_eq!(result, "foo=bar&baz=1");
+    }
+
+    #[test]
+    fn strip_internal_query_params_preserves_all_when_no_internal() {
+        let result = super::strip_internal_query_params("foo=bar&baz=1");
+        assert_eq!(result, "foo=bar&baz=1");
+    }
+
+    #[test]
+    fn strip_internal_query_params_returns_empty_when_only_internal() {
+        let result = super::strip_internal_query_params("_nyxid_via=us-123");
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn append_query_param_adds_to_clean_url() {
+        let result = super::append_query_param("https://api.example.com/v1", "key", "value");
+        assert_eq!(result, "https://api.example.com/v1?key=value");
+    }
+
+    #[test]
+    fn append_query_param_appends_to_existing_query() {
+        let result = super::append_query_param("https://api.example.com/v1?a=1", "key", "val ue");
+        assert_eq!(result, "https://api.example.com/v1?a=1&key=val%20ue");
+    }
+
+    #[test]
+    fn proxy_error_telemetry_fields_maps_common_errors() {
+        use super::proxy_error_telemetry_fields;
+        use crate::errors::AppError;
+
+        assert_eq!(
+            proxy_error_telemetry_fields(&AppError::BadRequest("x".into())),
+            (400, 1000)
+        );
+        assert_eq!(
+            proxy_error_telemetry_fields(&AppError::Unauthorized("x".into())),
+            (401, 1001)
+        );
+        assert_eq!(
+            proxy_error_telemetry_fields(&AppError::Forbidden("x".into())),
+            (403, 1002)
+        );
+        assert_eq!(
+            proxy_error_telemetry_fields(&AppError::NotFound("x".into())),
+            (404, 1003)
+        );
+        assert_eq!(
+            proxy_error_telemetry_fields(&AppError::RateLimited),
+            (429, 1005)
+        );
+        assert_eq!(
+            proxy_error_telemetry_fields(&AppError::NodeProxyTimeout),
+            (504, 8002)
+        );
+        assert_eq!(
+            proxy_error_telemetry_fields(&AppError::ApiKeyScopeForbidden("x".into())),
+            (403, 9000)
+        );
+    }
+
+    #[test]
+    fn collect_forward_headers_empty_input() {
+        let headers = axum::http::HeaderMap::new();
+        let result = collect_forward_headers_with_prefixes(
+            &headers,
+            ALLOWED_FORWARD_HEADERS,
+            ALLOWED_FORWARD_HEADER_PREFIXES,
+        );
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn collect_forward_headers_forwards_aws_prefix() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "x-amz-target",
+            "CostExplorer.GetCostAndUsage".parse().unwrap(),
+        );
+        headers.insert("content-type", "application/json".parse().unwrap());
+
+        let result = collect_forward_headers_with_prefixes(
+            &headers,
+            ALLOWED_FORWARD_HEADERS,
+            ALLOWED_FORWARD_HEADER_PREFIXES,
+        );
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().any(|(n, _)| n == "x-amz-target"));
+        assert!(result.iter().any(|(n, _)| n == "content-type"));
+    }
+
+    #[test]
+    fn node_proxy_audit_event_data_includes_node_and_connection() {
+        let data = super::node_proxy_audit_event_data(
+            "svc-1",
+            "POST",
+            "/v1/chat",
+            200,
+            "node-1",
+            "owner-1",
+            "actor-1",
+            Some("conn-1"),
+        );
+        assert_eq!(data["routed_via"], "node");
+        assert_eq!(data["node_id"], "node-1");
+        assert_eq!(data["connection_id"], "conn-1");
+        assert_eq!(data["owner_user_id"], "owner-1");
+    }
+
+    #[test]
+    fn node_proxy_audit_event_data_omits_owner_when_same_as_actor() {
+        let data = super::node_proxy_audit_event_data(
+            "svc-1", "GET", "/models", 200, "node-1", "user-1", "user-1", None,
+        );
+        assert!(data.get("owner_user_id").is_none());
+        assert!(data.get("connection_id").is_none());
+    }
 }
 
 #[cfg(test)]

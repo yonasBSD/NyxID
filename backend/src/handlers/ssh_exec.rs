@@ -532,4 +532,23 @@ mod tests {
     fn default_timeout_is_30() {
         assert_eq!(default_timeout(), 30);
     }
+
+    #[test]
+    fn dangerous_commands_list_is_populated() {
+        assert!(DANGEROUS_COMMANDS.len() >= 7);
+        assert!(DANGEROUS_COMMANDS.contains(&"rm -rf /"));
+        assert!(DANGEROUS_COMMANDS.contains(&":(){ :|:& };:"));
+    }
+
+    #[test]
+    fn max_constants_are_sensible() {
+        assert_eq!(MAX_TIMEOUT_SECS, 300);
+        assert_eq!(MAX_OUTPUT_BYTES, 1_048_576);
+    }
+
+    #[test]
+    fn check_dangerous_command_case_insensitive() {
+        assert!(check_dangerous_command("SHUTDOWN -h now").is_err());
+        assert!(check_dangerous_command("REBOOT").is_err());
+    }
 }

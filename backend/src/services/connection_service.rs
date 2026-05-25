@@ -16,6 +16,7 @@ use crate::services::node_ws_manager::NodeWsManager;
 /// Maximum credential length in bytes to prevent abuse.
 const MAX_CREDENTIAL_LENGTH: usize = 8192;
 
+#[derive(Debug)]
 pub struct ConnectionResult {
     pub service_name: String,
     pub connected_at: DateTime<Utc>,
@@ -328,4 +329,187 @@ pub async fn disconnect_user(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::downstream_service::test_helpers::dummy_service;
+    use crate::test_utils::*;
+
+    async fn insert_connection_service(
+        db: &mongodb::Database,
+        service_id: &str,
+        category: &str,
+        requires_cred: bool,
+        service_type: &str,
+    ) {
+        let mut svc = dummy_service();
+        svc.id = service_id.to_string();
+        svc.service_category = category.to_string();
+        svc.requires_user_credential = requires_cred;
+        svc.service_type = service_type.to_string();
+        svc.auth_type = Some("api_key".to_string());
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&svc)
+            .await
+            .expect("insert test service");
+    }
+
+    #[tokio::test]
+    async fn test_connect_user_connection_service() {
+        let Some(db) = connect_test_database("conn_svc_connect").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let ws = NodeWsManager::new(30, 100);
+        let user_id = Uuid::new_v4().to_string();
+        let service_id = Uuid::new_v4().to_string();
+        insert_connection_service(&db, &service_id, "connection", true, "http").await;
+
+        let result = connect_user(
+            &db,
+            &enc,
+            &ws,
+            &user_id,
+            &service_id,
+            Some("my-api-key"),
+            Some("prod"),
+        )
+        .await;
+        assert!(result.is_ok());
+        let cr = result.unwrap();
+        assert!(!cr.service_name.is_empty());
+
+        let conn = db
+            .collection::<UserServiceConnection>(CONNECTIONS)
+            .find_one(doc! { "user_id": &user_id, "service_id": &service_id })
+            .await
+            .unwrap()
+            .expect("connection should exist");
+        assert!(conn.is_active);
+        assert!(conn.credential_encrypted.is_some());
+        assert_eq!(conn.credential_label.as_deref(), Some("prod"));
+    }
+
+    #[tokio::test]
+    async fn test_connect_user_internal_service_rejects_credential() {
+        let Some(db) = connect_test_database("conn_svc_internal").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let ws = NodeWsManager::new(30, 100);
+        let user_id = Uuid::new_v4().to_string();
+        let service_id = Uuid::new_v4().to_string();
+        insert_connection_service(&db, &service_id, "internal", false, "http").await;
+
+        let err = connect_user(&db, &enc, &ws, &user_id, &service_id, Some("secret"), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn test_connect_user_provider_service_rejected() {
+        let Some(db) = connect_test_database("conn_svc_provider").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let ws = NodeWsManager::new(30, 100);
+        let user_id = Uuid::new_v4().to_string();
+        let service_id = Uuid::new_v4().to_string();
+        insert_connection_service(&db, &service_id, "provider", false, "http").await;
+
+        let err = connect_user(&db, &enc, &ws, &user_id, &service_id, None, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn test_connect_user_duplicate_rejected() {
+        let Some(db) = connect_test_database("conn_svc_dup").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let ws = NodeWsManager::new(30, 100);
+        let user_id = Uuid::new_v4().to_string();
+        let service_id = Uuid::new_v4().to_string();
+        insert_connection_service(&db, &service_id, "connection", true, "http").await;
+
+        connect_user(&db, &enc, &ws, &user_id, &service_id, Some("key1"), None)
+            .await
+            .unwrap();
+        let err = connect_user(&db, &enc, &ws, &user_id, &service_id, Some("key2"), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::Conflict(_)));
+    }
+
+    #[tokio::test]
+    async fn test_update_credential() {
+        let Some(db) = connect_test_database("conn_svc_update").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let ws = NodeWsManager::new(30, 100);
+        let user_id = Uuid::new_v4().to_string();
+        let service_id = Uuid::new_v4().to_string();
+        insert_connection_service(&db, &service_id, "connection", true, "http").await;
+
+        connect_user(&db, &enc, &ws, &user_id, &service_id, Some("old-key"), None)
+            .await
+            .unwrap();
+
+        let result = update_credential(
+            &db,
+            &enc,
+            &user_id,
+            &service_id,
+            "new-key",
+            Some("updated-label"),
+        )
+        .await;
+        assert!(result.is_ok());
+
+        let conn = db
+            .collection::<UserServiceConnection>(CONNECTIONS)
+            .find_one(doc! { "user_id": &user_id, "service_id": &service_id, "is_active": true })
+            .await
+            .unwrap()
+            .expect("connection should exist");
+        assert_eq!(conn.credential_label.as_deref(), Some("updated-label"));
+    }
+
+    #[tokio::test]
+    async fn test_disconnect_user() {
+        let Some(db) = connect_test_database("conn_svc_disc").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let ws = NodeWsManager::new(30, 100);
+        let user_id = Uuid::new_v4().to_string();
+        let service_id = Uuid::new_v4().to_string();
+        insert_connection_service(&db, &service_id, "connection", true, "http").await;
+
+        connect_user(&db, &enc, &ws, &user_id, &service_id, Some("key"), None)
+            .await
+            .unwrap();
+
+        disconnect_user(&db, &user_id, &service_id).await.unwrap();
+
+        let conn = db
+            .collection::<UserServiceConnection>(CONNECTIONS)
+            .find_one(doc! { "user_id": &user_id, "service_id": &service_id })
+            .await
+            .unwrap()
+            .expect("connection should still exist (soft delete)");
+        assert!(!conn.is_active);
+        assert!(conn.credential_encrypted.is_none());
+
+        let err = disconnect_user(&db, &user_id, &service_id)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
 }

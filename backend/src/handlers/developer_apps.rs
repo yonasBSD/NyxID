@@ -426,3 +426,298 @@ pub async fn delete_my_oauth_client(
         serde_json::json!({ "message": "OAuth client deactivated" }),
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+    use crate::test_utils::{connect_test_database, test_app_state, test_auth_user, test_user};
+    use axum::extract::State;
+
+    fn tele() -> TelemetryContext {
+        TelemetryContext::default()
+    }
+
+    #[tokio::test]
+    async fn create_and_list_oauth_client() {
+        let Some(db) = connect_test_database("h_dev_apps_create_list").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+        let state = test_app_state(db);
+        let auth = test_auth_user(&user_id);
+
+        let Json(created) = create_my_oauth_client(
+            State(state.clone()),
+            auth.clone(),
+            tele(),
+            Json(CreateDeveloperOAuthClientRequest {
+                name: "Test App".to_string(),
+                redirect_uris: vec!["https://example.com/callback".to_string()],
+                client_type: Some("confidential".to_string()),
+                delegation_scopes: None,
+                broker_capability_enabled: None,
+                revocation_webhook_url: None,
+                revocation_webhook_secret: None,
+                allowed_scopes: None,
+                target_org_id: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(created.client_name, "Test App");
+        assert_eq!(created.client_type, "confidential");
+        assert!(created.client_secret.is_some());
+        assert!(created.is_active);
+
+        let Json(list) = list_my_oauth_clients(
+            State(state),
+            auth,
+            axum::extract::Query(ListDeveloperAppsQuery { org_id: None }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(list.clients.len(), 1);
+        assert_eq!(list.clients[0].id, created.id);
+    }
+
+    #[tokio::test]
+    async fn get_oauth_client() {
+        let Some(db) = connect_test_database("h_dev_apps_get").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+        let state = test_app_state(db);
+        let auth = test_auth_user(&user_id);
+
+        let Json(created) = create_my_oauth_client(
+            State(state.clone()),
+            auth.clone(),
+            tele(),
+            Json(CreateDeveloperOAuthClientRequest {
+                name: "Get App".to_string(),
+                redirect_uris: vec!["https://example.com/cb".to_string()],
+                client_type: None,
+                delegation_scopes: None,
+                broker_capability_enabled: None,
+                revocation_webhook_url: None,
+                revocation_webhook_secret: None,
+                allowed_scopes: None,
+                target_org_id: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let Json(fetched) = get_my_oauth_client(State(state), auth, Path(created.id.clone()))
+            .await
+            .unwrap();
+
+        assert_eq!(fetched.id, created.id);
+        assert_eq!(fetched.client_name, "Get App");
+        assert!(fetched.client_secret.is_none());
+    }
+
+    #[tokio::test]
+    async fn update_oauth_client() {
+        let Some(db) = connect_test_database("h_dev_apps_update").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+        let state = test_app_state(db);
+        let auth = test_auth_user(&user_id);
+
+        let Json(created) = create_my_oauth_client(
+            State(state.clone()),
+            auth.clone(),
+            tele(),
+            Json(CreateDeveloperOAuthClientRequest {
+                name: "Before Update".to_string(),
+                redirect_uris: vec!["https://example.com/cb".to_string()],
+                client_type: Some("confidential".to_string()),
+                delegation_scopes: None,
+                broker_capability_enabled: None,
+                revocation_webhook_url: None,
+                revocation_webhook_secret: None,
+                allowed_scopes: None,
+                target_org_id: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let Json(updated) = update_my_oauth_client(
+            State(state),
+            auth,
+            Path(created.id.clone()),
+            Json(UpdateDeveloperOAuthClientRequest {
+                name: Some("After Update".to_string()),
+                redirect_uris: None,
+                delegation_scopes: None,
+                broker_capability_enabled: Some(true),
+                revocation_webhook_url: None,
+                revocation_webhook_secret: None,
+                allowed_scopes: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(updated.client_name, "After Update");
+        assert!(updated.broker_capability_enabled);
+    }
+
+    #[tokio::test]
+    async fn rotate_oauth_client_secret() {
+        let Some(db) = connect_test_database("h_dev_apps_rotate").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+        let state = test_app_state(db);
+        let auth = test_auth_user(&user_id);
+
+        let Json(created) = create_my_oauth_client(
+            State(state.clone()),
+            auth.clone(),
+            tele(),
+            Json(CreateDeveloperOAuthClientRequest {
+                name: "Rotate App".to_string(),
+                redirect_uris: vec!["https://example.com/cb".to_string()],
+                client_type: Some("confidential".to_string()),
+                delegation_scopes: None,
+                broker_capability_enabled: None,
+                revocation_webhook_url: None,
+                revocation_webhook_secret: None,
+                allowed_scopes: None,
+                target_org_id: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let original_secret = created.client_secret.unwrap();
+
+        let Json(rotated) =
+            rotate_my_oauth_client_secret(State(state), auth, tele(), Path(created.id.clone()))
+                .await
+                .unwrap();
+
+        assert_eq!(rotated.id, created.id);
+        assert_ne!(rotated.client_secret, original_secret);
+    }
+
+    #[tokio::test]
+    async fn delete_oauth_client() {
+        let Some(db) = connect_test_database("h_dev_apps_delete").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+        let state = test_app_state(db);
+        let auth = test_auth_user(&user_id);
+
+        let Json(created) = create_my_oauth_client(
+            State(state.clone()),
+            auth.clone(),
+            tele(),
+            Json(CreateDeveloperOAuthClientRequest {
+                name: "Delete App".to_string(),
+                redirect_uris: vec!["https://example.com/cb".to_string()],
+                client_type: Some("confidential".to_string()),
+                delegation_scopes: None,
+                broker_capability_enabled: None,
+                revocation_webhook_url: None,
+                revocation_webhook_secret: None,
+                allowed_scopes: None,
+                target_org_id: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let Json(resp) =
+            delete_my_oauth_client(State(state.clone()), auth.clone(), Path(created.id.clone()))
+                .await
+                .unwrap();
+
+        assert_eq!(resp["message"], "OAuth client deactivated");
+
+        let err = get_my_oauth_client(State(state), auth, Path(created.id)).await;
+
+        assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn create_rejects_empty_name() {
+        let Some(db) = connect_test_database("h_dev_apps_empty_name").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+        let state = test_app_state(db);
+        let auth = test_auth_user(&user_id);
+
+        let err = create_my_oauth_client(
+            State(state),
+            auth,
+            tele(),
+            Json(CreateDeveloperOAuthClientRequest {
+                name: "   ".to_string(),
+                redirect_uris: vec!["https://example.com/cb".to_string()],
+                client_type: None,
+                delegation_scopes: None,
+                broker_capability_enabled: None,
+                revocation_webhook_url: None,
+                revocation_webhook_secret: None,
+                allowed_scopes: None,
+                target_org_id: None,
+            }),
+        )
+        .await;
+
+        assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn get_nonexistent_client_returns_not_found() {
+        let Some(db) = connect_test_database("h_dev_apps_not_found").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+        let state = test_app_state(db);
+        let auth = test_auth_user(&user_id);
+
+        let err =
+            get_my_oauth_client(State(state), auth, Path(uuid::Uuid::new_v4().to_string())).await;
+
+        assert!(err.is_err());
+    }
+}

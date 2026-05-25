@@ -2111,4 +2111,142 @@ mod tests {
                 if message.contains("template must not exceed 4096 bytes")
         ));
     }
+
+    #[test]
+    fn validate_slug_rejects_empty() {
+        let err = validate_slug("").expect_err("empty slug");
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[test]
+    fn validate_slug_rejects_over_eighty_characters() {
+        let long = "a".repeat(81);
+        let err = validate_slug(&long).expect_err("too long");
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[test]
+    fn validate_slug_rejects_uppercase_letters() {
+        let err = validate_slug("Bad-Slug").expect_err("uppercase");
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[test]
+    fn validate_slug_rejects_leading_hyphen() {
+        let err = validate_slug("-leading").expect_err("leading hyphen");
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[test]
+    fn validate_slug_rejects_trailing_hyphen() {
+        let err = validate_slug("trailing-").expect_err("trailing hyphen");
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[test]
+    fn validate_slug_accepts_valid_slug() {
+        validate_slug("my-service-123").expect("valid slug");
+    }
+
+    #[test]
+    fn validate_auth_method_accepts_aws_sigv4() {
+        validate_auth_method("aws_sigv4").expect("aws_sigv4 must be accepted");
+    }
+
+    #[test]
+    fn auth_method_requires_key_name_for_body() {
+        assert!(auth_method_requires_key_name("body"));
+        assert!(auth_method_requires_key_name("header"));
+        assert!(auth_method_requires_key_name("query"));
+        assert!(auth_method_requires_key_name("path"));
+        assert!(!auth_method_requires_key_name("bearer"));
+        assert!(!auth_method_requires_key_name("none"));
+        assert!(!auth_method_requires_key_name("bot_bearer"));
+    }
+
+    #[tokio::test]
+    async fn list_user_services_returns_empty_for_unknown_user() {
+        let Some(db) = connect_test_database("user_svc_ext_list_empty").await else {
+            return;
+        };
+        let services = list_user_services(&db, "nonexistent").await.unwrap();
+        assert!(services.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_user_service_returns_not_found_for_wrong_user() {
+        let Some(db) = connect_test_database("user_svc_ext_get_wrong_user").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let svc = test_user_service(&service_id, &user_id, "svc-a", "ep-1", None, None);
+        db.collection::<UserService>(COLLECTION_NAME)
+            .insert_one(&svc)
+            .await
+            .unwrap();
+        let err = get_user_service(&db, "other-user", &service_id)
+            .await
+            .expect_err("wrong user");
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn find_by_slug_returns_none_for_inactive_service() {
+        let Some(db) = connect_test_database("user_svc_ext_find_inactive").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let mut svc = test_user_service(&service_id, &user_id, "inactive-svc", "ep-1", None, None);
+        svc.is_active = false;
+        db.collection::<UserService>(COLLECTION_NAME)
+            .insert_one(&svc)
+            .await
+            .unwrap();
+        let found = find_by_slug(&db, &user_id, "inactive-svc").await.unwrap();
+        assert!(found.is_none());
+    }
+
+    #[tokio::test]
+    async fn deactivate_user_service_sets_is_active_false() {
+        let Some(db) = connect_test_database("user_svc_ext_deactivate").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let svc = test_user_service(&service_id, &user_id, "to-deactivate", "ep-1", None, None);
+        db.collection::<UserService>(COLLECTION_NAME)
+            .insert_one(&svc)
+            .await
+            .unwrap();
+        deactivate_user_service(&db, &user_id, &user_id, &service_id)
+            .await
+            .unwrap();
+        let after = db
+            .collection::<UserService>(COLLECTION_NAME)
+            .find_one(doc! { "_id": &service_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!after.is_active);
+    }
+
+    #[test]
+    fn identity_config_none_returns_defaults() {
+        let config = IdentityConfig::none();
+        assert_eq!(config.identity_propagation_mode, "none");
+        assert!(!config.identity_include_user_id);
+        assert!(!config.forward_access_token);
+        assert!(!config.inject_delegation_token);
+        assert_eq!(config.delegation_token_scope, "llm:proxy");
+    }
+
+    #[test]
+    fn normalize_identity_config_accepts_proxy_star_scope() {
+        let mut config = sample_identity_config();
+        config.delegation_token_scope = "proxy:*".to_string();
+        let normalized = normalize_identity_config(&config).unwrap();
+        assert_eq!(normalized.delegation_token_scope, "proxy:*");
+    }
 }

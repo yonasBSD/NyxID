@@ -1778,6 +1778,183 @@ mod tests {
         );
     }
 
+    #[test]
+    fn validate_redirect_path_rejects_empty() {
+        assert!(validate_redirect_path("").is_err());
+    }
+
+    #[test]
+    fn validate_redirect_path_rejects_double_slash() {
+        assert!(validate_redirect_path("//evil.com").is_err());
+    }
+
+    #[test]
+    fn validate_redirect_path_rejects_control_chars() {
+        assert!(validate_redirect_path("/path\r\ninjection").is_err());
+    }
+
+    #[test]
+    fn validate_redirect_path_accepts_valid_path() {
+        assert!(validate_redirect_path("/keys/detail?tab=settings").is_ok());
+    }
+
+    #[tokio::test]
+    async fn list_my_tokens_returns_empty_when_no_tokens() {
+        let Some(db) = connect_test_database("user_tokens_ext_list_empty").await else {
+            eprintln!(
+                "skipping provider token handler integration test: no local MongoDB available"
+            );
+            return;
+        };
+        let state = test_app_state(db);
+        let actor_id = Uuid::new_v4().to_string();
+
+        let Json(response) = list_my_tokens(
+            State(state),
+            crate::test_utils::test_auth_user(&actor_id),
+            Query(ProviderTokenTargetQuery {
+                target_org_id: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(response.tokens.is_empty());
+    }
+
+    #[tokio::test]
+    async fn connect_api_key_rejects_empty_key() {
+        let Some(db) = connect_test_database("user_tokens_ext_connect_empty").await else {
+            eprintln!(
+                "skipping provider token handler integration test: no local MongoDB available"
+            );
+            return;
+        };
+        let state = test_app_state(db);
+        let provider_id = Uuid::new_v4().to_string();
+
+        let err = connect_api_key(
+            State(state),
+            crate::test_utils::test_auth_user(&Uuid::new_v4().to_string()),
+            Path(provider_id),
+            Json(ConnectApiKeyRequest {
+                api_key: String::new(),
+                label: None,
+                gateway_url: None,
+            }),
+        )
+        .await
+        .expect_err("should reject empty key");
+
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn connect_api_key_rejects_oversized_key() {
+        let Some(db) = connect_test_database("user_tokens_ext_connect_long").await else {
+            eprintln!(
+                "skipping provider token handler integration test: no local MongoDB available"
+            );
+            return;
+        };
+        let state = test_app_state(db);
+        let provider_id = Uuid::new_v4().to_string();
+
+        let err = connect_api_key(
+            State(state),
+            crate::test_utils::test_auth_user(&Uuid::new_v4().to_string()),
+            Path(provider_id),
+            Json(ConnectApiKeyRequest {
+                api_key: "x".repeat(4097),
+                label: None,
+                gateway_url: None,
+            }),
+        )
+        .await
+        .expect_err("should reject oversized key");
+
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn connect_api_key_rejects_empty_gateway_url() {
+        let Some(db) = connect_test_database("user_tokens_ext_connect_empty_gw").await else {
+            eprintln!(
+                "skipping provider token handler integration test: no local MongoDB available"
+            );
+            return;
+        };
+        let state = test_app_state(db);
+        let provider_id = Uuid::new_v4().to_string();
+
+        let err = connect_api_key(
+            State(state),
+            crate::test_utils::test_auth_user(&Uuid::new_v4().to_string()),
+            Path(provider_id),
+            Json(ConnectApiKeyRequest {
+                api_key: "valid-key".to_string(),
+                label: None,
+                gateway_url: Some(String::new()),
+            }),
+        )
+        .await
+        .expect_err("should reject empty gateway_url");
+
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn disconnect_provider_rejects_org_member() {
+        let Some(db) = connect_test_database("user_tokens_ext_disconnect_member").await else {
+            eprintln!(
+                "skipping provider token handler integration test: no local MongoDB available"
+            );
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let member_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+
+        db.collection(USERS)
+            .insert_one(test_user(&org_id, UserType::Org))
+            .await
+            .unwrap();
+        db.collection(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(
+                &org_id,
+                &member_id,
+                crate::models::org_membership::OrgRole::Member,
+                None,
+            ))
+            .await
+            .unwrap();
+
+        let err = disconnect_provider(
+            State(state),
+            crate::test_utils::test_auth_user(&member_id),
+            Path(Uuid::new_v4().to_string()),
+            Query(ProviderTokenTargetQuery {
+                target_org_id: Some(org_id),
+            }),
+        )
+        .await
+        .expect_err("member should not disconnect org tokens");
+
+        assert!(matches!(err, AppError::OrgRoleInsufficient(_)));
+    }
+
+    #[test]
+    fn safe_error_message_hides_internal_details() {
+        let internal = safe_error_message(&AppError::Internal("db crash".to_string()));
+        assert_eq!(internal, "An internal error occurred");
+    }
+
+    #[test]
+    fn safe_error_message_passes_through_user_errors() {
+        let msg = safe_error_message(&AppError::BadRequest("bad input".to_string()));
+        assert!(msg.contains("bad input"));
+    }
+
     #[tokio::test]
     async fn generic_oauth_callback_denial_without_state_redirects_only() {
         let Some(db) = connect_test_database("oauth_callback_denial_without_state").await else {

@@ -519,4 +519,59 @@ mod table_tests {
         .await
         .expect("endpoints table should succeed");
     }
+
+    #[tokio::test]
+    async fn show_surfaces_server_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/catalog/nonexistent"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+
+        let result = run(CatalogCommands::Show {
+            slug: "nonexistent".to_string(),
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Json),
+        })
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn endpoints_empty_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/catalog/empty/endpoints"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "endpoints": []
+            })))
+            .mount(&server)
+            .await;
+
+        run(CatalogCommands::Endpoints {
+            slug: "empty".to_string(),
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+        })
+        .await
+        .expect("empty endpoints should succeed");
+    }
+
+    #[tokio::test]
+    async fn list_table_empty_catalog() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/catalog"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "entries": [] })),
+            )
+            .mount(&server)
+            .await;
+
+        run(CatalogCommands::List {
+            all: false,
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+        })
+        .await
+        .expect("empty catalog list should succeed");
+    }
 }

@@ -178,6 +178,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_table_renders_rows() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/api-keys/external"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "api_keys": [
+                    {"id": "key-abc12345", "label": "OpenAI", "credential_type": "bearer", "created_at": "2026-01-01"}
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        run(ExternalKeyCommands::List {
+            auth: crate::test_support::mock_auth_with_output(
+                server.uri(),
+                crate::cli::OutputFormat::Table,
+            ),
+        })
+        .await
+        .expect("list table should succeed");
+    }
+
+    #[tokio::test]
+    async fn list_table_empty() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/api-keys/external"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "api_keys": [] })),
+            )
+            .mount(&server)
+            .await;
+
+        run(ExternalKeyCommands::List {
+            auth: crate::test_support::mock_auth_with_output(
+                server.uri(),
+                crate::cli::OutputFormat::Table,
+            ),
+        })
+        .await
+        .expect("empty list should succeed");
+    }
+
+    #[tokio::test]
+    async fn rotate_table_output() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/api-keys/external/key-1"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": "key-1" })),
+            )
+            .mount(&server)
+            .await;
+
+        run(ExternalKeyCommands::Rotate {
+            id: "key-1".to_string(),
+            credential_env: None,
+            credential: Some("new-cred".to_string()),
+            auth: crate::test_support::mock_auth_with_output(
+                server.uri(),
+                crate::cli::OutputFormat::Table,
+            ),
+        })
+        .await
+        .expect("rotate table should succeed");
+    }
+
+    #[tokio::test]
     async fn delete_with_yes_issues_delete_request() {
         let server = MockServer::start().await;
         Mock::given(method("DELETE"))

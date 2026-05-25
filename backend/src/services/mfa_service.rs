@@ -257,3 +257,191 @@ pub async fn verify_totp(
 
     Ok(valid)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::*;
+
+    #[tokio::test]
+    async fn test_setup_totp_creates_unverified_factor() {
+        let Some(db) = connect_test_database("mfa_svc").await else {
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let user_id = Uuid::new_v4().to_string();
+
+        let result = setup_totp(&db, &encryption_keys, &user_id, "user@example.com").await;
+        assert!(result.is_ok());
+
+        let setup = result.unwrap();
+        assert!(!setup.factor_id.is_empty());
+        assert!(!setup.secret.is_empty());
+        assert!(setup.qr_code_url.contains("otpauth://totp/"));
+
+        let stored = db
+            .collection::<MfaFactor>(MFA_FACTORS)
+            .find_one(doc! { "_id": &setup.factor_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.user_id, user_id);
+        assert_eq!(stored.factor_type, "totp");
+        assert!(!stored.is_verified);
+        assert!(stored.is_active);
+        assert!(stored.secret_encrypted.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_setup_totp_rejects_if_already_verified() {
+        let Some(db) = connect_test_database("mfa_svc").await else {
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let user_id = Uuid::new_v4().to_string();
+
+        let factor = MfaFactor {
+            id: Uuid::new_v4().to_string(),
+            user_id: user_id.clone(),
+            factor_type: "totp".to_string(),
+            secret_encrypted: Some(vec![1, 2, 3]),
+            recovery_codes: None,
+            is_verified: true,
+            is_active: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        db.collection::<MfaFactor>(MFA_FACTORS)
+            .insert_one(&factor)
+            .await
+            .unwrap();
+
+        let result = setup_totp(&db, &encryption_keys, &user_id, "user@example.com").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_setup_totp_replaces_unverified_factor() {
+        let Some(db) = connect_test_database("mfa_svc").await else {
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let user_id = Uuid::new_v4().to_string();
+
+        let first = setup_totp(&db, &encryption_keys, &user_id, "user@example.com")
+            .await
+            .unwrap();
+
+        let second = setup_totp(&db, &encryption_keys, &user_id, "user@example.com")
+            .await
+            .unwrap();
+
+        assert_ne!(first.factor_id, second.factor_id);
+
+        let old = db
+            .collection::<MfaFactor>(MFA_FACTORS)
+            .find_one(doc! { "_id": &first.factor_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!old.is_active);
+    }
+
+    #[tokio::test]
+    async fn test_verify_totp_setup_with_valid_code() {
+        let Some(db) = connect_test_database("mfa_verify").await else {
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let user_id = Uuid::new_v4().to_string();
+
+        let setup = setup_totp(&db, &encryption_keys, &user_id, "user@example.com")
+            .await
+            .unwrap();
+
+        let secret = Secret::Encoded(setup.secret.clone());
+        let totp = TOTP::new(
+            Algorithm::SHA1,
+            6,
+            1,
+            30,
+            secret.to_bytes().unwrap(),
+            Some("NyxID".to_string()),
+            user_id.clone(),
+        )
+        .unwrap();
+        let code = totp.generate_current().unwrap();
+
+        let recovery_codes =
+            verify_totp_setup(&db, &encryption_keys, &setup.factor_id, &user_id, &code)
+                .await
+                .unwrap();
+
+        assert_eq!(recovery_codes.len(), 10);
+        for code in &recovery_codes {
+            assert_eq!(code.len(), 8);
+        }
+
+        let stored = db
+            .collection::<MfaFactor>(MFA_FACTORS)
+            .find_one(doc! { "_id": &setup.factor_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.is_verified);
+        assert!(stored.recovery_codes.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_verify_totp_setup_rejects_invalid_code() {
+        let Some(db) = connect_test_database("mfa_reject").await else {
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let user_id = Uuid::new_v4().to_string();
+
+        let setup = setup_totp(&db, &encryption_keys, &user_id, "user@example.com")
+            .await
+            .unwrap();
+
+        let result =
+            verify_totp_setup(&db, &encryption_keys, &setup.factor_id, &user_id, "000000").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_verify_totp_login_with_valid_code() {
+        let Some(db) = connect_test_database("mfa_login").await else {
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let user_id = Uuid::new_v4().to_string();
+
+        let setup = setup_totp(&db, &encryption_keys, &user_id, "user@example.com")
+            .await
+            .unwrap();
+
+        let secret = Secret::Encoded(setup.secret.clone());
+        let totp = TOTP::new(
+            Algorithm::SHA1,
+            6,
+            1,
+            30,
+            secret.to_bytes().unwrap(),
+            Some("NyxID".to_string()),
+            user_id.clone(),
+        )
+        .unwrap();
+        let code = totp.generate_current().unwrap();
+
+        verify_totp_setup(&db, &encryption_keys, &setup.factor_id, &user_id, &code)
+            .await
+            .unwrap();
+
+        let login_code = totp.generate_current().unwrap();
+        let valid = verify_totp(&db, &encryption_keys, &user_id, &login_code)
+            .await
+            .unwrap();
+        assert!(valid);
+    }
+}

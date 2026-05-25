@@ -1345,4 +1345,69 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn parse_bool_env_defaults() {
+        assert!(parse_bool_env("NONEXISTENT_VAR_XYZZY_12345", true));
+        assert!(!parse_bool_env("NONEXISTENT_VAR_XYZZY_12345", false));
+    }
+
+    #[test]
+    fn cookie_domain_returns_configured_value() {
+        let mut cfg = make_config("http://localhost:3001", "dev", &"ab".repeat(32));
+        assert!(cfg.cookie_domain().is_none());
+        cfg.cookie_domain = Some(".example.com".to_string());
+        assert_eq!(cfg.cookie_domain(), Some(".example.com"));
+    }
+
+    #[test]
+    fn apple_configured_requires_all_fields() {
+        let mut cfg = make_config("http://localhost:3001", "dev", &"ab".repeat(32));
+        assert!(!cfg.apple_configured());
+        cfg.apple_client_id = Some("id".to_string());
+        cfg.apple_team_id = Some("team".to_string());
+        cfg.apple_key_id = Some("key".to_string());
+        assert!(!cfg.apple_configured());
+        cfg.apple_private_key_path = Some("/path".to_string());
+        assert!(cfg.apple_configured());
+    }
+
+    #[test]
+    fn debug_redacts_secrets() {
+        let cfg = make_config("http://localhost:3001", "dev", &"ab".repeat(32));
+        let debug = format!("{:?}", cfg);
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains(&"ab".repeat(32)));
+    }
+
+    #[test]
+    #[should_panic(expected = "SSH_MAX_TUNNEL_DURATION_SECS must be greater than 0")]
+    fn validate_ssh_runtime_config_rejects_zero_tunnel_duration() {
+        let mut cfg = make_config("http://localhost:3001", "dev", &"ab".repeat(32));
+        cfg.ssh_max_tunnel_duration_secs = 0;
+        cfg.validate_ssh_runtime_config();
+    }
+
+    #[test]
+    fn validate_key_provider_local() {
+        let cfg = make_config("http://localhost:3001", "dev", &"ab".repeat(32));
+        cfg.validate_key_provider();
+    }
+
+    #[test]
+    #[should_panic(expected = "Unsupported KEY_PROVIDER")]
+    fn validate_key_provider_unsupported() {
+        let mut cfg = make_config("http://localhost:3001", "dev", &"ab".repeat(32));
+        cfg.key_provider = "invalid-provider".to_string();
+        cfg.validate_key_provider();
+    }
+
+    #[test]
+    fn warn_if_non_url_issuer_does_not_panic() {
+        let mut cfg = make_config("http://localhost:3001", "dev", &"ab".repeat(32));
+        cfg.jwt_issuer = "nyxid".to_string();
+        cfg.warn_if_non_url_issuer();
+        cfg.jwt_issuer = "https://auth.example.com".to_string();
+        cfg.warn_if_non_url_issuer();
+    }
 }

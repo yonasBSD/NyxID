@@ -418,3 +418,154 @@ pub async fn disable(
         message: "MFA has been disabled.".to_string(),
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+    use crate::test_utils::{connect_test_database, test_app_state, test_auth_user, test_user};
+    use axum::extract::State;
+
+    fn tele() -> TelemetryContext {
+        TelemetryContext::default()
+    }
+
+    #[tokio::test]
+    async fn setup_mfa_returns_secret_and_qr() {
+        let Some(db) = connect_test_database("h_mfa_setup").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+        let state = test_app_state(db);
+        let auth = test_auth_user(&user_id);
+
+        let Json(resp) = setup(State(state), auth, tele()).await.unwrap();
+
+        assert!(!resp.factor_id.is_empty());
+        assert!(!resp.secret.is_empty());
+        assert!(resp.qr_code_url.starts_with("otpauth://totp/"));
+    }
+
+    #[tokio::test]
+    async fn setup_mfa_user_not_found() {
+        let Some(db) = connect_test_database("h_mfa_setup_no_user").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let state = test_app_state(db);
+        let auth = test_auth_user(&user_id);
+
+        let err = setup(State(state), auth, tele()).await;
+        assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn confirm_mfa_no_pending_factor() {
+        let Some(db) = connect_test_database("h_mfa_confirm_no_factor").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+        let state = test_app_state(db);
+        let auth = test_auth_user(&user_id);
+
+        let err = confirm(
+            State(state),
+            auth,
+            tele(),
+            Json(MfaConfirmRequest {
+                code: "123456".to_string(),
+            }),
+        )
+        .await;
+
+        assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn confirm_mfa_wrong_code() {
+        let Some(db) = connect_test_database("h_mfa_confirm_bad_code").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+        let state = test_app_state(db);
+        let auth = test_auth_user(&user_id);
+
+        let Json(_) = setup(State(state.clone()), auth.clone(), tele())
+            .await
+            .unwrap();
+
+        let err = confirm(
+            State(state),
+            auth,
+            tele(),
+            Json(MfaConfirmRequest {
+                code: "000000".to_string(),
+            }),
+        )
+        .await;
+
+        assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn disable_mfa_wrong_password() {
+        let Some(db) = connect_test_database("h_mfa_disable_bad_pw").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let pw_hash = crate::crypto::password::hash_password("correct_password").unwrap();
+        let mut user = test_user(&user_id, UserType::Person);
+        user.password_hash = Some(pw_hash);
+        db.collection::<User>(USERS).insert_one(user).await.unwrap();
+        let state = test_app_state(db);
+        let auth = test_auth_user(&user_id);
+
+        let err = disable(
+            State(state),
+            auth,
+            Json(MfaDisableRequest {
+                password: "wrong_password".to_string(),
+            }),
+        )
+        .await;
+
+        assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn disable_mfa_no_password_set() {
+        let Some(db) = connect_test_database("h_mfa_disable_no_pw").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+        let state = test_app_state(db);
+        let auth = test_auth_user(&user_id);
+
+        let err = disable(
+            State(state),
+            auth,
+            Json(MfaDisableRequest {
+                password: "any".to_string(),
+            }),
+        )
+        .await;
+
+        assert!(err.is_err());
+    }
+}

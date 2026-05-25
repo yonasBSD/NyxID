@@ -313,3 +313,221 @@ async fn check_circular_hierarchy(
     // Max depth reached -- treat as circular to be safe
     Err(AppError::CircularGroupHierarchy)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::role::Role;
+    use crate::models::user::COLLECTION_NAME as USERS;
+    use crate::test_utils::*;
+
+    async fn insert_test_role(db: &mongodb::Database, role_id: &str) {
+        let role = Role {
+            id: role_id.to_string(),
+            name: "Test Role".to_string(),
+            slug: format!("test-role-{}", &role_id[..8]),
+            description: None,
+            permissions: vec!["read".to_string()],
+            is_default: false,
+            is_system: false,
+            client_id: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        db.collection::<Role>(ROLES)
+            .insert_one(&role)
+            .await
+            .expect("insert test role");
+    }
+
+    async fn insert_test_user(db: &mongodb::Database, user_id: &str) {
+        let user = test_user(user_id, crate::models::user::UserType::Person);
+        db.collection::<User>(USERS)
+            .insert_one(&user)
+            .await
+            .expect("insert test user");
+    }
+
+    #[tokio::test]
+    async fn test_create_and_get_group() {
+        let Some(db) = connect_test_database("group_svc_create").await else {
+            return;
+        };
+        let role_id = Uuid::new_v4().to_string();
+        insert_test_role(&db, &role_id).await;
+
+        let group = create_group(
+            &db,
+            "Engineering",
+            "engineering",
+            Some("Eng team"),
+            std::slice::from_ref(&role_id),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(group.name, "Engineering");
+        assert_eq!(group.slug, "engineering");
+        assert_eq!(group.description.as_deref(), Some("Eng team"));
+        assert_eq!(group.role_ids, vec![role_id]);
+        assert!(group.parent_group_id.is_none());
+
+        let fetched = get_group(&db, &group.id).await.unwrap();
+        assert_eq!(fetched.id, group.id);
+        assert_eq!(fetched.name, "Engineering");
+    }
+
+    #[tokio::test]
+    async fn test_create_group_duplicate_slug() {
+        let Some(db) = connect_test_database("group_svc_dup_slug").await else {
+            return;
+        };
+
+        create_group(&db, "Team A", "team-a", None, &[], None)
+            .await
+            .unwrap();
+        let err = create_group(&db, "Team B", "team-a", None, &[], None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::DuplicateSlug(_)));
+    }
+
+    #[tokio::test]
+    async fn test_create_group_invalid_role_ids() {
+        let Some(db) = connect_test_database("group_svc_bad_role").await else {
+            return;
+        };
+        let fake_role = Uuid::new_v4().to_string();
+
+        let err = create_group(&db, "Bad", "bad-group", None, &[fake_role], None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn test_update_group() {
+        let Some(db) = connect_test_database("group_svc_update").await else {
+            return;
+        };
+
+        let group = create_group(&db, "Original", "original", None, &[], None)
+            .await
+            .unwrap();
+
+        let updated = update_group(
+            &db,
+            &group.id,
+            Some("Renamed"),
+            Some("renamed"),
+            Some("New desc"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(updated.name, "Renamed");
+        assert_eq!(updated.slug, "renamed");
+        assert_eq!(updated.description.as_deref(), Some("New desc"));
+    }
+
+    #[tokio::test]
+    async fn test_delete_group_removes_from_members() {
+        let Some(db) = connect_test_database("group_svc_delete").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        insert_test_user(&db, &user_id).await;
+
+        let group = create_group(&db, "Deletable", "deletable", None, &[], None)
+            .await
+            .unwrap();
+        add_member(&db, &group.id, &user_id).await.unwrap();
+
+        let members_before = get_members(&db, &group.id).await.unwrap();
+        assert_eq!(members_before.len(), 1);
+
+        delete_group(&db, &group.id).await.unwrap();
+
+        let user = db
+            .collection::<User>(USERS)
+            .find_one(mongodb::bson::doc! { "_id": &user_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!user.group_ids.contains(&group.id));
+
+        let err = get_group(&db, &group.id).await.unwrap_err();
+        assert!(matches!(err, AppError::GroupNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn test_delete_group_with_children_blocked() {
+        let Some(db) = connect_test_database("group_svc_del_child").await else {
+            return;
+        };
+
+        let parent = create_group(&db, "Parent", "parent-grp", None, &[], None)
+            .await
+            .unwrap();
+        create_group(&db, "Child", "child-grp", None, &[], Some(&parent.id))
+            .await
+            .unwrap();
+
+        let err = delete_group(&db, &parent.id).await.unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn test_add_and_remove_member() {
+        let Some(db) = connect_test_database("group_svc_member").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        insert_test_user(&db, &user_id).await;
+
+        let group = create_group(&db, "Members", "members-grp", None, &[], None)
+            .await
+            .unwrap();
+
+        add_member(&db, &group.id, &user_id).await.unwrap();
+
+        let members = get_members(&db, &group.id).await.unwrap();
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].id, user_id);
+
+        let dup_err = add_member(&db, &group.id, &user_id).await.unwrap_err();
+        assert!(matches!(dup_err, AppError::GroupMembershipExists));
+
+        remove_member(&db, &group.id, &user_id).await.unwrap();
+
+        let members_after = get_members(&db, &group.id).await.unwrap();
+        assert!(members_after.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_circular_hierarchy_detection() {
+        let Some(db) = connect_test_database("group_svc_circ").await else {
+            return;
+        };
+
+        let a = create_group(&db, "A", "group-a", None, &[], None)
+            .await
+            .unwrap();
+        let b = create_group(&db, "B", "group-b", None, &[], Some(&a.id))
+            .await
+            .unwrap();
+
+        let err = update_group(&db, &a.id, None, None, None, None, Some(Some(&b.id)))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::CircularGroupHierarchy));
+
+        let self_err = update_group(&db, &a.id, None, None, None, None, Some(Some(&a.id)))
+            .await
+            .unwrap_err();
+        assert!(matches!(self_err, AppError::CircularGroupHierarchy));
+    }
+}

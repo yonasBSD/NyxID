@@ -473,3 +473,334 @@ pub async fn revoke_tokens(
         message: "All active tokens revoked".to_string(),
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+    use crate::services::role_service;
+    use crate::test_utils::{connect_test_database, test_app_state, test_auth_user, test_user};
+    use axum::extract::{Path, Query, State};
+    use axum::http::HeaderMap;
+    use uuid::Uuid;
+
+    async fn seed_admin(db: &mongodb::Database) -> String {
+        role_service::seed_system_roles(db)
+            .await
+            .expect("seed roles");
+        let ids = role_service::get_platform_role_ids(db)
+            .await
+            .expect("role ids");
+        let id = Uuid::new_v4().to_string();
+        let mut user = test_user(&id, UserType::Person);
+        user.role_ids.push(ids.admin);
+        db.collection::<User>(USERS)
+            .insert_one(&user)
+            .await
+            .expect("insert admin");
+        id
+    }
+
+    async fn seed_non_admin(db: &mongodb::Database) -> String {
+        role_service::seed_system_roles(db)
+            .await
+            .expect("seed roles");
+        let id = Uuid::new_v4().to_string();
+        let user = test_user(&id, UserType::Person);
+        db.collection::<User>(USERS)
+            .insert_one(&user)
+            .await
+            .expect("insert user");
+        id
+    }
+
+    #[tokio::test]
+    async fn test_create_service_account_success() {
+        let Some(db) = connect_test_database("h_admin_sa_create").await else {
+            return;
+        };
+        let admin_id = seed_admin(&db).await;
+        let state = test_app_state(db);
+        let auth = test_auth_user(&admin_id);
+
+        let body = CreateServiceAccountRequest {
+            name: "CI Pipeline".to_string(),
+            description: Some("Runs CI".to_string()),
+            allowed_scopes: "proxy:*".to_string(),
+            role_ids: None,
+            rate_limit_override: None,
+            target_org_id: None,
+        };
+
+        let Json(resp) = create_service_account(
+            State(state),
+            auth,
+            TelemetryContext::default(),
+            HeaderMap::new(),
+            Json(body),
+        )
+        .await
+        .expect("create should succeed");
+
+        assert_eq!(resp.name, "CI Pipeline");
+        assert!(!resp.client_id.is_empty());
+        assert!(!resp.client_secret.is_empty());
+        assert!(resp.is_active);
+    }
+
+    #[tokio::test]
+    async fn test_create_service_account_non_admin_rejected() {
+        let Some(db) = connect_test_database("h_admin_sa_create_reject").await else {
+            return;
+        };
+        let user_id = seed_non_admin(&db).await;
+        let state = test_app_state(db);
+        let auth = test_auth_user(&user_id);
+
+        let body = CreateServiceAccountRequest {
+            name: "Should Fail".to_string(),
+            description: None,
+            allowed_scopes: "proxy:*".to_string(),
+            role_ids: None,
+            rate_limit_override: None,
+            target_org_id: None,
+        };
+
+        let err = create_service_account(
+            State(state),
+            auth,
+            TelemetryContext::default(),
+            HeaderMap::new(),
+            Json(body),
+        )
+        .await
+        .expect_err("non-admin should be rejected");
+
+        assert!(matches!(err, AppError::Forbidden(_)));
+    }
+
+    #[tokio::test]
+    async fn test_list_service_accounts_empty() {
+        let Some(db) = connect_test_database("h_admin_sa_list").await else {
+            return;
+        };
+        let admin_id = seed_admin(&db).await;
+        let state = test_app_state(db);
+        let auth = test_auth_user(&admin_id);
+
+        let Json(resp) = list_service_accounts(
+            State(state),
+            auth,
+            Query(ServiceAccountListQuery {
+                page: None,
+                per_page: None,
+                search: None,
+                org_id: None,
+            }),
+        )
+        .await
+        .expect("list should succeed");
+
+        assert_eq!(resp.total, 0);
+        assert!(resp.service_accounts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_service_account_success() {
+        let Some(db) = connect_test_database("h_admin_sa_get").await else {
+            return;
+        };
+        let admin_id = seed_admin(&db).await;
+        let state = test_app_state(db);
+        let auth = test_auth_user(&admin_id);
+
+        let body = CreateServiceAccountRequest {
+            name: "Getter SA".to_string(),
+            description: None,
+            allowed_scopes: "proxy:*".to_string(),
+            role_ids: None,
+            rate_limit_override: None,
+            target_org_id: None,
+        };
+        let Json(created) = create_service_account(
+            State(state.clone()),
+            auth.clone(),
+            TelemetryContext::default(),
+            HeaderMap::new(),
+            Json(body),
+        )
+        .await
+        .expect("create");
+
+        let Json(fetched) = get_service_account(State(state), auth, Path(created.id.clone()))
+            .await
+            .expect("get should succeed");
+
+        assert_eq!(fetched.id, created.id);
+        assert_eq!(fetched.name, "Getter SA");
+    }
+
+    #[tokio::test]
+    async fn test_update_service_account_success() {
+        let Some(db) = connect_test_database("h_admin_sa_update").await else {
+            return;
+        };
+        let admin_id = seed_admin(&db).await;
+        let state = test_app_state(db);
+        let auth = test_auth_user(&admin_id);
+
+        let body = CreateServiceAccountRequest {
+            name: "Before Update".to_string(),
+            description: None,
+            allowed_scopes: "proxy:*".to_string(),
+            role_ids: None,
+            rate_limit_override: None,
+            target_org_id: None,
+        };
+        let Json(created) = create_service_account(
+            State(state.clone()),
+            auth.clone(),
+            TelemetryContext::default(),
+            HeaderMap::new(),
+            Json(body),
+        )
+        .await
+        .expect("create");
+
+        let update_body = UpdateServiceAccountRequest {
+            name: Some("After Update".to_string()),
+            description: Some("updated desc".to_string()),
+            allowed_scopes: None,
+            role_ids: None,
+            rate_limit_override: None,
+            is_active: None,
+        };
+        let Json(updated) = update_service_account(
+            State(state),
+            auth,
+            HeaderMap::new(),
+            Path(created.id.clone()),
+            Json(update_body),
+        )
+        .await
+        .expect("update should succeed");
+
+        assert_eq!(updated.name, "After Update");
+    }
+
+    #[tokio::test]
+    async fn test_delete_service_account_success() {
+        let Some(db) = connect_test_database("h_admin_sa_delete").await else {
+            return;
+        };
+        let admin_id = seed_admin(&db).await;
+        let state = test_app_state(db);
+        let auth = test_auth_user(&admin_id);
+
+        let body = CreateServiceAccountRequest {
+            name: "To Delete".to_string(),
+            description: None,
+            allowed_scopes: "proxy:*".to_string(),
+            role_ids: None,
+            rate_limit_override: None,
+            target_org_id: None,
+        };
+        let Json(created) = create_service_account(
+            State(state.clone()),
+            auth.clone(),
+            TelemetryContext::default(),
+            HeaderMap::new(),
+            Json(body),
+        )
+        .await
+        .expect("create");
+
+        let Json(resp) = delete_service_account(
+            State(state),
+            auth,
+            TelemetryContext::default(),
+            HeaderMap::new(),
+            Path(created.id),
+        )
+        .await
+        .expect("delete should succeed");
+
+        assert!(resp.message.contains("deactivated"));
+    }
+
+    #[tokio::test]
+    async fn test_rotate_secret_success() {
+        let Some(db) = connect_test_database("h_admin_sa_rotate").await else {
+            return;
+        };
+        let admin_id = seed_admin(&db).await;
+        let state = test_app_state(db);
+        let auth = test_auth_user(&admin_id);
+
+        let body = CreateServiceAccountRequest {
+            name: "Rotate SA".to_string(),
+            description: None,
+            allowed_scopes: "proxy:*".to_string(),
+            role_ids: None,
+            rate_limit_override: None,
+            target_org_id: None,
+        };
+        let Json(created) = create_service_account(
+            State(state.clone()),
+            auth.clone(),
+            TelemetryContext::default(),
+            HeaderMap::new(),
+            Json(body),
+        )
+        .await
+        .expect("create");
+
+        let Json(rotated) = rotate_secret(
+            State(state),
+            auth,
+            TelemetryContext::default(),
+            HeaderMap::new(),
+            Path(created.id),
+        )
+        .await
+        .expect("rotate should succeed");
+
+        assert!(!rotated.client_secret.is_empty());
+        assert_ne!(rotated.client_secret, created.client_secret);
+    }
+
+    #[tokio::test]
+    async fn test_revoke_tokens_success() {
+        let Some(db) = connect_test_database("h_admin_sa_revoke").await else {
+            return;
+        };
+        let admin_id = seed_admin(&db).await;
+        let state = test_app_state(db);
+        let auth = test_auth_user(&admin_id);
+
+        let body = CreateServiceAccountRequest {
+            name: "Revoke SA".to_string(),
+            description: None,
+            allowed_scopes: "proxy:*".to_string(),
+            role_ids: None,
+            rate_limit_override: None,
+            target_org_id: None,
+        };
+        let Json(created) = create_service_account(
+            State(state.clone()),
+            auth.clone(),
+            TelemetryContext::default(),
+            HeaderMap::new(),
+            Json(body),
+        )
+        .await
+        .expect("create");
+
+        let Json(resp) = revoke_tokens(State(state), auth, HeaderMap::new(), Path(created.id))
+            .await
+            .expect("revoke should succeed");
+
+        assert_eq!(resp.revoked_count, 0);
+        assert!(resp.message.contains("revoked"));
+    }
+}

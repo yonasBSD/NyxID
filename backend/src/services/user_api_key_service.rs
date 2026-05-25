@@ -1436,6 +1436,377 @@ mod tests {
         assert_eq!(failed, 0);
     }
 
+    #[test]
+    fn has_server_credential_for_bearer_key() {
+        let mut key = sample_key("bearer");
+        assert!(!has_server_credential(&key));
+        key.credential_encrypted = Some(vec![10, 20]);
+        assert!(has_server_credential(&key));
+    }
+
+    #[test]
+    fn has_server_credential_empty_vec_means_no_credential() {
+        let mut key = sample_key("api_key");
+        key.credential_encrypted = Some(vec![]);
+        assert!(!has_server_credential(&key));
+    }
+
+    #[test]
+    fn ssh_certificate_keys_never_report_server_credentials() {
+        let mut key = sample_key("ssh_certificate");
+        key.credential_encrypted = Some(vec![1]);
+        key.access_token_encrypted = Some(vec![2]);
+        assert!(!has_server_credential(&key));
+    }
+
+    #[tokio::test]
+    async fn list_api_keys_returns_empty_for_unknown_user() {
+        let Some(db) = connect_test_database("user_api_key_ext_list_empty").await else {
+            return;
+        };
+        let keys = super::list_api_keys(&db, "nonexistent-user").await.unwrap();
+        assert!(keys.is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_api_key_validates_empty_label() {
+        let Some(db) = connect_test_database("user_api_key_ext_empty_label").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let err = super::create_api_key(
+            &db,
+            &enc,
+            "user-1",
+            super::CreateApiKeyParams {
+                label: "",
+                credential_type: "api_key",
+                credential: "secret",
+                access_token: None,
+                refresh_token: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: None,
+                connection_id: None,
+                oauth_client_id: None,
+                oauth_client_secret: None,
+                status: "active",
+                source: None,
+                source_id: None,
+            },
+        )
+        .await
+        .expect_err("empty label should fail");
+        assert!(matches!(err, crate::errors::AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn create_api_key_validates_invalid_credential_type() {
+        let Some(db) = connect_test_database("user_api_key_ext_bad_type").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let err = super::create_api_key(
+            &db,
+            &enc,
+            "user-1",
+            super::CreateApiKeyParams {
+                label: "Test",
+                credential_type: "unknown_type",
+                credential: "secret",
+                access_token: None,
+                refresh_token: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: None,
+                connection_id: None,
+                oauth_client_id: None,
+                oauth_client_secret: None,
+                status: "active",
+                source: None,
+                source_id: None,
+            },
+        )
+        .await
+        .expect_err("invalid type should fail");
+        assert!(matches!(err, crate::errors::AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn create_api_key_validates_invalid_status() {
+        let Some(db) = connect_test_database("user_api_key_ext_bad_status").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let err = super::create_api_key(
+            &db,
+            &enc,
+            "user-1",
+            super::CreateApiKeyParams {
+                label: "Test",
+                credential_type: "api_key",
+                credential: "secret",
+                access_token: None,
+                refresh_token: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: None,
+                connection_id: None,
+                oauth_client_id: None,
+                oauth_client_secret: None,
+                status: "invalid_status",
+                source: None,
+                source_id: None,
+            },
+        )
+        .await
+        .expect_err("invalid status should fail");
+        assert!(matches!(err, crate::errors::AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn create_api_key_rejects_mismatched_oauth_client_pair() {
+        let Some(db) = connect_test_database("user_api_key_ext_oauth_pair").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let err = super::create_api_key(
+            &db,
+            &enc,
+            "user-1",
+            super::CreateApiKeyParams {
+                label: "Test",
+                credential_type: "oauth2",
+                credential: "",
+                access_token: None,
+                refresh_token: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: None,
+                connection_id: None,
+                oauth_client_id: Some("client-id"),
+                oauth_client_secret: None,
+                status: "pending_auth",
+                source: None,
+                source_id: None,
+            },
+        )
+        .await
+        .expect_err("mismatched pair should fail");
+        assert!(matches!(err, crate::errors::AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn create_and_get_api_key_round_trips() {
+        let Some(db) = connect_test_database("user_api_key_ext_roundtrip").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let key = super::create_api_key(
+            &db,
+            &enc,
+            &user_id,
+            super::CreateApiKeyParams {
+                label: "My Key",
+                credential_type: "api_key",
+                credential: "secret-value",
+                access_token: None,
+                refresh_token: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: None,
+                connection_id: None,
+                oauth_client_id: None,
+                oauth_client_secret: None,
+                status: "active",
+                source: Some("user_created"),
+                source_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(key.label, "My Key");
+        assert_eq!(key.credential_type, "api_key");
+        assert!(key.credential_encrypted.is_some());
+
+        let fetched = super::get_api_key(&db, &user_id, &key.id).await.unwrap();
+        assert_eq!(fetched.id, key.id);
+
+        let listed = super::list_api_keys(&db, &user_id).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, key.id);
+    }
+
+    #[tokio::test]
+    async fn get_api_key_rejects_wrong_user() {
+        let Some(db) = connect_test_database("user_api_key_ext_wrong_user").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let key = super::create_api_key(
+            &db,
+            &enc,
+            &user_id,
+            super::CreateApiKeyParams {
+                label: "Mine",
+                credential_type: "api_key",
+                credential: "secret",
+                access_token: None,
+                refresh_token: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: None,
+                connection_id: None,
+                oauth_client_id: None,
+                oauth_client_secret: None,
+                status: "active",
+                source: None,
+                source_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        let err = super::get_api_key(&db, "other-user", &key.id)
+            .await
+            .expect_err("wrong user should 404");
+        assert!(matches!(err, crate::errors::AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn delete_api_key_works_when_not_referenced() {
+        let Some(db) = connect_test_database("user_api_key_ext_delete").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let key = super::create_api_key(
+            &db,
+            &enc,
+            &user_id,
+            super::CreateApiKeyParams {
+                label: "Deletable",
+                credential_type: "api_key",
+                credential: "secret",
+                access_token: None,
+                refresh_token: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: None,
+                connection_id: None,
+                oauth_client_id: None,
+                oauth_client_secret: None,
+                status: "active",
+                source: None,
+                source_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        super::delete_api_key(&db, &user_id, &key.id).await.unwrap();
+        let err = super::get_api_key(&db, &user_id, &key.id)
+            .await
+            .expect_err("should be gone");
+        assert!(matches!(err, crate::errors::AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn update_api_key_rotates_label() {
+        let Some(db) = connect_test_database("user_api_key_ext_update").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let key = super::create_api_key(
+            &db,
+            &enc,
+            &user_id,
+            super::CreateApiKeyParams {
+                label: "Old Label",
+                credential_type: "api_key",
+                credential: "secret",
+                access_token: None,
+                refresh_token: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: None,
+                connection_id: None,
+                oauth_client_id: None,
+                oauth_client_secret: None,
+                status: "active",
+                source: None,
+                source_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        super::update_api_key(&db, &enc, &user_id, &key.id, Some("New Label"), None)
+            .await
+            .unwrap();
+        let updated = super::get_api_key(&db, &user_id, &key.id).await.unwrap();
+        assert_eq!(updated.label, "New Label");
+    }
+
+    #[tokio::test]
+    async fn update_api_key_rejects_empty_body() {
+        let Some(db) = connect_test_database("user_api_key_ext_update_empty").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let err = super::update_api_key(&db, &enc, "user", "key", None, None)
+            .await
+            .expect_err("no fields should fail");
+        assert!(matches!(err, crate::errors::AppError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn write_oauth_tokens_to_key_writes_to_matching_connection() {
+        let Some(db) = connect_test_database("user_api_key_ext_write_oauth").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let connection_id = uuid::Uuid::new_v4().to_string();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let key = super::create_api_key(
+            &db,
+            &enc,
+            &user_id,
+            super::CreateApiKeyParams {
+                label: "OAuth Key",
+                credential_type: "oauth2",
+                credential: "",
+                access_token: None,
+                refresh_token: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: None,
+                connection_id: Some(&connection_id),
+                oauth_client_id: None,
+                oauth_client_secret: None,
+                status: "pending_auth",
+                source: None,
+                source_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        write_oauth_tokens_to_key(
+            &db,
+            &enc,
+            &connection_id,
+            "fresh-access",
+            Some("fresh-refresh"),
+            Some("openid"),
+            None,
+        )
+        .await
+        .unwrap();
+        let updated = get_key(&db, &key.id).await;
+        assert_eq!(updated.status, "active");
+        assert!(updated.access_token_encrypted.is_some());
+    }
+
     fn live_oauth_state(user_id: &str, provider_id: &str) -> OAuthState {
         live_oauth_state_full(user_id, None, provider_id)
     }

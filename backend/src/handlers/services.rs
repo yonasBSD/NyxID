@@ -2147,7 +2147,10 @@ pub async fn regenerate_oidc_secret(
 
 #[cfg(test)]
 mod tests {
-    use super::{UpdateServiceRequest, resolve_spec_url_update};
+    use super::{
+        UpdateServiceRequest, derive_http_service_category, derive_ssh_service_category,
+        derive_visibility, normalize_service_type, resolve_spec_url_update,
+    };
 
     // Three wire shapes on the update request need to stay distinguishable
     // so the admin can clear the field without an empty-array workaround:
@@ -2359,6 +2362,73 @@ mod tests {
         });
         let err = validate_token_exchange_config(&config).unwrap_err();
         assert!(err.to_string().contains("app_scret"));
+    }
+
+    #[test]
+    fn normalize_service_type_defaults_to_http() {
+        assert_eq!(normalize_service_type(None).unwrap(), "http");
+        assert_eq!(normalize_service_type(Some("http")).unwrap(), "http");
+        assert_eq!(normalize_service_type(Some("ssh")).unwrap(), "ssh");
+    }
+
+    #[test]
+    fn normalize_service_type_rejects_invalid() {
+        assert!(normalize_service_type(Some("grpc")).is_err());
+    }
+
+    #[test]
+    fn derive_http_service_category_oidc_is_always_provider() {
+        assert_eq!(
+            derive_http_service_category("oidc", None).unwrap(),
+            "provider"
+        );
+        assert_eq!(
+            derive_http_service_category("oidc", Some("connection")).unwrap(),
+            "provider"
+        );
+    }
+
+    #[test]
+    fn derive_http_service_category_none_is_internal() {
+        assert_eq!(
+            derive_http_service_category("none", None).unwrap(),
+            "internal"
+        );
+    }
+
+    #[test]
+    fn derive_http_service_category_rejects_provider_for_non_oidc() {
+        assert!(derive_http_service_category("bearer", Some("provider")).is_err());
+    }
+
+    #[test]
+    fn derive_ssh_service_category_defaults_to_internal() {
+        assert_eq!(derive_ssh_service_category(None).unwrap(), "internal");
+    }
+
+    #[test]
+    fn derive_ssh_service_category_rejects_provider() {
+        assert!(derive_ssh_service_category(Some("provider")).is_err());
+    }
+
+    #[test]
+    fn derive_visibility_defaults_based_on_service_type() {
+        assert_eq!(derive_visibility("http", None).unwrap(), "public");
+        assert_eq!(derive_visibility("ssh", None).unwrap(), "private");
+    }
+
+    #[test]
+    fn derive_visibility_accepts_explicit_values() {
+        assert_eq!(
+            derive_visibility("http", Some("private")).unwrap(),
+            "private"
+        );
+        assert_eq!(derive_visibility("ssh", Some("public")).unwrap(), "public");
+    }
+
+    #[test]
+    fn derive_visibility_rejects_invalid() {
+        assert!(derive_visibility("http", Some("hidden")).is_err());
     }
 
     #[test]

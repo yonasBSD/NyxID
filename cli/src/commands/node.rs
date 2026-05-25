@@ -1067,4 +1067,255 @@ mod tests {
         });
         assert_eq!(admin_label(&email_only), "member@example.com (owner)");
     }
+
+    #[test]
+    fn owner_type_label_maps_kinds() {
+        assert_eq!(owner_type_label(Some(&json!({"kind": "org"}))), Some("org"));
+        assert_eq!(
+            owner_type_label(Some(&json!({"kind": "user"}))),
+            Some("person")
+        );
+        assert_eq!(
+            owner_type_label(Some(&json!({"kind": "unknown"}))),
+            Some("unknown")
+        );
+        assert_eq!(owner_type_label(None), None);
+    }
+
+    #[test]
+    fn owner_label_shows_org_display_name() {
+        let owner = json!({
+            "kind": "org",
+            "id": "org-1",
+            "display_name": "Acme Corp"
+        });
+        assert_eq!(owner_label(Some(&owner), Some("user-1")), "Acme Corp");
+    }
+
+    #[test]
+    fn docker_container_name_uses_profile() {
+        assert_eq!(docker_container_name(None), "nyxid-node");
+        assert_eq!(docker_container_name(Some("default")), "nyxid-node");
+        assert_eq!(docker_container_name(Some("prod")), "nyxid-node-prod");
+    }
+}
+
+#[cfg(test)]
+mod wiremock_tests {
+    use super::*;
+    use crate::cli::NodeCommands;
+    use crate::test_support::mock_auth;
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn list_nodes_json_output() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/nodes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "nodes": [
+                    {"id": "n-1", "name": "my-node", "status": "online", "last_heartbeat_at": "2026-01-01T00:00:00Z"}
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(NodeCommands::List {
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("list nodes should succeed");
+    }
+
+    #[tokio::test]
+    async fn show_node_json_output() {
+        let server = MockServer::start().await;
+        let node_id = "dbf51e02-633d-4293-a896-ec0fb383f30b";
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/nodes/{node_id}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": node_id, "name": "wh", "status": "online"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/nodes/{node_id}/admins")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "admins": []
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(NodeCommands::Show {
+            id: node_id.to_string(),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("show node should succeed");
+    }
+
+    #[tokio::test]
+    async fn show_node_resolves_by_name_on_404() {
+        let server = MockServer::start().await;
+        let node_id = "dbf51e02-633d-4293-a896-ec0fb383f30b";
+        Mock::given(method("GET"))
+            .and(path("/api/v1/nodes/my-node"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({"error": "not found"})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/nodes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "nodes": [{"id": node_id, "name": "my-node"}]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/nodes/{node_id}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": node_id, "name": "my-node", "status": "online"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/nodes/{node_id}/admins")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"admins": []})))
+            .mount(&server)
+            .await;
+
+        run(NodeCommands::Show {
+            id: "my-node".to_string(),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("show by name should succeed");
+    }
+
+    #[tokio::test]
+    async fn delete_node_with_yes_flag() {
+        let server = MockServer::start().await;
+        let node_id = "dbf51e02-633d-4293-a896-ec0fb383f30b";
+        Mock::given(method("DELETE"))
+            .and(path(format!("/api/v1/nodes/{node_id}")))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(NodeCommands::Delete {
+            id: node_id.to_string(),
+            yes: true,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("delete node should succeed");
+    }
+
+    #[tokio::test]
+    async fn delete_node_surfaces_server_error() {
+        let server = MockServer::start().await;
+        let node_id = "dbf51e02-633d-4293-a896-ec0fb383f30b";
+        Mock::given(method("DELETE"))
+            .and(path(format!("/api/v1/nodes/{node_id}")))
+            .respond_with(ResponseTemplate::new(403).set_body_string("forbidden"))
+            .mount(&server)
+            .await;
+
+        let result = run(NodeCommands::Delete {
+            id: node_id.to_string(),
+            yes: true,
+            auth: mock_auth(server.uri()),
+        })
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn rotate_token_terminal_mode() {
+        let server = MockServer::start().await;
+        let node_id = "dbf51e02-633d-4293-a896-ec0fb383f30b";
+        Mock::given(method("POST"))
+            .and(path(format!("/api/v1/nodes/{node_id}/rotate-token")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "token": "nyx_nauth_new_token"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(NodeCommands::RotateToken {
+            id: node_id.to_string(),
+            terminal: true,
+            no_wait: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("rotate-token should succeed");
+    }
+
+    #[tokio::test]
+    async fn rotate_token_surfaces_server_error() {
+        let server = MockServer::start().await;
+        let node_id = "dbf51e02-633d-4293-a896-ec0fb383f30b";
+        Mock::given(method("POST"))
+            .and(path(format!("/api/v1/nodes/{node_id}/rotate-token")))
+            .respond_with(ResponseTemplate::new(500).set_body_string("internal error"))
+            .mount(&server)
+            .await;
+
+        let result = run(NodeCommands::RotateToken {
+            id: node_id.to_string(),
+            terminal: true,
+            no_wait: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn list_nodes_empty_array() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/nodes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "nodes": [] })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(NodeCommands::List {
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("list empty nodes should succeed");
+    }
+
+    #[tokio::test]
+    async fn register_token_terminal_mode() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/nodes/register-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "token": "nyx_nreg_test",
+                "expires_at": "2026-06-01T00:00:00Z"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(NodeCommands::RegisterToken {
+            name: Some("test-node".to_string()),
+            org: None,
+            terminal: true,
+            no_wait: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("register-token should succeed");
+    }
 }

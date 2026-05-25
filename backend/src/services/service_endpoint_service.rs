@@ -303,3 +303,206 @@ pub async fn bulk_upsert_endpoints(
 
     Ok(result_endpoints)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::*;
+
+    fn make_input(name: &str, method: &str, path: &str) -> EndpointInput {
+        EndpointInput {
+            name: name.to_string(),
+            description: Some(format!("{name} endpoint")),
+            method: method.to_string(),
+            path: path.to_string(),
+            parameters: None,
+            request_body_schema: None,
+            request_content_type: None,
+            request_body_required: false,
+            response_description: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_endpoint() {
+        let Some(db) = connect_test_database("svc_endpoint").await else {
+            return;
+        };
+        let service_id = Uuid::new_v4().to_string();
+
+        let ep = create_endpoint(&db, &service_id, make_input("list_users", "get", "/users"))
+            .await
+            .unwrap();
+
+        assert_eq!(ep.service_id, service_id);
+        assert_eq!(ep.name, "list_users");
+        assert_eq!(ep.method, "GET");
+        assert_eq!(ep.path, "/users");
+        assert!(ep.is_active);
+    }
+
+    #[tokio::test]
+    async fn test_list_endpoints_filters_inactive() {
+        let Some(db) = connect_test_database("svc_endpoint").await else {
+            return;
+        };
+        let service_id = Uuid::new_v4().to_string();
+
+        create_endpoint(&db, &service_id, make_input("active_ep", "get", "/a"))
+            .await
+            .unwrap();
+        let inactive = create_endpoint(&db, &service_id, make_input("inactive_ep", "post", "/b"))
+            .await
+            .unwrap();
+
+        db.collection::<ServiceEndpoint>(COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": &inactive.id },
+                doc! { "$set": { "is_active": false } },
+            )
+            .await
+            .unwrap();
+
+        let endpoints = list_endpoints(&db, &service_id).await.unwrap();
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0].name, "active_ep");
+    }
+
+    #[tokio::test]
+    async fn test_update_endpoint_partial() {
+        let Some(db) = connect_test_database("svc_endpoint").await else {
+            return;
+        };
+        let service_id = Uuid::new_v4().to_string();
+
+        let ep = create_endpoint(&db, &service_id, make_input("ep1", "get", "/old"))
+            .await
+            .unwrap();
+
+        update_endpoint(
+            &db,
+            &ep.id,
+            EndpointUpdate {
+                name: Some("ep1_renamed".to_string()),
+                description: None,
+                method: Some("post".to_string()),
+                path: Some("/new".to_string()),
+                parameters: None,
+                request_body_schema: None,
+                request_content_type: None,
+                request_body_required: None,
+                response_description: None,
+                is_active: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let updated = db
+            .collection::<ServiceEndpoint>(COLLECTION_NAME)
+            .find_one(doc! { "_id": &ep.id })
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(updated.name, "ep1_renamed");
+        assert_eq!(updated.method, "POST");
+        assert_eq!(updated.path, "/new");
+    }
+
+    #[tokio::test]
+    async fn test_update_endpoint_not_found() {
+        let Some(db) = connect_test_database("svc_endpoint").await else {
+            return;
+        };
+
+        let result = update_endpoint(
+            &db,
+            "nonexistent-id",
+            EndpointUpdate {
+                name: Some("x".to_string()),
+                description: None,
+                method: None,
+                path: None,
+                parameters: None,
+                request_body_schema: None,
+                request_content_type: None,
+                request_body_required: None,
+                response_description: None,
+                is_active: None,
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_delete_endpoint() {
+        let Some(db) = connect_test_database("svc_endpoint").await else {
+            return;
+        };
+        let service_id = Uuid::new_v4().to_string();
+
+        let ep = create_endpoint(&db, &service_id, make_input("to_delete", "delete", "/x"))
+            .await
+            .unwrap();
+        delete_endpoint(&db, &ep.id).await.unwrap();
+
+        let count = db
+            .collection::<ServiceEndpoint>(COLLECTION_NAME)
+            .count_documents(doc! { "_id": &ep.id })
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_delete_endpoint_not_found() {
+        let Some(db) = connect_test_database("svc_endpoint").await else {
+            return;
+        };
+
+        let result = delete_endpoint(&db, "nonexistent-id").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_bulk_upsert_endpoints() {
+        let Some(db) = connect_test_database("svc_endpoint").await else {
+            return;
+        };
+        let service_id = Uuid::new_v4().to_string();
+
+        create_endpoint(&db, &service_id, make_input("ep_a", "get", "/a"))
+            .await
+            .unwrap();
+        create_endpoint(&db, &service_id, make_input("ep_b", "get", "/b"))
+            .await
+            .unwrap();
+        create_endpoint(&db, &service_id, make_input("ep_c", "get", "/c"))
+            .await
+            .unwrap();
+
+        let inputs = vec![
+            make_input("ep_a", "put", "/a_updated"),
+            make_input("ep_d", "post", "/d_new"),
+        ];
+        let results = bulk_upsert_endpoints(&db, &service_id, inputs)
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].name, "ep_a");
+        assert_eq!(results[0].method, "PUT");
+        assert_eq!(results[0].path, "/a_updated");
+        assert_eq!(results[1].name, "ep_d");
+
+        let active = list_endpoints(&db, &service_id).await.unwrap();
+        let active_names: Vec<&str> = active.iter().map(|e| e.name.as_str()).collect();
+        assert!(active_names.contains(&"ep_a"));
+        assert!(active_names.contains(&"ep_d"));
+        assert!(!active_names.contains(&"ep_b"));
+        assert!(!active_names.contains(&"ep_c"));
+    }
+}

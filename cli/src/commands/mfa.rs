@@ -187,4 +187,71 @@ mod tests {
         .await
         .expect("mfa status should succeed");
     }
+
+    #[tokio::test]
+    async fn setup_table_renders_secret_and_qr() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/mfa/setup"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "secret": "TOTP123", "otpauth_url": "otpauth://totp/NyxID:test"
+            })))
+            .mount(&server)
+            .await;
+
+        run(MfaCommands::Setup {
+            terminal: true,
+            no_wait: false,
+            auth: crate::test_support::mock_auth_with_output(
+                server.uri(),
+                crate::cli::OutputFormat::Table,
+            ),
+        })
+        .await
+        .expect("setup table should succeed");
+    }
+
+    #[tokio::test]
+    async fn verify_table_renders_recovery_codes() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/mfa/confirm"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "recovery_codes": ["aaaa-bbbb", "cccc-dddd"]
+            })))
+            .mount(&server)
+            .await;
+
+        run(MfaCommands::Verify {
+            code: "999999".to_string(),
+            auth: crate::test_support::mock_auth_with_output(
+                server.uri(),
+                crate::cli::OutputFormat::Table,
+            ),
+        })
+        .await
+        .expect("verify table should succeed");
+    }
+
+    #[tokio::test]
+    async fn status_table_disabled() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/users/me"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "mfa_enabled": false })),
+            )
+            .mount(&server)
+            .await;
+
+        run(MfaCommands::Status {
+            auth: crate::test_support::mock_auth_with_output(
+                server.uri(),
+                crate::cli::OutputFormat::Table,
+            ),
+        })
+        .await
+        .expect("status disabled table should succeed");
+    }
 }

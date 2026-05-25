@@ -797,4 +797,133 @@ mod tests {
         assert!(!VerifyError::Expired.should_refresh_keys());
         assert!(!VerifyError::Other("x".to_string()).should_refresh_keys());
     }
+
+    #[test]
+    fn verify_error_into_app_error_messages() {
+        let e = VerifyError::NoMatchingKey.into_app_error();
+        assert!(matches!(e, AppError::ExternalTokenInvalid(_)));
+        let e = VerifyError::Expired.into_app_error();
+        assert!(matches!(e, AppError::ExternalTokenInvalid(m) if m.contains("expired")));
+        let e = VerifyError::InvalidAudience.into_app_error();
+        assert!(matches!(e, AppError::ExternalTokenInvalid(m) if m.contains("audience")));
+        let e = VerifyError::InvalidIssuer.into_app_error();
+        assert!(matches!(e, AppError::ExternalTokenInvalid(m) if m.contains("issuer")));
+    }
+
+    #[test]
+    fn parse_cache_control_max_age_exact_boundaries() {
+        assert_eq!(
+            parse_cache_control_max_age(Some("max-age=300")),
+            Duration::from_secs(300)
+        );
+        assert_eq!(
+            parse_cache_control_max_age(Some("max-age=86400")),
+            Duration::from_secs(86400)
+        );
+    }
+
+    #[test]
+    fn parse_jwk_valid_ec_p256() {
+        let jwk = JwkKey {
+            kty: "EC".to_string(),
+            kid: Some("ec-kid".to_string()),
+            alg: Some("ES256".to_string()),
+            crv: Some("P-256".to_string()),
+            // Real P-256 public key coordinates (from test vectors)
+            x: Some("f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU".to_string()),
+            y: Some("x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0".to_string()),
+            n: None,
+            e: None,
+            key_use: Some("sig".to_string()),
+        };
+        let result = parse_jwk(&jwk);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().algorithm, Algorithm::ES256);
+    }
+
+    #[test]
+    fn parse_jwk_rejects_ec_wrong_curve() {
+        let jwk = JwkKey {
+            kty: "EC".to_string(),
+            kid: Some("ec-kid".to_string()),
+            alg: Some("ES256".to_string()),
+            crv: Some("P-384".to_string()),
+            x: Some("x".to_string()),
+            y: Some("y".to_string()),
+            n: None,
+            e: None,
+            key_use: Some("sig".to_string()),
+        };
+        assert!(parse_jwk(&jwk).is_none());
+    }
+
+    #[test]
+    fn apple_email_verified_handles_none() {
+        let claims = AppleIdTokenClaims {
+            sub: "u".into(),
+            iss: APPLE_ISSUER.into(),
+            aud: "a".into(),
+            exp: 0,
+            iat: 0,
+            email: None,
+            email_verified: None,
+            is_private_email: None,
+            real_user_status: None,
+            nonce: None,
+        };
+        assert_eq!(claims.is_email_verified(), None);
+    }
+
+    #[test]
+    fn apple_email_verified_handles_unexpected_string() {
+        let claims = AppleIdTokenClaims {
+            sub: "u".into(),
+            iss: APPLE_ISSUER.into(),
+            aud: "a".into(),
+            exp: 0,
+            iat: 0,
+            email: None,
+            email_verified: Some(serde_json::Value::String("maybe".into())),
+            is_private_email: None,
+            real_user_status: None,
+            nonce: None,
+        };
+        assert_eq!(claims.is_email_verified(), None);
+    }
+
+    #[test]
+    fn validate_apple_claims_rejects_empty_sub() {
+        let now = chrono::Utc::now().timestamp();
+        let claims = AppleIdTokenClaims {
+            sub: String::new(),
+            iss: APPLE_ISSUER.into(),
+            aud: "a".into(),
+            exp: now + 3600,
+            iat: now,
+            email: None,
+            email_verified: None,
+            is_private_email: None,
+            real_user_status: None,
+            nonce: None,
+        };
+        assert!(validate_apple_claims(claims).is_err());
+    }
+
+    #[test]
+    fn validate_apple_claims_rejects_future_iat() {
+        let future = chrono::Utc::now().timestamp() + 60;
+        let claims = AppleIdTokenClaims {
+            sub: "u".into(),
+            iss: APPLE_ISSUER.into(),
+            aud: "a".into(),
+            exp: future + 3600,
+            iat: future,
+            email: None,
+            email_verified: None,
+            is_private_email: None,
+            real_user_status: None,
+            nonce: None,
+        };
+        assert!(validate_apple_claims(claims).is_err());
+    }
 }

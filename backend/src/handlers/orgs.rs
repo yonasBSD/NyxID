@@ -1030,8 +1030,8 @@ pub async fn set_primary_org(
 #[cfg(test)]
 mod tests {
     use super::{
-        CreateOrgRequest, UpdateMemberRequest, UpdateOrgRequest, create_org, get_org, list_orgs,
-        update_org,
+        CreateOrgRequest, MemberScopeSourceWire, OrgRoleWire, UpdateMemberRequest,
+        UpdateOrgRequest, create_org, get_org, list_orgs, update_org,
     };
     use crate::db::{ensure_indexes, migrate_backfill_org_slugs};
     use crate::errors::AppError;
@@ -1047,6 +1047,7 @@ mod tests {
     use bson::doc;
     use futures::TryStreamExt;
     use uuid::Uuid;
+    use validator::Validate;
 
     // Regression tests for ChronoAIProject/NyxID#363: `allowed_service_ids:
     // null` in PATCH /orgs/{id}/members/{id} must clear the scope. With
@@ -1086,6 +1087,105 @@ mod tests {
         let req: UpdateMemberRequest =
             serde_json::from_str(r#"{"role": "member", "allowed_service_ids": []}"#).unwrap();
         assert_eq!(req.allowed_service_ids, Some(Some(vec![])));
+    }
+
+    #[test]
+    fn org_role_wire_roundtrip() {
+        assert_eq!(OrgRoleWire::from(OrgRole::Admin), OrgRoleWire::Admin);
+        assert_eq!(OrgRoleWire::from(OrgRole::Member), OrgRoleWire::Member);
+        assert_eq!(OrgRoleWire::from(OrgRole::Viewer), OrgRoleWire::Viewer);
+        assert_eq!(OrgRole::from(OrgRoleWire::Admin), OrgRole::Admin);
+        assert_eq!(OrgRole::from(OrgRoleWire::Member), OrgRole::Member);
+        assert_eq!(OrgRole::from(OrgRoleWire::Viewer), OrgRole::Viewer);
+    }
+
+    #[test]
+    fn member_scope_source_wire_roundtrip() {
+        use crate::models::org_membership::MemberScopeSource;
+        assert_eq!(
+            MemberScopeSourceWire::from(MemberScopeSource::Inherit),
+            MemberScopeSourceWire::Inherit
+        );
+        assert_eq!(
+            MemberScopeSourceWire::from(MemberScopeSource::Override),
+            MemberScopeSourceWire::Override
+        );
+        assert_eq!(
+            MemberScopeSource::from(MemberScopeSourceWire::Inherit),
+            MemberScopeSource::Inherit
+        );
+        assert_eq!(
+            MemberScopeSource::from(MemberScopeSourceWire::Override),
+            MemberScopeSource::Override
+        );
+    }
+
+    #[test]
+    fn resolve_scope_source_for_create_inherits_by_default() {
+        use crate::models::org_membership::MemberScopeSource;
+        assert_eq!(
+            super::resolve_scope_source_for_create(None, None),
+            MemberScopeSource::Inherit
+        );
+    }
+
+    #[test]
+    fn resolve_scope_source_for_create_overrides_when_service_ids_present() {
+        use crate::models::org_membership::MemberScopeSource;
+        let ids = vec!["svc-1".to_string()];
+        assert_eq!(
+            super::resolve_scope_source_for_create(None, Some(&ids)),
+            MemberScopeSource::Override
+        );
+    }
+
+    #[test]
+    fn resolve_scope_source_for_create_explicit_wins() {
+        use crate::models::org_membership::MemberScopeSource;
+        let ids = vec!["svc-1".to_string()];
+        assert_eq!(
+            super::resolve_scope_source_for_create(
+                Some(MemberScopeSourceWire::Inherit),
+                Some(&ids)
+            ),
+            MemberScopeSource::Inherit
+        );
+    }
+
+    #[test]
+    fn resolve_scope_source_for_update_returns_none_when_nothing_set() {
+        assert!(super::resolve_scope_source_for_update(None, None).is_none());
+    }
+
+    #[test]
+    fn resolve_scope_source_for_update_uses_explicit() {
+        use crate::models::org_membership::MemberScopeSource;
+        assert_eq!(
+            super::resolve_scope_source_for_update(Some(MemberScopeSourceWire::Override), None),
+            Some(MemberScopeSource::Override)
+        );
+    }
+
+    #[test]
+    fn create_org_request_validation() {
+        let req = CreateOrgRequest {
+            display_name: String::new(),
+            contact_email: None,
+            avatar_url: None,
+        };
+        assert!(req.validate().is_err());
+        let req2 = CreateOrgRequest {
+            display_name: "x".repeat(129),
+            contact_email: None,
+            avatar_url: None,
+        };
+        assert!(req2.validate().is_err());
+        let req3 = CreateOrgRequest {
+            display_name: "Valid".to_string(),
+            contact_email: Some("bad".to_string()),
+            avatar_url: None,
+        };
+        assert!(req3.validate().is_err());
     }
 
     #[tokio::test]

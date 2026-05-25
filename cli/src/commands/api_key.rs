@@ -946,6 +946,169 @@ mod option_tests {
     }
 
     #[tokio::test]
+    async fn create_table_output_with_expiry() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/api-keys"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "name": "k", "full_key": "nyxid_ag_x", "scopes": "read write",
+                "expires_at": "2027-01-01T00:00:00Z"
+            })))
+            .mount(&server)
+            .await;
+
+        run(ApiKeyCommands::Create {
+            name: Some("k".to_string()),
+            scopes: Some("read write".to_string()),
+            expires_in_days: Some(30),
+            allowed_services: None,
+            allowed_nodes: None,
+            allow_all_services: false,
+            allow_all_nodes: false,
+            platform: None,
+            callback_url: None,
+            org: None,
+            terminal: true,
+            no_wait: false,
+            auth: crate::test_support::mock_auth_with_output(
+                server.uri(),
+                crate::cli::OutputFormat::Table,
+            ),
+        })
+        .await
+        .expect("create table should succeed");
+    }
+
+    #[tokio::test]
+    async fn list_table_renders_scope_columns() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/api-keys"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "keys": [{
+                    "id": "key-1", "name": "agent", "scopes": "read",
+                    "allow_all_services": false, "allow_all_nodes": false,
+                    "allowed_services": [{"slug": "openai"}],
+                    "allowed_nodes": [{"name": "laptop"}],
+                    "last_used_at": "2026-05-20T00:00:00Z"
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        run(ApiKeyCommands::List {
+            org: None,
+            auth: crate::test_support::mock_auth_with_output(
+                server.uri(),
+                crate::cli::OutputFormat::Table,
+            ),
+        })
+        .await
+        .expect("list table should succeed");
+    }
+
+    #[tokio::test]
+    async fn list_table_empty() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/api-keys"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "keys": [] })),
+            )
+            .mount(&server)
+            .await;
+
+        run(ApiKeyCommands::List {
+            org: None,
+            auth: crate::test_support::mock_auth_with_output(
+                server.uri(),
+                crate::cli::OutputFormat::Table,
+            ),
+        })
+        .await
+        .expect("empty list should succeed");
+    }
+
+    #[tokio::test]
+    async fn show_table_renders_scope_fields() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/api-keys/key-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "key-1", "name": "agent", "scopes": "read write",
+                "key_prefix": "nyxid_ag_", "expires_at": "2027-01-01",
+                "last_used_at": "2026-05-20", "allow_all_services": true,
+                "allow_all_nodes": true,
+                "allowed_service_ids": ["svc-a"],
+                "allowed_node_ids": ["node-a"]
+            })))
+            .mount(&server)
+            .await;
+
+        run(ApiKeyCommands::Show {
+            id: "key-1".to_string(),
+            auth: crate::test_support::mock_auth_with_output(
+                server.uri(),
+                crate::cli::OutputFormat::Table,
+            ),
+        })
+        .await
+        .expect("show table should succeed");
+    }
+
+    #[tokio::test]
+    async fn rotate_table_output() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/api-keys/key-1/rotate"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "full_key": "nyxid_ag_new" })),
+            )
+            .mount(&server)
+            .await;
+
+        run(ApiKeyCommands::Rotate {
+            id: "key-1".to_string(),
+            terminal: true,
+            no_wait: false,
+            auth: crate::test_support::mock_auth_with_output(
+                server.uri(),
+                crate::cli::OutputFormat::Table,
+            ),
+        })
+        .await
+        .expect("rotate table should succeed");
+    }
+
+    #[tokio::test]
+    async fn update_clears_callback_url_with_empty_string() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/api-keys/key-1"))
+            .and(body_partial_json(
+                serde_json::json!({ "callback_url": null }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+
+        run(ApiKeyCommands::Update {
+            id: "key-1".to_string(),
+            name: None,
+            scopes: None,
+            allowed_services: None,
+            allowed_nodes: None,
+            allow_all_services: None,
+            allow_all_nodes: None,
+            callback_url: Some(String::new()),
+            auth: crate::test_support::mock_auth(server.uri()),
+        })
+        .await
+        .expect("update clear callback should succeed");
+    }
+
+    #[tokio::test]
     async fn bind_explicit_credential_label_overrides_service_default() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))

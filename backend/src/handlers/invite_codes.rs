@@ -281,3 +281,209 @@ pub async fn deactivate_invite_code(
         message: "Invite code deactivated".to_string(),
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+    use crate::services::role_service;
+    use crate::test_utils::{connect_test_database, test_app_state, test_auth_user, test_user};
+    use axum::extract::{ConnectInfo, Path, State};
+    use uuid::Uuid;
+
+    async fn insert_admin(db: &mongodb::Database) -> String {
+        role_service::seed_system_roles(db)
+            .await
+            .expect("seed platform roles");
+        let platform_role_ids = role_service::get_platform_role_ids(db)
+            .await
+            .expect("platform role ids");
+        let id = Uuid::new_v4().to_string();
+        let mut user = test_user(&id, UserType::Person);
+        user.role_ids.push(platform_role_ids.admin);
+        db.collection::<User>(USERS)
+            .insert_one(&user)
+            .await
+            .expect("insert admin user");
+        id
+    }
+
+    fn test_peer() -> ConnectInfo<SocketAddr> {
+        ConnectInfo("127.0.0.1:12345".parse().unwrap())
+    }
+
+    #[tokio::test]
+    async fn test_create_invite_code() {
+        let Some(db) = connect_test_database("h_invite_codes_create").await else {
+            return;
+        };
+        let admin_id = insert_admin(&db).await;
+        let state = test_app_state(db);
+
+        let result = create_invite_code(
+            State(state),
+            test_peer(),
+            test_auth_user(&admin_id),
+            TelemetryContext::default(),
+            HeaderMap::new(),
+            Json(CreateInviteCodeRequest {
+                max_uses: Some(5),
+                note: Some("Test invite".to_string()),
+            }),
+        )
+        .await
+        .expect("create_invite_code should succeed");
+
+        assert_eq!(result.0.max_uses, 5);
+        assert_eq!(result.0.used_count, 0);
+        assert!(result.0.is_active);
+        assert!(!result.0.code.is_empty());
+        assert_eq!(result.0.note, Some("Test invite".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_list_invite_codes() {
+        let Some(db) = connect_test_database("h_invite_codes_list").await else {
+            return;
+        };
+        let admin_id = insert_admin(&db).await;
+        let state = test_app_state(db);
+
+        let _ = create_invite_code(
+            State(state.clone()),
+            test_peer(),
+            test_auth_user(&admin_id),
+            TelemetryContext::default(),
+            HeaderMap::new(),
+            Json(CreateInviteCodeRequest {
+                max_uses: None,
+                note: None,
+            }),
+        )
+        .await
+        .expect("create_invite_code should succeed");
+
+        let result = list_invite_codes(State(state), test_auth_user(&admin_id))
+            .await
+            .expect("list_invite_codes should succeed");
+
+        assert_eq!(result.0.invite_codes.len(), 1);
+        assert!(result.0.invite_codes[0].is_active);
+    }
+
+    #[tokio::test]
+    async fn test_create_invite_code_default_max_uses() {
+        let Some(db) = connect_test_database("h_invite_codes_defaults").await else {
+            return;
+        };
+        let admin_id = insert_admin(&db).await;
+        let state = test_app_state(db);
+
+        let result = create_invite_code(
+            State(state),
+            test_peer(),
+            test_auth_user(&admin_id),
+            TelemetryContext::default(),
+            HeaderMap::new(),
+            Json(CreateInviteCodeRequest {
+                max_uses: None,
+                note: None,
+            }),
+        )
+        .await
+        .expect("create_invite_code should succeed");
+
+        assert_eq!(result.0.max_uses, 10);
+        assert!(result.0.note.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_update_invite_code() {
+        let Some(db) = connect_test_database("h_invite_codes_update").await else {
+            return;
+        };
+        let admin_id = insert_admin(&db).await;
+        let state = test_app_state(db);
+
+        let created = create_invite_code(
+            State(state.clone()),
+            test_peer(),
+            test_auth_user(&admin_id),
+            TelemetryContext::default(),
+            HeaderMap::new(),
+            Json(CreateInviteCodeRequest {
+                max_uses: Some(3),
+                note: None,
+            }),
+        )
+        .await
+        .expect("create_invite_code should succeed");
+
+        let code_id = created.0.id.clone();
+
+        let result = update_invite_code(
+            State(state),
+            test_peer(),
+            test_auth_user(&admin_id),
+            HeaderMap::new(),
+            Path(code_id.clone()),
+            Json(UpdateInviteCodeRequest {
+                note: Some("Updated note".to_string()),
+            }),
+        )
+        .await
+        .expect("update_invite_code should succeed");
+
+        assert_eq!(result.0.id, code_id);
+        assert_eq!(result.0.note, Some("Updated note".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_deactivate_invite_code() {
+        let Some(db) = connect_test_database("h_invite_codes_deactivate").await else {
+            return;
+        };
+        let admin_id = insert_admin(&db).await;
+        let state = test_app_state(db);
+
+        let created = create_invite_code(
+            State(state.clone()),
+            test_peer(),
+            test_auth_user(&admin_id),
+            TelemetryContext::default(),
+            HeaderMap::new(),
+            Json(CreateInviteCodeRequest {
+                max_uses: Some(10),
+                note: None,
+            }),
+        )
+        .await
+        .expect("create_invite_code should succeed");
+
+        let code_id = created.0.id.clone();
+
+        let result = deactivate_invite_code(
+            State(state.clone()),
+            test_peer(),
+            test_auth_user(&admin_id),
+            HeaderMap::new(),
+            Path(code_id.clone()),
+        )
+        .await
+        .expect("deactivate_invite_code should succeed");
+
+        assert_eq!(result.0.message, "Invite code deactivated");
+
+        let list = list_invite_codes(State(state), test_auth_user(&admin_id))
+            .await
+            .expect("list_invite_codes should succeed");
+
+        let deactivated = list
+            .0
+            .invite_codes
+            .iter()
+            .find(|ic| ic.id == code_id)
+            .expect("code should still be in list");
+        assert!(!deactivated.is_active);
+    }
+}

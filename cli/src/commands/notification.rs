@@ -207,6 +207,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn settings_table_output() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/notifications/settings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "push_enabled": false, "telegram_enabled": true,
+                "telegram_connected": true, "approval_required": false
+            })))
+            .mount(&server)
+            .await;
+
+        run(NotificationCommands::Settings {
+            auth: crate::test_support::mock_auth_with_output(
+                server.uri(),
+                crate::cli::OutputFormat::Table,
+            ),
+        })
+        .await
+        .expect("settings table should succeed");
+    }
+
+    #[tokio::test]
+    async fn telegram_link_table_output() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/notifications/telegram/link"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "link_code": "XYZ", "bot_username": "nyxid_bot",
+                "instructions": "Send /start then the code"
+            })))
+            .mount(&server)
+            .await;
+
+        run(NotificationCommands::TelegramLink {
+            auth: crate::test_support::mock_auth_with_output(
+                server.uri(),
+                crate::cli::OutputFormat::Table,
+            ),
+        })
+        .await
+        .expect("telegram link table should succeed");
+    }
+
+    #[tokio::test]
     async fn telegram_disconnect_deletes() {
         let server = MockServer::start().await;
         Mock::given(method("DELETE"))

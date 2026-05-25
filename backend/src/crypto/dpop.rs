@@ -310,4 +310,71 @@ mod tests {
 
         assert!(validate_proof(&proof, "POST", htu, &cache).is_err());
     }
+
+    #[test]
+    fn canonicalize_htu_strips_query_and_fragment() {
+        let result = canonicalize_htu("https://example.com/path?q=1#frag").unwrap();
+        assert_eq!(result, "https://example.com/path");
+    }
+
+    #[test]
+    fn canonicalize_htu_lowercases_scheme_and_host() {
+        let result = canonicalize_htu("HTTPS://EXAMPLE.COM/Path").unwrap();
+        assert_eq!(result, "https://example.com/Path");
+    }
+
+    #[test]
+    fn canonicalize_htu_rejects_invalid_uri() {
+        assert!(canonicalize_htu("not a url").is_err());
+    }
+
+    #[test]
+    fn htu_from_base_and_path_constructs_correctly() {
+        let htu = htu_from_base_and_path("https://auth.example.com/", "/oauth/token").unwrap();
+        assert_eq!(htu, "https://auth.example.com/oauth/token");
+    }
+
+    #[test]
+    fn jwk_thumbprint_ec_key() {
+        let jwk = Jwk {
+            kty: "EC".to_string(),
+            crv: Some("P-256".to_string()),
+            x: Some("test_x".to_string()),
+            y: Some("test_y".to_string()),
+            e: None,
+            n: None,
+        };
+        let t = jwk_thumbprint(&jwk);
+        assert!(!t.is_empty());
+        // base64url-no-pad encoded SHA-256 should be 43 chars
+        assert_eq!(t.len(), 43);
+    }
+
+    #[test]
+    fn jwk_thumbprint_unknown_kty_returns_empty() {
+        let jwk = Jwk {
+            kty: "OKP".into(),
+            crv: None,
+            x: None,
+            y: None,
+            e: None,
+            n: None,
+        };
+        assert_eq!(jwk_thumbprint(&jwk), "");
+    }
+
+    #[test]
+    fn validate_proof_rejects_htu_mismatch() {
+        let (encoding_key, jwk) = test_dpop_keypair();
+        let cache = DpopJtiCache::new(16, std::time::Duration::from_secs(600));
+        let proof = sign_test_proof(
+            &encoding_key,
+            &jwk,
+            "POST",
+            "https://wrong.com/token",
+            Utc::now().timestamp(),
+            &Uuid::new_v4().to_string(),
+        );
+        assert!(validate_proof(&proof, "POST", "https://right.com/token", &cache).is_err());
+    }
 }

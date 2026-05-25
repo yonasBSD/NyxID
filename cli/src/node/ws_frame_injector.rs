@@ -173,3 +173,133 @@ fn default_direction_downstream() -> WsFrameDirection {
 fn default_true() -> bool {
     true
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn make_rule(
+        trigger: WsFrameTrigger,
+        template: &str,
+        direction: WsFrameDirection,
+    ) -> WsFrameInjection {
+        WsFrameInjection {
+            trigger,
+            template: template.to_string(),
+            frame_kind: WsFrameKind::Text,
+            consume_trigger: true,
+            direction,
+        }
+    }
+
+    fn make_text_frame(direction: WsFrameDirection, payload: &str) -> IncomingFrame {
+        IncomingFrame {
+            direction,
+            kind: WsFrameKind::Text,
+            payload: payload.as_bytes().to_vec(),
+        }
+    }
+
+    #[test]
+    fn evaluate_first_frame_trigger_fires_on_first_downstream() {
+        let rules = vec![make_rule(
+            WsFrameTrigger::FirstFrameFromDownstream,
+            r#"{"auth":"${credential}"}"#,
+            WsFrameDirection::Downstream,
+        )];
+        let mut state = InjectorState::default();
+        let frame = make_text_frame(WsFrameDirection::Downstream, "hello");
+
+        let action = evaluate(&rules, &mut state, &frame, "secret123").unwrap();
+        assert_eq!(action.trigger_kind, "first_frame_from_downstream");
+        assert_eq!(action.frame_index_in, 0);
+        assert!(!action.forward_original);
+        assert_eq!(
+            String::from_utf8(action.send_frame.payload.clone()).unwrap(),
+            r#"{"auth":"secret123"}"#
+        );
+    }
+
+    #[test]
+    fn evaluate_first_frame_trigger_does_not_fire_on_second() {
+        let rules = vec![make_rule(
+            WsFrameTrigger::FirstFrameFromDownstream,
+            "inject",
+            WsFrameDirection::Downstream,
+        )];
+        let mut state = InjectorState::default();
+        let frame = make_text_frame(WsFrameDirection::Downstream, "hello");
+
+        let _ = evaluate(&rules, &mut state, &frame, "cred");
+        let second = evaluate(&rules, &mut state, &frame, "cred");
+        assert!(second.is_none());
+    }
+
+    #[test]
+    fn evaluate_frame_index_trigger() {
+        let rules = vec![make_rule(
+            WsFrameTrigger::FrameIndexFromDownstream { index: 2 },
+            "injected",
+            WsFrameDirection::Downstream,
+        )];
+        let mut state = InjectorState::default();
+        let frame = make_text_frame(WsFrameDirection::Downstream, "data");
+
+        assert!(evaluate(&rules, &mut state, &frame, "c").is_none());
+        assert!(evaluate(&rules, &mut state, &frame, "c").is_none());
+        let action = evaluate(&rules, &mut state, &frame, "c").unwrap();
+        assert_eq!(action.trigger_kind, "frame_index_from_downstream");
+        assert_eq!(action.frame_index_in, 2);
+    }
+
+    #[test]
+    fn evaluate_json_field_equals_trigger() {
+        let rules = vec![make_rule(
+            WsFrameTrigger::JsonFieldEquals {
+                path: "$.type".to_string(),
+                value: json!("auth_required"),
+            },
+            r#"{"token":"${credential}"}"#,
+            WsFrameDirection::Downstream,
+        )];
+        let mut state = InjectorState::default();
+        let frame = make_text_frame(
+            WsFrameDirection::Downstream,
+            r#"{"type":"auth_required","msg":"hello"}"#,
+        );
+
+        let action = evaluate(&rules, &mut state, &frame, "my-key").unwrap();
+        assert_eq!(action.trigger_kind, "json_field_equals");
+        assert_eq!(
+            String::from_utf8(action.send_frame.payload.clone()).unwrap(),
+            r#"{"token":"my-key"}"#
+        );
+    }
+
+    #[test]
+    fn evaluate_respects_max_injections_limit() {
+        let rules = vec![make_rule(
+            WsFrameTrigger::FrameIndexFromDownstream { index: 0 },
+            "inject",
+            WsFrameDirection::Downstream,
+        )];
+        let mut state = InjectorState {
+            downstream_frame_index: 0,
+            upstream_frame_index: 0,
+            total_injections_fired: MAX_INJECTIONS_PER_CONNECTION,
+        };
+        let frame = make_text_frame(WsFrameDirection::Downstream, "data");
+
+        assert!(evaluate(&rules, &mut state, &frame, "c").is_none());
+    }
+
+    #[test]
+    fn get_json_path_value_traverses_nested_objects() {
+        let val = json!({"a": {"b": {"c": 42}}});
+        assert_eq!(get_json_path_value(&val, "$.a.b.c"), Some(&json!(42)));
+        assert!(get_json_path_value(&val, "$.a.x").is_none());
+        assert!(get_json_path_value(&val, "no_prefix").is_none());
+        assert!(get_json_path_value(&val, "$.").is_none());
+    }
+}

@@ -73,3 +73,65 @@ pub async fn security_headers_middleware(request: Request<Body>, next: Next) -> 
 
     response
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::StatusCode;
+    use axum::{Router, routing::get};
+    use tower::ServiceExt;
+
+    async fn ok_handler() -> StatusCode {
+        StatusCode::OK
+    }
+
+    async fn custom_csp_handler() -> Response {
+        let mut resp = Response::new(Body::empty());
+        resp.headers_mut().insert(
+            header::CONTENT_SECURITY_POLICY,
+            "default-src 'self'".parse().unwrap(),
+        );
+        resp
+    }
+
+    #[tokio::test]
+    async fn injects_all_security_headers() {
+        let app = Router::new()
+            .route("/test", get(ok_handler))
+            .layer(axum::middleware::from_fn(security_headers_middleware));
+        let resp = app
+            .oneshot(Request::builder().uri("/test").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert!(
+            resp.headers()
+                .contains_key(header::STRICT_TRANSPORT_SECURITY)
+        );
+        assert!(resp.headers().contains_key(header::X_CONTENT_TYPE_OPTIONS));
+        assert!(resp.headers().contains_key(header::X_FRAME_OPTIONS));
+        assert!(resp.headers().contains_key(header::CONTENT_SECURITY_POLICY));
+        assert!(resp.headers().contains_key(header::REFERRER_POLICY));
+        assert!(resp.headers().contains_key(header::CACHE_CONTROL));
+        assert!(resp.headers().contains_key(header::PRAGMA));
+        assert_eq!(
+            resp.headers().get(header::X_CONTENT_TYPE_OPTIONS).unwrap(),
+            "nosniff"
+        );
+        assert_eq!(resp.headers().get(header::X_FRAME_OPTIONS).unwrap(), "DENY");
+    }
+
+    #[tokio::test]
+    async fn preserves_handler_csp() {
+        let app = Router::new()
+            .route("/csp", get(custom_csp_handler))
+            .layer(axum::middleware::from_fn(security_headers_middleware));
+        let resp = app
+            .oneshot(Request::builder().uri("/csp").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.headers().get(header::CONTENT_SECURITY_POLICY).unwrap(),
+            "default-src 'self'"
+        );
+    }
+}

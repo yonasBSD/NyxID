@@ -91,4 +91,22 @@ mod tests {
             .await
             .expect("whoami table should succeed");
     }
+
+    #[tokio::test]
+    async fn whoami_table_is_admin_true_fallback() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/users/me"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "u1", "email": "a@b.com", "is_admin": true, "mfa_enabled": true,
+                "email_verified": true, "display_name": "Admin User"
+            })))
+            .mount(&server)
+            .await;
+
+        let mut api = ApiClient::new(&server.uri(), "test-token".to_string()).unwrap();
+        run(&mut api, OutputFormat::Table)
+            .await
+            .expect("whoami admin fallback should succeed");
+    }
 }

@@ -360,3 +360,186 @@ pub async fn poll_device_code_for_sa(
         interval: result.interval,
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
+    use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+    use crate::services::role_service;
+    use crate::test_utils::{connect_test_database, test_app_state, test_auth_user, test_user};
+    use axum::extract::{Path, State};
+    use axum::http::HeaderMap;
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    async fn seed_admin(db: &mongodb::Database) -> String {
+        role_service::seed_system_roles(db)
+            .await
+            .expect("seed roles");
+        let ids = role_service::get_platform_role_ids(db)
+            .await
+            .expect("role ids");
+        let id = Uuid::new_v4().to_string();
+        let mut user = test_user(&id, UserType::Person);
+        user.role_ids.push(ids.admin);
+        db.collection::<User>(USERS)
+            .insert_one(&user)
+            .await
+            .expect("insert admin");
+        id
+    }
+
+    fn fixture_sa(admin_id: &str) -> ServiceAccount {
+        let now = Utc::now();
+        ServiceAccount {
+            id: Uuid::new_v4().to_string(),
+            name: "Test SA".to_string(),
+            description: None,
+            client_id: format!("sa_{}", hex::encode([1u8; 12])),
+            client_secret_hash: "0".repeat(64),
+            secret_prefix: "sas_test".to_string(),
+            role_ids: vec![],
+            allowed_scopes: "proxy:*".to_string(),
+            is_active: true,
+            rate_limit_override: None,
+            created_by: admin_id.to_string(),
+            owner_user_id: None,
+            created_at: now,
+            updated_at: now,
+            last_authenticated_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_list_sa_providers_empty() {
+        let Some(db) = connect_test_database("h_sa_prov_list").await else {
+            return;
+        };
+        let admin_id = seed_admin(&db).await;
+        let sa = fixture_sa(&admin_id);
+        let sa_id = sa.id.clone();
+        db.collection::<ServiceAccount>(SERVICE_ACCOUNTS)
+            .insert_one(&sa)
+            .await
+            .expect("insert sa");
+
+        let state = test_app_state(db);
+        let auth = test_auth_user(&admin_id);
+
+        let Json(resp) = list_sa_providers(State(state), auth, Path(sa_id))
+            .await
+            .expect("list should succeed");
+
+        assert!(resp.tokens.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_list_sa_providers_sa_not_found() {
+        let Some(db) = connect_test_database("h_sa_prov_list_404").await else {
+            return;
+        };
+        let admin_id = seed_admin(&db).await;
+        let state = test_app_state(db);
+        let auth = test_auth_user(&admin_id);
+
+        let err = list_sa_providers(State(state), auth, Path(Uuid::new_v4().to_string()))
+            .await
+            .expect_err("missing SA should fail");
+
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn test_connect_api_key_empty_rejected() {
+        let Some(db) = connect_test_database("h_sa_prov_connect_empty").await else {
+            return;
+        };
+        let admin_id = seed_admin(&db).await;
+        let sa = fixture_sa(&admin_id);
+        let sa_id = sa.id.clone();
+        db.collection::<ServiceAccount>(SERVICE_ACCOUNTS)
+            .insert_one(&sa)
+            .await
+            .expect("insert sa");
+
+        let state = test_app_state(db);
+        let auth = test_auth_user(&admin_id);
+
+        let err = connect_api_key_for_sa(
+            State(state),
+            auth,
+            HeaderMap::new(),
+            Path((sa_id, Uuid::new_v4().to_string())),
+            Json(AdminConnectApiKeyRequest {
+                api_key: String::new(),
+                label: None,
+            }),
+        )
+        .await
+        .expect_err("empty key should be rejected");
+
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn test_connect_api_key_inactive_sa_rejected() {
+        let Some(db) = connect_test_database("h_sa_prov_connect_inactive").await else {
+            return;
+        };
+        let admin_id = seed_admin(&db).await;
+        let mut sa = fixture_sa(&admin_id);
+        sa.is_active = false;
+        let sa_id = sa.id.clone();
+        db.collection::<ServiceAccount>(SERVICE_ACCOUNTS)
+            .insert_one(&sa)
+            .await
+            .expect("insert sa");
+
+        let state = test_app_state(db);
+        let auth = test_auth_user(&admin_id);
+
+        let err = connect_api_key_for_sa(
+            State(state),
+            auth,
+            HeaderMap::new(),
+            Path((sa_id, Uuid::new_v4().to_string())),
+            Json(AdminConnectApiKeyRequest {
+                api_key: "sk-test-key".to_string(),
+                label: None,
+            }),
+        )
+        .await
+        .expect_err("inactive SA should be rejected");
+
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn test_disconnect_sa_provider_not_found() {
+        let Some(db) = connect_test_database("h_sa_prov_disconnect_404").await else {
+            return;
+        };
+        let admin_id = seed_admin(&db).await;
+        let sa = fixture_sa(&admin_id);
+        let sa_id = sa.id.clone();
+        db.collection::<ServiceAccount>(SERVICE_ACCOUNTS)
+            .insert_one(&sa)
+            .await
+            .expect("insert sa");
+
+        let state = test_app_state(db);
+        let auth = test_auth_user(&admin_id);
+
+        let err = disconnect_sa_provider(
+            State(state),
+            auth,
+            HeaderMap::new(),
+            Path((sa_id, Uuid::new_v4().to_string())),
+        )
+        .await
+        .expect_err("disconnect non-existent provider should fail");
+
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+}

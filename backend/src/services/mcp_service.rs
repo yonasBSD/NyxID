@@ -4497,4 +4497,204 @@ mod tests {
         );
         assert!(headers.get(reqwest::header::ACCEPT).is_none());
     }
+
+    // ---- pure function coverage: tool resolution, body mode, helpers ----
+
+    #[test]
+    fn resolve_tool_call_finds_match() {
+        let services = vec![make_service(
+            "s1",
+            "Svc",
+            "svc",
+            vec![make_endpoint("ep", "desc")],
+        )];
+        let (s, e) = resolve_tool_call("svc__ep", &services).unwrap();
+        assert_eq!(s.service_slug, "svc");
+        assert_eq!(e.name, "ep");
+    }
+
+    #[test]
+    fn resolve_tool_call_returns_none_for_unknown() {
+        let services = vec![make_service(
+            "s1",
+            "Svc",
+            "svc",
+            vec![make_endpoint("ep", "desc")],
+        )];
+        assert!(resolve_tool_call("unknown__ep", &services).is_none());
+        assert!(resolve_tool_call("no_separator", &services).is_none());
+    }
+
+    #[test]
+    fn request_body_mode_for_multipart() {
+        assert_eq!(
+            request_body_mode_for(Some("multipart/form-data"), None),
+            RequestBodyMode::Multipart
+        );
+    }
+
+    #[test]
+    fn request_body_mode_for_binary_content_type() {
+        assert_eq!(
+            request_body_mode_for(Some("application/octet-stream"), None),
+            RequestBodyMode::Binary
+        );
+        assert_eq!(
+            request_body_mode_for(Some("image/png"), None),
+            RequestBodyMode::Binary
+        );
+    }
+
+    #[test]
+    fn request_body_mode_for_json_content_type() {
+        assert_eq!(
+            request_body_mode_for(Some("application/json"), None),
+            RequestBodyMode::Json
+        );
+        assert_eq!(
+            request_body_mode_for(Some("application/vnd.api+json"), None),
+            RequestBodyMode::Json
+        );
+    }
+
+    #[test]
+    fn request_body_mode_for_text_is_raw() {
+        assert_eq!(
+            request_body_mode_for(Some("text/plain"), None),
+            RequestBodyMode::Raw
+        );
+    }
+
+    #[test]
+    fn request_body_mode_for_wildcard_is_json() {
+        assert_eq!(
+            request_body_mode_for(Some("*/*"), None),
+            RequestBodyMode::Json
+        );
+    }
+
+    #[test]
+    fn request_body_mode_for_none_with_binary_schema() {
+        let schema = serde_json::json!({"type": "string", "format": "binary"});
+        assert_eq!(
+            request_body_mode_for(None, Some(&schema)),
+            RequestBodyMode::Binary
+        );
+    }
+
+    #[test]
+    fn is_blocked_mcp_header_parameter_blocks_standard_headers() {
+        assert!(is_blocked_mcp_header_parameter("Authorization"));
+        assert!(is_blocked_mcp_header_parameter("Host"));
+        assert!(is_blocked_mcp_header_parameter("X-NyxID-Custom"));
+        assert!(!is_blocked_mcp_header_parameter("X-Custom-Header"));
+    }
+
+    #[test]
+    fn normalize_header_name_lowercases_and_trims() {
+        assert_eq!(normalize_header_name("  Content-TYPE  "), "content-type");
+    }
+
+    #[test]
+    fn supported_parameter_name_for_mcp_blocks_reserved_headers() {
+        let param = serde_json::json!({"name": "Authorization", "in": "header"});
+        assert!(supported_parameter_name_for_mcp(&param).is_none());
+        let ok = serde_json::json!({"name": "X-Custom", "in": "header"});
+        assert_eq!(supported_parameter_name_for_mcp(&ok), Some("X-Custom"));
+    }
+
+    #[test]
+    fn request_body_field_name_avoids_collision() {
+        let endpoint = McpToolEndpoint {
+            endpoint_id: String::new(),
+            name: "test".into(),
+            description: None,
+            method: "POST".into(),
+            path: "/test".into(),
+            parameters: Some(serde_json::json!([{"name": "body", "in": "query"}])),
+            request_body_schema: None,
+            request_content_type: None,
+            request_body_required: false,
+            response_description: None,
+        };
+        assert_eq!(request_body_field_name(&endpoint), "request_body");
+    }
+
+    #[test]
+    fn push_required_deduplicates() {
+        let mut required = vec![serde_json::Value::String("a".into())];
+        push_required(&mut required, "a");
+        assert_eq!(required.len(), 1);
+        push_required(&mut required, "b");
+        assert_eq!(required.len(), 2);
+    }
+
+    #[test]
+    fn default_content_type_for_all_modes() {
+        assert_eq!(
+            default_content_type_for_mode(RequestBodyMode::Json),
+            "application/json"
+        );
+        assert_eq!(
+            default_content_type_for_mode(RequestBodyMode::Raw),
+            "text/plain"
+        );
+        assert_eq!(
+            default_content_type_for_mode(RequestBodyMode::Binary),
+            "application/octet-stream"
+        );
+        assert_eq!(
+            default_content_type_for_mode(RequestBodyMode::Multipart),
+            "multipart/form-data"
+        );
+    }
+
+    #[test]
+    fn has_concrete_content_type_rejects_wildcard_and_empty() {
+        assert!(!has_concrete_content_type("*/*"));
+        assert!(!has_concrete_content_type(""));
+        assert!(has_concrete_content_type("application/json"));
+    }
+
+    #[test]
+    fn build_generic_proxy_endpoint_has_request_method() {
+        let ep = build_generic_proxy_endpoint("my-svc");
+        assert_eq!(ep.name, "request");
+        assert!(ep.description.unwrap().contains("my-svc"));
+    }
+
+    #[test]
+    fn build_generic_proxy_input_schema_has_path_required() {
+        let schema = build_generic_proxy_input_schema();
+        let required = schema["required"].as_array().unwrap();
+        assert!(required.contains(&serde_json::Value::String("path".into())));
+    }
+
+    #[test]
+    fn node_scope_unrestricted_permits_all() {
+        assert!(NodeScope::Unrestricted.permits("any-node-id"));
+    }
+
+    #[test]
+    fn node_scope_allowed_filters() {
+        let ids = vec!["node-1".to_string(), "node-2".to_string()];
+        let scope = NodeScope::Allowed(&ids);
+        assert!(scope.permits("node-1"));
+        assert!(!scope.permits("node-3"));
+    }
+
+    #[test]
+    fn mcp_tool_source_is_user_service() {
+        let platform = McpToolSource::Platform {
+            downstream_service_id: "x".into(),
+        };
+        assert!(!platform.is_user_service());
+        let user = McpToolSource::UserManaged {
+            user_service_id: "x".into(),
+            effective_owner_id: "u".into(),
+            node_id: None,
+            has_server_credential: true,
+        };
+        assert!(user.is_user_service());
+    }
 }

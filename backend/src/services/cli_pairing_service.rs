@@ -1276,4 +1276,35 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn normalize_code_handles_lowercase_input() {
+        assert_eq!(normalize_code("abcd-efgh"), "ABCDEFGH");
+    }
+
+    #[test]
+    fn format_code_preserves_long_codes() {
+        assert_eq!(format_code("TOOLONG1X"), "TOOLONG1X");
+    }
+
+    #[test]
+    fn default_ttl_is_15_minutes() {
+        assert_eq!(DEFAULT_TTL_SECS, 900);
+    }
+
+    #[test]
+    fn max_failed_claims_is_10() {
+        assert_eq!(MAX_FAILED_CLAIMS, 10);
+    }
+
+    #[test]
+    fn created_pairing_serializes() {
+        let p = CreatedPairing {
+            id: "id".into(),
+            code: "ABCD-1234".into(),
+            expires_at: "2026-01-01T00:00:00Z".into(),
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["code"], "ABCD-1234");
+    }
 }

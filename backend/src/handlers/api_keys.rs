@@ -1787,4 +1787,57 @@ mod tests {
         let data = json!({ "response_status": 403 });
         assert_eq!(extract_response_status(Some(&data)), Some(403));
     }
+
+    #[test]
+    fn extract_response_status_returns_none_for_missing_field() {
+        assert_eq!(extract_response_status(Some(&json!({}))), None);
+        assert_eq!(extract_response_status(None), None);
+    }
+
+    #[test]
+    fn extract_response_status_ignores_non_numeric() {
+        assert_eq!(
+            extract_response_status(Some(&json!({"response_status": "ok"}))),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_expires_at_accepts_date_only_format() {
+        let dt = parse_expires_at("2026-06-15").unwrap();
+        assert_eq!(dt.format("%Y-%m-%d").to_string(), "2026-06-15");
+    }
+
+    #[test]
+    fn is_zero_returns_true_for_zero() {
+        assert!(super::is_zero(&0));
+        assert!(!super::is_zero(&1));
+    }
+
+    #[test]
+    fn default_usage_days_is_seven() {
+        assert_eq!(super::default_usage_days(), 7);
+    }
+
+    #[test]
+    fn default_true_returns_true() {
+        assert!(super::default_true());
+    }
+
+    #[test]
+    fn proxy_request_no_status_is_not_error() {
+        assert!(!is_error_event(
+            "proxy_request",
+            Some(&json!({"service_id": "s"}))
+        ));
+    }
+
+    #[test]
+    fn usage_date_range_thirty_days() {
+        let today = NaiveDate::from_ymd_opt(2026, 5, 25).unwrap();
+        let dates = usage_date_range(today, 30);
+        assert_eq!(dates.len(), 30);
+        assert_eq!(dates[0], "2026-04-26");
+        assert_eq!(dates[29], "2026-05-25");
+    }
 }

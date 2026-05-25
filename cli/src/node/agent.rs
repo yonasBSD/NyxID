@@ -2845,6 +2845,341 @@ mod tests {
     }
 
     #[test]
+    fn parse_header_splits_on_colon() {
+        let (name, value) = parse_header("Authorization: Bearer sk-test").unwrap();
+        assert_eq!(name, "Authorization");
+        assert_eq!(value, "Bearer sk-test");
+    }
+
+    #[test]
+    fn parse_header_rejects_no_colon() {
+        assert!(parse_header("NoColonHere").is_err());
+    }
+
+    #[test]
+    fn parse_query_param_splits_on_equals() {
+        let (name, value) = parse_query_param("api_key=sk-test").unwrap();
+        assert_eq!(name, "api_key");
+        assert_eq!(value, "sk-test");
+    }
+
+    #[test]
+    fn parse_query_param_rejects_no_equals() {
+        assert!(parse_query_param("noequals").is_err());
+    }
+
+    #[test]
+    fn format_pending_age_formats_seconds() {
+        let now = chrono::Utc::now();
+        let ts = (now - chrono::Duration::seconds(45)).to_rfc3339();
+        let age = format_pending_age(&ts);
+        assert!(age.ends_with('s'));
+    }
+
+    #[test]
+    fn format_pending_age_formats_minutes() {
+        let now = chrono::Utc::now();
+        let ts = (now - chrono::Duration::minutes(5)).to_rfc3339();
+        let age = format_pending_age(&ts);
+        assert!(age.ends_with('m'));
+    }
+
+    #[test]
+    fn format_pending_age_formats_hours() {
+        let now = chrono::Utc::now();
+        let ts = (now - chrono::Duration::hours(3)).to_rfc3339();
+        let age = format_pending_age(&ts);
+        assert!(age.ends_with('h'));
+    }
+
+    #[test]
+    fn format_pending_age_formats_days() {
+        let now = chrono::Utc::now();
+        let ts = (now - chrono::Duration::days(7)).to_rfc3339();
+        let age = format_pending_age(&ts);
+        assert!(age.ends_with('d'));
+    }
+
+    #[test]
+    fn format_pending_age_handles_invalid_timestamp() {
+        assert_eq!(format_pending_age("not-a-date"), "-");
+    }
+
+    #[test]
+    fn read_secret_value_rejects_empty() {
+        let result = read_secret_value(Some(String::new()), "test");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn read_secret_value_accepts_nonempty() {
+        let result = read_secret_value(Some("secret".into()), "test");
+        assert_eq!(result.unwrap(), "secret");
+    }
+
+    #[test]
+    fn format_algorithm_allowlist_none_shows_default() {
+        assert_eq!(format_algorithm_allowlist(None), "default");
+    }
+
+    #[test]
+    fn format_algorithm_allowlist_empty_shows_marker() {
+        assert_eq!(format_algorithm_allowlist(Some(&[])), "<empty>");
+    }
+
+    #[test]
+    fn format_algorithm_allowlist_values_joined() {
+        let vals = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(format_algorithm_allowlist(Some(&vals)), "a, b");
+    }
+
+    #[test]
+    fn non_empty_algorithm_list_empty_returns_none() {
+        assert!(non_empty_algorithm_list(vec![]).is_none());
+    }
+
+    #[test]
+    fn non_empty_algorithm_list_nonempty_returns_some() {
+        assert!(non_empty_algorithm_list(vec!["aes128-ctr".to_string()]).is_some());
+    }
+
+    #[test]
+    fn normalize_algorithm_preferences_all_none_returns_none() {
+        let prefs = SshAlgorithmPreferences {
+            kex: None,
+            host_key: None,
+            cipher: None,
+            mac: None,
+        };
+        assert!(normalize_algorithm_preferences(prefs).unwrap().is_none());
+    }
+
+    #[test]
+    fn validate_algorithm_reset_args_rejects_empty() {
+        let args = AlgorithmResetArgs {
+            kex: &[],
+            host_key: &[],
+            cipher: &[],
+            mac: &[],
+            reset_kex: false,
+            reset_host_key: false,
+            reset_cipher: false,
+            reset_mac: false,
+            reset_all: false,
+        };
+        assert!(validate_algorithm_reset_args(args).is_err());
+    }
+
+    #[test]
+    fn validate_algorithm_reset_args_rejects_reset_all_with_list() {
+        let kex = vec!["diffie-hellman".to_string()];
+        let args = AlgorithmResetArgs {
+            kex: &kex,
+            host_key: &[],
+            cipher: &[],
+            mac: &[],
+            reset_kex: false,
+            reset_host_key: false,
+            reset_cipher: false,
+            reset_mac: false,
+            reset_all: true,
+        };
+        assert!(validate_algorithm_reset_args(args).is_err());
+    }
+
+    #[test]
+    fn validate_algorithm_reset_args_rejects_kex_with_reset_kex() {
+        let kex = vec!["dh".to_string()];
+        let args = AlgorithmResetArgs {
+            kex: &kex,
+            host_key: &[],
+            cipher: &[],
+            mac: &[],
+            reset_kex: true,
+            reset_host_key: false,
+            reset_cipher: false,
+            reset_mac: false,
+            reset_all: false,
+        };
+        assert!(validate_algorithm_reset_args(args).is_err());
+    }
+
+    #[test]
+    fn validate_algorithm_reset_args_accepts_reset_all_alone() {
+        let args = AlgorithmResetArgs {
+            kex: &[],
+            host_key: &[],
+            cipher: &[],
+            mac: &[],
+            reset_kex: false,
+            reset_host_key: false,
+            reset_cipher: false,
+            reset_mac: false,
+            reset_all: true,
+        };
+        assert!(validate_algorithm_reset_args(args).is_ok());
+    }
+
+    #[test]
+    fn validate_algorithm_reset_args_rejects_host_key_with_reset_host_key() {
+        let hk = vec!["rsa".to_string()];
+        let args = AlgorithmResetArgs {
+            kex: &[],
+            host_key: &hk,
+            cipher: &[],
+            mac: &[],
+            reset_kex: false,
+            reset_host_key: true,
+            reset_cipher: false,
+            reset_mac: false,
+            reset_all: false,
+        };
+        assert!(validate_algorithm_reset_args(args).is_err());
+    }
+
+    #[test]
+    fn validate_algorithm_reset_args_rejects_cipher_with_reset_cipher() {
+        let c = vec!["aes".to_string()];
+        let args = AlgorithmResetArgs {
+            kex: &[],
+            host_key: &[],
+            cipher: &c,
+            mac: &[],
+            reset_kex: false,
+            reset_host_key: false,
+            reset_cipher: true,
+            reset_mac: false,
+            reset_all: false,
+        };
+        assert!(validate_algorithm_reset_args(args).is_err());
+    }
+
+    #[test]
+    fn validate_algorithm_reset_args_rejects_mac_with_reset_mac() {
+        let m = vec!["hmac".to_string()];
+        let args = AlgorithmResetArgs {
+            kex: &[],
+            host_key: &[],
+            cipher: &[],
+            mac: &m,
+            reset_kex: false,
+            reset_host_key: false,
+            reset_cipher: false,
+            reset_mac: true,
+            reset_all: false,
+        };
+        assert!(validate_algorithm_reset_args(args).is_err());
+    }
+
+    #[test]
+    fn store_pending_credential_locally_header_method() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = SecretBackend::File(LocalEncryption::load_or_generate(dir.path()).unwrap());
+        let mut config =
+            NodeConfig::new("ws://x/api/v1/nodes/ws".into(), "n1".into(), "file".into());
+        let pending = PendingCredentialMetadata {
+            id: "p1".into(),
+            service_slug: "svc".into(),
+            injection_method: "header".into(),
+            field_name: "Authorization".into(),
+            target_url: None,
+            label: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            expires_at: "2026-01-02T00:00:00Z".into(),
+        };
+        store_pending_credential_locally(&mut config, &backend, &pending, "Bearer sk-test")
+            .unwrap();
+        assert!(config.credentials.contains_key("svc"));
+    }
+
+    #[test]
+    fn store_pending_credential_locally_query_param() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = SecretBackend::File(LocalEncryption::load_or_generate(dir.path()).unwrap());
+        let mut config =
+            NodeConfig::new("ws://x/api/v1/nodes/ws".into(), "n1".into(), "file".into());
+        let pending = PendingCredentialMetadata {
+            id: "p2".into(),
+            service_slug: "svc2".into(),
+            injection_method: "query-param".into(),
+            field_name: "api_key".into(),
+            target_url: None,
+            label: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            expires_at: "2026-01-02T00:00:00Z".into(),
+        };
+        store_pending_credential_locally(&mut config, &backend, &pending, "sk-test").unwrap();
+        assert!(config.credentials.contains_key("svc2"));
+    }
+
+    #[test]
+    fn store_pending_credential_locally_unsupported_method() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = SecretBackend::File(LocalEncryption::load_or_generate(dir.path()).unwrap());
+        let mut config =
+            NodeConfig::new("ws://x/api/v1/nodes/ws".into(), "n1".into(), "file".into());
+        let pending = PendingCredentialMetadata {
+            id: "p3".into(),
+            service_slug: "svc3".into(),
+            injection_method: "unknown".into(),
+            field_name: "x".into(),
+            target_url: None,
+            label: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            expires_at: "2026-01-02T00:00:00Z".into(),
+        };
+        assert!(store_pending_credential_locally(&mut config, &backend, &pending, "val").is_err());
+    }
+
+    #[test]
+    fn store_pending_credential_locally_path_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = SecretBackend::File(LocalEncryption::load_or_generate(dir.path()).unwrap());
+        let mut config =
+            NodeConfig::new("ws://x/api/v1/nodes/ws".into(), "n1".into(), "file".into());
+        let pending = PendingCredentialMetadata {
+            id: "p4".into(),
+            service_slug: "svc4".into(),
+            injection_method: "path-prefix".into(),
+            field_name: "v1".into(),
+            target_url: None,
+            label: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            expires_at: "2026-01-02T00:00:00Z".into(),
+        };
+        store_pending_credential_locally(&mut config, &backend, &pending, "key123").unwrap();
+        assert!(config.credentials.contains_key("svc4"));
+    }
+
+    #[test]
+    fn find_existing_service_returns_none_when_no_keys() {
+        let resp = json!({"keys": []});
+        assert!(find_existing_service(&resp, "test", "node-a").is_none());
+    }
+
+    #[test]
+    fn find_existing_service_returns_none_missing_keys_field() {
+        let resp = json!({});
+        assert!(find_existing_service(&resp, "test", "node-a").is_none());
+    }
+
+    #[test]
+    fn api_base_url_from_node_ws_url_handles_no_ws_path() {
+        assert_eq!(
+            api_base_url_from_node_ws_url("https://example.com"),
+            "https://example.com"
+        );
+    }
+
+    #[test]
+    fn api_base_url_from_node_ws_url_strips_trailing_slash() {
+        assert_eq!(
+            api_base_url_from_node_ws_url("ws://localhost:3001/api/v1/nodes/ws/"),
+            "http://localhost:3001"
+        );
+    }
+
+    #[test]
     fn cleanup_source_secrets_removes_auth_signing_and_credentials() {
         let backend = SecretBackend::new_mock_keychain("node-1");
         let mut config = NodeConfig::new(

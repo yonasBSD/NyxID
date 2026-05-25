@@ -1612,4 +1612,46 @@ mod tests {
         let csrf_portion = extract_csrf_from_state(&compound);
         assert!(state_matches_cookie_hash(csrf_portion, Some(&hash)));
     }
+
+    #[test]
+    fn is_supported_mobile_redirect_uri_accepts_nyxid_scheme() {
+        assert!(is_supported_mobile_redirect_uri("nyxid://auth/callback"));
+        assert!(is_supported_mobile_redirect_uri("exp://192.168.1.1:8081"));
+        assert!(!is_supported_mobile_redirect_uri("https://evil.com"));
+        assert!(!is_supported_mobile_redirect_uri("http://localhost:3000"));
+    }
+
+    #[test]
+    fn is_trusted_return_to_validates_origins() {
+        assert!(is_trusted_return_to(
+            "https://app.example.com",
+            "https://auth.example.com",
+            "https://app.example.com/oauth"
+        ));
+        assert!(is_trusted_return_to(
+            "https://app.example.com",
+            "https://auth.example.com",
+            "https://auth.example.com/callback"
+        ));
+        assert!(!is_trusted_return_to(
+            "https://app.example.com",
+            "https://auth.example.com",
+            "https://evil.com/phish"
+        ));
+    }
+
+    #[test]
+    fn extract_cookie_value_parses_cookie_header() {
+        let mut h = HeaderMap::new();
+        h.insert("cookie", "a=1; b=2; c=3".parse().unwrap());
+        assert_eq!(extract_cookie_value(&h, "b"), Some("2".to_string()));
+        assert_eq!(extract_cookie_value(&h, "d"), None);
+        assert_eq!(extract_cookie_value(&HeaderMap::new(), "a"), None);
+    }
+
+    #[test]
+    fn nonce_matches_cookie_hash_empty_strings_fail() {
+        assert!(!nonce_matches_cookie_hash(Some(""), Some("hash")));
+        assert!(!nonce_matches_cookie_hash(Some("nonce"), Some("")));
+    }
 }

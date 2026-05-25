@@ -4340,4 +4340,394 @@ mod tests {
 
         server.abort();
     }
+
+    fn test_minimal_downstream() -> DownstreamService {
+        DownstreamService {
+            id: "ds-test".into(),
+            name: "Test".into(),
+            slug: "test".into(),
+            description: None,
+            base_url: "https://example.test".into(),
+            service_type: "http".into(),
+            visibility: "public".into(),
+            auth_method: "bearer".into(),
+            auth_key_name: String::new(),
+            credential_encrypted: vec![],
+            auth_type: None,
+            openapi_spec_url: None,
+            asyncapi_spec_url: None,
+            streaming_supported: false,
+            ssh_config: None,
+            oauth_client_id: None,
+            service_category: "connection".into(),
+            requires_user_credential: false,
+            is_active: true,
+            created_by: "system".into(),
+            identity_propagation_mode: "none".into(),
+            identity_include_user_id: false,
+            identity_include_email: false,
+            identity_include_name: false,
+            identity_jwt_audience: None,
+            forward_access_token: false,
+            inject_delegation_token: false,
+            delegation_token_scope: String::new(),
+            provider_config_id: None,
+            homepage_url: None,
+            repository_url: None,
+            issues_url: None,
+            capabilities: None,
+            auth_notes: None,
+            known_limitations: None,
+            required_permissions: None,
+            examples_url: None,
+            recommended_skills: None,
+            custom_user_agent: None,
+            default_request_headers: None,
+            ws_frame_injections: vec![],
+            developer_app_ids: None,
+            token_exchange_config: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    // ---- pure function coverage: path validation ----
+
+    #[test]
+    fn contains_dot_segment_detects_single_and_double() {
+        assert!(contains_dot_segment("a/./b"));
+        assert!(contains_dot_segment("a/../b"));
+        assert!(!contains_dot_segment("a/b"));
+        assert!(!contains_dot_segment("a/..b/c"));
+    }
+
+    #[test]
+    fn contains_raw_path_breaker_catches_all_variants() {
+        assert!(contains_raw_path_breaker("a\\b"));
+        assert!(contains_raw_path_breaker("a\0b"));
+        assert!(contains_raw_path_breaker("a?b"));
+        assert!(contains_raw_path_breaker("a#b"));
+        assert!(contains_raw_path_breaker("a//b"));
+        assert!(contains_raw_path_breaker("a/../b"));
+        assert!(!contains_raw_path_breaker("a/b/c"));
+    }
+
+    #[test]
+    fn contains_percent_encoded_path_breaker_detects_encoded_slash() {
+        assert!(contains_percent_encoded_path_breaker("a%2fb"));
+        assert!(contains_percent_encoded_path_breaker("a%5Cb"));
+        assert!(contains_percent_encoded_path_breaker("a%00b"));
+        assert!(contains_percent_encoded_path_breaker("a%3fb"));
+        assert!(contains_percent_encoded_path_breaker("a%23b"));
+        assert!(!contains_percent_encoded_path_breaker("a/b"));
+    }
+
+    #[test]
+    fn contains_nested_percent_encoded_path_breaker_double_encoding() {
+        // %252f -> %2f after one decode -> / after second
+        assert!(contains_nested_percent_encoded_path_breaker("%252f"));
+        assert!(!contains_nested_percent_encoded_path_breaker("normal/path"));
+    }
+
+    #[test]
+    fn validate_requested_proxy_path_rejects_traversal() {
+        assert!(validate_requested_proxy_path("a/../etc/passwd").is_err());
+        assert!(validate_requested_proxy_path("v1/models").is_ok());
+    }
+
+    #[test]
+    fn validate_path_injection_prefix_rejects_bad_chars() {
+        assert!(validate_path_injection_prefix("").is_err());
+        assert!(validate_path_injection_prefix("a/b").is_err());
+        assert!(validate_path_injection_prefix("a b").is_err());
+        assert!(validate_path_injection_prefix("a%20b").is_err());
+        assert!(validate_path_injection_prefix("a..b").is_err());
+        assert!(validate_path_injection_prefix("bot").is_ok());
+    }
+
+    #[test]
+    fn validate_path_injection_credential_rejects_traversal() {
+        assert!(validate_path_injection_credential("../etc").is_err());
+        assert!(validate_path_injection_credential("token123").is_ok());
+        assert!(validate_path_injection_credential("").is_err());
+    }
+
+    #[test]
+    fn build_forward_path_with_path_cred() {
+        let creds = vec![DelegatedCredential {
+            provider_slug: String::new(),
+            injection_method: "path".to_string(),
+            injection_key: "bot".to_string(),
+            credential: "TOKEN".to_string(),
+        }];
+        assert_eq!(
+            build_forward_path("v1/send", &creds).unwrap(),
+            "botTOKEN/v1/send"
+        );
+    }
+
+    #[test]
+    fn build_forward_path_empty_path() {
+        let creds = vec![DelegatedCredential {
+            provider_slug: String::new(),
+            injection_method: "path".to_string(),
+            injection_key: "bot".to_string(),
+            credential: "T".to_string(),
+        }];
+        assert_eq!(build_forward_path("", &creds).unwrap(), "botT");
+    }
+
+    #[test]
+    fn build_forward_path_no_creds() {
+        assert_eq!(build_forward_path("/v1/models", &[]).unwrap(), "v1/models");
+    }
+
+    // ---- credential_header_name tests ----
+
+    #[test]
+    fn credential_header_name_bearer_returns_authorization() {
+        let target = ProxyTarget {
+            base_url: String::new(),
+            auth_method: "bearer".to_string(),
+            auth_key_name: String::new(),
+            credential: String::new(),
+            service: test_minimal_downstream(),
+            catalog_default_headers: vec![],
+            user_service_default_headers: vec![],
+            ws_frame_injections: vec![],
+            connection_id: None,
+        };
+        assert_eq!(
+            credential_header_name(&target),
+            Some("authorization".to_string())
+        );
+    }
+
+    #[test]
+    fn credential_header_name_header_with_custom_name() {
+        let target = ProxyTarget {
+            base_url: String::new(),
+            auth_method: "header".to_string(),
+            auth_key_name: "X-Api-Key".to_string(),
+            credential: String::new(),
+            service: test_minimal_downstream(),
+            catalog_default_headers: vec![],
+            user_service_default_headers: vec![],
+            ws_frame_injections: vec![],
+            connection_id: None,
+        };
+        assert_eq!(
+            credential_header_name(&target),
+            Some("X-Api-Key".to_string())
+        );
+    }
+
+    #[test]
+    fn credential_header_name_header_with_empty_key() {
+        let target = ProxyTarget {
+            base_url: String::new(),
+            auth_method: "header".to_string(),
+            auth_key_name: "  ".to_string(),
+            credential: String::new(),
+            service: test_minimal_downstream(),
+            catalog_default_headers: vec![],
+            user_service_default_headers: vec![],
+            ws_frame_injections: vec![],
+            connection_id: None,
+        };
+        assert_eq!(credential_header_name(&target), None);
+    }
+
+    #[test]
+    fn credential_header_name_none_method() {
+        let target = ProxyTarget {
+            base_url: String::new(),
+            auth_method: "none".to_string(),
+            auth_key_name: String::new(),
+            credential: String::new(),
+            service: test_minimal_downstream(),
+            catalog_default_headers: vec![],
+            user_service_default_headers: vec![],
+            ws_frame_injections: vec![],
+            connection_id: None,
+        };
+        assert_eq!(credential_header_name(&target), None);
+    }
+
+    #[test]
+    fn credential_header_name_query_method() {
+        let target = ProxyTarget {
+            base_url: String::new(),
+            auth_method: "query".to_string(),
+            auth_key_name: "key".to_string(),
+            credential: String::new(),
+            service: test_minimal_downstream(),
+            catalog_default_headers: vec![],
+            user_service_default_headers: vec![],
+            ws_frame_injections: vec![],
+            connection_id: None,
+        };
+        assert_eq!(credential_header_name(&target), None);
+    }
+
+    #[test]
+    fn credential_header_name_aws_sigv4() {
+        let target = ProxyTarget {
+            base_url: String::new(),
+            auth_method: "aws_sigv4".to_string(),
+            auth_key_name: String::new(),
+            credential: String::new(),
+            service: test_minimal_downstream(),
+            catalog_default_headers: vec![],
+            user_service_default_headers: vec![],
+            ws_frame_injections: vec![],
+            connection_id: None,
+        };
+        assert_eq!(
+            credential_header_name(&target),
+            Some("authorization".to_string())
+        );
+    }
+
+    // ---- prepare_delegated_request ----
+
+    #[test]
+    fn prepare_delegated_request_bearer_adds_header() {
+        let creds = vec![DelegatedCredential {
+            provider_slug: "p".into(),
+            injection_method: "bearer".into(),
+            injection_key: "Authorization".into(),
+            credential: "tok123".into(),
+        }];
+        let req = prepare_delegated_request("v1/x", None, &creds).unwrap();
+        assert_eq!(
+            req.delegated_headers,
+            vec![("Authorization".to_string(), "Bearer tok123".to_string())]
+        );
+    }
+
+    #[test]
+    fn prepare_delegated_request_query_appends() {
+        let creds = vec![DelegatedCredential {
+            provider_slug: "p".into(),
+            injection_method: "query".into(),
+            injection_key: "api_key".into(),
+            credential: "secret".into(),
+        }];
+        let req = prepare_delegated_request("v1/x", Some("foo=bar"), &creds).unwrap();
+        assert!(req.query.unwrap().contains("api_key=secret"));
+    }
+
+    // ---- extend_with_path_credential ----
+
+    #[test]
+    fn extend_with_path_credential_skips_non_path() {
+        let target = ProxyTarget {
+            base_url: String::new(),
+            auth_method: "bearer".to_string(),
+            auth_key_name: String::new(),
+            credential: "tok".to_string(),
+            service: test_minimal_downstream(),
+            catalog_default_headers: vec![],
+            user_service_default_headers: vec![],
+            ws_frame_injections: vec![],
+            connection_id: None,
+        };
+        let mut delegated = Vec::new();
+        extend_with_path_credential(&mut delegated, &target);
+        assert!(delegated.is_empty());
+    }
+
+    #[test]
+    fn extend_with_path_credential_appends_for_path() {
+        let target = ProxyTarget {
+            base_url: String::new(),
+            auth_method: "path".to_string(),
+            auth_key_name: "bot".to_string(),
+            credential: "TOKEN".to_string(),
+            service: test_minimal_downstream(),
+            catalog_default_headers: vec![],
+            user_service_default_headers: vec![],
+            ws_frame_injections: vec![],
+            connection_id: None,
+        };
+        let mut delegated = Vec::new();
+        extend_with_path_credential(&mut delegated, &target);
+        assert_eq!(delegated.len(), 1);
+        assert_eq!(delegated[0].injection_method, "path");
+    }
+
+    #[test]
+    fn missing_credential_error_oauth2_with_provider() {
+        let key = UserApiKey {
+            id: "k".into(),
+            user_id: "u".into(),
+            label: "l".into(),
+            credential_type: "oauth2".into(),
+            credential_encrypted: None,
+            access_token_encrypted: None,
+            refresh_token_encrypted: None,
+            token_scopes: None,
+            expires_at: None,
+            provider_config_id: Some("p".into()),
+            connection_id: None,
+            status: "active".into(),
+            last_used_at: None,
+            error_message: None,
+            source: None,
+            source_id: None,
+            user_oauth_client_id_encrypted: None,
+            user_oauth_client_secret_encrypted: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let err = missing_user_api_key_credential_error(&key);
+        assert!(matches!(err, AppError::BadRequest(m) if m.contains("OAuth connection")));
+    }
+
+    #[test]
+    fn missing_credential_error_api_key() {
+        let key = UserApiKey {
+            id: "k".into(),
+            user_id: "u".into(),
+            label: "l".into(),
+            credential_type: "api_key".into(),
+            credential_encrypted: None,
+            access_token_encrypted: None,
+            refresh_token_encrypted: None,
+            token_scopes: None,
+            expires_at: None,
+            provider_config_id: None,
+            connection_id: None,
+            user_oauth_client_id_encrypted: None,
+            user_oauth_client_secret_encrypted: None,
+            status: "active".into(),
+            last_used_at: None,
+            error_message: None,
+            source: None,
+            source_id: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let err = missing_user_api_key_credential_error(&key);
+        assert!(matches!(err, AppError::BadRequest(m) if m.contains("No credential")));
+    }
+
+    // ---- forward header: AWS and GCP prefixes ----
+
+    #[test]
+    fn forward_allowlist_accepts_aws_prefixed_headers() {
+        assert!(is_allowed_forward_header("x-amz-target"));
+        assert!(is_allowed_forward_header("x-amz-date"));
+    }
+
+    #[test]
+    fn forward_allowlist_accepts_gcp_prefixed_headers() {
+        assert!(is_allowed_forward_header("x-goog-user-project"));
+    }
+
+    #[test]
+    fn default_proxy_user_agent_contains_version() {
+        assert!(DEFAULT_PROXY_USER_AGENT.starts_with("NyxID-Proxy/"));
+    }
 }

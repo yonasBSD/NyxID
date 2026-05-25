@@ -727,4 +727,74 @@ mod tests {
             CallbackResult::Ignore => "ignore",
         }
     }
+
+    #[test]
+    fn ignores_non_callback_path() {
+        let request = "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n";
+        assert!(matches!(
+            parse_callback_request(request, "x"),
+            CallbackResult::Ignore
+        ));
+    }
+
+    #[test]
+    fn callback_missing_query_is_error() {
+        let request = "GET /callback HTTP/1.1\r\nHost: 127.0.0.1\r\n";
+        assert!(matches!(
+            parse_callback_request(request, "x"),
+            CallbackResult::Error(_)
+        ));
+    }
+
+    #[test]
+    fn callback_with_error_param_returns_error() {
+        let request =
+            "GET /callback?error=access_denied&error_description=denied&state=s1 HTTP/1.1\r\n";
+        match parse_callback_request(request, "s1") {
+            CallbackResult::Error(msg) => assert!(msg.contains("denied")),
+            other => panic!("expected error, got {}", callback_result_name(&other)),
+        }
+    }
+
+    #[test]
+    fn callback_missing_code_is_error() {
+        let request = "GET /callback?state=s1 HTTP/1.1\r\n";
+        match parse_callback_request(request, "s1") {
+            CallbackResult::Error(msg) => assert!(msg.contains("authorization code")),
+            other => panic!("expected error, got {}", callback_result_name(&other)),
+        }
+    }
+
+    #[test]
+    fn ignores_empty_request() {
+        assert!(matches!(
+            parse_callback_request("", "x"),
+            CallbackResult::Ignore
+        ));
+    }
+
+    #[test]
+    fn catalog_config_missing_token_url_errors() {
+        let body = serde_json::json!({ "authorization_url": "https://example.com" });
+        assert!(oauth_config_from_catalog_value(&body).is_err());
+    }
+
+    #[test]
+    fn catalog_config_defaults() {
+        let body = serde_json::json!({ "token_url": "https://example.com/token" });
+        let config = oauth_config_from_catalog_value(&body).expect("config");
+        assert!(!config.supports_pkce);
+        assert_eq!(config.device_code_format, "rfc8628");
+        assert_eq!(config.token_endpoint_auth_method, "client_secret_post");
+        assert!(config.default_scopes.is_empty());
+        assert!(config.authorization_url.is_none());
+        assert!(config.oauth_client_id.is_none());
+    }
+
+    #[test]
+    fn client_id_param_name_defaults_to_client_id() {
+        let body = serde_json::json!({ "token_url": "https://example.com/token" });
+        let config = oauth_config_from_catalog_value(&body).expect("config");
+        assert_eq!(config.client_id_param_name(), "client_id");
+    }
 }

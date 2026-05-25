@@ -672,4 +672,29 @@ mod tests {
             "group"
         );
     }
+
+    #[test]
+    fn default_page_and_per_page() {
+        assert_eq!(super::default_page(), 1);
+        assert_eq!(super::default_per_page(), 50);
+    }
+
+    #[test]
+    fn create_conversation_request_deserialization_minimal() {
+        let json = r#"{"agent_api_key_id": "key-1"}"#;
+        let req: super::CreateConversationRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.agent_api_key_id, "key-1");
+        assert!(req.channel_bot_id.is_none());
+        assert!(req.platform.is_none());
+        assert!(req.target_org_id.is_none());
+    }
+
+    #[test]
+    fn update_conversation_request_deserialization() {
+        let json = r#"{"agent_api_key_id": "k2", "default_agent": true, "is_active": false}"#;
+        let req: super::UpdateConversationRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.agent_api_key_id.as_deref(), Some("k2"));
+        assert_eq!(req.default_agent, Some(true));
+        assert_eq!(req.is_active, Some(false));
+    }
 }

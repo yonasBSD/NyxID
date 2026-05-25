@@ -191,3 +191,160 @@ pub async fn delete_my_credentials(
         message: "Credentials deleted successfully".to_string(),
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
+    use crate::test_utils::*;
+    use axum::extract::{Path, State};
+
+    fn test_provider(provider_id: &str, credential_mode: &str, is_active: bool) -> ProviderConfig {
+        let now = chrono::Utc::now();
+        ProviderConfig {
+            id: provider_id.to_string(),
+            slug: format!("test-{}", &provider_id[..8]),
+            name: "Test Provider".to_string(),
+            description: None,
+            provider_type: "oauth2".to_string(),
+            authorization_url: Some("https://auth.example.com/authorize".to_string()),
+            token_url: Some("https://auth.example.com/token".to_string()),
+            revocation_url: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: None,
+            is_active,
+            credential_mode: credential_mode.to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: false,
+            created_by: "admin".to_string(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_my_credentials_none() {
+        let Some(db) = connect_test_database("h_user_creds_get_none").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        let state = test_app_state(db);
+
+        let Json(resp) = get_my_credentials(
+            State(state),
+            test_auth_user(&user_id),
+            Path(provider_id.clone()),
+        )
+        .await
+        .unwrap();
+
+        assert!(!resp.has_credentials);
+        assert_eq!(resp.provider_config_id, provider_id);
+        assert!(resp.created_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_set_and_get_my_credentials() {
+        let Some(db) = connect_test_database("h_user_creds_set_get").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(test_provider(&provider_id, "user", true))
+            .await
+            .unwrap();
+
+        let state = test_app_state(db);
+
+        let Json(set_resp) = set_my_credentials(
+            State(state.clone()),
+            test_auth_user(&user_id),
+            TelemetryContext::default(),
+            Path(provider_id.clone()),
+            Json(SetUserCredentialsRequest {
+                client_id: "my-client-id".to_string(),
+                client_secret: Some("my-secret".to_string()),
+                label: Some("My App".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(set_resp.has_credentials);
+        assert_eq!(set_resp.provider_config_id, provider_id);
+        assert_eq!(set_resp.label.as_deref(), Some("My App"));
+
+        let Json(get_resp) = get_my_credentials(
+            State(state),
+            test_auth_user(&user_id),
+            Path(provider_id.clone()),
+        )
+        .await
+        .unwrap();
+
+        assert!(get_resp.has_credentials);
+        assert_eq!(get_resp.label.as_deref(), Some("My App"));
+    }
+
+    #[tokio::test]
+    async fn test_delete_my_credentials() {
+        let Some(db) = connect_test_database("h_user_creds_delete").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(test_provider(&provider_id, "both", true))
+            .await
+            .unwrap();
+
+        let state = test_app_state(db);
+
+        let _ = set_my_credentials(
+            State(state.clone()),
+            test_auth_user(&user_id),
+            TelemetryContext::default(),
+            Path(provider_id.clone()),
+            Json(SetUserCredentialsRequest {
+                client_id: "cid".to_string(),
+                client_secret: None,
+                label: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let Json(del_resp) = delete_my_credentials(
+            State(state.clone()),
+            test_auth_user(&user_id),
+            TelemetryContext::default(),
+            Path(provider_id.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(del_resp.message, "Credentials deleted successfully");
+
+        let Json(after) =
+            get_my_credentials(State(state), test_auth_user(&user_id), Path(provider_id))
+                .await
+                .unwrap();
+        assert!(!after.has_credentials);
+    }
+}

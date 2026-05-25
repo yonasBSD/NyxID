@@ -135,4 +135,31 @@ mod tests {
         assert!(keys.contains(&"created_at"));
         assert!(keys.contains(&"updated_at"));
     }
+
+    #[test]
+    fn effective_owner_returns_owner_when_set() {
+        let sa = make_service_account();
+        let owner = sa.owner_user_id.as_deref().unwrap();
+        assert_eq!(sa.effective_owner_user_id(), owner);
+    }
+
+    #[test]
+    fn effective_owner_falls_back_to_created_by() {
+        let mut sa = make_service_account();
+        sa.owner_user_id = None;
+        assert_eq!(sa.effective_owner_user_id(), sa.created_by.as_str());
+    }
+
+    #[test]
+    fn bson_backward_compat_missing_owner_user_id() {
+        let sa = make_service_account();
+        let mut doc = bson::to_document(&sa).expect("serialize");
+        doc.remove("owner_user_id");
+        let restored: ServiceAccount = bson::from_document(doc).expect("deserialize");
+        assert!(restored.owner_user_id.is_none());
+        assert_eq!(
+            restored.effective_owner_user_id(),
+            restored.created_by.as_str()
+        );
+    }
 }

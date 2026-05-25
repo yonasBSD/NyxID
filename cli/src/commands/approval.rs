@@ -678,6 +678,160 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_table_renders_rows() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/approvals/requests"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "requests": [{"id": "r1-abcdef12", "service_name": "openai", "status": "pending",
+                              "action_description": "chat", "requester_label": "agent", "created_at": "2026-01-01"}]
+            })))
+            .mount(&server)
+            .await;
+
+        run(ApprovalCommands::List {
+            org: None,
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+        })
+        .await
+        .expect("list table should succeed");
+    }
+
+    #[tokio::test]
+    async fn list_table_empty() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/approvals/requests"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "requests": [] })),
+            )
+            .mount(&server)
+            .await;
+
+        run(ApprovalCommands::List {
+            org: None,
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+        })
+        .await
+        .expect("empty list should succeed");
+    }
+
+    #[tokio::test]
+    async fn show_table_renders_detail() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/approvals/requests/r1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "r1", "service_name": "openai", "status": "pending",
+                "operation_summary": "POST /v1/chat", "action_description": "Chat request",
+                "requester_label": "coding-agent", "created_at": "2026-01-01T00:00:00Z"
+            })))
+            .mount(&server)
+            .await;
+
+        run(ApprovalCommands::Show {
+            id: "r1".to_string(),
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+        })
+        .await
+        .expect("show table should succeed");
+    }
+
+    #[tokio::test]
+    async fn grants_table_renders_rows() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/approvals/grants"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "grants": [{"id": "g1-abcdef12", "service_name": "openai",
+                            "requester_label": "agent", "granted_at": "2026-01-01", "expires_at": "2027-01-01"}]
+            })))
+            .mount(&server)
+            .await;
+
+        run(ApprovalCommands::Grants {
+            org: None,
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+        })
+        .await
+        .expect("grants table should succeed");
+    }
+
+    #[tokio::test]
+    async fn grants_table_empty() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/approvals/grants"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "grants": [] })),
+            )
+            .mount(&server)
+            .await;
+
+        run(ApprovalCommands::Grants {
+            org: None,
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+        })
+        .await
+        .expect("empty grants should succeed");
+    }
+
+    #[tokio::test]
+    async fn service_configs_table_renders_rows() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/approvals/service-configs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "configs": [{"service_id": "svc-abcdef12", "service_name": "openai",
+                             "approval_required": true, "approval_mode": "grant"}]
+            })))
+            .mount(&server)
+            .await;
+
+        run(ApprovalCommands::ServiceConfigs {
+            org: None,
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+        })
+        .await
+        .expect("service-configs table should succeed");
+    }
+
+    #[tokio::test]
+    async fn service_configs_table_empty() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/approvals/service-configs"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "configs": [] })),
+            )
+            .mount(&server)
+            .await;
+
+        run(ApprovalCommands::ServiceConfigs {
+            org: None,
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+        })
+        .await
+        .expect("empty configs should succeed");
+    }
+
+    #[tokio::test]
+    async fn enable_table_output() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/notifications/settings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+
+        run(ApprovalCommands::Enable {
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+        })
+        .await
+        .expect("enable table should succeed");
+    }
+
+    #[tokio::test]
     async fn revoke_grant_table_output() {
         let server = MockServer::start().await;
         Mock::given(method("DELETE"))

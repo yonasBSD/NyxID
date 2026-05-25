@@ -599,3 +599,282 @@ pub async fn revoke_session(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::*;
+
+    async fn seed_user(db: &mongodb::Database, user_id: &str) {
+        let user = test_user(user_id, crate::models::user::UserType::Person);
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(&user)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_create_session_inserts_record() {
+        let Some(db) = connect_test_database("token_svc").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        seed_user(&db, &user_id).await;
+
+        let result = create_session(&db, &user_id, Some("127.0.0.1"), Some("test-agent")).await;
+        assert!(result.is_ok());
+
+        let issued = result.unwrap();
+        assert!(!issued.session_token.is_empty());
+        assert!(!issued.session_id.is_empty());
+
+        let stored = db
+            .collection::<Session>(SESSIONS)
+            .find_one(doc! { "_id": &issued.session_id })
+            .await
+            .unwrap();
+        assert!(stored.is_some());
+        let stored = stored.unwrap();
+        assert_eq!(stored.user_id, user_id);
+        assert!(!stored.revoked);
+        assert_eq!(stored.ip_address.as_deref(), Some("127.0.0.1"));
+        assert_eq!(stored.user_agent.as_deref(), Some("test-agent"));
+    }
+
+    #[tokio::test]
+    async fn test_create_session_rejects_invalid_uuid() {
+        let Some(db) = connect_test_database("token_svc").await else {
+            return;
+        };
+        let result = create_session(&db, "not-a-uuid", None, None).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_create_session_with_none_optional_fields() {
+        let Some(db) = connect_test_database("token_svc").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        seed_user(&db, &user_id).await;
+
+        let issued = create_session(&db, &user_id, None, None).await.unwrap();
+        let stored = db
+            .collection::<Session>(SESSIONS)
+            .find_one(doc! { "_id": &issued.session_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.ip_address.is_none());
+        assert!(stored.user_agent.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_create_session_and_issue_tokens_returns_valid_tokens() {
+        let Some(db) = connect_test_database("token_svc").await else {
+            return;
+        };
+        let config = test_app_config();
+        let jwt_keys = cached_test_jwt_keys();
+        let user_id = Uuid::new_v4().to_string();
+        seed_user(&db, &user_id).await;
+
+        let result = create_session_and_issue_tokens(
+            &db,
+            &config,
+            &jwt_keys,
+            &user_id,
+            Some("10.0.0.1"),
+            Some("browser/1.0"),
+        )
+        .await;
+        assert!(result.is_ok());
+
+        let issued = result.unwrap();
+        assert!(!issued.access_token.is_empty());
+        assert!(!issued.refresh_token.is_empty());
+        assert!(!issued.session_id.is_empty());
+        assert_eq!(issued.access_expires_in, config.jwt_access_ttl_secs);
+
+        let access_claims =
+            crate::crypto::jwt::verify_token(&jwt_keys, &config, &issued.access_token).unwrap();
+        assert_eq!(access_claims.sub, user_id);
+        assert_eq!(access_claims.token_type, "access");
+
+        let refresh_claims =
+            crate::crypto::jwt::verify_token(&jwt_keys, &config, &issued.refresh_token).unwrap();
+        assert_eq!(refresh_claims.sub, user_id);
+        assert_eq!(refresh_claims.token_type, "refresh");
+    }
+
+    #[tokio::test]
+    async fn test_create_session_and_issue_tokens_persists_refresh_token() {
+        let Some(db) = connect_test_database("token_svc").await else {
+            return;
+        };
+        let config = test_app_config();
+        let jwt_keys = cached_test_jwt_keys();
+        let user_id = Uuid::new_v4().to_string();
+        seed_user(&db, &user_id).await;
+
+        let issued = create_session_and_issue_tokens(&db, &config, &jwt_keys, &user_id, None, None)
+            .await
+            .unwrap();
+
+        let refresh_claims =
+            crate::crypto::jwt::verify_token(&jwt_keys, &config, &issued.refresh_token).unwrap();
+        let stored = db
+            .collection::<RefreshToken>(REFRESH_TOKENS)
+            .find_one(doc! { "jti": &refresh_claims.jti })
+            .await
+            .unwrap();
+        assert!(stored.is_some());
+        let stored = stored.unwrap();
+        assert_eq!(stored.user_id, user_id);
+        assert!(!stored.revoked);
+        assert_eq!(
+            stored.session_id.as_deref(),
+            Some(issued.session_id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_refresh_tokens_rotates_refresh_token() {
+        let Some(db) = connect_test_database("token_svc").await else {
+            return;
+        };
+        let config = test_app_config();
+        let jwt_keys = cached_test_jwt_keys();
+        let user_id = Uuid::new_v4().to_string();
+        seed_user(&db, &user_id).await;
+
+        let issued = create_session_and_issue_tokens(&db, &config, &jwt_keys, &user_id, None, None)
+            .await
+            .unwrap();
+
+        let refreshed = refresh_tokens(&db, &config, &jwt_keys, &issued.refresh_token, None)
+            .await
+            .unwrap();
+
+        assert!(!refreshed.access_token.is_empty());
+        assert!(!refreshed.refresh_token.is_empty());
+        assert_ne!(refreshed.refresh_token, issued.refresh_token);
+
+        let old_claims =
+            crate::crypto::jwt::verify_token(&jwt_keys, &config, &issued.refresh_token).unwrap();
+        let old_stored = db
+            .collection::<RefreshToken>(REFRESH_TOKENS)
+            .find_one(doc! { "jti": &old_claims.jti })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(old_stored.revoked);
+        assert!(old_stored.replaced_by.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_refresh_tokens_rejects_non_refresh_token() {
+        let Some(db) = connect_test_database("token_svc").await else {
+            return;
+        };
+        let config = test_app_config();
+        let jwt_keys = cached_test_jwt_keys();
+        let user_id = Uuid::new_v4();
+
+        let access_token = crate::crypto::jwt::generate_access_token(
+            &jwt_keys, &config, &user_id, "openid", None, None, None, None,
+        )
+        .unwrap();
+
+        let result = refresh_tokens(&db, &config, &jwt_keys, &access_token, None).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_refresh_tokens_rejects_revoked_token_no_replacement() {
+        let Some(db) = connect_test_database("token_svc").await else {
+            return;
+        };
+        let config = test_app_config();
+        let jwt_keys = cached_test_jwt_keys();
+        let user_id = Uuid::new_v4().to_string();
+        seed_user(&db, &user_id).await;
+
+        let issued = create_session_and_issue_tokens(&db, &config, &jwt_keys, &user_id, None, None)
+            .await
+            .unwrap();
+
+        let claims =
+            crate::crypto::jwt::verify_token(&jwt_keys, &config, &issued.refresh_token).unwrap();
+        db.collection::<RefreshToken>(REFRESH_TOKENS)
+            .update_one(
+                doc! { "jti": &claims.jti },
+                doc! { "$set": { "revoked": true } },
+            )
+            .await
+            .unwrap();
+
+        let result = refresh_tokens(&db, &config, &jwt_keys, &issued.refresh_token, None).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_revoke_session_marks_session_and_tokens() {
+        let Some(db) = connect_test_database("token_svc").await else {
+            return;
+        };
+        let config = test_app_config();
+        let jwt_keys = cached_test_jwt_keys();
+        let user_id = Uuid::new_v4().to_string();
+        seed_user(&db, &user_id).await;
+
+        let issued = create_session_and_issue_tokens(&db, &config, &jwt_keys, &user_id, None, None)
+            .await
+            .unwrap();
+
+        revoke_session(&db, &issued.session_id, None).await.unwrap();
+
+        let session = db
+            .collection::<Session>(SESSIONS)
+            .find_one(doc! { "_id": &issued.session_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(session.revoked);
+
+        let refresh_claims =
+            crate::crypto::jwt::verify_token(&jwt_keys, &config, &issued.refresh_token).unwrap();
+        let refresh = db
+            .collection::<RefreshToken>(REFRESH_TOKENS)
+            .find_one(doc! { "jti": &refresh_claims.jti })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(refresh.revoked);
+    }
+
+    #[tokio::test]
+    async fn test_create_mfa_pending_session() {
+        let Some(db) = connect_test_database("token_svc").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        seed_user(&db, &user_id).await;
+
+        let temp_hash = "abc123hash";
+        let session_id = create_mfa_pending_session(&db, &user_id, temp_hash)
+            .await
+            .unwrap();
+
+        let session = db
+            .collection::<Session>(SESSIONS)
+            .find_one(doc! { "_id": &session_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.user_id, user_id);
+        assert_eq!(session.token_hash, temp_hash);
+        assert_eq!(session.user_agent.as_deref(), Some("mfa_pending"));
+        assert!(!session.revoked);
+    }
+}

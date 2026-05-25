@@ -67,3 +67,71 @@ impl TelemetryErasureJob {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collection_name() {
+        assert_eq!(COLLECTION_NAME, "telemetry_erasure_jobs");
+    }
+
+    #[test]
+    fn new_creates_pending_job() {
+        let job = TelemetryErasureJob::new("user-123");
+        assert_eq!(job.user_id, "user-123");
+        assert_eq!(job.status, TelemetryErasureStatus::Pending);
+        assert_eq!(job.attempts, 0);
+        assert!(job.last_error.is_none());
+    }
+
+    #[test]
+    fn bson_roundtrip() {
+        let job = TelemetryErasureJob::new("user-456");
+        let doc = bson::to_document(&job).expect("serialize");
+        let restored: TelemetryErasureJob = bson::from_document(doc).expect("deserialize");
+        assert_eq!(job.id, restored.id);
+        assert_eq!(job.user_id, restored.user_id);
+        assert_eq!(restored.status, TelemetryErasureStatus::Pending);
+    }
+
+    #[test]
+    fn bson_roundtrip_all_statuses() {
+        for status in [
+            TelemetryErasureStatus::Pending,
+            TelemetryErasureStatus::InFlight,
+            TelemetryErasureStatus::Completed,
+            TelemetryErasureStatus::Failed,
+        ] {
+            let mut job = TelemetryErasureJob::new("u");
+            job.status = status;
+            let doc = bson::to_document(&job).expect("serialize");
+            let restored: TelemetryErasureJob = bson::from_document(doc).expect("deserialize");
+            assert_eq!(restored.status, status);
+        }
+    }
+
+    #[test]
+    fn bson_roundtrip_with_error() {
+        let mut job = TelemetryErasureJob::new("u");
+        job.status = TelemetryErasureStatus::Failed;
+        job.attempts = 3;
+        job.last_error = Some("PostHog 500".to_string());
+        let doc = bson::to_document(&job).expect("serialize");
+        let restored: TelemetryErasureJob = bson::from_document(doc).expect("deserialize");
+        assert_eq!(restored.attempts, 3);
+        assert_eq!(restored.last_error.as_deref(), Some("PostHog 500"));
+    }
+
+    #[test]
+    fn bson_backward_compat_missing_optional_fields() {
+        let job = TelemetryErasureJob::new("u");
+        let mut doc = bson::to_document(&job).expect("serialize");
+        doc.remove("attempts");
+        doc.remove("last_error");
+        let restored: TelemetryErasureJob = bson::from_document(doc).expect("deserialize");
+        assert_eq!(restored.attempts, 0);
+        assert!(restored.last_error.is_none());
+    }
+}

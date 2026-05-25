@@ -1265,4 +1265,88 @@ mod tests {
 
         assert!(matches!(error, AppError::BadRequest(_)));
     }
+
+    #[test]
+    fn extract_ip_from_x_forwarded_for() {
+        let mut h = HeaderMap::new();
+        h.insert("x-forwarded-for", "1.2.3.4, 5.6.7.8".parse().unwrap());
+        assert_eq!(extract_ip(&h, None), Some("1.2.3.4".to_string()));
+    }
+
+    #[test]
+    fn extract_ip_from_x_real_ip() {
+        let mut h = HeaderMap::new();
+        h.insert("x-real-ip", "10.0.0.1".parse().unwrap());
+        assert_eq!(extract_ip(&h, None), Some("10.0.0.1".to_string()));
+    }
+
+    #[test]
+    fn extract_ip_falls_back_to_peer() {
+        let peer = "192.168.1.1:8080".parse().ok();
+        assert_eq!(
+            extract_ip(&HeaderMap::new(), peer),
+            Some("192.168.1.1".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_ip_returns_none_when_nothing_available() {
+        assert_eq!(extract_ip(&HeaderMap::new(), None), None);
+    }
+
+    #[test]
+    fn build_cookie_includes_all_attributes() {
+        let c = build_cookie("name", "val", 3600, "/", true, Some(".example.com"));
+        assert!(c.contains("name=val"));
+        assert!(c.contains("HttpOnly"));
+        assert!(c.contains("SameSite=Lax"));
+        assert!(c.contains("Max-Age=3600"));
+        assert!(c.contains("; Secure"));
+        assert!(c.contains("Domain=.example.com"));
+    }
+
+    #[test]
+    fn build_cookie_no_secure_for_http() {
+        let c = build_cookie("n", "v", 60, "/", false, None);
+        assert!(!c.contains("; Secure"));
+        assert!(!c.contains("Domain="));
+    }
+
+    #[test]
+    fn clear_cookie_sets_max_age_zero() {
+        let c = clear_cookie("tok", "/", true, None);
+        assert!(c.contains("Max-Age=0"));
+        assert!(c.contains("tok=;"));
+    }
+
+    #[test]
+    fn resolve_auth_client_mode_web_explicit() {
+        assert_eq!(
+            resolve_auth_client_mode(&HeaderMap::new(), Some("web")),
+            AuthClientMode::BrowserSession
+        );
+        assert_eq!(
+            resolve_auth_client_mode(&HeaderMap::new(), Some("WEB")),
+            AuthClientMode::BrowserSession
+        );
+    }
+
+    #[test]
+    fn resolve_auth_client_mode_empty_and_whitespace_ignored() {
+        assert_eq!(
+            resolve_auth_client_mode(&HeaderMap::new(), Some("")),
+            AuthClientMode::TokenClient
+        );
+        assert_eq!(
+            resolve_auth_client_mode(&HeaderMap::new(), Some("  ")),
+            AuthClientMode::TokenClient
+        );
+    }
+
+    #[test]
+    fn parse_cli_token_request_body_valid_json() {
+        let body = Bytes::from(r#"{"client_ua":"nyxid/1.0"}"#);
+        let result = parse_cli_token_request_body(body).unwrap().unwrap();
+        assert_eq!(result.client_ua, Some("nyxid/1.0".to_string()));
+    }
 }

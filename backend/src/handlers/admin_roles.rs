@@ -373,3 +373,248 @@ pub async fn bulk_assign_role(
         ),
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+    use crate::services::role_service;
+    use crate::test_utils::{connect_test_database, test_app_state, test_auth_user, test_user};
+    use axum::extract::{Path, Query, State};
+    use uuid::Uuid;
+
+    async fn insert_admin(db: &mongodb::Database) -> String {
+        role_service::seed_system_roles(db)
+            .await
+            .expect("seed platform roles");
+        let platform_role_ids = role_service::get_platform_role_ids(db)
+            .await
+            .expect("platform role ids");
+        let id = Uuid::new_v4().to_string();
+        let mut user = test_user(&id, UserType::Person);
+        user.role_ids.push(platform_role_ids.admin);
+        db.collection::<User>(USERS)
+            .insert_one(&user)
+            .await
+            .expect("insert admin user");
+        id
+    }
+
+    #[tokio::test]
+    async fn test_list_roles_empty() {
+        let Some(db) = connect_test_database("h_admin_roles_list").await else {
+            return;
+        };
+        let admin_id = insert_admin(&db).await;
+        let state = test_app_state(db);
+        let auth = test_auth_user(&admin_id);
+
+        let result = list_roles(State(state), auth, Query(RoleListQuery { client_id: None }))
+            .await
+            .expect("list_roles should succeed");
+
+        assert!(result.0.roles.len() >= 3);
+    }
+
+    #[tokio::test]
+    async fn test_create_role() {
+        let Some(db) = connect_test_database("h_admin_roles_create").await else {
+            return;
+        };
+        let admin_id = insert_admin(&db).await;
+        let state = test_app_state(db);
+        let auth = test_auth_user(&admin_id);
+
+        let result = create_role(
+            State(state),
+            auth,
+            HeaderMap::new(),
+            Json(CreateRoleRequest {
+                name: "Tester".to_string(),
+                slug: "tester".to_string(),
+                description: Some("A test role".to_string()),
+                permissions: vec!["read".to_string()],
+                is_default: Some(false),
+                client_id: None,
+            }),
+        )
+        .await
+        .expect("create_role should succeed");
+
+        assert_eq!(result.0.name, "Tester");
+        assert_eq!(result.0.slug, "tester");
+        assert_eq!(result.0.permissions, vec!["read"]);
+        assert!(!result.0.is_system);
+    }
+
+    #[tokio::test]
+    async fn test_get_role() {
+        let Some(db) = connect_test_database("h_admin_roles_get").await else {
+            return;
+        };
+        let admin_id = insert_admin(&db).await;
+        let state = test_app_state(db);
+
+        let created = create_role(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            HeaderMap::new(),
+            Json(CreateRoleRequest {
+                name: "Viewer".to_string(),
+                slug: "viewer".to_string(),
+                description: None,
+                permissions: vec![],
+                is_default: None,
+                client_id: None,
+            }),
+        )
+        .await
+        .expect("create_role should succeed");
+
+        let role_id = created.0.id.clone();
+
+        let result = get_role(
+            State(state),
+            test_auth_user(&admin_id),
+            Path(role_id.clone()),
+        )
+        .await
+        .expect("get_role should succeed");
+
+        assert_eq!(result.0.id, role_id);
+        assert_eq!(result.0.name, "Viewer");
+    }
+
+    #[tokio::test]
+    async fn test_update_role() {
+        let Some(db) = connect_test_database("h_admin_roles_update").await else {
+            return;
+        };
+        let admin_id = insert_admin(&db).await;
+        let state = test_app_state(db);
+
+        let created = create_role(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            HeaderMap::new(),
+            Json(CreateRoleRequest {
+                name: "Editor".to_string(),
+                slug: "editor".to_string(),
+                description: None,
+                permissions: vec!["edit".to_string()],
+                is_default: None,
+                client_id: None,
+            }),
+        )
+        .await
+        .expect("create_role should succeed");
+
+        let role_id = created.0.id.clone();
+
+        let result = update_role(
+            State(state),
+            test_auth_user(&admin_id),
+            HeaderMap::new(),
+            Path(role_id.clone()),
+            Json(UpdateRoleRequest {
+                name: Some("Senior Editor".to_string()),
+                slug: None,
+                description: Some("Updated description".to_string()),
+                permissions: Some(vec!["edit".to_string(), "publish".to_string()]),
+                is_default: None,
+            }),
+        )
+        .await
+        .expect("update_role should succeed");
+
+        assert_eq!(result.0.name, "Senior Editor");
+        assert_eq!(result.0.permissions, vec!["edit", "publish"]);
+    }
+
+    #[tokio::test]
+    async fn test_delete_role() {
+        let Some(db) = connect_test_database("h_admin_roles_delete").await else {
+            return;
+        };
+        let admin_id = insert_admin(&db).await;
+        let state = test_app_state(db);
+
+        let created = create_role(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            HeaderMap::new(),
+            Json(CreateRoleRequest {
+                name: "Temp".to_string(),
+                slug: "temp".to_string(),
+                description: None,
+                permissions: vec![],
+                is_default: None,
+                client_id: None,
+            }),
+        )
+        .await
+        .expect("create_role should succeed");
+
+        let role_id = created.0.id.clone();
+
+        let result = delete_role(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            HeaderMap::new(),
+            Path(role_id.clone()),
+        )
+        .await
+        .expect("delete_role should succeed");
+
+        assert_eq!(result.0.message, "Role deleted");
+
+        let err = get_role(State(state), test_auth_user(&admin_id), Path(role_id)).await;
+        assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_assign_role() {
+        let Some(db) = connect_test_database("h_admin_roles_assign").await else {
+            return;
+        };
+        let admin_id = insert_admin(&db).await;
+
+        let target_id = Uuid::new_v4().to_string();
+        let target_user = test_user(&target_id, UserType::Person);
+        db.collection::<User>(USERS)
+            .insert_one(&target_user)
+            .await
+            .expect("insert target user");
+
+        let state = test_app_state(db);
+
+        let created = create_role(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            HeaderMap::new(),
+            Json(CreateRoleRequest {
+                name: "Assignable".to_string(),
+                slug: "assignable".to_string(),
+                description: None,
+                permissions: vec!["test.perm".to_string()],
+                is_default: None,
+                client_id: None,
+            }),
+        )
+        .await
+        .expect("create_role should succeed");
+
+        let role_id = created.0.id.clone();
+
+        let result = assign_role(
+            State(state),
+            test_auth_user(&admin_id),
+            HeaderMap::new(),
+            Path((target_id, role_id)),
+        )
+        .await
+        .expect("assign_role should succeed");
+
+        assert_eq!(result.0.message, "Role assigned");
+    }
+}

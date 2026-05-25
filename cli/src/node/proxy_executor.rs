@@ -554,4 +554,60 @@ mod tests {
         let url = append_query_param("https://example.com/api?x=1", "token", "abc");
         assert_eq!(url, "https://example.com/api?x=1&token=abc");
     }
+
+    #[test]
+    fn proxy_error_response_includes_all_fields() {
+        let json_str = super::proxy_error_response("req-1", "test error", 502, false);
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(parsed["type"], "proxy_error");
+        assert_eq!(parsed["request_id"], "req-1");
+        assert_eq!(parsed["error"], "test error");
+        assert_eq!(parsed["status"], 502);
+        assert_eq!(parsed["retryable"], false);
+    }
+
+    #[test]
+    fn proxy_error_response_with_reason_includes_reason() {
+        let json_str = super::proxy_error_response_with_reason(
+            "req-2",
+            "missing cred",
+            502,
+            true,
+            Some("credential_missing"),
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(parsed["reason"], "credential_missing");
+        assert_eq!(parsed["retryable"], true);
+    }
+
+    #[test]
+    fn proxy_error_response_with_reason_none_omits_reason() {
+        let json_str = super::proxy_error_response_with_reason("req-3", "err", 500, false, None);
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert!(parsed.get("reason").is_none());
+    }
+
+    #[test]
+    fn streaming_content_types_are_correct() {
+        assert!(super::STREAMING_CONTENT_TYPES.contains(&"text/event-stream"));
+        assert!(super::STREAMING_CONTENT_TYPES.contains(&"video/"));
+        assert!(super::STREAMING_CONTENT_TYPES.contains(&"audio/"));
+        assert!(super::STREAMING_CONTENT_TYPES.contains(&"application/octet-stream"));
+    }
+
+    #[test]
+    fn max_chunk_size_is_64kb() {
+        assert_eq!(super::MAX_CHUNK_SIZE, 64 * 1024);
+    }
+
+    #[test]
+    fn stream_size_threshold_is_256kb() {
+        assert_eq!(super::STREAM_SIZE_THRESHOLD, 256 * 1024);
+    }
+
+    #[test]
+    fn append_query_param_handles_empty_url() {
+        let url = append_query_param("", "k", "v");
+        assert_eq!(url, "?k=v");
+    }
 }

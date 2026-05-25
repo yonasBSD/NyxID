@@ -2154,6 +2154,68 @@ mod tests {
         assert_eq!(err, "SSH service not found: shared-label");
     }
 
+    #[test]
+    fn accepts_sse_returns_true_for_event_stream() {
+        let mut headers = HeaderMap::new();
+        headers.insert("accept", "text/event-stream".parse().unwrap());
+        assert!(accepts_sse(&headers));
+    }
+
+    #[test]
+    fn accepts_sse_returns_false_for_json() {
+        let mut headers = HeaderMap::new();
+        headers.insert("accept", "application/json".parse().unwrap());
+        assert!(!accepts_sse(&headers));
+    }
+
+    #[test]
+    fn accepts_sse_returns_false_for_missing() {
+        let headers = HeaderMap::new();
+        assert!(!accepts_sse(&headers));
+    }
+
+    #[test]
+    fn rpc_success_returns_valid_json_rpc_response() {
+        let response = rpc_success(Some(serde_json::json!(1)), serde_json::json!({"ok": true}));
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn rpc_error_returns_valid_json_rpc_error() {
+        let response = rpc_error(Some(serde_json::json!(1)), -32600, "Invalid Request");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn mcp_auth_context_user_has_unrestricted_access() {
+        let ctx = McpAuthContext::user("user-1".to_string());
+        assert!(!ctx.is_api_key);
+        assert!(ctx.allow_all_services);
+        assert!(ctx.allow_all_nodes);
+        assert!(ctx.api_key_id.is_none());
+    }
+
+    #[test]
+    fn mcp_extract_ip_prefers_forwarded_for() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "1.2.3.4, 5.6.7.8".parse().unwrap());
+        headers.insert("x-real-ip", "9.9.9.9".parse().unwrap());
+        assert_eq!(mcp_extract_ip(&headers).as_deref(), Some("1.2.3.4"));
+    }
+
+    #[test]
+    fn mcp_extract_ip_falls_back_to_real_ip() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-real-ip", "9.9.9.9".parse().unwrap());
+        assert_eq!(mcp_extract_ip(&headers).as_deref(), Some("9.9.9.9"));
+    }
+
+    #[test]
+    fn mcp_extract_ip_returns_none_when_absent() {
+        let headers = HeaderMap::new();
+        assert!(mcp_extract_ip(&headers).is_none());
+    }
+
     #[tokio::test]
     async fn resolve_ssh_service_id_scopes_uuid_lookup_to_user() {
         let Some(db) = connect_test_database("mcp_ssh_resolve").await else {

@@ -465,4 +465,120 @@ mod tests {
     fn parse_optional_json_rejects_invalid() {
         assert!(parse_optional_json(Some("{bad"), "metadata").is_err());
     }
+
+    #[test]
+    fn parse_optional_json_parses_valid() {
+        let v = parse_optional_json(Some(r#"{"k":1}"#), "metadata")
+            .expect("ok")
+            .expect("some");
+        assert_eq!(v["k"], 1);
+    }
+
+    #[test]
+    fn parse_optional_json_none_when_absent() {
+        assert!(parse_optional_json(None, "metadata").expect("ok").is_none());
+    }
+
+    #[tokio::test]
+    async fn push_table_output() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/channel-events/conv-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "accepted", "event_id": "ev-auto"
+            })))
+            .mount(&server)
+            .await;
+
+        run(ChannelEventCommands::Push {
+            conversation_id: "conv-1".to_string(),
+            source: "sensor".to_string(),
+            event_type: "reading".to_string(),
+            event_id: None,
+            timestamp: None,
+            payload_json: None,
+            payload_file: None,
+            metadata_json: Some(r#"{"region":"us"}"#.to_string()),
+            api_key: Some("nyxid_ag_x".to_string()),
+            api_key_env: None,
+            base: BaseUrlArgs {
+                base_url: Some(server.uri()),
+                profile: None,
+            },
+            output: OutputFormat::Table,
+        })
+        .await
+        .expect("push table should succeed");
+    }
+
+    #[tokio::test]
+    async fn channel_create_table_output() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/channel-conversations"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "c1", "platform_conversation_id": "dev-1",
+                "platform_conversation_type": "sensor"
+            })))
+            .mount(&server)
+            .await;
+
+        run(ChannelEventCommands::Channel {
+            command: ChannelEventChannelCommands::Create {
+                conversation_id: "dev-1".to_string(),
+                agent_key_id: "key-1".to_string(),
+                conversation_type: Some("sensor".to_string()),
+                org: None,
+                auth: crate::test_support::mock_auth_with_output(server.uri(), OutputFormat::Table),
+            },
+        })
+        .await
+        .expect("channel create table should succeed");
+    }
+
+    #[tokio::test]
+    async fn channel_list_filters_device_platform() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/channel-conversations"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "conversations": [
+                    {"id": "c1", "platform": "device", "is_active": true,
+                     "platform_conversation_id": "dev-1", "agent_api_key_id": "key-1"},
+                    {"id": "c2", "platform": "telegram", "is_active": true}
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        run(ChannelEventCommands::Channel {
+            command: ChannelEventChannelCommands::List {
+                org: None,
+                auth: crate::test_support::mock_auth_with_output(server.uri(), OutputFormat::Table),
+            },
+        })
+        .await
+        .expect("channel list should succeed");
+    }
+
+    #[tokio::test]
+    async fn channel_list_empty() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/channel-conversations"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "conversations": []
+            })))
+            .mount(&server)
+            .await;
+
+        run(ChannelEventCommands::Channel {
+            command: ChannelEventChannelCommands::List {
+                org: None,
+                auth: crate::test_support::mock_auth_with_output(server.uri(), OutputFormat::Table),
+            },
+        })
+        .await
+        .expect("empty channel list should succeed");
+    }
 }
