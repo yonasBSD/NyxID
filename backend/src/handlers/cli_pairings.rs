@@ -283,3 +283,210 @@ pub async fn cancel_pairing(
     cli_pairing_service::cancel(&state.db, &id, &user.user_id.to_string()).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::errors::AppError;
+    use crate::test_utils::{connect_test_database, test_app_state, test_auth_user};
+    use axum::extract::{ConnectInfo, Path, State};
+    use axum::http::HeaderMap;
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn test_create_pairing_success() {
+        let Some(db) = connect_test_database("h_cli_pair_create").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let state = test_app_state(db);
+        let auth = test_auth_user(&user_id);
+
+        let Json(resp) = create_pairing(
+            State(state),
+            auth,
+            Json(CreatePairingRequest {
+                kind: "api-key-create".to_string(),
+                prefill: serde_json::json!({"name": "test"}),
+                ttl_secs: None,
+            }),
+        )
+        .await
+        .expect("create should succeed");
+
+        assert!(!resp.id.is_empty());
+        assert!(!resp.code.is_empty());
+        assert!(resp.pair_url.contains("/cli/pair"));
+        assert!(resp.poll_url.contains(&resp.id));
+    }
+
+    #[tokio::test]
+    async fn test_create_pairing_empty_kind_rejected() {
+        let Some(db) = connect_test_database("h_cli_pair_empty_kind").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let state = test_app_state(db);
+        let auth = test_auth_user(&user_id);
+
+        let err = create_pairing(
+            State(state),
+            auth,
+            Json(CreatePairingRequest {
+                kind: String::new(),
+                prefill: serde_json::json!(null),
+                ttl_secs: None,
+            }),
+        )
+        .await
+        .expect_err("empty kind should be rejected");
+
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn test_poll_pairing_pending() {
+        let Some(db) = connect_test_database("h_cli_pair_poll").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let state = test_app_state(db);
+        let auth = test_auth_user(&user_id);
+
+        let Json(created) = create_pairing(
+            State(state.clone()),
+            auth.clone(),
+            Json(CreatePairingRequest {
+                kind: "api-key-create".to_string(),
+                prefill: serde_json::json!({}),
+                ttl_secs: None,
+            }),
+        )
+        .await
+        .expect("create");
+
+        let Json(poll) = poll_pairing(State(state), auth, Path(created.id))
+            .await
+            .expect("poll should succeed");
+
+        assert!(matches!(
+            poll.status,
+            cli_pairing_service::PollStatus::Pending
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_claim_pairing_success() {
+        let Some(db) = connect_test_database("h_cli_pair_claim").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let state = test_app_state(db);
+        let auth = test_auth_user(&user_id);
+
+        let Json(created) = create_pairing(
+            State(state.clone()),
+            auth.clone(),
+            Json(CreatePairingRequest {
+                kind: "api-key-create".to_string(),
+                prefill: serde_json::json!({"name": "agent"}),
+                ttl_secs: None,
+            }),
+        )
+        .await
+        .expect("create");
+
+        let peer: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+
+        let Json(claimed) = claim_pairing(
+            State(state),
+            auth,
+            ConnectInfo(peer),
+            HeaderMap::new(),
+            Json(ClaimPairingRequest {
+                code: created.code.clone(),
+            }),
+        )
+        .await
+        .expect("claim should succeed");
+
+        assert_eq!(claimed.kind, "api-key-create");
+        assert!(!claimed.resumed);
+    }
+
+    #[tokio::test]
+    async fn test_complete_pairing_success() {
+        let Some(db) = connect_test_database("h_cli_pair_complete").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let state = test_app_state(db);
+        let auth = test_auth_user(&user_id);
+
+        let Json(created) = create_pairing(
+            State(state.clone()),
+            auth.clone(),
+            Json(CreatePairingRequest {
+                kind: "api-key-create".to_string(),
+                prefill: serde_json::json!({}),
+                ttl_secs: None,
+            }),
+        )
+        .await
+        .expect("create");
+
+        let peer: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        let _ = claim_pairing(
+            State(state.clone()),
+            auth.clone(),
+            ConnectInfo(peer),
+            HeaderMap::new(),
+            Json(ClaimPairingRequest {
+                code: created.code.clone(),
+            }),
+        )
+        .await
+        .expect("claim");
+
+        let Json(resp) = complete_pairing(
+            State(state),
+            auth,
+            Path(created.id),
+            Json(CompletePairingRequest {
+                ack: serde_json::json!({"api_key_id": "abc-123"}),
+            }),
+        )
+        .await
+        .expect("complete should succeed");
+
+        assert_eq!(resp.get("ok").and_then(|v| v.as_bool()), Some(true));
+    }
+
+    #[tokio::test]
+    async fn test_cancel_pairing_success() {
+        let Some(db) = connect_test_database("h_cli_pair_cancel").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let state = test_app_state(db);
+        let auth = test_auth_user(&user_id);
+
+        let Json(created) = create_pairing(
+            State(state.clone()),
+            auth.clone(),
+            Json(CreatePairingRequest {
+                kind: "node-register-token".to_string(),
+                prefill: serde_json::json!({}),
+                ttl_secs: None,
+            }),
+        )
+        .await
+        .expect("create");
+
+        let Json(resp) = cancel_pairing(State(state), auth, Path(created.id))
+            .await
+            .expect("cancel should succeed");
+
+        assert_eq!(resp.get("ok").and_then(|v| v.as_bool()), Some(true));
+    }
+}

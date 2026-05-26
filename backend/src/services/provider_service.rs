@@ -4012,4 +4012,509 @@ mod tests {
         assert!(reconcile_seeded_headers(Some(&stored), seeded).is_none());
         assert!(reconcile_seeded_headers(None, seeded).is_none());
     }
+
+    use crate::models::provider_config::{COLLECTION_NAME, ProviderConfig};
+    use crate::test_utils::{connect_test_database, test_encryption_keys};
+    use chrono::Utc;
+    use mongodb::bson::doc;
+    use uuid::Uuid;
+
+    fn make_test_provider(slug: &str, provider_type: &str) -> ProviderConfig {
+        let now = Utc::now();
+        ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: slug.to_string(),
+            name: format!("Test {slug}"),
+            description: None,
+            provider_type: provider_type.to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: None,
+            is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[tokio::test]
+    async fn create_provider_validates_invalid_provider_type() {
+        let Some(db) = connect_test_database("provider_ext_invalid_type").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let err = super::create_provider(
+            &db,
+            &enc,
+            "Bad",
+            "bad-type",
+            "invalid_type",
+            "admin",
+            "client_secret_post",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "test",
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("invalid type");
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn create_provider_validates_invalid_credential_mode() {
+        let Some(db) = connect_test_database("provider_ext_invalid_mode").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let err = super::create_provider(
+            &db,
+            &enc,
+            "Bad",
+            "bad-mode",
+            "api_key",
+            "invalid_mode",
+            "client_secret_post",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "test",
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("invalid mode");
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn create_provider_rejects_non_admin_mode_for_api_key() {
+        let Some(db) = connect_test_database("provider_ext_apikey_mode").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let err = super::create_provider(
+            &db,
+            &enc,
+            "Bad",
+            "apikey-user",
+            "api_key",
+            "user",
+            "client_secret_post",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "test",
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("api_key must be admin");
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn create_provider_rejects_non_admin_mode_for_telegram_widget() {
+        let Some(db) = connect_test_database("provider_ext_tg_mode").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let err = super::create_provider(
+            &db,
+            &enc,
+            "TG",
+            "tg-user",
+            "telegram_widget",
+            "user",
+            "client_secret_post",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "test",
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("telegram must be admin");
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn create_provider_rejects_duplicate_slug() {
+        let Some(db) = connect_test_database("provider_ext_dup_slug").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let slug = format!("dup-{}", Uuid::new_v4());
+        super::create_provider(
+            &db,
+            &enc,
+            "First",
+            &slug,
+            "api_key",
+            "admin",
+            "client_secret_post",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "test",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let err = super::create_provider(
+            &db,
+            &enc,
+            "Second",
+            &slug,
+            "api_key",
+            "admin",
+            "client_secret_post",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "test",
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("duplicate slug");
+        assert!(matches!(err, AppError::Conflict(_)));
+    }
+
+    #[tokio::test]
+    async fn create_and_get_provider_round_trips() {
+        let Some(db) = connect_test_database("provider_ext_create_get").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let slug = format!("rt-{}", Uuid::new_v4());
+        let created = super::create_provider(
+            &db,
+            &enc,
+            "Round Trip",
+            &slug,
+            "api_key",
+            "admin",
+            "client_secret_post",
+            None,
+            None,
+            None,
+            None,
+            Some("A test provider"),
+            None,
+            Some("https://example.com/docs"),
+            "test",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(created.slug, slug);
+        assert_eq!(created.description.as_deref(), Some("A test provider"));
+        assert!(created.is_active);
+
+        let fetched = super::get_provider(&db, &created.id).await.unwrap();
+        assert_eq!(fetched.slug, slug);
+
+        let by_slug = super::get_provider_by_slug(&db, &slug).await.unwrap();
+        assert_eq!(by_slug.id, created.id);
+    }
+
+    #[tokio::test]
+    async fn list_providers_only_returns_active() {
+        let Some(db) = connect_test_database("provider_ext_list").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let slug_active = format!("active-{}", Uuid::new_v4());
+        let slug_inactive = format!("inactive-{}", Uuid::new_v4());
+
+        super::create_provider(
+            &db,
+            &enc,
+            "Active",
+            &slug_active,
+            "api_key",
+            "admin",
+            "client_secret_post",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "test",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let mut inactive = make_test_provider(&slug_inactive, "api_key");
+        inactive.is_active = false;
+        db.collection::<ProviderConfig>(COLLECTION_NAME)
+            .insert_one(&inactive)
+            .await
+            .unwrap();
+
+        let all = super::list_providers(&db).await.unwrap();
+        let slugs: Vec<&str> = all.iter().map(|p| p.slug.as_str()).collect();
+        assert!(slugs.contains(&slug_active.as_str()));
+        assert!(!slugs.contains(&slug_inactive.as_str()));
+    }
+
+    #[tokio::test]
+    async fn get_provider_returns_not_found_for_missing_id() {
+        let Some(db) = connect_test_database("provider_ext_notfound").await else {
+            return;
+        };
+        let err = super::get_provider(&db, "nonexistent-id")
+            .await
+            .expect_err("should not find");
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn get_provider_by_slug_returns_not_found_for_missing_slug() {
+        let Some(db) = connect_test_database("provider_ext_slug_nf").await else {
+            return;
+        };
+        let err = super::get_provider_by_slug(&db, "no-such-slug")
+            .await
+            .expect_err("should not find");
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn delete_provider_deactivates_and_revokes_tokens() {
+        let Some(db) = connect_test_database("provider_ext_delete").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let slug = format!("del-{}", Uuid::new_v4());
+        let created = super::create_provider(
+            &db,
+            &enc,
+            "Delete Me",
+            &slug,
+            "api_key",
+            "admin",
+            "client_secret_post",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "test",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        super::delete_provider(&db, &created.id).await.unwrap();
+        let after = db
+            .collection::<ProviderConfig>(COLLECTION_NAME)
+            .find_one(doc! { "_id": &created.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!after.is_active);
+    }
+
+    #[tokio::test]
+    async fn delete_provider_returns_not_found_for_missing() {
+        let Some(db) = connect_test_database("provider_ext_del_nf").await else {
+            return;
+        };
+        let err = super::delete_provider(&db, "nonexistent")
+            .await
+            .expect_err("should not find");
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn create_provider_api_key_stores_correctly() {
+        let Some(db) = connect_test_database("provider_ext_ak_create").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let slug = format!("ak-{}", Uuid::new_v4());
+        let created = super::create_provider(
+            &db,
+            &enc,
+            "API Key Provider",
+            &slug,
+            "api_key",
+            "admin",
+            "client_secret_post",
+            None,
+            Some(super::ApiKeyProviderInput {
+                api_key_instructions: Some("Get key from console".to_string()),
+                api_key_url: Some("https://example.com/keys".to_string()),
+            }),
+            None,
+            None,
+            None,
+            None,
+            None,
+            "test",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            created.api_key_instructions.as_deref(),
+            Some("Get key from console")
+        );
+        assert_eq!(
+            created.api_key_url.as_deref(),
+            Some("https://example.com/keys")
+        );
+        assert_eq!(created.provider_type, "api_key");
+    }
+
+    #[tokio::test]
+    async fn create_provider_oauth2_stores_urls_and_scopes() {
+        let Some(db) = connect_test_database("provider_ext_oauth_create").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let slug = format!("oauth-{}", Uuid::new_v4());
+        let created = super::create_provider(
+            &db,
+            &enc,
+            "OAuth",
+            &slug,
+            "oauth2",
+            "user",
+            "client_secret_post",
+            Some(super::OAuthProviderInput {
+                authorization_url: "https://auth.example.com/authorize".to_string(),
+                token_url: "https://auth.example.com/token".to_string(),
+                revocation_url: Some("https://auth.example.com/revoke".to_string()),
+                default_scopes: Some(vec!["openid".to_string(), "profile".to_string()]),
+                client_id: Some("test-client".to_string()),
+                client_secret: Some("test-secret".to_string()),
+                supports_pkce: true,
+            }),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "test",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            created.authorization_url.as_deref(),
+            Some("https://auth.example.com/authorize")
+        );
+        assert!(created.supports_pkce);
+        assert!(created.client_id_encrypted.is_some());
+        assert!(created.client_secret_encrypted.is_some());
+        assert_eq!(created.credential_mode, "user");
+    }
+
+    #[test]
+    fn normalize_telegram_bot_token_rejects_tab_whitespace() {
+        let err = normalize_telegram_bot_token("123:ABC\tDEF").expect_err("tab should be rejected");
+        assert!(err.to_string().contains("whitespace"));
+    }
+
+    #[test]
+    fn normalize_telegram_bot_username_accepts_valid_five_char() {
+        let result = normalize_telegram_bot_username("AaBot").expect("5-char valid bot username");
+        assert_eq!(result, "AaBot");
+    }
+
+    #[test]
+    fn normalize_telegram_bot_username_rejects_empty() {
+        let err = normalize_telegram_bot_username("").expect_err("empty should be rejected");
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[test]
+    fn is_lark_family_slug_matches_known_slugs() {
+        assert!(super::is_lark_family_slug("api-lark-bot"));
+        assert!(super::is_lark_family_slug("api-feishu-bot"));
+        assert!(!super::is_lark_family_slug("api-slack-bot"));
+        assert!(!super::is_lark_family_slug("api-lark"));
+    }
+
+    #[test]
+    fn default_service_seeds_have_unique_slugs() {
+        let slugs: Vec<&str> = DEFAULT_SERVICE_SEEDS
+            .iter()
+            .map(|s| s.service_slug)
+            .collect();
+        let mut unique = slugs.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(slugs.len(), unique.len());
+    }
 }

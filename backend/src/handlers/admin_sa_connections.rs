@@ -286,3 +286,186 @@ pub async fn disconnect_sa_service(
         message: "Service disconnected from service account".to_string(),
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::downstream_service::DownstreamService;
+    use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
+    use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+    use crate::services::role_service;
+    use crate::test_utils::{connect_test_database, test_app_state, test_auth_user, test_user};
+    use axum::extract::{Path, State};
+    use axum::http::HeaderMap;
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    async fn seed_admin(db: &mongodb::Database) -> String {
+        role_service::seed_system_roles(db)
+            .await
+            .expect("seed roles");
+        let ids = role_service::get_platform_role_ids(db)
+            .await
+            .expect("role ids");
+        let id = Uuid::new_v4().to_string();
+        let mut user = test_user(&id, UserType::Person);
+        user.role_ids.push(ids.admin);
+        db.collection::<User>(USERS)
+            .insert_one(&user)
+            .await
+            .expect("insert admin");
+        id
+    }
+
+    fn fixture_sa(admin_id: &str, active: bool) -> ServiceAccount {
+        let now = Utc::now();
+        ServiceAccount {
+            id: Uuid::new_v4().to_string(),
+            name: "Test SA".to_string(),
+            description: None,
+            client_id: format!("sa_{}", hex::encode([2u8; 12])),
+            client_secret_hash: "0".repeat(64),
+            secret_prefix: "sas_test".to_string(),
+            role_ids: vec![],
+            allowed_scopes: "proxy:*".to_string(),
+            is_active: active,
+            rate_limit_override: None,
+            created_by: admin_id.to_string(),
+            owner_user_id: None,
+            created_at: now,
+            updated_at: now,
+            last_authenticated_at: None,
+        }
+    }
+
+    fn fixture_downstream_service(svc_id: &str) -> DownstreamService {
+        let mut svc = crate::models::downstream_service::test_helpers::dummy_service();
+        svc.id = svc_id.to_string();
+        svc.slug = format!("svc-{}", &svc_id[..8]);
+        svc.name = "Test Downstream".to_string();
+        svc.service_category = "internal".to_string();
+        svc
+    }
+
+    #[tokio::test]
+    async fn test_list_sa_connections_empty() {
+        let Some(db) = connect_test_database("h_sa_conn_list").await else {
+            return;
+        };
+        let admin_id = seed_admin(&db).await;
+        let sa = fixture_sa(&admin_id, true);
+        let sa_id = sa.id.clone();
+        db.collection::<ServiceAccount>(SERVICE_ACCOUNTS)
+            .insert_one(&sa)
+            .await
+            .expect("insert sa");
+
+        let state = test_app_state(db);
+        let auth = test_auth_user(&admin_id);
+
+        let Json(resp) = list_sa_connections(State(state), auth, Path(sa_id))
+            .await
+            .expect("list should succeed");
+
+        assert!(resp.connections.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_connect_sa_service_internal() {
+        let Some(db) = connect_test_database("h_sa_conn_connect").await else {
+            return;
+        };
+        let admin_id = seed_admin(&db).await;
+        let sa = fixture_sa(&admin_id, true);
+        let sa_id = sa.id.clone();
+        db.collection::<ServiceAccount>(SERVICE_ACCOUNTS)
+            .insert_one(&sa)
+            .await
+            .expect("insert sa");
+
+        let svc_id = Uuid::new_v4().to_string();
+        let svc = fixture_downstream_service(&svc_id);
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&svc)
+            .await
+            .expect("insert downstream");
+
+        let state = test_app_state(db);
+        let auth = test_auth_user(&admin_id);
+
+        let Json(resp) = connect_sa_service(
+            State(state),
+            auth,
+            HeaderMap::new(),
+            Path((sa_id, svc_id)),
+            Json(AdminSaConnectRequest {
+                credential: None,
+                credential_label: None,
+            }),
+        )
+        .await
+        .expect("connect should succeed");
+
+        assert_eq!(resp.service_name, "Test Downstream");
+    }
+
+    #[tokio::test]
+    async fn test_connect_sa_service_inactive_rejected() {
+        let Some(db) = connect_test_database("h_sa_conn_inactive").await else {
+            return;
+        };
+        let admin_id = seed_admin(&db).await;
+        let sa = fixture_sa(&admin_id, false);
+        let sa_id = sa.id.clone();
+        db.collection::<ServiceAccount>(SERVICE_ACCOUNTS)
+            .insert_one(&sa)
+            .await
+            .expect("insert sa");
+
+        let state = test_app_state(db);
+        let auth = test_auth_user(&admin_id);
+
+        let err = connect_sa_service(
+            State(state),
+            auth,
+            HeaderMap::new(),
+            Path((sa_id, Uuid::new_v4().to_string())),
+            Json(AdminSaConnectRequest {
+                credential: None,
+                credential_label: None,
+            }),
+        )
+        .await
+        .expect_err("inactive SA should be rejected");
+
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn test_disconnect_sa_service_inactive_rejected() {
+        let Some(db) = connect_test_database("h_sa_conn_disc_inactive").await else {
+            return;
+        };
+        let admin_id = seed_admin(&db).await;
+        let sa = fixture_sa(&admin_id, false);
+        let sa_id = sa.id.clone();
+        db.collection::<ServiceAccount>(SERVICE_ACCOUNTS)
+            .insert_one(&sa)
+            .await
+            .expect("insert sa");
+
+        let state = test_app_state(db);
+        let auth = test_auth_user(&admin_id);
+
+        let err = disconnect_sa_service(
+            State(state),
+            auth,
+            HeaderMap::new(),
+            Path((sa_id, Uuid::new_v4().to_string())),
+        )
+        .await
+        .expect_err("disconnect on inactive SA should be rejected");
+
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+}

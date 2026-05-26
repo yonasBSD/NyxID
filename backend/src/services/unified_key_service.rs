@@ -5573,4 +5573,306 @@ mod tests {
                 if m.contains("does not carry user-provided OAuth client credentials")
         ));
     }
+
+    #[test]
+    fn generate_slug_from_label_strips_special_chars() {
+        assert_eq!(generate_slug_from_label("Hello, World!"), "hello-world");
+    }
+
+    #[test]
+    fn generate_slug_from_label_collapses_consecutive_hyphens() {
+        assert_eq!(generate_slug_from_label("a---b---c"), "a-b-c");
+    }
+
+    #[test]
+    fn generate_slug_from_label_handles_all_hyphens_as_empty() {
+        assert_eq!(generate_slug_from_label("---"), "service");
+    }
+
+    #[test]
+    fn resolve_openapi_spec_url_inherit_no_catalog_returns_none() {
+        assert_eq!(
+            resolve_openapi_spec_url(&OpenApiSpecUrlInput::Inherit, false, None),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_openapi_spec_url_clear_always_none() {
+        assert_eq!(
+            resolve_openapi_spec_url(
+                &OpenApiSpecUrlInput::Clear,
+                false,
+                Some("https://example.com/spec.json"),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_openapi_spec_url_set_returns_trimmed_url() {
+        let out = resolve_openapi_spec_url(
+            &OpenApiSpecUrlInput::Set("  https://api.example.com/openapi.yaml  "),
+            false,
+            None,
+        );
+        assert_eq!(out.as_deref(), Some("https://api.example.com/openapi.yaml"));
+    }
+
+    #[test]
+    fn derive_effective_auth_spr_injection_key_none_defaults_to_authorization() {
+        let mut svc = sample_catalog_service();
+        svc.auth_method = "none".to_string();
+        svc.auth_key_name = "".to_string();
+        let spr = sample_spr("bearer", None);
+        let (method, key) = derive_effective_auth(&svc, Some(&spr));
+        assert_eq!(method, "bearer");
+        assert_eq!(key, "Authorization");
+    }
+
+    #[test]
+    fn direct_credential_type_from_auth_method_handles_all_cases() {
+        assert_eq!(
+            direct_credential_type_from_auth_method("body"),
+            Some("api_key")
+        );
+        assert_eq!(
+            direct_credential_type_from_auth_method("path"),
+            Some("api_key")
+        );
+        assert_eq!(
+            direct_credential_type_from_auth_method("bot_bearer"),
+            Some("api_key")
+        );
+        assert_eq!(
+            direct_credential_type_from_auth_method("token_exchange"),
+            Some("api_key")
+        );
+    }
+
+    #[test]
+    fn direct_credential_type_for_service_ssh_returns_none() {
+        let key = sample_api_key("ssh_certificate");
+        let service = sample_service("none");
+        assert_eq!(
+            direct_credential_type_for_service(&key, &service, None),
+            None
+        );
+    }
+
+    #[test]
+    fn direct_credential_type_for_service_with_provider_uses_provider_type() {
+        let key = sample_api_key("api_key");
+        let service = sample_service("bearer");
+        let now = Utc::now();
+        let provider = ProviderConfig {
+            id: "p1".to_string(),
+            slug: "test".to_string(),
+            name: "Test".to_string(),
+            description: None,
+            provider_type: "device_code".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: None,
+            is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        assert_eq!(
+            direct_credential_type_for_service(&key, &service, Some(&provider)),
+            Some("oauth2")
+        );
+    }
+
+    #[tokio::test]
+    async fn create_key_custom_http_no_auth_skips_api_key_creation() {
+        let Some(db) = connect_test_database("unified_ext_noauth").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let result = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            None,
+            Some("https://api.example.com"),
+            "",
+            "No Auth Service",
+            Some("no-auth-svc"),
+            Some("none"),
+            None,
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(result.api_key.is_none());
+        assert_eq!(result.service.auth_method, "none");
+    }
+
+    #[tokio::test]
+    async fn create_key_custom_http_requires_endpoint_url_without_node() {
+        let Some(db) = connect_test_database("unified_ext_no_url").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let err = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            None,
+            None,
+            "secret",
+            "Missing URL",
+            None,
+            Some("bearer"),
+            None,
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .err()
+        .expect("should require endpoint_url");
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn create_key_custom_http_requires_credential_for_direct() {
+        let Some(db) = connect_test_database("unified_ext_no_cred").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let err = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            None,
+            Some("https://api.example.com"),
+            "",
+            "No Cred",
+            None,
+            Some("bearer"),
+            None,
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .err()
+        .expect("should require credential");
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn create_key_ssh_requires_node() {
+        let Some(db) = connect_test_database("unified_ext_ssh_no_node").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let err = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            None,
+            None,
+            "",
+            "SSH Service",
+            None,
+            None,
+            None,
+            None,
+            Some(SshCreateParams {
+                host: "10.0.0.1",
+                port: 22,
+                certificate_auth: false,
+                ssh_auth_mode: SshAuthMode::ProxyOnly,
+                principals: vec![],
+                certificate_ttl_minutes: 30,
+            }),
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .err()
+        .expect("SSH should require node");
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn revoke_key_returns_not_found_for_missing_service() {
+        let Some(db) = connect_test_database("unified_ext_revoke_nf").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let err = revoke_key(&db, &user_id, &user_id, "nonexistent-svc")
+            .await
+            .expect_err("should not find");
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[test]
+    fn identity_config_from_downstream_mode_none_disables_all() {
+        let mut svc = sample_catalog_service();
+        svc.identity_propagation_mode = "none".to_string();
+        svc.identity_include_user_id = false;
+        svc.identity_include_email = false;
+        svc.identity_include_name = false;
+        let cfg = identity_config_from_downstream_service(&svc);
+        assert!(!cfg.identity_include_user_id);
+        assert!(!cfg.identity_include_email);
+        assert!(!cfg.identity_include_name);
+    }
+
+    #[test]
+    fn auto_provision_source_id_deterministic() {
+        let a = auto_provision_source_id("user-1", "cat-1");
+        let b = auto_provision_source_id("user-1", "cat-1");
+        assert_eq!(a, b);
+        let c = auto_provision_source_id("user-2", "cat-1");
+        assert_ne!(a, c);
+    }
 }

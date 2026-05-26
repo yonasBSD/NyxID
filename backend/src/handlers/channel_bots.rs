@@ -1001,4 +1001,54 @@ mod tests {
         let url = url.expect("Feishu bot should produce a permission URL");
         assert!(url.starts_with("https://open.feishu.cn/app/cli_test/auth?q="));
     }
+
+    #[test]
+    fn normalize_optional_field_trims_and_filters() {
+        assert_eq!(normalize_optional_field(None), None);
+        assert_eq!(normalize_optional_field(Some("")), None);
+        assert_eq!(normalize_optional_field(Some("  ")), None);
+        assert_eq!(normalize_optional_field(Some(" hello ")), Some("hello"));
+    }
+
+    #[test]
+    fn hash_conversation_id_is_deterministic_and_16_hex() {
+        let h1 = hash_conversation_id("oc_chat789");
+        let h2 = hash_conversation_id("oc_chat789");
+        assert_eq!(h1, h2);
+        assert_eq!(h1.len(), 16);
+        assert!(h1.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn hash_conversation_id_different_inputs() {
+        assert_ne!(hash_conversation_id("a"), hash_conversation_id("b"));
+    }
+
+    #[test]
+    fn bot_to_item_maps_fields() {
+        let bot = make_telegram_bot();
+        let item = bot_to_item(&bot);
+        assert_eq!(item.platform, "telegram");
+        assert_eq!(item.label, "TG Bot");
+        assert!(!item.webhook_registered);
+    }
+
+    #[test]
+    fn create_channel_bot_request_debug_redacts_token() {
+        let req = CreateChannelBotRequest {
+            platform: "telegram".to_string(),
+            bot_token: "secret123".to_string(),
+            label: "Test".to_string(),
+            app_id: None,
+            app_secret: Some("app_secret_val".to_string()),
+            verification_token: None,
+            encrypt_key: None,
+            public_key: None,
+            target_org_id: None,
+        };
+        let debug = format!("{:?}", req);
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("secret123"));
+        assert!(!debug.contains("app_secret_val"));
+    }
 }

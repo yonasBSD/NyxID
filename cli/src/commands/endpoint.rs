@@ -183,6 +183,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_table_renders_rows() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/endpoints"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "endpoints": [
+                    {"id": "ep-abcdef12", "label": "Primary", "url": "https://api.example.com"}
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        run(EndpointCommands::List {
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+        })
+        .await
+        .expect("list table should succeed");
+    }
+
+    #[tokio::test]
+    async fn update_table_output() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/endpoints/ep-1"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": "ep-1" })),
+            )
+            .mount(&server)
+            .await;
+
+        run(EndpointCommands::Update {
+            id: "ep-1".to_string(),
+            url: "https://new.example.com".to_string(),
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+        })
+        .await
+        .expect("update table should succeed");
+    }
+
+    #[tokio::test]
+    async fn delete_table_output() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/endpoints/ep-1"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        run(EndpointCommands::Delete {
+            id: "ep-1".to_string(),
+            yes: true,
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+        })
+        .await
+        .expect("delete table should succeed");
+    }
+
+    #[tokio::test]
     async fn list_surfaces_server_error() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))

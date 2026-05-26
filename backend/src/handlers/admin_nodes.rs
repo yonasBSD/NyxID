@@ -293,3 +293,246 @@ pub async fn admin_delete_node(
 
     Ok(StatusCode::NO_CONTENT)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::node::{COLLECTION_NAME as NODES, Node, NodeMetrics, NodeStatus};
+    use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+    use crate::services::role_service;
+    use crate::test_utils::{connect_test_database, test_app_state, test_auth_user, test_user};
+    use axum::extract::{Path, Query, State};
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    async fn insert_admin(db: &mongodb::Database) -> String {
+        role_service::seed_system_roles(db)
+            .await
+            .expect("seed platform roles");
+        let platform_role_ids = role_service::get_platform_role_ids(db)
+            .await
+            .expect("platform role ids");
+        let id = Uuid::new_v4().to_string();
+        let mut user = test_user(&id, UserType::Person);
+        user.role_ids.push(platform_role_ids.admin);
+        db.collection::<User>(USERS)
+            .insert_one(&user)
+            .await
+            .expect("insert admin user");
+        id
+    }
+
+    fn make_test_node(user_id: &str) -> Node {
+        Node {
+            id: Uuid::new_v4().to_string(),
+            user_id: user_id.to_string(),
+            name: "test-node".to_string(),
+            status: NodeStatus::Offline,
+            auth_token_hash: "deadbeef".repeat(8),
+            signing_secret_encrypted: None,
+            signing_secret_hash: "abcdef01".repeat(8),
+            last_heartbeat_at: None,
+            connected_at: None,
+            metadata: None,
+            metrics: NodeMetrics::default(),
+            is_active: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_admin_list_nodes_empty() {
+        let Some(db) = connect_test_database("h_admin_nodes_list").await else {
+            return;
+        };
+        let admin_id = insert_admin(&db).await;
+        let state = test_app_state(db);
+
+        let result = admin_list_nodes(
+            State(state),
+            test_auth_user(&admin_id),
+            Query(AdminNodeListQuery {
+                page: None,
+                per_page: None,
+                status: None,
+                user_id: None,
+            }),
+        )
+        .await
+        .expect("admin_list_nodes should succeed");
+
+        assert_eq!(result.0.total, 0);
+        assert!(result.0.nodes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_admin_list_nodes_with_data() {
+        let Some(db) = connect_test_database("h_admin_nodes_list_data").await else {
+            return;
+        };
+        let admin_id = insert_admin(&db).await;
+
+        let owner_id = Uuid::new_v4().to_string();
+        let owner = test_user(&owner_id, UserType::Person);
+        db.collection::<User>(USERS)
+            .insert_one(&owner)
+            .await
+            .expect("insert owner");
+
+        let node = make_test_node(&owner_id);
+        db.collection::<Node>(NODES)
+            .insert_one(&node)
+            .await
+            .expect("insert node");
+
+        let state = test_app_state(db);
+
+        let result = admin_list_nodes(
+            State(state),
+            test_auth_user(&admin_id),
+            Query(AdminNodeListQuery {
+                page: Some(1),
+                per_page: Some(10),
+                status: None,
+                user_id: None,
+            }),
+        )
+        .await
+        .expect("admin_list_nodes should succeed");
+
+        assert_eq!(result.0.total, 1);
+        assert_eq!(result.0.nodes.len(), 1);
+        assert_eq!(result.0.nodes[0].id, node.id);
+        assert_eq!(result.0.nodes[0].user_email, Some(owner.email));
+    }
+
+    #[tokio::test]
+    async fn test_admin_get_node() {
+        let Some(db) = connect_test_database("h_admin_nodes_get").await else {
+            return;
+        };
+        let admin_id = insert_admin(&db).await;
+
+        let owner_id = Uuid::new_v4().to_string();
+        let owner = test_user(&owner_id, UserType::Person);
+        db.collection::<User>(USERS)
+            .insert_one(&owner)
+            .await
+            .expect("insert owner");
+
+        let node = make_test_node(&owner_id);
+        let node_id = node.id.clone();
+        db.collection::<Node>(NODES)
+            .insert_one(&node)
+            .await
+            .expect("insert node");
+
+        let state = test_app_state(db);
+
+        let result = admin_get_node(
+            State(state),
+            test_auth_user(&admin_id),
+            Path(node_id.clone()),
+        )
+        .await
+        .expect("admin_get_node should succeed");
+
+        assert_eq!(result.0.id, node_id);
+        assert_eq!(result.0.name, "test-node");
+        assert_eq!(result.0.status, "offline");
+    }
+
+    #[tokio::test]
+    async fn test_admin_get_node_not_found() {
+        let Some(db) = connect_test_database("h_admin_nodes_get_404").await else {
+            return;
+        };
+        let admin_id = insert_admin(&db).await;
+        let state = test_app_state(db);
+
+        let err = admin_get_node(
+            State(state),
+            test_auth_user(&admin_id),
+            Path(Uuid::new_v4().to_string()),
+        )
+        .await;
+
+        assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_admin_disconnect_node_noop() {
+        let Some(db) = connect_test_database("h_admin_nodes_disconnect").await else {
+            return;
+        };
+        let admin_id = insert_admin(&db).await;
+
+        let owner_id = Uuid::new_v4().to_string();
+        let owner = test_user(&owner_id, UserType::Person);
+        db.collection::<User>(USERS)
+            .insert_one(&owner)
+            .await
+            .expect("insert owner");
+
+        let node = make_test_node(&owner_id);
+        let node_id = node.id.clone();
+        db.collection::<Node>(NODES)
+            .insert_one(&node)
+            .await
+            .expect("insert node");
+
+        let state = test_app_state(db);
+
+        let result = admin_disconnect_node(
+            State(state),
+            test_auth_user(&admin_id),
+            TelemetryContext::default(),
+            Path(node_id),
+        )
+        .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_admin_delete_node() {
+        let Some(db) = connect_test_database("h_admin_nodes_delete").await else {
+            return;
+        };
+        let admin_id = insert_admin(&db).await;
+
+        let owner_id = Uuid::new_v4().to_string();
+        let owner = test_user(&owner_id, UserType::Person);
+        db.collection::<User>(USERS)
+            .insert_one(&owner)
+            .await
+            .expect("insert owner");
+
+        let node = make_test_node(&owner_id);
+        let node_id = node.id.clone();
+        db.collection::<Node>(NODES)
+            .insert_one(&node)
+            .await
+            .expect("insert node");
+
+        let state = test_app_state(db.clone());
+
+        let result = admin_delete_node(
+            State(state),
+            test_auth_user(&admin_id),
+            TelemetryContext::default(),
+            Path(node_id.clone()),
+        )
+        .await;
+
+        assert!(result.is_ok());
+
+        let deleted = db
+            .collection::<Node>(NODES)
+            .find_one(doc! { "_id": &node_id, "is_active": true })
+            .await
+            .expect("query node");
+        assert!(deleted.is_none());
+    }
+}

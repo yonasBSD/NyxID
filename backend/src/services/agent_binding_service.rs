@@ -318,3 +318,232 @@ pub async fn cleanup_bindings_for_credential(
 
     Ok(result.deleted_count)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::user_api_key::UserApiKey;
+    use crate::test_utils::*;
+
+    fn make_api_key(id: &str, user_id: &str, allow_all: bool) -> ApiKey {
+        ApiKey {
+            id: id.to_string(),
+            user_id: user_id.to_string(),
+            name: "test-agent-key".to_string(),
+            key_prefix: "nyxid_ag".to_string(),
+            key_hash: "deadbeef".repeat(8),
+            scopes: "proxy".to_string(),
+            last_used_at: None,
+            expires_at: None,
+            is_active: true,
+            created_at: Utc::now(),
+            description: None,
+            allowed_service_ids: vec![],
+            allowed_node_ids: vec![],
+            allow_all_services: allow_all,
+            allow_all_nodes: true,
+            rate_limit_per_second: None,
+            rate_limit_burst: None,
+            platform: Some("claude-code".to_string()),
+            callback_url: None,
+        }
+    }
+
+    fn make_user_service(id: &str, user_id: &str) -> UserService {
+        test_user_service(
+            id,
+            user_id,
+            "test-svc",
+            &Uuid::new_v4().to_string(),
+            None,
+            None,
+        )
+    }
+
+    fn make_user_api_key(id: &str, user_id: &str) -> UserApiKey {
+        UserApiKey {
+            id: id.to_string(),
+            user_id: user_id.to_string(),
+            label: "test-credential".to_string(),
+            credential_type: "api_key".to_string(),
+            credential_encrypted: Some(vec![1, 2, 3]),
+            access_token_encrypted: None,
+            refresh_token_encrypted: None,
+            token_scopes: None,
+            expires_at: None,
+            provider_config_id: None,
+            connection_id: None,
+            user_oauth_client_id_encrypted: None,
+            user_oauth_client_secret_encrypted: None,
+            status: "active".to_string(),
+            last_used_at: None,
+            error_message: None,
+            source: None,
+            source_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    async fn seed_fixtures(db: &mongodb::Database, user_id: &str) -> (String, String, String) {
+        let ak_id = Uuid::new_v4().to_string();
+        let us_id = Uuid::new_v4().to_string();
+        let uak_id = Uuid::new_v4().to_string();
+
+        db.collection::<ApiKey>(API_KEYS)
+            .insert_one(make_api_key(&ak_id, user_id, true))
+            .await
+            .unwrap();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(make_user_service(&us_id, user_id))
+            .await
+            .unwrap();
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(make_user_api_key(&uak_id, user_id))
+            .await
+            .unwrap();
+
+        (ak_id, us_id, uak_id)
+    }
+
+    #[tokio::test]
+    async fn test_create_binding_happy_path() {
+        let Some(db) = connect_test_database("agent_bind").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let (ak_id, us_id, uak_id) = seed_fixtures(&db, &user_id).await;
+
+        let binding = create_binding(&db, &user_id, &ak_id, &us_id, &uak_id)
+            .await
+            .unwrap();
+
+        assert_eq!(binding.api_key_id, ak_id);
+        assert_eq!(binding.user_service_id, us_id);
+        assert_eq!(binding.user_api_key_id, uak_id);
+        assert_eq!(binding.user_id, user_id);
+    }
+
+    #[tokio::test]
+    async fn test_create_binding_rejects_duplicate() {
+        let Some(db) = connect_test_database("agent_bind").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let (ak_id, us_id, uak_id) = seed_fixtures(&db, &user_id).await;
+
+        create_binding(&db, &user_id, &ak_id, &us_id, &uak_id)
+            .await
+            .unwrap();
+        let err = create_binding(&db, &user_id, &ak_id, &us_id, &uak_id).await;
+
+        assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_create_binding_missing_api_key() {
+        let Some(db) = connect_test_database("agent_bind").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let us_id = Uuid::new_v4().to_string();
+        let uak_id = Uuid::new_v4().to_string();
+
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(make_user_service(&us_id, &user_id))
+            .await
+            .unwrap();
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(make_user_api_key(&uak_id, &user_id))
+            .await
+            .unwrap();
+
+        let err = create_binding(&db, &user_id, &Uuid::new_v4().to_string(), &us_id, &uak_id).await;
+        assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_credential_override() {
+        let Some(db) = connect_test_database("agent_bind").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let (ak_id, us_id, uak_id) = seed_fixtures(&db, &user_id).await;
+
+        let none = resolve_credential_override(&db, &ak_id, &us_id, &user_id)
+            .await
+            .unwrap();
+        assert!(none.is_none());
+
+        create_binding(&db, &user_id, &ak_id, &us_id, &uak_id)
+            .await
+            .unwrap();
+
+        let found = resolve_credential_override(&db, &ak_id, &us_id, &user_id)
+            .await
+            .unwrap();
+        assert_eq!(found, Some(uak_id));
+    }
+
+    #[tokio::test]
+    async fn test_list_bindings() {
+        let Some(db) = connect_test_database("agent_bind").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let (ak_id, us_id, uak_id) = seed_fixtures(&db, &user_id).await;
+
+        create_binding(&db, &user_id, &ak_id, &us_id, &uak_id)
+            .await
+            .unwrap();
+
+        let bindings = list_bindings(&db, &user_id, &ak_id).await.unwrap();
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].user_service_id, us_id);
+    }
+
+    #[tokio::test]
+    async fn test_delete_binding() {
+        let Some(db) = connect_test_database("agent_bind").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let (ak_id, us_id, uak_id) = seed_fixtures(&db, &user_id).await;
+
+        let binding = create_binding(&db, &user_id, &ak_id, &us_id, &uak_id)
+            .await
+            .unwrap();
+        delete_binding(&db, &user_id, &ak_id, &binding.id)
+            .await
+            .unwrap();
+
+        let bindings = list_bindings(&db, &user_id, &ak_id).await.unwrap();
+        assert!(bindings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_bindings_for_user_service() {
+        let Some(db) = connect_test_database("agent_bind").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let (ak_id, us_id, uak_id) = seed_fixtures(&db, &user_id).await;
+
+        create_binding(&db, &user_id, &ak_id, &us_id, &uak_id)
+            .await
+            .unwrap();
+
+        let removed = cleanup_bindings_for_user_service(&db, &user_id, &us_id)
+            .await
+            .unwrap();
+        assert_eq!(removed, 1);
+
+        let bindings = list_bindings(&db, &user_id, &ak_id).await.unwrap();
+        assert!(bindings.is_empty());
+
+        let zero = cleanup_bindings_for_user_service(&db, &user_id, &us_id)
+            .await
+            .unwrap();
+        assert_eq!(zero, 0);
+    }
+}

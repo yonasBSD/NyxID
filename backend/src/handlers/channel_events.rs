@@ -187,4 +187,40 @@ mod tests {
         env.event_type = "sensor:temperature".to_string();
         assert!(validate_envelope(&env).is_ok());
     }
+
+    #[test]
+    fn rejects_empty_event_id() {
+        let mut env = envelope();
+        env.event_id = String::new();
+        assert!(validate_envelope(&env).is_err());
+    }
+
+    #[test]
+    fn rejects_oversized_event_id() {
+        let mut env = envelope();
+        env.event_id = "a".repeat(MAX_ID_LEN + 1);
+        assert!(validate_envelope(&env).is_err());
+    }
+
+    #[test]
+    fn rejects_empty_type() {
+        let mut env = envelope();
+        env.event_type = String::new();
+        assert!(validate_envelope(&env).is_err());
+    }
+
+    #[test]
+    fn is_valid_label_accepts_alphanumeric_and_special() {
+        assert!(is_valid_label("camera-01/main_feed"));
+        assert!(is_valid_label("sensor.temp"));
+        assert!(!is_valid_label("has space"));
+        assert!(!is_valid_label(""));
+    }
+
+    #[test]
+    fn is_valid_type_accepts_colons_and_dots() {
+        assert!(is_valid_type("sensor:temperature.celsius"));
+        assert!(!is_valid_type("bad type!"));
+        assert!(!is_valid_type(""));
+    }
 }

@@ -371,3 +371,248 @@ pub async fn get_user_groups(
 
     Ok(Json(UserGroupsResponse { groups: items }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::user::{COLLECTION_NAME as USERS, UserType};
+    use crate::services::role_service;
+    use crate::test_utils::{connect_test_database, test_app_state, test_auth_user, test_user};
+    use axum::extract::{Path, State};
+    use uuid::Uuid;
+
+    async fn insert_admin(db: &mongodb::Database) -> String {
+        role_service::seed_system_roles(db)
+            .await
+            .expect("seed platform roles");
+        let platform_role_ids = role_service::get_platform_role_ids(db)
+            .await
+            .expect("platform role ids");
+        let id = Uuid::new_v4().to_string();
+        let mut user = test_user(&id, UserType::Person);
+        user.role_ids.push(platform_role_ids.admin);
+        db.collection::<User>(USERS)
+            .insert_one(&user)
+            .await
+            .expect("insert admin user");
+        id
+    }
+
+    #[tokio::test]
+    async fn test_list_groups_empty() {
+        let Some(db) = connect_test_database("h_admin_groups_list").await else {
+            return;
+        };
+        let admin_id = insert_admin(&db).await;
+        let state = test_app_state(db);
+        let auth = test_auth_user(&admin_id);
+
+        let result = list_groups(State(state), auth)
+            .await
+            .expect("list_groups should succeed");
+
+        assert!(result.0.groups.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_create_group() {
+        let Some(db) = connect_test_database("h_admin_groups_create").await else {
+            return;
+        };
+        let admin_id = insert_admin(&db).await;
+        let state = test_app_state(db);
+        let auth = test_auth_user(&admin_id);
+
+        let result = create_group(
+            State(state),
+            auth,
+            HeaderMap::new(),
+            Json(CreateGroupRequest {
+                name: "Engineering".to_string(),
+                slug: "engineering".to_string(),
+                description: Some("Engineering team".to_string()),
+                role_ids: vec![],
+                parent_group_id: None,
+            }),
+        )
+        .await
+        .expect("create_group should succeed");
+
+        assert_eq!(result.0.name, "Engineering");
+        assert_eq!(result.0.slug, "engineering");
+        assert_eq!(result.0.member_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_group() {
+        let Some(db) = connect_test_database("h_admin_groups_get").await else {
+            return;
+        };
+        let admin_id = insert_admin(&db).await;
+        let state = test_app_state(db);
+
+        let created = create_group(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            HeaderMap::new(),
+            Json(CreateGroupRequest {
+                name: "Design".to_string(),
+                slug: "design".to_string(),
+                description: None,
+                role_ids: vec![],
+                parent_group_id: None,
+            }),
+        )
+        .await
+        .expect("create_group should succeed");
+
+        let group_id = created.0.id.clone();
+
+        let result = get_group(
+            State(state),
+            test_auth_user(&admin_id),
+            Path(group_id.clone()),
+        )
+        .await
+        .expect("get_group should succeed");
+
+        assert_eq!(result.0.id, group_id);
+        assert_eq!(result.0.name, "Design");
+    }
+
+    #[tokio::test]
+    async fn test_update_group() {
+        let Some(db) = connect_test_database("h_admin_groups_update").await else {
+            return;
+        };
+        let admin_id = insert_admin(&db).await;
+        let state = test_app_state(db);
+
+        let created = create_group(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            HeaderMap::new(),
+            Json(CreateGroupRequest {
+                name: "Ops".to_string(),
+                slug: "ops".to_string(),
+                description: None,
+                role_ids: vec![],
+                parent_group_id: None,
+            }),
+        )
+        .await
+        .expect("create_group should succeed");
+
+        let group_id = created.0.id.clone();
+
+        let result = update_group(
+            State(state),
+            test_auth_user(&admin_id),
+            HeaderMap::new(),
+            Path(group_id.clone()),
+            Json(UpdateGroupRequest {
+                name: Some("Operations".to_string()),
+                slug: None,
+                description: Some("Operations team".to_string()),
+                role_ids: None,
+                parent_group_id: None,
+            }),
+        )
+        .await
+        .expect("update_group should succeed");
+
+        assert_eq!(result.0.name, "Operations");
+        assert_eq!(result.0.description, Some("Operations team".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_delete_group() {
+        let Some(db) = connect_test_database("h_admin_groups_delete").await else {
+            return;
+        };
+        let admin_id = insert_admin(&db).await;
+        let state = test_app_state(db);
+
+        let created = create_group(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            HeaderMap::new(),
+            Json(CreateGroupRequest {
+                name: "Temporary".to_string(),
+                slug: "temporary".to_string(),
+                description: None,
+                role_ids: vec![],
+                parent_group_id: None,
+            }),
+        )
+        .await
+        .expect("create_group should succeed");
+
+        let group_id = created.0.id.clone();
+
+        let result = delete_group(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            HeaderMap::new(),
+            Path(group_id.clone()),
+        )
+        .await
+        .expect("delete_group should succeed");
+
+        assert_eq!(result.0.message, "Group deleted");
+
+        let err = get_group(State(state), test_auth_user(&admin_id), Path(group_id)).await;
+        assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_add_member() {
+        let Some(db) = connect_test_database("h_admin_groups_add_member").await else {
+            return;
+        };
+        let admin_id = insert_admin(&db).await;
+
+        let member_id = Uuid::new_v4().to_string();
+        let member = test_user(&member_id, UserType::Person);
+        db.collection::<User>(USERS)
+            .insert_one(&member)
+            .await
+            .expect("insert member user");
+
+        let state = test_app_state(db);
+
+        let created = create_group(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            HeaderMap::new(),
+            Json(CreateGroupRequest {
+                name: "Team".to_string(),
+                slug: "team".to_string(),
+                description: None,
+                role_ids: vec![],
+                parent_group_id: None,
+            }),
+        )
+        .await
+        .expect("create_group should succeed");
+
+        let group_id = created.0.id.clone();
+
+        let result = add_member(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            HeaderMap::new(),
+            Path((group_id.clone(), member_id)),
+        )
+        .await
+        .expect("add_member should succeed");
+
+        assert_eq!(result.0.message, "Member added");
+
+        let group = get_group(State(state), test_auth_user(&admin_id), Path(group_id))
+            .await
+            .expect("get_group should succeed");
+
+        assert_eq!(group.0.member_count, 1);
+    }
+}

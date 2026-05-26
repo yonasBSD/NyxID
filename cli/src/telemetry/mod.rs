@@ -292,3 +292,72 @@ pub(crate) fn anon_id_path(profile: Option<&str>) -> Option<PathBuf> {
     };
     Some(dir.join(ANON_ID_FILE_NAME))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_event_name_returns_expected_value() {
+        let event = CliEvent::CommandInvoked {
+            command_group: "auth",
+            subcommand: "login",
+            exit_code: 0,
+            duration_ms: 150,
+            profile: None,
+            os: "macos",
+            arch: "aarch64",
+        };
+        assert_eq!(event.name(), "cli.command_invoked");
+    }
+
+    #[test]
+    fn cli_event_properties_contain_all_fields() {
+        let event = CliEvent::CommandInvoked {
+            command_group: "service",
+            subcommand: "add",
+            exit_code: 1,
+            duration_ms: 500,
+            profile: Some("work".to_string()),
+            os: "linux",
+            arch: "x86_64",
+        };
+        let props = event.properties();
+        let obj = props.as_object().unwrap();
+        assert_eq!(obj.get("command_group").unwrap(), "service");
+        assert_eq!(obj.get("subcommand").unwrap(), "add");
+        assert_eq!(obj.get("exit_code").unwrap(), 1);
+        assert_eq!(obj.get("duration_ms").unwrap(), 500);
+        assert_eq!(obj.get("profile").unwrap(), "work");
+        assert_eq!(obj.get("os").unwrap(), "linux");
+        assert_eq!(obj.get("arch").unwrap(), "x86_64");
+    }
+
+    #[test]
+    fn cli_event_properties_with_null_profile() {
+        let event = CliEvent::CommandInvoked {
+            command_group: "auth",
+            subcommand: "logout",
+            exit_code: 0,
+            duration_ms: 10,
+            profile: None,
+            os: "macos",
+            arch: "aarch64",
+        };
+        let props = event.properties();
+        let obj = props.as_object().unwrap();
+        assert!(obj.get("profile").unwrap().is_null());
+    }
+
+    #[test]
+    fn anon_id_path_default_profile() {
+        let path = anon_id_path(None).unwrap();
+        assert!(path.ends_with(".nyxid/anon_id"));
+    }
+
+    #[test]
+    fn anon_id_path_named_profile() {
+        let path = anon_id_path(Some("work")).unwrap();
+        assert!(path.ends_with(".nyxid/profiles/work/anon_id"));
+    }
+}

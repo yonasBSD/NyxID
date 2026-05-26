@@ -616,3 +616,479 @@ pub async fn revoke_all_user_sessions(db: &mongodb::Database, user_id: &str) -> 
 
     Ok(revoked_count)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::role::{
+        COLLECTION_NAME as ROLES, PLATFORM_ADMIN_ROLE_SLUG, PLATFORM_OPERATOR_ROLE_SLUG, Role,
+    };
+    use crate::test_utils::*;
+
+    async fn seed_platform_roles(db: &mongodb::Database) -> (String, String) {
+        let now = Utc::now();
+        let admin_role = Role {
+            id: Uuid::new_v4().to_string(),
+            name: "Admin".to_string(),
+            slug: PLATFORM_ADMIN_ROLE_SLUG.to_string(),
+            description: None,
+            permissions: vec!["*".to_string()],
+            is_default: false,
+            is_system: true,
+            client_id: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let operator_role = Role {
+            id: Uuid::new_v4().to_string(),
+            name: "Operator".to_string(),
+            slug: PLATFORM_OPERATOR_ROLE_SLUG.to_string(),
+            description: None,
+            permissions: vec![],
+            is_default: false,
+            is_system: true,
+            client_id: None,
+            created_at: now,
+            updated_at: now,
+        };
+        db.collection::<Role>(ROLES)
+            .insert_one(&admin_role)
+            .await
+            .unwrap();
+        db.collection::<Role>(ROLES)
+            .insert_one(&operator_role)
+            .await
+            .unwrap();
+        (admin_role.id.clone(), operator_role.id.clone())
+    }
+
+    async fn seed_person(db: &mongodb::Database, user_id: &str, email: &str) {
+        let now = Utc::now();
+        let user = User {
+            id: user_id.to_string(),
+            email: email.to_string(),
+            password_hash: Some(crate::crypto::password::hash_password("password123").unwrap()),
+            display_name: Some("Test".to_string()),
+            slug: None,
+            avatar_url: None,
+            email_verified: true,
+            email_verification_token: None,
+            password_reset_token: None,
+            password_reset_expires_at: None,
+            is_active: true,
+            is_admin: false,
+            is_operator: false,
+            role_ids: vec![],
+            group_ids: vec![],
+            invite_code_id: None,
+            mfa_enabled: false,
+            social_provider: None,
+            social_provider_id: None,
+            user_type: crate::models::user::UserType::Person,
+            primary_org_id: None,
+            created_at: now,
+            updated_at: now,
+            last_login_at: None,
+            profile_config: Default::default(),
+        };
+        db.collection::<User>(USERS)
+            .insert_one(&user)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_create_user_basic() {
+        let Some(db) = connect_test_database("admin_user").await else {
+            return;
+        };
+        seed_platform_roles(&db).await;
+
+        let user = create_user(
+            &db,
+            "newuser@example.com",
+            "strongpass123",
+            Some("Alice"),
+            "user",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(user.email, "newuser@example.com");
+        assert_eq!(user.display_name.as_deref(), Some("Alice"));
+        assert!(user.email_verified);
+        assert!(user.is_active);
+        assert!(!user.is_admin);
+        assert!(user.password_hash.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_create_user_as_admin() {
+        let Some(db) = connect_test_database("admin_user").await else {
+            return;
+        };
+        seed_platform_roles(&db).await;
+
+        let user = create_user(&db, "admin@example.com", "strongpass123", None, "admin")
+            .await
+            .unwrap();
+
+        assert!(user.is_admin);
+        assert!(!user.is_operator);
+    }
+
+    #[tokio::test]
+    async fn test_create_user_as_operator() {
+        let Some(db) = connect_test_database("admin_user").await else {
+            return;
+        };
+        seed_platform_roles(&db).await;
+
+        let user = create_user(
+            &db,
+            "operator@example.com",
+            "strongpass123",
+            None,
+            "operator",
+        )
+        .await
+        .unwrap();
+
+        assert!(!user.is_admin);
+        assert!(user.is_operator);
+    }
+
+    #[tokio::test]
+    async fn test_create_user_rejects_invalid_email() {
+        let Some(db) = connect_test_database("admin_user").await else {
+            return;
+        };
+        seed_platform_roles(&db).await;
+
+        let result = create_user(&db, "notanemail", "strongpass123", None, "user").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_create_user_rejects_short_password() {
+        let Some(db) = connect_test_database("admin_user").await else {
+            return;
+        };
+        seed_platform_roles(&db).await;
+
+        let result = create_user(&db, "user@example.com", "short", None, "user").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_create_user_rejects_invalid_role() {
+        let Some(db) = connect_test_database("admin_user").await else {
+            return;
+        };
+        seed_platform_roles(&db).await;
+
+        let result =
+            create_user(&db, "user@example.com", "strongpass123", None, "superadmin").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_create_user_rejects_duplicate_email() {
+        let Some(db) = connect_test_database("admin_user").await else {
+            return;
+        };
+        seed_platform_roles(&db).await;
+
+        create_user(&db, "dup@example.com", "strongpass123", None, "user")
+            .await
+            .unwrap();
+
+        let result = create_user(&db, "DUP@EXAMPLE.COM", "strongpass123", None, "user").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_update_user_display_name() {
+        let Some(db) = connect_test_database("admin_user").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        seed_person(&db, &user_id, "existing@example.com").await;
+
+        let updated = update_user(&db, &user_id, Some("New Name"), None, None)
+            .await
+            .unwrap();
+        assert_eq!(updated.display_name.as_deref(), Some("New Name"));
+    }
+
+    #[tokio::test]
+    async fn test_update_user_email() {
+        let Some(db) = connect_test_database("admin_user").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        seed_person(&db, &user_id, "oldemail@example.com").await;
+
+        let updated = update_user(&db, &user_id, None, Some("newemail@example.com"), None)
+            .await
+            .unwrap();
+        assert_eq!(updated.email, "newemail@example.com");
+    }
+
+    #[tokio::test]
+    async fn test_update_user_rejects_invalid_email() {
+        let Some(db) = connect_test_database("admin_user").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        seed_person(&db, &user_id, "valid@example.com").await;
+
+        let result = update_user(&db, &user_id, None, Some("bad"), None).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_update_user_not_found() {
+        let Some(db) = connect_test_database("admin_user").await else {
+            return;
+        };
+        let result = update_user(&db, &Uuid::new_v4().to_string(), Some("Name"), None, None).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_set_platform_role_to_admin() {
+        let Some(db) = connect_test_database("admin_user").await else {
+            return;
+        };
+        seed_platform_roles(&db).await;
+        let admin_id = Uuid::new_v4().to_string();
+        let target_id = Uuid::new_v4().to_string();
+        seed_person(&db, &admin_id, "admin-actor@example.com").await;
+        seed_person(&db, &target_id, "target@example.com").await;
+
+        let updated = set_platform_role(&db, &admin_id, &target_id, "admin")
+            .await
+            .unwrap();
+        assert!(updated.is_admin);
+    }
+
+    #[tokio::test]
+    async fn test_set_platform_role_self_protection() {
+        let Some(db) = connect_test_database("admin_user").await else {
+            return;
+        };
+        seed_platform_roles(&db).await;
+        let user_id = Uuid::new_v4().to_string();
+        seed_person(&db, &user_id, "selfchange@example.com").await;
+
+        let result = set_platform_role(&db, &user_id, &user_id, "admin").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_set_user_active_disables_and_revokes() {
+        let Some(db) = connect_test_database("admin_user").await else {
+            return;
+        };
+        let admin_id = Uuid::new_v4().to_string();
+        let target_id = Uuid::new_v4().to_string();
+        seed_person(&db, &admin_id, "admin-disable@example.com").await;
+        seed_person(&db, &target_id, "target-disable@example.com").await;
+
+        let session = crate::models::session::Session {
+            id: Uuid::new_v4().to_string(),
+            user_id: target_id.clone(),
+            token_hash: "hash".to_string(),
+            ip_address: None,
+            user_agent: None,
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+            revoked: false,
+            created_at: Utc::now(),
+            last_active_at: Utc::now(),
+        };
+        db.collection::<crate::models::session::Session>(SESSIONS)
+            .insert_one(&session)
+            .await
+            .unwrap();
+
+        set_user_active(&db, &admin_id, &target_id, false)
+            .await
+            .unwrap();
+
+        let user = db
+            .collection::<User>(USERS)
+            .find_one(doc! { "_id": &target_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!user.is_active);
+
+        let sess = db
+            .collection::<crate::models::session::Session>(SESSIONS)
+            .find_one(doc! { "_id": &session.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(sess.revoked);
+    }
+
+    #[tokio::test]
+    async fn test_set_user_active_self_protection() {
+        let Some(db) = connect_test_database("admin_user").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        seed_person(&db, &user_id, "self-disable@example.com").await;
+
+        let result = set_user_active(&db, &user_id, &user_id, false).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_delete_user_cascade() {
+        let Some(db) = connect_test_database("admin_user").await else {
+            return;
+        };
+        let admin_id = Uuid::new_v4().to_string();
+        let target_id = Uuid::new_v4().to_string();
+        seed_person(&db, &admin_id, "admin-del@example.com").await;
+        seed_person(&db, &target_id, "target-del@example.com").await;
+
+        let session = crate::models::session::Session {
+            id: Uuid::new_v4().to_string(),
+            user_id: target_id.clone(),
+            token_hash: "hash".to_string(),
+            ip_address: None,
+            user_agent: None,
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+            revoked: false,
+            created_at: Utc::now(),
+            last_active_at: Utc::now(),
+        };
+        db.collection::<crate::models::session::Session>(SESSIONS)
+            .insert_one(&session)
+            .await
+            .unwrap();
+
+        delete_user_cascade(&db, &admin_id, &target_id)
+            .await
+            .unwrap();
+
+        let user = db
+            .collection::<User>(USERS)
+            .find_one(doc! { "_id": &target_id })
+            .await
+            .unwrap();
+        assert!(user.is_none());
+
+        let sess = db
+            .collection::<crate::models::session::Session>(SESSIONS)
+            .find_one(doc! { "_id": &session.id })
+            .await
+            .unwrap();
+        assert!(sess.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_delete_user_cascade_self_protection() {
+        let Some(db) = connect_test_database("admin_user").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        seed_person(&db, &user_id, "self-del@example.com").await;
+
+        let result = delete_user_cascade(&db, &user_id, &user_id).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_delete_user_cascade_not_found() {
+        let Some(db) = connect_test_database("admin_user").await else {
+            return;
+        };
+        let admin_id = Uuid::new_v4().to_string();
+        seed_person(&db, &admin_id, "admin-nf@example.com").await;
+
+        let result = delete_user_cascade(&db, &admin_id, &Uuid::new_v4().to_string()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_force_password_reset_for_password_user() {
+        let Some(db) = connect_test_database("admin_user").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        seed_person(&db, &user_id, "reset-target@example.com").await;
+
+        let session = crate::models::session::Session {
+            id: Uuid::new_v4().to_string(),
+            user_id: user_id.clone(),
+            token_hash: "hash".to_string(),
+            ip_address: None,
+            user_agent: None,
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+            revoked: false,
+            created_at: Utc::now(),
+            last_active_at: Utc::now(),
+        };
+        db.collection::<crate::models::session::Session>(SESSIONS)
+            .insert_one(&session)
+            .await
+            .unwrap();
+
+        force_password_reset(&db, &user_id).await.unwrap();
+
+        let sess = db
+            .collection::<crate::models::session::Session>(SESSIONS)
+            .find_one(doc! { "_id": &session.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(sess.revoked);
+    }
+
+    #[tokio::test]
+    async fn test_force_password_reset_rejects_social_only() {
+        let Some(db) = connect_test_database("admin_user").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let now = Utc::now();
+        let user = User {
+            id: user_id.clone(),
+            email: "social@example.com".to_string(),
+            password_hash: None,
+            display_name: None,
+            slug: None,
+            avatar_url: None,
+            email_verified: true,
+            email_verification_token: None,
+            password_reset_token: None,
+            password_reset_expires_at: None,
+            is_active: true,
+            is_admin: false,
+            is_operator: false,
+            role_ids: vec![],
+            group_ids: vec![],
+            invite_code_id: None,
+            mfa_enabled: false,
+            social_provider: Some("google".to_string()),
+            social_provider_id: Some("google-123".to_string()),
+            user_type: crate::models::user::UserType::Person,
+            primary_org_id: None,
+            created_at: now,
+            updated_at: now,
+            last_login_at: None,
+            profile_config: Default::default(),
+        };
+        db.collection::<User>(USERS)
+            .insert_one(&user)
+            .await
+            .unwrap();
+
+        let result = force_password_reset(&db, &user_id).await;
+        assert!(result.is_err());
+    }
+}

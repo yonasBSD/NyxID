@@ -369,6 +369,68 @@ mod tests {
         assert_eq!(lookup.list_calls, 1);
     }
 
+    #[test]
+    fn is_slug_shape_rejects_empty() {
+        assert!(!is_slug_shape(""));
+    }
+
+    #[test]
+    fn is_slug_shape_rejects_too_long() {
+        assert!(!is_slug_shape(&"a".repeat(65)));
+    }
+
+    #[test]
+    fn is_slug_shape_rejects_uppercase_start() {
+        assert!(!is_slug_shape("Abc"));
+    }
+
+    #[test]
+    fn is_slug_shape_accepts_digit_start() {
+        assert!(is_slug_shape("1abc"));
+    }
+
+    #[test]
+    fn is_slug_shape_accepts_single_char() {
+        assert!(is_slug_shape("a"));
+    }
+
+    #[test]
+    fn org_resolve_error_display_not_found() {
+        let err = OrgResolveError::NotFound("test".into());
+        let msg = format!("{err}");
+        assert!(msg.contains("not found"));
+    }
+
+    #[test]
+    fn org_resolve_error_display_ambiguous() {
+        let err = OrgResolveError::Ambiguous {
+            input: "acme".into(),
+            candidates: vec![candidate("1", "a", "A"), candidate("2", "b", "B")],
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("ambiguous"));
+    }
+
+    #[test]
+    fn org_resolve_error_display_api() {
+        let err = OrgResolveError::Api(anyhow::anyhow!("connection refused"));
+        let msg = format!("{err}");
+        assert!(msg.contains("connection refused"));
+    }
+
+    #[test]
+    fn org_resolve_error_source_api_has_inner() {
+        let inner = anyhow::anyhow!("inner");
+        let err = OrgResolveError::Api(inner);
+        assert!(std::error::Error::source(&err).is_some());
+    }
+
+    #[test]
+    fn org_resolve_error_source_not_found_is_none() {
+        let err = OrgResolveError::NotFound("x".into());
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
     #[tokio::test]
     async fn display_name_resolution_reuses_cached_org_list() {
         let mut lookup = FakeOrgLookup {

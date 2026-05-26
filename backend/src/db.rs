@@ -2848,4 +2848,84 @@ mod tests {
         let resolved = resolve_available_slug_from_existing("llm-openai", &active_slugs);
         assert!(resolved.is_none());
     }
+
+    #[tokio::test]
+    async fn ensure_indexes_runs_without_error_on_fresh_db() {
+        let Some(db) = crate::test_utils::connect_test_database("db_infra_indexes").await else {
+            eprintln!("skipping db infra test: no local MongoDB available");
+            return;
+        };
+        ensure_indexes(&db)
+            .await
+            .expect("ensure_indexes should succeed on a fresh database");
+        ensure_indexes(&db)
+            .await
+            .expect("ensure_indexes should be idempotent on second call");
+    }
+
+    #[tokio::test]
+    async fn backfill_user_type_sets_person_on_legacy_rows() {
+        let Some(db) = crate::test_utils::connect_test_database("db_infra_user_type").await else {
+            eprintln!("skipping db infra test: no local MongoDB available");
+            return;
+        };
+        let users = db.collection::<Document>("users");
+        let legacy_id = uuid::Uuid::new_v4().to_string();
+        users
+            .insert_one(doc! {
+                "_id": &legacy_id,
+                "email": format!("legacy-{}@test.com", &legacy_id[..8]),
+                "display_name": "Legacy User",
+            })
+            .await
+            .expect("insert legacy user");
+
+        backfill_user_type(&db)
+            .await
+            .expect("backfill_user_type should succeed");
+
+        let updated = users
+            .find_one(doc! { "_id": &legacy_id })
+            .await
+            .expect("find user")
+            .expect("user should exist");
+        assert_eq!(
+            updated.get_str("user_type").expect("user_type field"),
+            "person"
+        );
+    }
+
+    #[tokio::test]
+    async fn backfill_downstream_service_types_sets_http_default() {
+        let Some(db) = crate::test_utils::connect_test_database("db_infra_service_types").await
+        else {
+            eprintln!("skipping db infra test: no local MongoDB available");
+            return;
+        };
+        let services = db.collection::<Document>("downstream_services");
+        let svc_id = uuid::Uuid::new_v4().to_string();
+        services
+            .insert_one(doc! {
+                "_id": &svc_id,
+                "name": "test-svc",
+                "slug": format!("test-svc-{}", &svc_id[..8]),
+                "is_active": true,
+            })
+            .await
+            .expect("insert legacy service");
+
+        backfill_downstream_service_types(&db)
+            .await
+            .expect("backfill should succeed");
+
+        let updated = services
+            .find_one(doc! { "_id": &svc_id })
+            .await
+            .expect("find service")
+            .expect("service should exist");
+        assert_eq!(
+            updated.get_str("service_type").expect("service_type field"),
+            "http"
+        );
+    }
 }

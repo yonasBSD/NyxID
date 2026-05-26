@@ -1414,8 +1414,6 @@ mod tests {
 
     #[test]
     fn parse_ack_rejects_unknown_fields() {
-        // The underlying ack structs use deny_unknown_fields so a
-        // tampered payload is rejected.
         let ack = serde_json::json!({
             "acknowledged": true,
             "api_key_id": "abc",
@@ -1423,5 +1421,213 @@ mod tests {
         });
         let outcome = parse_ack(PairingFlow::ApiKeyCreate, ack);
         assert!(outcome.is_err(), "deny_unknown_fields should reject");
+    }
+
+    #[test]
+    fn parse_ack_rotation_rejects_unacknowledged() {
+        let ack = serde_json::json!({"acknowledged": false, "resource_id": "x"});
+        assert!(parse_ack(PairingFlow::ApiKeyRotate, ack).is_err());
+    }
+
+    #[test]
+    fn parse_ack_node_register_rejects_unacknowledged() {
+        let ack = serde_json::json!({"acknowledged": false, "token_id": "x"});
+        assert!(parse_ack(PairingFlow::NodeRegisterToken, ack).is_err());
+    }
+
+    #[test]
+    fn parse_ack_service_account_rejects_unacknowledged() {
+        let ack = serde_json::json!({"acknowledged": false, "service_account_id": "x"});
+        assert!(parse_ack(PairingFlow::ServiceAccountCreate, ack).is_err());
+    }
+
+    #[test]
+    fn parse_ack_developer_app_rejects_unacknowledged() {
+        let ack = serde_json::json!({"acknowledged": false, "developer_app_id": "x"});
+        assert!(parse_ack(PairingFlow::DeveloperAppCreate, ack).is_err());
+    }
+
+    #[test]
+    fn parse_ack_mfa_rejects_unacknowledged() {
+        let ack = serde_json::json!({"acknowledged": false, "factor_id": "x"});
+        assert!(parse_ack(PairingFlow::MfaSetup, ack).is_err());
+    }
+
+    #[test]
+    fn parse_ack_node_register_valid() {
+        let ack = serde_json::json!({"acknowledged": true, "token_id": "tok-1"});
+        let outcome = parse_ack(PairingFlow::NodeRegisterToken, ack).unwrap();
+        assert!(matches!(
+            outcome,
+            WizardOutcome::NodeRegisterAcknowledged(_)
+        ));
+    }
+
+    #[test]
+    fn parse_ack_service_account_create_valid() {
+        let ack = serde_json::json!({"acknowledged": true, "service_account_id": "sa-1"});
+        let outcome = parse_ack(PairingFlow::ServiceAccountCreate, ack).unwrap();
+        assert!(matches!(
+            outcome,
+            WizardOutcome::ServiceAccountCreateAcknowledged(_)
+        ));
+    }
+
+    #[test]
+    fn parse_ack_developer_app_create_valid() {
+        let ack = serde_json::json!({"acknowledged": true, "developer_app_id": "app-1"});
+        let outcome = parse_ack(PairingFlow::DeveloperAppCreate, ack).unwrap();
+        assert!(matches!(
+            outcome,
+            WizardOutcome::DeveloperAppCreateAcknowledged(_)
+        ));
+    }
+
+    #[test]
+    fn parse_ack_mfa_setup_valid() {
+        let ack = serde_json::json!({"acknowledged": true, "factor_id": "mfa-1"});
+        let outcome = parse_ack(PairingFlow::MfaSetup, ack).unwrap();
+        assert!(matches!(outcome, WizardOutcome::MfaSetupAcknowledged(_)));
+    }
+
+    #[test]
+    fn parse_ack_api_key_create_valid() {
+        let ack = serde_json::json!({"acknowledged": true, "api_key_id": "key-1"});
+        let outcome = parse_ack(PairingFlow::ApiKeyCreate, ack).unwrap();
+        assert!(matches!(
+            outcome,
+            WizardOutcome::ApiKeyCreateAcknowledged(_)
+        ));
+    }
+
+    #[test]
+    fn parse_ack_ai_key_valid() {
+        let ack = serde_json::json!({"acknowledged": true, "service_id": "s1", "slug": "s", "label": "l"});
+        let outcome = parse_ack(PairingFlow::AiKey, ack).unwrap();
+        assert!(matches!(outcome, WizardOutcome::AiKeyPaired(_)));
+    }
+
+    #[test]
+    fn parse_ack_node_rotate_valid() {
+        let ack = serde_json::json!({"acknowledged": true, "resource_id": "n1"});
+        let outcome = parse_ack(PairingFlow::NodeRotateToken, ack).unwrap();
+        assert!(matches!(outcome, WizardOutcome::RotationAcknowledged(_)));
+    }
+
+    #[test]
+    fn pair_url_with_code_appends_to_existing_query() {
+        let resp = CreateResp {
+            id: "id".into(),
+            code: "AB-12".into(),
+            pair_url: "https://x.com/pair?flow=ai".into(),
+            poll_url: String::new(),
+            expires_at: String::new(),
+        };
+        assert_eq!(
+            pair_url_with_code(&resp),
+            "https://x.com/pair?flow=ai&code=AB-12"
+        );
+    }
+
+    #[test]
+    fn pair_url_with_code_adds_query_when_none() {
+        let resp = CreateResp {
+            id: "id".into(),
+            code: "CD-34".into(),
+            pair_url: "https://x.com/pair".into(),
+            poll_url: String::new(),
+            expires_at: String::new(),
+        };
+        assert_eq!(pair_url_with_code(&resp), "https://x.com/pair?code=CD-34");
+    }
+
+    #[test]
+    fn urlencoding_minimal_empty_string() {
+        assert_eq!(urlencoding_minimal(""), "");
+    }
+
+    #[test]
+    fn shell_quote_empty_string_wraps_in_quotes() {
+        assert_eq!(shell_quote(""), "\"\"");
+    }
+
+    #[test]
+    fn prefill_node_register_with_name() {
+        let p = NodeRegisterPrefill {
+            name: Some("my-node".into()),
+        };
+        let v = prefill_node_register(&p);
+        assert_eq!(v["name"], "my-node");
+    }
+
+    #[test]
+    fn prefill_node_register_without_name() {
+        let p = NodeRegisterPrefill { name: None };
+        let v = prefill_node_register(&p);
+        assert!(v.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn prefill_api_key_create_all_fields_set() {
+        let p = ApiKeyCreatePrefill {
+            name: Some("agent".into()),
+            platform: Some("claude-code".into()),
+            scopes: Some("proxy".into()),
+            expires_in_days: Some(30),
+            allow_all_services: true,
+            allow_all_nodes: true,
+            allowed_services_csv: Some("svc1,svc2".into()),
+            allowed_nodes_csv: Some("n1".into()),
+            callback_url: Some("https://cb.example.com".into()),
+            org_id: Some("org-1".into()),
+        };
+        let v = prefill_api_key_create(&p);
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj.len(), 10);
+        assert_eq!(v["expires_in_days"], 30);
+    }
+
+    #[test]
+    fn prefill_service_account_create_all_fields() {
+        let p = ServiceAccountCreatePrefill {
+            name: Some("bot".into()),
+            scopes: Some("admin".into()),
+            description: Some("CI bot".into()),
+            rate_limit_override: Some(200),
+            role_ids_csv: Some("r1,r2".into()),
+            org_id: Some("org-x".into()),
+        };
+        let v = prefill_service_account_create(&p);
+        assert_eq!(v.as_object().unwrap().len(), 6);
+    }
+
+    #[test]
+    fn prefill_developer_app_create_filters_empty_uris() {
+        let p = DeveloperAppCreatePrefill {
+            redirect_uris: vec!["".into(), "https://a.com".into(), "".into()],
+            ..Default::default()
+        };
+        let v = prefill_developer_app_create(&p);
+        let uris = v["redirect_uris"].as_array().unwrap();
+        assert_eq!(uris.len(), 1);
+    }
+
+    #[test]
+    fn prefill_developer_app_create_no_uris() {
+        let p = DeveloperAppCreatePrefill::default();
+        let v = prefill_developer_app_create(&p);
+        assert!(!v.as_object().unwrap().contains_key("redirect_uris"));
+    }
+
+    #[test]
+    fn looks_like_auth_failure_handles_chained_errors() {
+        let inner = anyhow::anyhow!("connection failed");
+        let outer = inner.context("GET /foo failed (HTTP 401)");
+        assert!(looks_like_auth_failure(&outer));
+    }
+
+    #[test]
+    fn from_kind_str_returns_none_for_empty() {
+        assert!(PairingFlow::from_kind_str("").is_none());
     }
 }

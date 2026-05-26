@@ -1822,6 +1822,165 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn list_nodes_returns_empty_for_user_with_no_nodes() {
+        let Some(db) = connect_test_database("node_ext_list_empty").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+        let actor_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&actor_id, UserType::Person))
+            .await
+            .expect("insert user");
+
+        let state = test_app_state(db);
+        let Json(response) = list_nodes(State(state), test_auth_user(&actor_id))
+            .await
+            .expect("list nodes");
+
+        assert!(response.nodes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_node_returns_not_found_for_nonexistent() {
+        let Some(db) = connect_test_database("node_ext_get_notfound").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+        let actor_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&actor_id, UserType::Person))
+            .await
+            .expect("insert user");
+
+        let state = test_app_state(db);
+        let err = get_node(
+            State(state),
+            test_auth_user(&actor_id),
+            Path("nonexistent-node-id".to_string()),
+        )
+        .await
+        .expect_err("should return not found");
+
+        assert!(matches!(err, AppError::NodeNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn delete_node_returns_not_found_for_nonexistent() {
+        let Some(db) = connect_test_database("node_ext_del_notfound").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+        let actor_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&actor_id, UserType::Person))
+            .await
+            .expect("insert user");
+
+        let state = test_app_state(db);
+        let result = delete_node(
+            State(state),
+            test_auth_user(&actor_id),
+            crate::telemetry::TelemetryContext::default(),
+            Path("nonexistent-node-id".to_string()),
+        )
+        .await;
+
+        let err = result
+            .err()
+            .expect("should return error for nonexistent node");
+        assert!(matches!(err, AppError::NodeNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn delete_node_removes_node_and_makes_it_unfindable() {
+        let Some(db) = connect_test_database("node_ext_delete_ok").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+        let owner_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&owner_id, UserType::Person))
+            .await
+            .expect("insert user");
+        let node = test_node(&owner_id, "deletable-node");
+        let node_id = node.id.clone();
+        db.collection::<Node>(NODES)
+            .insert_one(node)
+            .await
+            .expect("insert node");
+
+        let state = test_app_state(db.clone());
+        let result = delete_node(
+            State(state.clone()),
+            test_auth_user(&owner_id),
+            crate::telemetry::TelemetryContext::default(),
+            Path(node_id.clone()),
+        )
+        .await;
+        assert!(result.is_ok());
+
+        let err = get_node(State(state), test_auth_user(&owner_id), Path(node_id))
+            .await
+            .expect_err("node should be gone");
+        assert!(matches!(err, AppError::NodeNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn list_bindings_returns_empty_for_node_with_no_bindings() {
+        let Some(db) = connect_test_database("node_ext_bindings_empty").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+        let owner_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&owner_id, UserType::Person))
+            .await
+            .expect("insert user");
+        let node = test_node(&owner_id, "empty-bindings-node");
+        let node_id = node.id.clone();
+        db.collection::<Node>(NODES)
+            .insert_one(node)
+            .await
+            .expect("insert node");
+
+        let state = test_app_state(db);
+        let Json(response) = list_bindings(State(state), test_auth_user(&owner_id), Path(node_id))
+            .await
+            .expect("list bindings");
+
+        assert!(response.bindings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rotate_token_returns_new_credentials() {
+        let Some(db) = connect_test_database("node_ext_rotate_token").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+        let owner_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&owner_id, UserType::Person))
+            .await
+            .expect("insert user");
+        let node = test_node(&owner_id, "rotate-node");
+        let node_id = node.id.clone();
+        db.collection::<Node>(NODES)
+            .insert_one(node)
+            .await
+            .expect("insert node");
+
+        let state = test_app_state(db);
+        let Json(response) = rotate_token(State(state), test_auth_user(&owner_id), Path(node_id))
+            .await
+            .expect("rotate token");
+
+        assert!(!response.auth_token.is_empty());
+        assert!(!response.signing_secret.is_empty());
+        assert!(response.message.contains("rotated"));
+    }
+
     #[test]
     fn audit_event_data_with_owner_adds_owner_only_when_shared() {
         let personal =

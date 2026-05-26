@@ -3576,4 +3576,160 @@ mod tests {
             .expect_err("missing refresh_token should error");
         assert!(matches!(err, AppError::Internal(ref m) if m.contains("refresh_token")));
     }
+
+    #[test]
+    fn telegram_identity_metadata_includes_all_optional_fields_when_present() {
+        let data = TelegramLoginData {
+            id: 99999,
+            first_name: "Alice".to_string(),
+            last_name: Some("Smith".to_string()),
+            username: Some("alice_bot".to_string()),
+            photo_url: Some("https://t.me/photo.jpg".to_string()),
+            auth_date: Utc::now().timestamp(),
+            hash: "abcdef".to_string(),
+        };
+        let metadata = build_telegram_identity_metadata(&data);
+        assert_eq!(metadata.get("telegram_user_id"), Some(&"99999".to_string()));
+        assert_eq!(metadata.get("first_name"), Some(&"Alice".to_string()));
+        assert_eq!(metadata.get("last_name"), Some(&"Smith".to_string()));
+        assert_eq!(metadata.get("username"), Some(&"alice_bot".to_string()));
+        assert_eq!(
+            metadata.get("photo_url"),
+            Some(&"https://t.me/photo.jpg".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_telegram_bot_api_key_rejects_empty() {
+        let err = normalize_telegram_bot_api_key("").expect_err("empty should be rejected");
+        assert!(err.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn normalize_telegram_bot_api_key_rejects_double_dots() {
+        let err = normalize_telegram_bot_api_key("123:ABC..DEF")
+            .expect_err("double dots should be rejected");
+        assert!(err.to_string().contains("invalid characters"));
+    }
+
+    #[test]
+    fn ensure_additional_scopes_supported_allows_empty_for_api_key() {
+        let provider = make_provider("api_key");
+        assert!(ensure_additional_scopes_supported(&provider, &[]).is_ok());
+    }
+
+    #[test]
+    fn parse_additional_scopes_accepts_tilde_and_star() {
+        let scopes = parse_additional_scopes(Some("read~all,write*")).unwrap();
+        assert_eq!(scopes, vec!["read~all".to_string(), "write*".to_string()]);
+    }
+
+    #[test]
+    fn merge_scopes_dedup_is_case_sensitive() {
+        let defaults = vec!["OpenID".to_string()];
+        let extras = vec!["openid".to_string()];
+        let merged = merge_scopes(Some(&defaults), &extras);
+        assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn build_telegram_identity_update_doc_sets_status_to_active() {
+        let metadata = HashMap::new();
+        let doc = build_telegram_identity_update_doc(&metadata, Utc::now()).unwrap();
+        assert_eq!(doc.get_str("status").unwrap(), "active");
+        assert!(doc.get("updated_at").is_some());
+    }
+
+    #[test]
+    fn ensure_additional_scopes_supported_rejects_telegram_widget() {
+        let provider = make_provider("telegram_widget");
+        let err = ensure_additional_scopes_supported(&provider, &["scope".to_string()])
+            .expect_err("telegram_widget should reject scopes");
+        assert!(err.to_string().contains("does not support OAuth scopes"));
+    }
+
+    #[tokio::test]
+    async fn store_api_key_creates_new_token_for_api_key_provider() {
+        let Some(db) = connect_test_database("user_token_ext_store").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let provider_id = Uuid::new_v4().to_string();
+        let mut provider = make_provider("api_key");
+        provider.id = provider_id.clone();
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+        let user_id = Uuid::new_v4().to_string();
+        let token = super::store_api_key(
+            &db,
+            &enc,
+            &user_id,
+            &provider_id,
+            "test-key-value",
+            Some("My Key"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(token.status, "active");
+        assert_eq!(token.token_type, "api_key");
+        assert!(token.api_key_encrypted.is_some());
+    }
+
+    #[tokio::test]
+    async fn store_api_key_rejects_oauth_provider_type() {
+        let Some(db) = connect_test_database("user_token_ext_store_oauth").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let provider_id = Uuid::new_v4().to_string();
+        let mut provider = make_provider("oauth2");
+        provider.id = provider_id.clone();
+        provider.authorization_url = Some("https://auth.example.com".to_string());
+        provider.token_url = Some("https://auth.example.com/token".to_string());
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+        let user_id = Uuid::new_v4().to_string();
+        let err = super::store_api_key(&db, &enc, &user_id, &provider_id, "test-key", None, None)
+            .await
+            .expect_err("oauth provider should reject api_key store");
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn store_api_key_updates_existing_token() {
+        let Some(db) = connect_test_database("user_token_ext_store_update").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let provider_id = Uuid::new_v4().to_string();
+        let mut provider = make_provider("api_key");
+        provider.id = provider_id.clone();
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+        let user_id = Uuid::new_v4().to_string();
+        let first =
+            super::store_api_key(&db, &enc, &user_id, &provider_id, "first-key", None, None)
+                .await
+                .unwrap();
+        let second = super::store_api_key(
+            &db,
+            &enc,
+            &user_id,
+            &provider_id,
+            "second-key",
+            Some("Updated"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.id, second.id);
+        assert_eq!(second.label.as_deref(), Some("Updated"));
+    }
 }

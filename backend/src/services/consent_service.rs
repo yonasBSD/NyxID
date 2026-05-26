@@ -134,3 +134,140 @@ pub async fn list_client_consents(
 
     Ok(consents)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::*;
+
+    #[tokio::test]
+    async fn test_grant_consent_creates_new() {
+        let Some(db) = connect_test_database("consent").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let client_id = Uuid::new_v4().to_string();
+
+        let consent = grant_consent(&db, &user_id, &client_id, "openid profile")
+            .await
+            .unwrap();
+
+        assert_eq!(consent.user_id, user_id);
+        assert_eq!(consent.client_id, client_id);
+        assert_eq!(consent.scopes, "openid profile");
+        assert!(consent.expires_at.is_none());
+
+        let stored = db
+            .collection::<Consent>(CONSENTS)
+            .find_one(doc! { "_id": &consent.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.scopes, "openid profile");
+    }
+
+    #[tokio::test]
+    async fn test_grant_consent_upserts_existing() {
+        let Some(db) = connect_test_database("consent").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let client_id = Uuid::new_v4().to_string();
+
+        let first = grant_consent(&db, &user_id, &client_id, "openid")
+            .await
+            .unwrap();
+        let second = grant_consent(&db, &user_id, &client_id, "openid profile email")
+            .await
+            .unwrap();
+
+        assert_eq!(first.id, second.id);
+        assert_eq!(second.scopes, "openid profile email");
+
+        let count = db
+            .collection::<Consent>(CONSENTS)
+            .count_documents(doc! { "user_id": &user_id, "client_id": &client_id })
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_check_consent_covers_all_scopes() {
+        let Some(db) = connect_test_database("consent").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let client_id = Uuid::new_v4().to_string();
+
+        grant_consent(&db, &user_id, &client_id, "openid profile email")
+            .await
+            .unwrap();
+
+        let found = check_consent(&db, &user_id, &client_id, "openid profile")
+            .await
+            .unwrap();
+        assert!(found.is_some());
+
+        let missing = check_consent(&db, &user_id, &client_id, "openid admin")
+            .await
+            .unwrap();
+        assert!(missing.is_none());
+
+        let no_consent = check_consent(&db, &user_id, &Uuid::new_v4().to_string(), "openid")
+            .await
+            .unwrap();
+        assert!(no_consent.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_revoke_consent_deletes_and_errors_on_missing() {
+        let Some(db) = connect_test_database("consent").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let client_id = Uuid::new_v4().to_string();
+
+        grant_consent(&db, &user_id, &client_id, "openid")
+            .await
+            .unwrap();
+        revoke_consent(&db, &user_id, &client_id).await.unwrap();
+
+        let after = check_consent(&db, &user_id, &client_id, "openid")
+            .await
+            .unwrap();
+        assert!(after.is_none());
+
+        let err = revoke_consent(&db, &user_id, &client_id).await;
+        assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_list_user_and_client_consents() {
+        let Some(db) = connect_test_database("consent").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let client_a = Uuid::new_v4().to_string();
+        let client_b = Uuid::new_v4().to_string();
+
+        grant_consent(&db, &user_id, &client_a, "openid")
+            .await
+            .unwrap();
+        grant_consent(&db, &user_id, &client_b, "profile")
+            .await
+            .unwrap();
+
+        let user_consents = list_user_consents(&db, &user_id).await.unwrap();
+        assert_eq!(user_consents.len(), 2);
+
+        let client_consents = list_client_consents(&db, &client_a).await.unwrap();
+        assert_eq!(client_consents.len(), 1);
+        assert_eq!(client_consents[0].scopes, "openid");
+
+        let empty = list_user_consents(&db, &Uuid::new_v4().to_string())
+            .await
+            .unwrap();
+        assert!(empty.is_empty());
+    }
+}

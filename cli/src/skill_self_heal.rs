@@ -243,4 +243,89 @@ mod tests {
         assert!(!cooldown_elapsed(&home));
         fs::remove_dir_all(&home).unwrap();
     }
+
+    #[test]
+    fn env_flag_recognizes_true_values() {
+        let _guard = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for val in ["1", "true", "yes", "on"] {
+            unsafe {
+                std::env::set_var("NYXID_TEST_ENV_FLAG", val);
+            }
+            assert!(env_flag("NYXID_TEST_ENV_FLAG"), "should be true for {val}");
+        }
+        unsafe {
+            std::env::set_var("NYXID_TEST_ENV_FLAG", "0");
+        }
+        assert!(!env_flag("NYXID_TEST_ENV_FLAG"));
+        unsafe {
+            std::env::remove_var("NYXID_TEST_ENV_FLAG");
+        }
+        assert!(!env_flag("NYXID_TEST_ENV_FLAG"));
+    }
+
+    #[test]
+    fn is_self_referential_matches_login() {
+        assert!(is_self_referential(&Commands::Login(
+            crate::cli::LoginArgs {
+                base_url: String::new(),
+                password: false,
+                email: None,
+                profile: None
+            }
+        )));
+    }
+
+    #[test]
+    fn should_run_returns_false_for_login() {
+        assert!(!should_run(&Commands::Login(crate::cli::LoginArgs {
+            base_url: String::new(),
+            password: false,
+            email: None,
+            profile: None
+        })));
+    }
+
+    #[test]
+    fn skill_install_dir_returns_none_for_cursor_and_generic() {
+        let home = PathBuf::from("/tmp/test");
+        assert!(skill_install_dir(&home, AiToolTarget::Cursor).is_none());
+        assert!(skill_install_dir(&home, AiToolTarget::Generic).is_none());
+    }
+
+    #[test]
+    fn skill_install_dir_returns_paths_for_filesystem_tools() {
+        let home = PathBuf::from("/home/user");
+        assert!(
+            skill_install_dir(&home, AiToolTarget::ClaudeCode)
+                .unwrap()
+                .ends_with(".claude/skills/nyxid")
+        );
+        assert!(
+            skill_install_dir(&home, AiToolTarget::Codex)
+                .unwrap()
+                .ends_with(".codex/skills/nyxid")
+        );
+        assert!(
+            skill_install_dir(&home, AiToolTarget::Openclaw)
+                .unwrap()
+                .ends_with(".openclaw/skills/nyxid")
+        );
+    }
+
+    #[test]
+    fn is_partial_install_returns_false_when_no_skill_dir() {
+        let home = temp_home();
+        assert!(!is_partial_install(&home, AiToolTarget::ClaudeCode));
+        fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn record_attempt_creates_marker_file() {
+        let home = temp_home();
+        record_attempt(&home);
+        assert!(home.join(COOLDOWN_FILE).exists());
+        fs::remove_dir_all(&home).unwrap();
+    }
 }

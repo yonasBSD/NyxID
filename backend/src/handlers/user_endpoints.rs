@@ -412,3 +412,232 @@ pub async fn list_openapi_endpoints(
         operations,
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+    use crate::models::user_endpoint::{COLLECTION_NAME as EP_COLLECTION, UserEndpoint};
+    use crate::test_utils::{
+        connect_test_database, test_app_state, test_auth_user, test_user, test_user_endpoint,
+    };
+    use axum::extract::State;
+
+    fn tele() -> TelemetryContext {
+        TelemetryContext::default()
+    }
+
+    #[tokio::test]
+    async fn list_endpoints_returns_user_endpoints() {
+        let Some(db) = connect_test_database("h_user_ep_list").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let ep_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+        db.collection::<UserEndpoint>(EP_COLLECTION)
+            .insert_one(test_user_endpoint(
+                &ep_id,
+                &user_id,
+                "My Endpoint",
+                "https://api.example.com",
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        let state = test_app_state(db);
+        let auth = test_auth_user(&user_id);
+
+        let Json(resp) = list_endpoints(
+            State(state),
+            auth,
+            Query(EndpointListQuery { org_id: None }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resp.endpoints.len(), 1);
+        assert_eq!(resp.endpoints[0].id, ep_id);
+        assert_eq!(resp.endpoints[0].label, "My Endpoint");
+    }
+
+    #[tokio::test]
+    async fn list_endpoints_empty_for_new_user() {
+        let Some(db) = connect_test_database("h_user_ep_list_empty").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+        let state = test_app_state(db);
+        let auth = test_auth_user(&user_id);
+
+        let Json(resp) = list_endpoints(
+            State(state),
+            auth,
+            Query(EndpointListQuery { org_id: None }),
+        )
+        .await
+        .unwrap();
+
+        assert!(resp.endpoints.is_empty());
+    }
+
+    #[tokio::test]
+    async fn update_endpoint_label() {
+        let Some(db) = connect_test_database("h_user_ep_update").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let ep_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+        db.collection::<UserEndpoint>(EP_COLLECTION)
+            .insert_one(test_user_endpoint(
+                &ep_id,
+                &user_id,
+                "Old Label",
+                "https://api.example.com",
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        let state = test_app_state(db);
+        let auth = test_auth_user(&user_id);
+
+        let Json(updated) = update_endpoint(
+            State(state),
+            auth,
+            tele(),
+            Path(ep_id.clone()),
+            Json(UpdateEndpointRequest {
+                url: None,
+                label: Some("New Label".to_string()),
+                openapi_spec_url: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(updated.id, ep_id);
+        assert_eq!(updated.label, "New Label");
+    }
+
+    #[tokio::test]
+    async fn update_nonexistent_endpoint_returns_not_found() {
+        let Some(db) = connect_test_database("h_user_ep_update_404").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+        let state = test_app_state(db);
+        let auth = test_auth_user(&user_id);
+
+        let err = update_endpoint(
+            State(state),
+            auth,
+            tele(),
+            Path(uuid::Uuid::new_v4().to_string()),
+            Json(UpdateEndpointRequest {
+                url: None,
+                label: Some("Nope".to_string()),
+                openapi_spec_url: None,
+            }),
+        )
+        .await;
+
+        assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn delete_endpoint_succeeds() {
+        let Some(db) = connect_test_database("h_user_ep_delete").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let ep_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+        db.collection::<UserEndpoint>(EP_COLLECTION)
+            .insert_one(test_user_endpoint(
+                &ep_id,
+                &user_id,
+                "To Delete",
+                "https://api.example.com",
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        let state = test_app_state(db);
+        let auth = test_auth_user(&user_id);
+
+        let resp = delete_endpoint(
+            State(state.clone()),
+            auth.clone(),
+            tele(),
+            Path(ep_id.clone()),
+        )
+        .await;
+
+        assert!(resp.is_ok());
+
+        let Json(list) = list_endpoints(
+            State(state),
+            auth,
+            Query(EndpointListQuery { org_id: None }),
+        )
+        .await
+        .unwrap();
+
+        assert!(list.endpoints.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_openapi_endpoints_no_spec_returns_empty() {
+        let Some(db) = connect_test_database("h_user_ep_openapi_empty").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let ep_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+        db.collection::<UserEndpoint>(EP_COLLECTION)
+            .insert_one(test_user_endpoint(
+                &ep_id,
+                &user_id,
+                "No Spec EP",
+                "https://api.example.com",
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        let state = test_app_state(db);
+        let auth = test_auth_user(&user_id);
+
+        let Json(resp) = list_openapi_endpoints(State(state), auth, Path(ep_id.clone()))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.endpoint_id, ep_id);
+        assert!(resp.openapi_spec_url.is_none());
+        assert!(resp.operations.is_empty());
+    }
+}

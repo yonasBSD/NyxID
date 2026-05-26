@@ -142,4 +142,93 @@ mod tests {
 
         assert!(!schema_contains_binary_field(Some(&schema)));
     }
+
+    #[test]
+    fn normalize_content_type_strips_params() {
+        assert_eq!(
+            normalize_content_type("text/html; charset=utf-8"),
+            "text/html"
+        );
+        assert_eq!(
+            normalize_content_type("APPLICATION/JSON"),
+            "application/json"
+        );
+    }
+
+    #[test]
+    fn is_json_content_type_matches_variants() {
+        assert!(is_json_content_type("application/json"));
+        assert!(is_json_content_type("application/vnd.api+json"));
+        assert!(!is_json_content_type("text/plain"));
+    }
+
+    #[test]
+    fn is_text_content_type_matches_all_text_types() {
+        assert!(is_text_content_type("text/plain"));
+        assert!(is_text_content_type("application/xml"));
+        assert!(is_text_content_type("application/yaml"));
+        assert!(is_text_content_type("application/graphql"));
+        assert!(is_text_content_type("application/ndjson"));
+        assert!(is_text_content_type("application/csv"));
+        assert!(is_text_content_type("application/sql"));
+        assert!(is_text_content_type("application/toml"));
+        assert!(!is_text_content_type("image/png"));
+    }
+
+    #[test]
+    fn is_binary_content_type_matches_binary_types() {
+        assert!(is_binary_content_type("application/octet-stream"));
+        assert!(is_binary_content_type("image/png"));
+        assert!(is_binary_content_type("audio/mp3"));
+        assert!(is_binary_content_type("video/mp4"));
+        assert!(is_binary_content_type("font/woff2"));
+        assert!(is_binary_content_type("application/zip"));
+        assert!(!is_binary_content_type("application/json"));
+        assert!(!is_binary_content_type("text/plain"));
+    }
+
+    #[test]
+    fn schema_is_binary_checks_format() {
+        assert!(schema_is_binary(Some(
+            &serde_json::json!({"format": "binary"})
+        )));
+        assert!(!schema_is_binary(Some(
+            &serde_json::json!({"format": "int32"})
+        )));
+        assert!(!schema_is_binary(None));
+    }
+
+    #[test]
+    fn schema_contains_binary_field_handles_none() {
+        assert!(!schema_contains_binary_field(None));
+    }
+
+    #[test]
+    fn schema_contains_binary_in_items() {
+        let schema = serde_json::json!({
+            "type": "array",
+            "items": {"type": "string", "format": "binary"}
+        });
+        assert!(schema_contains_binary_field(Some(&schema)));
+    }
+
+    #[test]
+    fn schema_contains_binary_in_additional_properties() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "additionalProperties": {"type": "string", "format": "binary"}
+        });
+        assert!(schema_contains_binary_field(Some(&schema)));
+    }
+
+    #[test]
+    fn schema_contains_binary_in_any_of() {
+        let schema = serde_json::json!({
+            "anyOf": [
+                {"type": "string"},
+                {"type": "string", "format": "binary"}
+            ]
+        });
+        assert!(schema_contains_binary_field(Some(&schema)));
+    }
 }

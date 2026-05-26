@@ -578,3 +578,86 @@ fn unique_devices_by_token(devices: &[DeviceToken]) -> Vec<&DeviceToken> {
 
     unique
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::connect_test_database;
+
+    fn make_device(device_id: &str, platform: &str, token: &str) -> DeviceToken {
+        DeviceToken {
+            device_id: device_id.to_string(),
+            platform: platform.to_string(),
+            token: token.to_string(),
+            device_name: None,
+            app_id: None,
+            registered_at: Utc::now(),
+            last_used_at: None,
+        }
+    }
+
+    #[test]
+    fn unique_devices_deduplicates_by_token() {
+        let devices = vec![
+            make_device("d1", "fcm", "token-aaa"),
+            make_device("d2", "fcm", "token-aaa"),
+            make_device("d3", "apns", "token-bbb"),
+        ];
+        let unique = unique_devices_by_token(&devices);
+        assert_eq!(unique.len(), 2);
+        assert_eq!(unique[0].device_id, "d1");
+        assert_eq!(unique[1].device_id, "d3");
+    }
+
+    #[test]
+    fn unique_devices_preserves_order_of_first_seen() {
+        let devices = vec![
+            make_device("d1", "apns", "token-x"),
+            make_device("d2", "fcm", "token-y"),
+            make_device("d3", "apns", "token-x"),
+            make_device("d4", "fcm", "token-z"),
+        ];
+        let unique = unique_devices_by_token(&devices);
+        assert_eq!(unique.len(), 3);
+        assert_eq!(unique[0].device_id, "d1");
+        assert_eq!(unique[1].device_id, "d2");
+        assert_eq!(unique[2].device_id, "d4");
+    }
+
+    #[test]
+    fn unique_devices_empty_input() {
+        let devices: Vec<DeviceToken> = vec![];
+        let unique = unique_devices_by_token(&devices);
+        assert!(unique.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_or_create_channel_creates_default_channel() {
+        let Some(db) = connect_test_database("notify_create").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let channel = get_or_create_channel(&db, &user_id).await.unwrap();
+
+        assert_eq!(channel.user_id, user_id);
+        assert!(!channel.telegram_enabled);
+        assert!(channel.telegram_chat_id.is_none());
+        assert!(!channel.push_enabled);
+        assert!(channel.push_devices.is_empty());
+        assert_eq!(channel.approval_timeout_secs, 30);
+        assert_eq!(channel.grant_expiry_days, 30);
+        assert!(!channel.approval_required);
+    }
+
+    #[tokio::test]
+    async fn get_or_create_channel_returns_existing() {
+        let Some(db) = connect_test_database("notify_existing").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let first = get_or_create_channel(&db, &user_id).await.unwrap();
+        let second = get_or_create_channel(&db, &user_id).await.unwrap();
+        assert_eq!(first.id, second.id);
+        assert_eq!(first.user_id, second.user_id);
+    }
+}

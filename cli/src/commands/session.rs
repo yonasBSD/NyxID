@@ -93,4 +93,20 @@ mod tests {
         .await
         .expect("session list table should succeed");
     }
+
+    #[tokio::test]
+    async fn list_sessions_table_empty() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/sessions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+
+        run(SessionCommands::List {
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+        })
+        .await
+        .expect("empty session list should succeed");
+    }
 }

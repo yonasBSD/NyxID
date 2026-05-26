@@ -422,3 +422,325 @@ pub async fn delete_binding(
         message: "Binding deleted".to_string(),
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::api_key::ApiKey;
+    use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+    use crate::models::user_api_key::UserApiKey;
+    use crate::test_utils::{
+        connect_test_database, test_app_state, test_auth_user, test_user, test_user_endpoint,
+        test_user_service,
+    };
+    use axum::extract::State;
+    use chrono::Utc;
+
+    fn tele() -> TelemetryContext {
+        TelemetryContext::default()
+    }
+
+    fn fixture_api_key(id: &str, user_id: &str) -> ApiKey {
+        ApiKey {
+            id: id.to_string(),
+            user_id: user_id.to_string(),
+            name: "test-agent".to_string(),
+            key_prefix: "nyxid_ag_test".to_string(),
+            key_hash: "deadbeef".repeat(8),
+            scopes: String::new(),
+            last_used_at: None,
+            expires_at: None,
+            is_active: true,
+            created_at: Utc::now(),
+            description: None,
+            allowed_service_ids: vec![],
+            allowed_node_ids: vec![],
+            allow_all_services: true,
+            allow_all_nodes: true,
+            rate_limit_per_second: None,
+            rate_limit_burst: None,
+            platform: Some("claude-code".to_string()),
+            callback_url: None,
+        }
+    }
+
+    fn fixture_user_api_key(id: &str, user_id: &str) -> UserApiKey {
+        UserApiKey {
+            id: id.to_string(),
+            user_id: user_id.to_string(),
+            label: "test-credential".to_string(),
+            credential_type: "api_key".to_string(),
+            credential_encrypted: Some(vec![1, 2, 3]),
+            access_token_encrypted: None,
+            refresh_token_encrypted: None,
+            token_scopes: None,
+            expires_at: None,
+            provider_config_id: None,
+            connection_id: None,
+            user_oauth_client_id_encrypted: None,
+            user_oauth_client_secret_encrypted: None,
+            status: "active".to_string(),
+            last_used_at: None,
+            error_message: None,
+            source: None,
+            source_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    struct Fixtures {
+        user_id: String,
+        api_key_id: String,
+        service_id: String,
+        credential_id: String,
+    }
+
+    async fn seed_fixtures(db: &mongodb::Database) -> Fixtures {
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let api_key_id = uuid::Uuid::new_v4().to_string();
+        let endpoint_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let credential_id = uuid::Uuid::new_v4().to_string();
+
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+        db.collection::<ApiKey>(API_KEYS)
+            .insert_one(fixture_api_key(&api_key_id, &user_id))
+            .await
+            .unwrap();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(test_user_endpoint(
+                &endpoint_id,
+                &user_id,
+                "Test EP",
+                "https://api.example.com",
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(test_user_service(
+                &service_id,
+                &user_id,
+                "test-svc",
+                &endpoint_id,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(fixture_user_api_key(&credential_id, &user_id))
+            .await
+            .unwrap();
+
+        Fixtures {
+            user_id,
+            api_key_id,
+            service_id,
+            credential_id,
+        }
+    }
+
+    #[tokio::test]
+    async fn create_and_list_binding() {
+        let Some(db) = connect_test_database("h_agent_bind_create_list").await else {
+            return;
+        };
+        let f = seed_fixtures(&db).await;
+        let state = test_app_state(db);
+        let auth = test_auth_user(&f.user_id);
+
+        let Json(created) = create_binding(
+            State(state.clone()),
+            auth.clone(),
+            tele(),
+            Path(f.api_key_id.clone()),
+            Json(CreateBindingRequest {
+                user_service_id: f.service_id.clone(),
+                user_api_key_id: f.credential_id.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(created.api_key_id, f.api_key_id);
+        assert_eq!(created.user_service_id, f.service_id);
+        assert_eq!(created.user_api_key_id, f.credential_id);
+        assert!(!created.is_invalid);
+
+        let Json(list) = list_bindings(State(state), auth, Path(f.api_key_id.clone()))
+            .await
+            .unwrap();
+
+        assert_eq!(list.bindings.len(), 1);
+        assert_eq!(list.bindings[0].id, created.id);
+    }
+
+    #[tokio::test]
+    async fn create_binding_duplicate_returns_conflict() {
+        let Some(db) = connect_test_database("h_agent_bind_dup").await else {
+            return;
+        };
+        let f = seed_fixtures(&db).await;
+        let state = test_app_state(db);
+        let auth = test_auth_user(&f.user_id);
+
+        let _first = create_binding(
+            State(state.clone()),
+            auth.clone(),
+            tele(),
+            Path(f.api_key_id.clone()),
+            Json(CreateBindingRequest {
+                user_service_id: f.service_id.clone(),
+                user_api_key_id: f.credential_id.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let err = create_binding(
+            State(state),
+            auth,
+            tele(),
+            Path(f.api_key_id.clone()),
+            Json(CreateBindingRequest {
+                user_service_id: f.service_id.clone(),
+                user_api_key_id: f.credential_id.clone(),
+            }),
+        )
+        .await;
+
+        assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn delete_binding_succeeds() {
+        let Some(db) = connect_test_database("h_agent_bind_delete").await else {
+            return;
+        };
+        let f = seed_fixtures(&db).await;
+        let state = test_app_state(db);
+        let auth = test_auth_user(&f.user_id);
+
+        let Json(created) = create_binding(
+            State(state.clone()),
+            auth.clone(),
+            tele(),
+            Path(f.api_key_id.clone()),
+            Json(CreateBindingRequest {
+                user_service_id: f.service_id.clone(),
+                user_api_key_id: f.credential_id.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let Json(resp) = delete_binding(
+            State(state.clone()),
+            auth.clone(),
+            tele(),
+            Path((f.api_key_id.clone(), created.id)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resp.message, "Binding deleted");
+
+        let Json(list) = list_bindings(State(state), auth, Path(f.api_key_id.clone()))
+            .await
+            .unwrap();
+
+        assert!(list.bindings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_nonexistent_binding_returns_error() {
+        let Some(db) = connect_test_database("h_agent_bind_del_404").await else {
+            return;
+        };
+        let f = seed_fixtures(&db).await;
+        let state = test_app_state(db);
+        let auth = test_auth_user(&f.user_id);
+
+        let err = delete_binding(
+            State(state),
+            auth,
+            tele(),
+            Path((f.api_key_id.clone(), uuid::Uuid::new_v4().to_string())),
+        )
+        .await;
+
+        assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn list_bindings_api_key_not_found() {
+        let Some(db) = connect_test_database("h_agent_bind_list_404").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+        let state = test_app_state(db);
+        let auth = test_auth_user(&user_id);
+
+        let err = list_bindings(State(state), auth, Path(uuid::Uuid::new_v4().to_string())).await;
+
+        assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn create_binding_invalid_service_returns_error() {
+        let Some(db) = connect_test_database("h_agent_bind_bad_svc").await else {
+            return;
+        };
+        let f = seed_fixtures(&db).await;
+        let state = test_app_state(db);
+        let auth = test_auth_user(&f.user_id);
+
+        let err = create_binding(
+            State(state),
+            auth,
+            tele(),
+            Path(f.api_key_id.clone()),
+            Json(CreateBindingRequest {
+                user_service_id: uuid::Uuid::new_v4().to_string(),
+                user_api_key_id: f.credential_id.clone(),
+            }),
+        )
+        .await;
+
+        assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn create_binding_invalid_credential_returns_error() {
+        let Some(db) = connect_test_database("h_agent_bind_bad_cred").await else {
+            return;
+        };
+        let f = seed_fixtures(&db).await;
+        let state = test_app_state(db);
+        let auth = test_auth_user(&f.user_id);
+
+        let err = create_binding(
+            State(state),
+            auth,
+            tele(),
+            Path(f.api_key_id.clone()),
+            Json(CreateBindingRequest {
+                user_service_id: f.service_id.clone(),
+                user_api_key_id: uuid::Uuid::new_v4().to_string(),
+            }),
+        )
+        .await;
+
+        assert!(err.is_err());
+    }
+}

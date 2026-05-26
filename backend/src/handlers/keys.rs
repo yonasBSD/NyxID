@@ -2866,4 +2866,163 @@ mod tests {
         assert_eq!(api_key_count, 0);
         assert_eq!(service_count, 0);
     }
+
+    #[tokio::test]
+    async fn list_keys_returns_empty_for_user_with_no_keys() {
+        let Some(db) = connect_test_database("keys_ext_list_empty").await else {
+            eprintln!("skipping keys handler integration test: no local MongoDB available");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &actor_id, UserType::Person).await;
+
+        let Json(response) = super::list_keys(State(state), test_auth_user(&actor_id))
+            .await
+            .unwrap();
+
+        assert!(response.keys.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_keys_returns_owned_keys() {
+        let Some(db) = connect_test_database("keys_ext_list_owned").await else {
+            eprintln!("skipping keys handler integration test: no local MongoDB available");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &actor_id, UserType::Person).await;
+        insert_key_fixture(&db, &actor_id, &service_id, "my-svc", "My Service").await;
+
+        let Json(response) = super::list_keys(State(state), test_auth_user(&actor_id))
+            .await
+            .unwrap();
+
+        assert!(!response.keys.is_empty());
+        assert!(response.keys.iter().any(|k| k.id == service_id));
+    }
+
+    #[tokio::test]
+    async fn get_key_not_found_returns_error() {
+        let Some(db) = connect_test_database("keys_ext_get_notfound").await else {
+            eprintln!("skipping keys handler integration test: no local MongoDB available");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &actor_id, UserType::Person).await;
+
+        let err = super::get_key(
+            State(state),
+            test_auth_user(&actor_id),
+            Path("nonexistent-id".to_string()),
+        )
+        .await
+        .expect_err("should return not found");
+
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn delete_key_not_found_returns_error() {
+        let Some(db) = connect_test_database("keys_ext_delete_notfound").await else {
+            eprintln!("skipping keys handler integration test: no local MongoDB available");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &actor_id, UserType::Person).await;
+
+        let err = super::delete_key(
+            State(state),
+            test_auth_user(&actor_id),
+            TelemetryContext::default(),
+            Path("nonexistent-id".to_string()),
+            axum::extract::Query(super::DeleteKeyQuery {
+                only_if_pending: None,
+            }),
+        )
+        .await
+        .expect_err("should return not found");
+
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn get_key_by_other_user_returns_not_found() {
+        let Some(db) = connect_test_database("keys_ext_get_other_user").await else {
+            eprintln!("skipping keys handler integration test: no local MongoDB available");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let owner_id = uuid::Uuid::new_v4().to_string();
+        let other_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &owner_id, UserType::Person).await;
+        insert_user(&db, &other_id, UserType::Person).await;
+        insert_key_fixture(&db, &owner_id, &service_id, "private-svc", "Private").await;
+
+        let err = super::get_key(State(state), test_auth_user(&other_id), Path(service_id))
+            .await
+            .expect_err("other user should not see the key");
+
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn update_key_not_found_returns_error() {
+        let Some(db) = connect_test_database("keys_ext_update_notfound").await else {
+            eprintln!("skipping keys handler integration test: no local MongoDB available");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &actor_id, UserType::Person).await;
+
+        let err = super::update_key(
+            State(state),
+            test_auth_user(&actor_id),
+            Path("nonexistent-id".to_string()),
+            Json(empty_update_request()),
+        )
+        .await
+        .expect_err("should return not found");
+
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[test]
+    fn validate_optional_label_rejects_empty() {
+        assert!(super::validate_optional_label_for_update(Some("")).is_err());
+    }
+
+    #[test]
+    fn validate_optional_label_rejects_too_long() {
+        let long_label = "a".repeat(201);
+        assert!(super::validate_optional_label_for_update(Some(&long_label)).is_err());
+    }
+
+    #[test]
+    fn validate_optional_label_accepts_valid() {
+        assert!(super::validate_optional_label_for_update(Some("Good Label")).is_ok());
+        assert!(super::validate_optional_label_for_update(None).is_ok());
+    }
+
+    #[test]
+    fn extract_app_id_from_credential_extracts_valid_json() {
+        let cred = r#"{"app_id": "cli_abc123", "app_secret": "secret"}"#;
+        assert_eq!(
+            super::extract_app_id_from_credential(cred),
+            Some("cli_abc123".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_app_id_from_credential_returns_none_for_invalid() {
+        assert!(super::extract_app_id_from_credential("not-json").is_none());
+        assert!(super::extract_app_id_from_credential(r#"{"key": "val"}"#).is_none());
+        assert!(super::extract_app_id_from_credential(r#"{"app_id": ""}"#).is_none());
+    }
 }

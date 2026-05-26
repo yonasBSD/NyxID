@@ -709,4 +709,99 @@ mod tests {
         .await
         .expect("revoke-tokens should succeed");
     }
+
+    #[tokio::test]
+    async fn list_minimal_without_search_or_org() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/admin/service-accounts"))
+            .and(query_param("page", "1"))
+            .and(query_param("per_page", "25"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "service_accounts": []
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ServiceAccountCommands::List {
+            org: None,
+            search: None,
+            page: 1,
+            per_page: 25,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("list without filters should succeed");
+    }
+
+    #[tokio::test]
+    async fn show_table_output() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/admin/service-accounts/sa-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "sa-1",
+                "name": "bot",
+                "description": "A bot",
+                "client_id": "cid",
+                "secret_prefix": "sk_...",
+                "allowed_scopes": "openid",
+                "role_ids": ["r1"],
+                "is_active": true,
+                "created_by": "admin-1",
+                "created_at": "2026-01-01T00:00:00Z",
+                "rate_limit_override": 50
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ServiceAccountCommands::Show {
+            id: "sa-1".to_string(),
+            auth: crate::test_support::mock_auth_with_output(
+                server.uri(),
+                crate::cli::OutputFormat::Table,
+            ),
+        })
+        .await
+        .expect("show table should succeed");
+    }
+
+    #[tokio::test]
+    async fn rotate_secret_surfaces_server_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/admin/service-accounts/sa-1/rotate-secret"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("forbidden"))
+            .mount(&server)
+            .await;
+
+        let result = run(ServiceAccountCommands::RotateSecret {
+            id: "sa-1".to_string(),
+            terminal: true,
+            no_wait: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn delete_surfaces_server_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/admin/service-accounts/sa-1"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("internal"))
+            .mount(&server)
+            .await;
+
+        let result = run(ServiceAccountCommands::Delete {
+            id: "sa-1".to_string(),
+            yes: true,
+            auth: mock_auth(server.uri()),
+        })
+        .await;
+        assert!(result.is_err());
+    }
 }

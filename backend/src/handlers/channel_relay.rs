@@ -1884,6 +1884,121 @@ mod tests {
         db.drop().await.unwrap();
     }
 
+    #[test]
+    fn extract_bearer_token_returns_none_for_missing_header() {
+        let headers = HeaderMap::new();
+        assert!(extract_bearer_token(&headers).unwrap().is_none());
+    }
+
+    #[test]
+    fn extract_bearer_token_extracts_value() {
+        let headers = bearer_headers("my-jwt-token");
+        assert_eq!(
+            extract_bearer_token(&headers).unwrap().as_deref(),
+            Some("my-jwt-token")
+        );
+    }
+
+    #[test]
+    fn token_targets_reply_audience_detects_relay_audience() {
+        let claims = serde_json::json!({
+            "aud": jwt::RELAY_REPLY_AUDIENCE,
+            "iss": "nyxid",
+            "exp": 9999999999i64,
+            "iat": 1000000000i64,
+        });
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&claims).unwrap());
+        let fake_token = format!("eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.{payload}.fake_sig");
+        assert!(token_targets_reply_audience(&fake_token));
+    }
+
+    #[test]
+    fn token_targets_reply_audience_rejects_non_relay() {
+        assert!(!token_targets_reply_audience("not-a-jwt"));
+        let claims = serde_json::json!({"aud": "other-audience"});
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&claims).unwrap());
+        let fake_token = format!("eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.{payload}.fake_sig");
+        assert!(!token_targets_reply_audience(&fake_token));
+    }
+
+    #[tokio::test]
+    async fn list_messages_requires_api_key_auth() {
+        let Some(fixture) = setup_reply_token_fixture("relay_ext_list_msg_no_key").await else {
+            eprintln!("skipping channel_relay test: no local MongoDB available");
+            return;
+        };
+        let db = fixture.state.db.clone();
+
+        let mut auth = api_key_auth_user(&fixture.api_key);
+        auth.api_key_id = None;
+
+        let err = list_messages(
+            State(fixture.state),
+            auth,
+            Path(fixture.conversation.id.clone()),
+            Query(ListMessagesQuery {
+                page: 1,
+                per_page: 50,
+            }),
+        )
+        .await
+        .expect_err("should require API key");
+
+        assert!(matches!(err, AppError::Forbidden(_)));
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn resolve_sender_requires_api_key_auth() {
+        let Some(fixture) = setup_reply_token_fixture("relay_ext_resolve_no_key").await else {
+            eprintln!("skipping channel_relay test: no local MongoDB available");
+            return;
+        };
+        let db = fixture.state.db.clone();
+
+        let mut auth = api_key_auth_user(&fixture.api_key);
+        auth.api_key_id = None;
+
+        let err = resolve_sender(
+            State(fixture.state),
+            auth,
+            Query(ResolveSenderQuery {
+                platform: "telegram".to_string(),
+                platform_id: "12345".to_string(),
+            }),
+        )
+        .await
+        .expect_err("should require API key");
+
+        assert!(matches!(err, AppError::Forbidden(_)));
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn resolve_sender_validates_empty_params() {
+        let Some(fixture) = setup_reply_token_fixture("relay_ext_resolve_empty").await else {
+            eprintln!("skipping channel_relay test: no local MongoDB available");
+            return;
+        };
+        let db = fixture.state.db.clone();
+
+        let err = resolve_sender(
+            State(fixture.state),
+            api_key_auth_user(&fixture.api_key),
+            Query(ResolveSenderQuery {
+                platform: String::new(),
+                platform_id: "12345".to_string(),
+            }),
+        )
+        .await
+        .expect_err("should reject empty platform");
+
+        assert!(matches!(err, AppError::ValidationError(_)));
+        db.drop().await.unwrap();
+    }
+
     #[tokio::test]
     async fn update_reply_rate_limits_per_platform_message_id() {
         let Some(fixture) = setup_reply_token_fixture("update_reply_rate_limit").await else {

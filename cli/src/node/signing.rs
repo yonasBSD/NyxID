@@ -735,4 +735,29 @@ mod tests {
         let old = (chrono::Utc::now() - chrono::Duration::seconds(600)).to_rfc3339();
         assert!(!guard.check(&old, "nonce-old"));
     }
+
+    #[test]
+    fn replay_guard_rejects_invalid_timestamp() {
+        let mut guard = ReplayGuard::new();
+        assert!(!guard.check("not-a-date", "nonce-bad"));
+    }
+
+    #[test]
+    fn replay_guard_accepts_different_nonces() {
+        let mut guard = ReplayGuard::new();
+        let ts = chrono::Utc::now().to_rfc3339();
+        assert!(guard.check(&ts, "a"));
+        assert!(guard.check(&ts, "b"));
+    }
+
+    #[test]
+    fn verify_invalid_secret_hex_fails() {
+        assert!(!verify_signature("not-hex", "aabb", "msg"));
+    }
+
+    #[test]
+    fn verify_invalid_expected_hex_fails() {
+        let secret = "ab".repeat(32);
+        assert!(!verify_signature(&secret, "not-hex", "msg"));
+    }
 }

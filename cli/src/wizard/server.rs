@@ -2601,4 +2601,474 @@ mod tests {
         assert_eq!(mock.gets.load(Ordering::SeqCst), 0);
         assert!(mock.deletes.lock().unwrap().is_empty());
     }
+
+    #[test]
+    fn proxy_route_matches_exact_path() {
+        let route = ProxyRoute {
+            method: Method::GET,
+            path_template: "/api/v1/catalog",
+            body_fields: &[],
+        };
+        assert!(route.matches(&Method::GET, "/api/v1/catalog"));
+        assert!(!route.matches(&Method::POST, "/api/v1/catalog"));
+        assert!(!route.matches(&Method::GET, "/api/v1/catalog/extra"));
+    }
+
+    #[test]
+    fn proxy_route_matches_parameterized_path() {
+        let route = ProxyRoute {
+            method: Method::GET,
+            path_template: "/api/v1/keys/:key_id",
+            body_fields: &[],
+        };
+        assert!(route.matches(&Method::GET, "/api/v1/keys/abc-123"));
+        assert!(!route.matches(&Method::GET, "/api/v1/keys/"));
+        assert!(!route.matches(&Method::GET, "/api/v1/keys/abc/extra"));
+    }
+
+    #[test]
+    fn proxy_route_rejects_empty_param_segment() {
+        let route = ProxyRoute {
+            method: Method::GET,
+            path_template: "/api/v1/catalog/:slug",
+            body_fields: &[],
+        };
+        assert!(!route.matches(&Method::GET, "/api/v1/catalog/"));
+    }
+
+    #[test]
+    fn proxy_route_multi_param_path() {
+        let route = ProxyRoute {
+            method: Method::POST,
+            path_template: "/api/v1/:a/:b/rotate",
+            body_fields: &[],
+        };
+        assert!(route.matches(&Method::POST, "/api/v1/abc/def/rotate"));
+        assert!(!route.matches(&Method::POST, "/api/v1/abc/def/other"));
+    }
+
+    #[test]
+    fn csrf_ok_returns_false_when_missing() {
+        let headers = HeaderMap::new();
+        assert!(!csrf_ok(&headers, "expected-token"));
+    }
+
+    #[test]
+    fn csrf_ok_returns_false_when_wrong() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-wizard-csrf", HeaderValue::from_static("wrong"));
+        assert!(!csrf_ok(&headers, "expected-token"));
+    }
+
+    #[test]
+    fn csrf_ok_returns_true_when_matches() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-wizard-csrf", HeaderValue::from_static("abc123"));
+        assert!(csrf_ok(&headers, "abc123"));
+    }
+
+    #[test]
+    fn is_uuid_like_accepts_hex_dashes() {
+        assert!(is_uuid_like("abc-def-0123"));
+        assert!(is_uuid_like("550e8400-e29b-41d4-a716-446655440000"));
+    }
+
+    #[test]
+    fn is_uuid_like_rejects_bad_chars() {
+        assert!(!is_uuid_like("abc/def"));
+        assert!(!is_uuid_like("abc def"));
+        assert!(!is_uuid_like("abc;def"));
+        assert!(!is_uuid_like("../../etc"));
+    }
+
+    #[test]
+    fn asset_content_type_returns_correct_type() {
+        assert_eq!(asset_content_type("style.css"), "text/css; charset=utf-8");
+        assert_eq!(
+            asset_content_type("app.js"),
+            "application/javascript; charset=utf-8"
+        );
+        assert_eq!(asset_content_type("index.html"), "text/html; charset=utf-8");
+        assert_eq!(asset_content_type("logo.svg"), "image/svg+xml");
+        assert_eq!(asset_content_type("favicon.ico"), "image/x-icon");
+        assert_eq!(asset_content_type("font.woff2"), "font/woff2");
+        assert_eq!(asset_content_type("font.woff"), "font/woff");
+        assert_eq!(asset_content_type("data.bin"), "application/octet-stream");
+    }
+
+    #[test]
+    fn embedded_asset_response_rejects_path_traversal() {
+        let resp = embedded_asset_response("../etc/passwd");
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn embedded_asset_response_rejects_empty_segment() {
+        let resp = embedded_asset_response("a//b");
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn base_security_headers_includes_required_headers() {
+        let h = base_security_headers();
+        assert_eq!(h.get("x-content-type-options").unwrap(), "nosniff");
+        assert_eq!(h.get("x-frame-options").unwrap(), "DENY");
+        assert_eq!(h.get("referrer-policy").unwrap(), "no-referrer");
+        assert_eq!(h.get("cache-control").unwrap(), "no-store");
+    }
+
+    #[test]
+    fn base_security_headers_with_nonce_includes_csp() {
+        let h = base_security_headers_with_nonce("test-nonce");
+        let csp = h.get("content-security-policy").unwrap().to_str().unwrap();
+        assert!(csp.contains("test-nonce"));
+        assert_eq!(h.get("x-frame-options").unwrap(), "DENY");
+    }
+
+    #[test]
+    fn origin_matches_returns_none_when_absent() {
+        let headers = HeaderMap::new();
+        assert_eq!(origin_matches(&headers, 8080), None);
+    }
+
+    #[test]
+    fn origin_matches_returns_true_for_correct_port() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://127.0.0.1:8080"),
+        );
+        assert_eq!(origin_matches(&headers, 8080), Some(true));
+    }
+
+    #[test]
+    fn origin_matches_returns_false_for_wrong_port() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://127.0.0.1:9090"),
+        );
+        assert_eq!(origin_matches(&headers, 8080), Some(false));
+    }
+
+    #[test]
+    fn check_host_exact_rejects_missing_host() {
+        let headers = HeaderMap::new();
+        assert!(!check_host_exact(&headers, 8080));
+    }
+
+    #[test]
+    fn check_host_exact_accepts_correct_host() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:8080"));
+        assert!(check_host_exact(&headers, 8080));
+    }
+
+    #[test]
+    fn check_host_exact_accepts_localhost() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("localhost:8080"));
+        assert!(check_host_exact(&headers, 8080));
+    }
+
+    #[test]
+    fn check_host_exact_rejects_wrong_port() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:9999"));
+        assert!(!check_host_exact(&headers, 8080));
+    }
+
+    #[test]
+    fn check_caller_strict_requires_both_origin_and_host() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://127.0.0.1:8080"),
+        );
+        assert!(!check_caller_strict(&headers, 8080));
+        headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:8080"));
+        assert!(check_caller_strict(&headers, 8080));
+    }
+
+    #[test]
+    fn check_caller_relaxed_allows_missing_origin() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:8080"));
+        assert!(check_caller_relaxed(&headers, 8080));
+    }
+
+    #[test]
+    fn enforce_proxy_body_constraints_rejects_public_client_type() {
+        let body = serde_json::json!({"client_type": "public", "name": "test"});
+        let resp = enforce_proxy_body_constraints(
+            FlowKind::DeveloperAppCreate,
+            &Method::POST,
+            "/api/v1/developer/oauth-clients",
+            &body,
+        );
+        assert!(resp.is_some());
+    }
+
+    #[test]
+    fn enforce_proxy_body_constraints_accepts_confidential() {
+        let body = serde_json::json!({"client_type": "confidential", "name": "test"});
+        let resp = enforce_proxy_body_constraints(
+            FlowKind::DeveloperAppCreate,
+            &Method::POST,
+            "/api/v1/developer/oauth-clients",
+            &body,
+        );
+        assert!(resp.is_none());
+    }
+
+    #[test]
+    fn enforce_proxy_body_constraints_ignores_other_flows() {
+        let body = serde_json::json!({"client_type": "public"});
+        let resp = enforce_proxy_body_constraints(
+            FlowKind::AiKey,
+            &Method::POST,
+            "/api/v1/developer/oauth-clients",
+            &body,
+        );
+        assert!(resp.is_none());
+    }
+
+    #[test]
+    fn flow_kind_slug_round_trips() {
+        for kind in [
+            FlowKind::AiKey,
+            FlowKind::ApiKeyRotate,
+            FlowKind::NodeRotateToken,
+            FlowKind::NodeRegisterToken,
+            FlowKind::ApiKeyCreate,
+            FlowKind::ServiceAccountCreate,
+            FlowKind::ServiceAccountRotateSecret,
+            FlowKind::DeveloperAppCreate,
+            FlowKind::DeveloperAppRotateSecret,
+            FlowKind::MfaSetup,
+        ] {
+            assert!(!kind.slug().is_empty());
+        }
+    }
+
+    #[test]
+    fn flow_kind_is_display_once_covers_all_variants() {
+        assert!(!FlowKind::AiKey.is_display_once());
+        assert!(FlowKind::ApiKeyRotate.is_display_once());
+        assert!(FlowKind::NodeRotateToken.is_display_once());
+        assert!(FlowKind::NodeRegisterToken.is_display_once());
+        assert!(FlowKind::ApiKeyCreate.is_display_once());
+        assert!(FlowKind::ServiceAccountCreate.is_display_once());
+        assert!(FlowKind::ServiceAccountRotateSecret.is_display_once());
+        assert!(FlowKind::DeveloperAppCreate.is_display_once());
+        assert!(FlowKind::DeveloperAppRotateSecret.is_display_once());
+        assert!(FlowKind::MfaSetup.is_display_once());
+    }
+
+    #[test]
+    fn allowlist_for_each_flow_is_nonempty() {
+        for kind in [
+            FlowKind::AiKey,
+            FlowKind::ApiKeyRotate,
+            FlowKind::NodeRotateToken,
+            FlowKind::NodeRegisterToken,
+            FlowKind::ApiKeyCreate,
+            FlowKind::ServiceAccountCreate,
+            FlowKind::ServiceAccountRotateSecret,
+            FlowKind::DeveloperAppCreate,
+            FlowKind::DeveloperAppRotateSecret,
+            FlowKind::MfaSetup,
+        ] {
+            assert!(
+                !allowlist_for(kind).is_empty(),
+                "allowlist empty for {:?}",
+                kind
+            );
+        }
+    }
+
+    #[test]
+    fn prefill_query_ai_key_empty_prefill() {
+        let prefill = PrefillData::AiKey(WizardPrefill::default());
+        assert_eq!(prefill_query(&prefill), "");
+    }
+
+    #[test]
+    fn prefill_query_ai_key_with_slug() {
+        let prefill = PrefillData::AiKey(WizardPrefill {
+            slug: Some("openai".into()),
+            ..Default::default()
+        });
+        assert_eq!(prefill_query(&prefill), "?slug=openai");
+    }
+
+    #[test]
+    fn prefill_query_ai_key_custom_mode() {
+        let prefill = PrefillData::AiKey(WizardPrefill {
+            custom: true,
+            custom_slug: Some("my-svc".into()),
+            ..Default::default()
+        });
+        let q = prefill_query(&prefill);
+        assert!(q.contains("custom=1"));
+        assert!(q.contains("custom_slug=my-svc"));
+    }
+
+    #[test]
+    fn prefill_query_rotate() {
+        let prefill = PrefillData::Rotate(RotatePrefill {
+            resource_id: "abc".into(),
+            display_name: "test key".into(),
+        });
+        let q = prefill_query(&prefill);
+        assert!(q.contains("resource_id=abc"));
+        assert!(q.contains("display_name=test%20key"));
+    }
+
+    #[test]
+    fn prefill_query_node_register() {
+        let prefill = PrefillData::NodeRegister(NodeRegisterPrefill {
+            name: Some("my-node".into()),
+        });
+        assert_eq!(prefill_query(&prefill), "?name=my-node");
+    }
+
+    #[test]
+    fn prefill_query_api_key_create_with_booleans() {
+        let prefill = PrefillData::ApiKeyCreate(ApiKeyCreatePrefill {
+            allow_all_services: true,
+            allow_all_nodes: true,
+            ..Default::default()
+        });
+        let q = prefill_query(&prefill);
+        assert!(q.contains("allow_all_services=1"));
+        assert!(q.contains("allow_all_nodes=1"));
+    }
+
+    #[test]
+    fn prefill_query_service_account_create() {
+        let prefill = PrefillData::ServiceAccountCreate(ServiceAccountCreatePrefill {
+            name: Some("sa".into()),
+            rate_limit_override: Some(100),
+            ..Default::default()
+        });
+        let q = prefill_query(&prefill);
+        assert!(q.contains("name=sa"));
+        assert!(q.contains("rate_limit_override=100"));
+    }
+
+    #[test]
+    fn prefill_query_developer_app_create() {
+        let prefill = PrefillData::DeveloperAppCreate(DeveloperAppCreatePrefill {
+            name: Some("app".into()),
+            redirect_uris: vec!["https://x.com/cb".into()],
+            broker_capability: Some(true),
+            ..Default::default()
+        });
+        let q = prefill_query(&prefill);
+        assert!(q.contains("name=app"));
+        assert!(q.contains("redirect_uri="));
+        assert!(q.contains("broker_capability=1"));
+    }
+
+    #[test]
+    fn prefill_query_mfa_setup_is_empty() {
+        let prefill = PrefillData::MfaSetup(MfaSetupPrefill {});
+        assert_eq!(prefill_query(&prefill), "");
+    }
+
+    #[test]
+    fn prefill_to_json_ai_key_has_correct_fields() {
+        let prefill = PrefillData::AiKey(WizardPrefill {
+            slug: Some("openai".into()),
+            label: Some("test".into()),
+            ..Default::default()
+        });
+        let json = prefill_to_json(&prefill);
+        assert_eq!(json["slug"], "openai");
+        assert_eq!(json["label"], "test");
+    }
+
+    #[test]
+    fn prefill_to_json_rotate_has_correct_fields() {
+        let prefill = PrefillData::Rotate(RotatePrefill {
+            resource_id: "r1".into(),
+            display_name: "key1".into(),
+        });
+        let json = prefill_to_json(&prefill);
+        assert_eq!(json["resource_id"], "r1");
+        assert_eq!(json["display_name"], "key1");
+    }
+
+    #[test]
+    fn prefill_to_json_api_key_create_includes_bools() {
+        let prefill = PrefillData::ApiKeyCreate(ApiKeyCreatePrefill {
+            allow_all_services: true,
+            ..Default::default()
+        });
+        let json = prefill_to_json(&prefill);
+        assert_eq!(json["allow_all_services"], true);
+        assert_eq!(json["allow_all_nodes"], false);
+    }
+
+    #[test]
+    fn prefill_to_json_developer_app_create_includes_uris() {
+        let prefill = PrefillData::DeveloperAppCreate(DeveloperAppCreatePrefill {
+            redirect_uris: vec!["https://a.com".into()],
+            ..Default::default()
+        });
+        let json = prefill_to_json(&prefill);
+        let uris = json["redirect_uris"].as_array().unwrap();
+        assert_eq!(uris.len(), 1);
+    }
+
+    #[test]
+    fn prefill_to_json_service_account_create_includes_rate_limit() {
+        let prefill = PrefillData::ServiceAccountCreate(ServiceAccountCreatePrefill {
+            rate_limit_override: Some(50),
+            ..Default::default()
+        });
+        let json = prefill_to_json(&prefill);
+        assert_eq!(json["rate_limit_override"], 50);
+    }
+
+    #[test]
+    fn prefill_to_json_mfa_setup_is_empty_object() {
+        let prefill = PrefillData::MfaSetup(MfaSetupPrefill {});
+        let json = prefill_to_json(&prefill);
+        assert!(json.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn classify_keys_response_post_unknown_status_is_none() {
+        let body = json!({"id": "x", "status": "revoked"});
+        assert_eq!(
+            classify_keys_response(&Method::POST, "/api/v1/keys", &body),
+            KeysResponseSignal::None
+        );
+    }
+
+    #[test]
+    fn proxy_error_response_returns_json_body() {
+        let resp = proxy_error_response(StatusCode::BAD_GATEWAY, "err", "msg", "detail".into());
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn heartbeat_watchdog_dead_uses_rotation_window() {
+        let started = Instant::now();
+        let beat = started + Duration::from_secs(1);
+        assert!(!heartbeat_watchdog_dead(
+            started,
+            Some(beat),
+            HEARTBEAT_DEAD_AFTER_ROTATION,
+            beat + HEARTBEAT_DEAD_AFTER_ROTATION - Duration::from_millis(1)
+        ));
+        assert!(heartbeat_watchdog_dead(
+            started,
+            Some(beat),
+            HEARTBEAT_DEAD_AFTER_ROTATION,
+            beat + HEARTBEAT_DEAD_AFTER_ROTATION + Duration::from_millis(1)
+        ));
+    }
 }

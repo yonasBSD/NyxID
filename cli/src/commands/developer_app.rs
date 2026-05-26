@@ -758,4 +758,134 @@ mod tests {
             "rotate-secret on a public/invalid client should surface the error"
         );
     }
+
+    #[tokio::test]
+    async fn list_table_output_renders_empty() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/developer/oauth-clients"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "clients": [] })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(DeveloperAppCommands::List {
+            org: None,
+            auth: crate::test_support::mock_auth_with_output(
+                server.uri(),
+                crate::cli::OutputFormat::Table,
+            ),
+        })
+        .await
+        .expect("list empty table should succeed");
+    }
+
+    #[tokio::test]
+    async fn show_table_output() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/developer/oauth-clients/client-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "client-1",
+                "client_name": "Acme",
+                "client_type": "public",
+                "allowed_scopes": "openid",
+                "delegation_scopes": "",
+                "broker_capability_enabled": false,
+                "is_active": true,
+                "redirect_uris": ["https://acme.test/cb"],
+                "created_at": "2026-01-01T00:00:00Z"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(DeveloperAppCommands::Show {
+            id: "client-1".to_string(),
+            auth: crate::test_support::mock_auth_with_output(
+                server.uri(),
+                crate::cli::OutputFormat::Table,
+            ),
+        })
+        .await
+        .expect("show table should succeed");
+    }
+
+    #[tokio::test]
+    async fn create_table_output_shows_secret() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/developer/oauth-clients"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "client-3",
+                "client_name": "Secret App",
+                "client_type": "confidential",
+                "allowed_scopes": "openid",
+                "delegation_scopes": "-",
+                "broker_capability_enabled": false,
+                "client_secret": "sek_shown_once"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(DeveloperAppCommands::Create {
+            name: "Secret App".to_string(),
+            redirect_uris: vec!["https://secret.test/cb".to_string()],
+            client_type: Some("confidential".to_string()),
+            allowed_scopes: None,
+            delegation_scopes: None,
+            broker_capability: None,
+            org: None,
+            terminal: true,
+            no_wait: false,
+            auth: crate::test_support::mock_auth_with_output(
+                server.uri(),
+                crate::cli::OutputFormat::Table,
+            ),
+        })
+        .await
+        .expect("create table with secret should succeed");
+    }
+
+    #[tokio::test]
+    async fn show_surfaces_server_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/developer/oauth-clients/client-x"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+
+        let result = run(DeveloperAppCommands::Show {
+            id: "client-x".to_string(),
+            auth: mock_auth(server.uri()),
+        })
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn update_surfaces_server_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/api/v1/developer/oauth-clients/client-x"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("internal"))
+            .mount(&server)
+            .await;
+
+        let result = run(DeveloperAppCommands::Update {
+            id: "client-x".to_string(),
+            name: Some("New".to_string()),
+            redirect_uris: vec![],
+            allowed_scopes: None,
+            delegation_scopes: None,
+            broker_capability: None,
+            auth: mock_auth(server.uri()),
+        })
+        .await;
+        assert!(result.is_err());
+    }
 }

@@ -263,3 +263,152 @@ pub async fn disconnect_service(
         message: "Disconnected from service".to_string(),
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::downstream_service::test_helpers::dummy_service;
+    use crate::test_utils::*;
+    use axum::extract::{Path, State};
+
+    async fn insert_internal_service(db: &mongodb::Database, service_id: &str) {
+        let mut svc = dummy_service();
+        svc.id = service_id.to_string();
+        svc.name = "Internal Test".to_string();
+        svc.service_category = "internal".to_string();
+        svc.requires_user_credential = false;
+        svc.service_type = "http".to_string();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&svc)
+            .await
+            .unwrap();
+    }
+
+    async fn insert_connection_service(db: &mongodb::Database, service_id: &str) {
+        let mut svc = dummy_service();
+        svc.id = service_id.to_string();
+        svc.name = "Connection Test".to_string();
+        svc.service_category = "connection".to_string();
+        svc.requires_user_credential = true;
+        svc.service_type = "http".to_string();
+        svc.auth_type = Some("api_key".to_string());
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&svc)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_list_connections_empty() {
+        let Some(db) = connect_test_database("h_connections_list_empty").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let state = test_app_state(db);
+
+        let Json(resp) = list_connections(State(state), test_auth_user(&user_id))
+            .await
+            .unwrap();
+        assert!(resp.connections.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_connect_internal_service_no_credential() {
+        let Some(db) = connect_test_database("h_connections_connect_internal").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        insert_internal_service(&db, &service_id).await;
+
+        let state = test_app_state(db);
+
+        let Json(resp) = connect_service(
+            State(state),
+            test_auth_user(&user_id),
+            Path(service_id.clone()),
+            Json(ConnectRequest {
+                credential: None,
+                credential_label: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resp.service_id, service_id);
+        assert_eq!(resp.service_name, "Internal Test");
+    }
+
+    #[tokio::test]
+    async fn test_connect_and_list_connections() {
+        let Some(db) = connect_test_database("h_connections_connect_list").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        insert_connection_service(&db, &service_id).await;
+
+        let state = test_app_state(db);
+
+        let _ = connect_service(
+            State(state.clone()),
+            test_auth_user(&user_id),
+            Path(service_id.clone()),
+            Json(ConnectRequest {
+                credential: Some("sk-test-api-key".to_string()),
+                credential_label: Some("Prod Key".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let Json(list_resp) = list_connections(State(state), test_auth_user(&user_id))
+            .await
+            .unwrap();
+        assert_eq!(list_resp.connections.len(), 1);
+        assert_eq!(list_resp.connections[0].service_id, service_id);
+        assert!(list_resp.connections[0].has_credential);
+        assert_eq!(
+            list_resp.connections[0].credential_label.as_deref(),
+            Some("Prod Key")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_disconnect_service_success() {
+        let Some(db) = connect_test_database("h_connections_disconnect").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        insert_internal_service(&db, &service_id).await;
+
+        let state = test_app_state(db);
+
+        let _ = connect_service(
+            State(state.clone()),
+            test_auth_user(&user_id),
+            Path(service_id.clone()),
+            Json(ConnectRequest {
+                credential: None,
+                credential_label: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let Json(disc_resp) = disconnect_service(
+            State(state.clone()),
+            test_auth_user(&user_id),
+            Path(service_id.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(disc_resp.message, "Disconnected from service");
+
+        let Json(list_resp) = list_connections(State(state), test_auth_user(&user_id))
+            .await
+            .unwrap();
+        assert!(list_resp.connections.is_empty());
+    }
+}

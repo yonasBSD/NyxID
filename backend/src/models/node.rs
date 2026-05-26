@@ -153,4 +153,65 @@ mod tests {
         assert!(restored.connected_at.is_some());
         assert!(restored.metadata.is_some());
     }
+
+    #[test]
+    fn node_status_as_str() {
+        assert_eq!(NodeStatus::Online.as_str(), "online");
+        assert_eq!(NodeStatus::Offline.as_str(), "offline");
+        assert_eq!(NodeStatus::Draining.as_str(), "draining");
+    }
+
+    #[test]
+    fn node_status_serde_roundtrip() {
+        for status in [
+            NodeStatus::Online,
+            NodeStatus::Offline,
+            NodeStatus::Draining,
+        ] {
+            let json = serde_json::to_string(&status).unwrap();
+            let back: NodeStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, status);
+        }
+    }
+
+    #[test]
+    fn node_metrics_default() {
+        let m = NodeMetrics::default();
+        assert_eq!(m.total_requests, 0);
+        assert_eq!(m.success_count, 0);
+        assert_eq!(m.error_count, 0);
+        assert_eq!(m.avg_latency_ms, 0.0);
+        assert!(m.last_error.is_none());
+        assert!(m.last_error_at.is_none());
+        assert!(m.last_success_at.is_none());
+    }
+
+    #[test]
+    fn bson_roundtrip_with_metrics() {
+        let mut node = make_node();
+        node.metrics = NodeMetrics {
+            total_requests: 100,
+            success_count: 95,
+            error_count: 5,
+            avg_latency_ms: 42.5,
+            last_error: Some("timeout".to_string()),
+            last_error_at: Some(Utc::now()),
+            last_success_at: Some(Utc::now()),
+        };
+        let doc = bson::to_document(&node).expect("serialize");
+        let restored: Node = bson::from_document(doc).expect("deserialize");
+        assert_eq!(restored.metrics.total_requests, 100);
+        assert_eq!(restored.metrics.error_count, 5);
+        assert!(restored.metrics.last_error.is_some());
+        assert!(restored.metrics.last_error_at.is_some());
+    }
+
+    #[test]
+    fn bson_backward_compat_missing_metrics() {
+        let node = make_node();
+        let mut doc = bson::to_document(&node).expect("serialize");
+        doc.remove("metrics");
+        let restored: Node = bson::from_document(doc).expect("deserialize");
+        assert_eq!(restored.metrics.total_requests, 0);
+    }
 }

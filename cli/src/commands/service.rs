@@ -3279,7 +3279,7 @@ mod command_tests {
 #[cfg(test)]
 mod branch_tests {
     use super::*;
-    use crate::test_support::{env_lock, mock_auth};
+    use crate::test_support::{env_lock, mock_auth, mock_auth_with_output};
     use wiremock::matchers::{body_json, body_partial_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -3558,6 +3558,202 @@ mod branch_tests {
         })
         .await
         .expect("convert ssh via list fallback should succeed");
+    }
+
+    #[tokio::test]
+    async fn show_table_ssh_service() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/keys/svc-ssh"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "svc-ssh", "slug": "myssh", "label": "SSH Box",
+                "service_type": "ssh", "endpoint_url": "-",
+                "auth_method": "none", "auth_key_name": "-",
+                "status": "active", "is_active": true,
+                "ssh_host": "10.0.0.5", "ssh_port": 22,
+                "ssh_ca_public_key": "ssh-rsa AAAA",
+                "ssh_certificate_ttl_minutes": 30,
+                "ssh_allowed_principals": ["ubuntu", "admin"]
+            })))
+            .mount(&server)
+            .await;
+
+        run(ServiceCommands::Show {
+            id: "svc-ssh".to_string(),
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+        })
+        .await
+        .expect("show ssh table should succeed");
+    }
+
+    #[tokio::test]
+    async fn show_table_node_offline_warning() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/keys/svc-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "svc-1", "slug": "openai", "label": "OpenAI",
+                "service_type": "http", "endpoint_url": "https://api.openai.com",
+                "auth_method": "bearer", "auth_key_name": "Authorization",
+                "status": "active", "is_active": true,
+                "node_id": "node-123", "node_status": "offline",
+                "credential_type": "node_managed"
+            })))
+            .mount(&server)
+            .await;
+
+        run(ServiceCommands::Show {
+            id: "svc-1".to_string(),
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+        })
+        .await
+        .expect("show with offline node should succeed");
+    }
+
+    #[tokio::test]
+    async fn show_table_node_unknown_warning() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/keys/svc-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "svc-1", "slug": "openai", "label": "OpenAI",
+                "service_type": "http", "endpoint_url": "https://api.openai.com",
+                "auth_method": "bearer", "status": "active",
+                "node_id": "node-123", "node_status": "unknown"
+            })))
+            .mount(&server)
+            .await;
+
+        run(ServiceCommands::Show {
+            id: "svc-1".to_string(),
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+        })
+        .await
+        .expect("show with unknown node should succeed");
+    }
+
+    #[tokio::test]
+    async fn list_table_with_node_status_columns() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/keys"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "keys": [
+                    {"id": "svc-1", "slug": "a", "label": "A", "endpoint_url": "u",
+                     "node_id": "n1", "node_status": "online", "status": "active"},
+                    {"id": "svc-2", "slug": "b", "label": "B", "endpoint_url": "u",
+                     "node_id": "n2", "node_status": "offline"},
+                    {"id": "svc-3", "slug": "c", "label": "C", "endpoint_url": "u",
+                     "node_id": "n3", "node_status": "draining"},
+                    {"id": "svc-4", "slug": "d", "label": "D", "endpoint_url": "u",
+                     "node_id": "n4", "node_status": "unknown"},
+                    {"id": "svc-5", "slug": "e", "label": "E", "endpoint_url": "u",
+                     "node_id": "n5", "node_status": "inaccessible"}
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        run(ServiceCommands::List {
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+        })
+        .await
+        .expect("list with node statuses should succeed");
+    }
+
+    #[tokio::test]
+    async fn update_clear_default_headers() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/keys/svc-1"))
+            .and(body_partial_json(
+                serde_json::json!({ "default_request_headers": null }),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": "svc-1" })),
+            )
+            .mount(&server)
+            .await;
+
+        run(ServiceCommands::Update {
+            id: "svc-1".to_string(),
+            label: None,
+            endpoint_url: None,
+            openapi_spec_url: None,
+            node_id: None,
+            no_node: false,
+            active: false,
+            inactive: false,
+            default_header: vec![],
+            clear_default_headers: true,
+            ws_frame_preset: None,
+            ws_frame_clear: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("clear headers should succeed");
+    }
+
+    #[tokio::test]
+    async fn update_no_node_sends_empty_string() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/keys/svc-1"))
+            .and(body_partial_json(serde_json::json!({ "node_id": "" })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": "svc-1" })),
+            )
+            .mount(&server)
+            .await;
+
+        run(ServiceCommands::Update {
+            id: "svc-1".to_string(),
+            label: None,
+            endpoint_url: None,
+            openapi_spec_url: None,
+            node_id: None,
+            no_node: true,
+            active: false,
+            inactive: false,
+            default_header: vec![],
+            clear_default_headers: false,
+            ws_frame_preset: None,
+            ws_frame_clear: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("no-node should succeed");
+    }
+
+    #[tokio::test]
+    async fn update_inactive_flag() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/keys/svc-1"))
+            .and(body_partial_json(serde_json::json!({ "is_active": false })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": "svc-1" })),
+            )
+            .mount(&server)
+            .await;
+
+        run(ServiceCommands::Update {
+            id: "svc-1".to_string(),
+            label: None,
+            endpoint_url: None,
+            openapi_spec_url: None,
+            node_id: None,
+            no_node: false,
+            active: false,
+            inactive: true,
+            default_header: vec![],
+            clear_default_headers: false,
+            ws_frame_preset: None,
+            ws_frame_clear: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("inactive should succeed");
     }
 
     #[tokio::test]

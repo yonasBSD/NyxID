@@ -2576,6 +2576,337 @@ mod tests {
         assert!(!load_binding(&db, &other_raw_binding_id).await.revoked);
     }
 
+    #[test]
+    fn oauth_error_response_maps_unsupported_grant_type() {
+        let err = AppError::UnsupportedGrantType("magic_grant".to_string());
+        let response = oauth_error_response(err);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn oauth_error_response_maps_internal_error_without_leak() {
+        let err = AppError::Internal("secret DB detail".to_string());
+        let response = oauth_error_response(err);
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn parse_basic_client_credentials_returns_none_for_missing_header() {
+        let headers = HeaderMap::new();
+        let result = parse_basic_client_credentials(&headers).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_basic_client_credentials_decodes_valid_basic() {
+        let mut headers = HeaderMap::new();
+        let encoded = base64::engine::general_purpose::STANDARD.encode("my_client:my_secret");
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Basic {encoded}").parse().unwrap(),
+        );
+        let (client_id, client_secret) = parse_basic_client_credentials(&headers).unwrap().unwrap();
+        assert_eq!(client_id, "my_client");
+        assert_eq!(client_secret, "my_secret");
+    }
+
+    #[test]
+    fn parse_basic_client_credentials_rejects_invalid_base64() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Basic not!valid!base64!!!".parse().unwrap(),
+        );
+        let err = parse_basic_client_credentials(&headers);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn client_credentials_from_basic_or_params_prefers_basic() {
+        let basic = Some(("basic_id".to_string(), "basic_secret".to_string()));
+        let result = client_credentials_from_basic_or_params(basic, None, None);
+        assert_eq!(result.unwrap().0, "basic_id");
+    }
+
+    #[test]
+    fn client_credentials_from_basic_or_params_rejects_conflicting_ids() {
+        let basic = Some(("basic_id".to_string(), "basic_secret".to_string()));
+        let result =
+            client_credentials_from_basic_or_params(basic, Some("different_id".to_string()), None);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn client_credentials_from_basic_or_params_falls_back_to_form() {
+        let result = client_credentials_from_basic_or_params(
+            None,
+            Some("form_id".to_string()),
+            Some("form_secret".to_string()),
+        );
+        let (id, secret) = result.unwrap();
+        assert_eq!(id, "form_id");
+        assert_eq!(secret.unwrap(), "form_secret");
+    }
+
+    #[test]
+    fn client_credentials_from_basic_or_params_returns_none_for_empty() {
+        let result = client_credentials_from_basic_or_params(None, None, None);
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn token_inner_rejects_missing_code_for_authorization_code() {
+        let Some(db) = connect_test_database("oauth_ext_missing_code").await else {
+            return;
+        };
+        let state = test_app_state(db);
+        let err = token_inner(
+            &state,
+            &TelemetryContext::default(),
+            &HeaderMap::new(),
+            TokenRequest {
+                grant_type: "authorization_code".to_string(),
+                code: None,
+                redirect_uri: Some("http://localhost/callback".to_string()),
+                client_id: Some("test-client".to_string()),
+                client_secret: None,
+                code_verifier: None,
+                refresh_token: None,
+                subject_token: None,
+                subject_token_type: None,
+                scope: None,
+                provider: None,
+            },
+        )
+        .await
+        .expect_err("should reject missing code");
+        assert!(matches!(err, AppError::BadRequest(msg) if msg.contains("code")));
+    }
+
+    #[tokio::test]
+    async fn token_inner_rejects_missing_refresh_token() {
+        let Some(db) = connect_test_database("oauth_ext_missing_refresh").await else {
+            return;
+        };
+        let state = test_app_state(db);
+        let err = token_inner(
+            &state,
+            &TelemetryContext::default(),
+            &HeaderMap::new(),
+            TokenRequest {
+                grant_type: "refresh_token".to_string(),
+                code: None,
+                redirect_uri: None,
+                client_id: None,
+                client_secret: None,
+                code_verifier: None,
+                refresh_token: None,
+                subject_token: None,
+                subject_token_type: None,
+                scope: None,
+                provider: None,
+            },
+        )
+        .await
+        .expect_err("should reject missing refresh_token");
+        assert!(matches!(err, AppError::BadRequest(msg) if msg.contains("refresh_token")));
+    }
+
+    #[tokio::test]
+    async fn token_inner_rejects_unsupported_grant_type() {
+        let Some(db) = connect_test_database("oauth_ext_bad_grant").await else {
+            return;
+        };
+        let state = test_app_state(db);
+        let err = token_inner(
+            &state,
+            &TelemetryContext::default(),
+            &HeaderMap::new(),
+            TokenRequest {
+                grant_type: "magic_grant".to_string(),
+                code: None,
+                redirect_uri: None,
+                client_id: None,
+                client_secret: None,
+                code_verifier: None,
+                refresh_token: None,
+                subject_token: None,
+                subject_token_type: None,
+                scope: None,
+                provider: None,
+            },
+        )
+        .await
+        .expect_err("should reject unsupported grant_type");
+        assert!(matches!(err, AppError::UnsupportedGrantType(_)));
+    }
+
+    #[tokio::test]
+    async fn token_inner_client_credentials_rejects_missing_client_id() {
+        let Some(db) = connect_test_database("oauth_ext_cc_no_id").await else {
+            return;
+        };
+        let state = test_app_state(db);
+        let err = token_inner(
+            &state,
+            &TelemetryContext::default(),
+            &HeaderMap::new(),
+            TokenRequest {
+                grant_type: "client_credentials".to_string(),
+                code: None,
+                redirect_uri: None,
+                client_id: None,
+                client_secret: Some("some-secret".to_string()),
+                code_verifier: None,
+                refresh_token: None,
+                subject_token: None,
+                subject_token_type: None,
+                scope: None,
+                provider: None,
+            },
+        )
+        .await
+        .expect_err("should reject missing client_id");
+        assert!(matches!(err, AppError::BadRequest(msg) if msg.contains("client_id")));
+    }
+
+    #[tokio::test]
+    async fn token_inner_client_credentials_rejects_missing_secret() {
+        let Some(db) = connect_test_database("oauth_ext_cc_no_secret").await else {
+            return;
+        };
+        let state = test_app_state(db);
+        let err = token_inner(
+            &state,
+            &TelemetryContext::default(),
+            &HeaderMap::new(),
+            TokenRequest {
+                grant_type: "client_credentials".to_string(),
+                code: None,
+                redirect_uri: None,
+                client_id: Some("some-client".to_string()),
+                client_secret: None,
+                code_verifier: None,
+                refresh_token: None,
+                subject_token: None,
+                subject_token_type: None,
+                scope: None,
+                provider: None,
+            },
+        )
+        .await
+        .expect_err("should reject missing client_secret");
+        assert!(matches!(err, AppError::BadRequest(msg) if msg.contains("client_secret")));
+    }
+
+    #[tokio::test]
+    async fn token_exchange_rejects_missing_subject_token() {
+        let Some(db) = connect_test_database("oauth_ext_te_no_subject").await else {
+            return;
+        };
+        let state = test_app_state(db);
+        let err = token_inner(
+            &state,
+            &TelemetryContext::default(),
+            &HeaderMap::new(),
+            TokenRequest {
+                grant_type: "urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
+                code: None,
+                redirect_uri: None,
+                client_id: Some("some-client".to_string()),
+                client_secret: None,
+                code_verifier: None,
+                refresh_token: None,
+                subject_token: None,
+                subject_token_type: Some(
+                    "urn:ietf:params:oauth:token-type:access_token".to_string(),
+                ),
+                scope: None,
+                provider: None,
+            },
+        )
+        .await
+        .expect_err("should reject missing subject_token");
+        assert!(matches!(err, AppError::BadRequest(msg) if msg.contains("subject_token")));
+    }
+
+    #[tokio::test]
+    async fn token_exchange_rejects_unsupported_subject_token_type() {
+        let Some(db) = connect_test_database("oauth_ext_te_bad_type").await else {
+            return;
+        };
+        let state = test_app_state(db);
+        let err = token_inner(
+            &state,
+            &TelemetryContext::default(),
+            &HeaderMap::new(),
+            TokenRequest {
+                grant_type: "urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
+                code: None,
+                redirect_uri: None,
+                client_id: Some("some-client".to_string()),
+                client_secret: None,
+                code_verifier: None,
+                refresh_token: None,
+                subject_token: Some("some-token".to_string()),
+                subject_token_type: Some("urn:unknown:type".to_string()),
+                scope: None,
+                provider: None,
+            },
+        )
+        .await
+        .expect_err("should reject unsupported subject_token_type");
+        assert!(
+            matches!(err, AppError::BadRequest(msg) if msg.contains("Unsupported subject_token_type"))
+        );
+    }
+
+    #[test]
+    fn needs_success_page_returns_true_for_loopback() {
+        assert!(needs_success_page("http://127.0.0.1/callback"));
+        assert!(needs_success_page("http://localhost/callback"));
+        assert!(needs_success_page("http://[::1]/callback"));
+    }
+
+    #[test]
+    fn needs_success_page_returns_true_for_custom_scheme() {
+        assert!(needs_success_page("cursor://callback"));
+        assert!(needs_success_page("vscode://callback"));
+    }
+
+    #[test]
+    fn needs_success_page_returns_false_for_remote_url() {
+        assert!(!needs_success_page("https://app.example.com/callback"));
+    }
+
+    #[test]
+    fn accepts_json_returns_true_for_json_accept() {
+        let mut headers = HeaderMap::new();
+        headers.insert("accept", "application/json".parse().unwrap());
+        assert!(accepts_json(&headers));
+    }
+
+    #[test]
+    fn accepts_json_returns_false_for_html_accept() {
+        let mut headers = HeaderMap::new();
+        headers.insert("accept", "text/html".parse().unwrap());
+        assert!(!accepts_json(&headers));
+    }
+
+    #[test]
+    fn parse_prompt_empty_returns_empty_set() {
+        assert!(parse_prompt(None).is_empty());
+        assert!(parse_prompt(Some("")).is_empty());
+    }
+
+    #[test]
+    fn parse_prompt_splits_space_separated_values() {
+        let prompts = parse_prompt(Some("login consent"));
+        assert!(prompts.contains("login"));
+        assert!(prompts.contains("consent"));
+        assert_eq!(prompts.len(), 2);
+    }
+
     #[tokio::test]
     async fn get_binding_accepts_public_client_id_without_secret() {
         let Some(db) = connect_test_database("oauth_broker_public_get").await else {

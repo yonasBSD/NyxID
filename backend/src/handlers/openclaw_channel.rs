@@ -249,3 +249,132 @@ pub async fn create_mapping(
         webhook_secret: Some(webhook_secret),
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::openclaw_channel_service::{self, MAPPINGS_COLLECTION};
+    use crate::test_utils::*;
+    use axum::extract::State;
+
+    #[tokio::test]
+    async fn test_create_mapping_success() {
+        let Some(db) = connect_test_database("h_openclaw_create_ok").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let state = test_app_state(db);
+        let auth = test_auth_user(&user_id);
+
+        let Json(resp) = create_mapping(
+            State(state),
+            auth,
+            TelemetryContext::default(),
+            Json(CreateMappingRequest {
+                channel: "whatsapp".to_string(),
+                channel_user_id: "user-123".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resp.status, "created");
+        assert!(resp.webhook_secret.is_some());
+        let secret = resp.webhook_secret.unwrap();
+        assert_eq!(secret.len(), 64);
+    }
+
+    #[tokio::test]
+    async fn test_create_mapping_empty_channel_rejected() {
+        let Some(db) = connect_test_database("h_openclaw_empty_chan").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let state = test_app_state(db);
+        let auth = test_auth_user(&user_id);
+
+        let result = create_mapping(
+            State(state),
+            auth,
+            TelemetryContext::default(),
+            Json(CreateMappingRequest {
+                channel: "".to_string(),
+                channel_user_id: "user-123".to_string(),
+            }),
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_create_mapping_empty_channel_user_id_rejected() {
+        let Some(db) = connect_test_database("h_openclaw_empty_uid").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let state = test_app_state(db);
+        let auth = test_auth_user(&user_id);
+
+        let result = create_mapping(
+            State(state),
+            auth,
+            TelemetryContext::default(),
+            Json(CreateMappingRequest {
+                channel: "telegram".to_string(),
+                channel_user_id: "".to_string(),
+            }),
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_create_mapping_upsert_rotates_secret() {
+        let Some(db) = connect_test_database("h_openclaw_upsert").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let state = test_app_state(db.clone());
+
+        let Json(first) = create_mapping(
+            State(state.clone()),
+            test_auth_user(&user_id),
+            TelemetryContext::default(),
+            Json(CreateMappingRequest {
+                channel: "discord".to_string(),
+                channel_user_id: "disc-user-1".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let Json(second) = create_mapping(
+            State(state),
+            test_auth_user(&user_id),
+            TelemetryContext::default(),
+            Json(CreateMappingRequest {
+                channel: "discord".to_string(),
+                channel_user_id: "disc-user-1".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_ne!(
+            first.webhook_secret.unwrap(),
+            second.webhook_secret.unwrap()
+        );
+
+        let count = db
+            .collection::<openclaw_channel_service::OpenClawChannelMapping>(MAPPINGS_COLLECTION)
+            .count_documents(mongodb::bson::doc! {
+                "channel": "discord",
+                "channel_user_id": "disc-user-1",
+            })
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+}

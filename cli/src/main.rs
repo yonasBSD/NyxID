@@ -270,3 +270,42 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::Info => commands::repo::run_info().await,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn command_names_maps_auth_commands() {
+        let login = Cli::parse_from(["nyxid", "login"]);
+        assert_eq!(command_names(&login.command), ("auth", "login"));
+
+        let logout = Cli::parse_from(["nyxid", "logout"]);
+        assert_eq!(command_names(&logout.command), ("auth", "logout"));
+
+        let whoami = Cli::parse_from(["nyxid", "whoami"]);
+        assert_eq!(command_names(&whoami.command), ("user", "whoami"));
+    }
+
+    #[test]
+    fn command_names_maps_utility_commands() {
+        let update = Cli::parse_from(["nyxid", "update", "--check"]);
+        assert_eq!(command_names(&update.command), ("cli", "update"));
+
+        let info = Cli::parse_from(["nyxid", "info"]);
+        assert_eq!(command_names(&info.command), ("repo", "info"));
+
+        let doctor = Cli::parse_from(["nyxid", "doctor"]);
+        assert_eq!(command_names(&doctor.command), ("cli", "doctor"));
+    }
+
+    #[test]
+    fn extract_profile_returns_none_for_non_login_commands() {
+        let whoami = Cli::parse_from(["nyxid", "whoami"]);
+        assert!(extract_profile(&whoami.command).is_none());
+
+        let info = Cli::parse_from(["nyxid", "info"]);
+        assert!(extract_profile(&info.command).is_none());
+    }
+}

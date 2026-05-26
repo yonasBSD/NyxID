@@ -285,4 +285,148 @@ mod tests {
         .await
         .expect("post request should succeed");
     }
+
+    #[tokio::test]
+    async fn discover_table_renders_services() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/proxy/services"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "services": [{"slug": "openai", "name": "OpenAI"}]
+            })))
+            .mount(&server)
+            .await;
+
+        run(ProxyCommands::Discover {
+            auth: crate::test_support::mock_auth_with_output(
+                server.uri(),
+                crate::cli::OutputFormat::Table,
+            ),
+        })
+        .await
+        .expect("discover table should succeed");
+    }
+
+    #[tokio::test]
+    async fn discover_table_empty() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/proxy/services"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "services": []
+            })))
+            .mount(&server)
+            .await;
+
+        run(ProxyCommands::Discover {
+            auth: crate::test_support::mock_auth_with_output(
+                server.uri(),
+                crate::cli::OutputFormat::Table,
+            ),
+        })
+        .await
+        .expect("empty discover should succeed");
+    }
+
+    #[tokio::test]
+    async fn request_error_status_prints_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/proxy/s/openai/v1/models"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("denied"))
+            .mount(&server)
+            .await;
+
+        run(req(
+            server.uri(),
+            "openai",
+            "/v1/models",
+            "GET",
+            None,
+            false,
+            None,
+        ))
+        .await
+        .expect("error status should still return Ok");
+    }
+
+    #[tokio::test]
+    async fn request_empty_path_slug() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/proxy/s/openai"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("root"))
+            .mount(&server)
+            .await;
+
+        run(req(server.uri(), "openai", "", "GET", None, false, None))
+            .await
+            .expect("empty path should succeed");
+    }
+
+    #[tokio::test]
+    async fn request_empty_path_by_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/proxy/svc-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("root"))
+            .mount(&server)
+            .await;
+
+        run(req(server.uri(), "svc-1", "", "GET", None, true, None))
+            .await
+            .expect("empty path by-id should succeed");
+    }
+
+    #[tokio::test]
+    async fn request_with_headers() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/proxy/s/openai/v1/x"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+            .mount(&server)
+            .await;
+
+        run(ProxyCommands::Request {
+            service: "openai".to_string(),
+            path: "/v1/x".to_string(),
+            method: "GET".to_string(),
+            data: None,
+            headers: vec!["X-Custom: value".to_string()],
+            stream: false,
+            by_id: false,
+            via_service: None,
+            auth: crate::test_support::mock_auth(server.uri()),
+        })
+        .await
+        .expect("request with headers should succeed");
+    }
+
+    #[tokio::test]
+    async fn request_file_body() {
+        let server = MockServer::start().await;
+        let tmp = std::env::temp_dir().join("nyxid_test_proxy_body.txt");
+        std::fs::write(&tmp, "file-contents").unwrap();
+        Mock::given(method("POST"))
+            .and(path("/api/v1/proxy/s/svc/upload"))
+            .and(body_string("file-contents"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+            .mount(&server)
+            .await;
+
+        run(ProxyCommands::Request {
+            service: "svc".to_string(),
+            path: "/upload".to_string(),
+            method: "POST".to_string(),
+            data: Some(format!("@{}", tmp.display())),
+            headers: vec![],
+            stream: false,
+            by_id: false,
+            via_service: None,
+            auth: crate::test_support::mock_auth(server.uri()),
+        })
+        .await
+        .expect("file body should succeed");
+        let _ = std::fs::remove_file(&tmp);
+    }
 }

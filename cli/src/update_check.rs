@@ -227,4 +227,27 @@ mod tests {
         assert!(matches!(cli.command, Commands::Update(_)));
         assert!(!should_attempt_update_check(&cli.command, true));
     }
+
+    #[test]
+    fn should_attempt_rejects_non_tty() {
+        let cli = Cli::parse_from(["nyxid", "whoami"]);
+        assert!(!should_attempt_update_check(&cli.command, false));
+    }
+
+    #[test]
+    fn ci_is_enabled_respects_env() {
+        let _guard = crate::test_support::env_lock().lock().unwrap();
+        unsafe { std::env::set_var("CI", "true") };
+        assert!(ci_is_enabled());
+        unsafe { std::env::set_var("CI", "false") };
+        assert!(!ci_is_enabled());
+        unsafe { std::env::remove_var("CI") };
+        assert!(!ci_is_enabled());
+    }
+
+    #[test]
+    fn cache_path_under_home_nyxid() {
+        let path = cache_path().unwrap();
+        assert!(path.ends_with(".nyxid/update-check.json"));
+    }
 }

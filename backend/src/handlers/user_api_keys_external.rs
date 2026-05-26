@@ -311,3 +311,212 @@ fn external_api_key_response(key: UserApiKey) -> ExternalApiKeyResponse {
         updated_at: key.updated_at.to_rfc3339(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::user::UserType;
+    use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
+    use crate::services::user_api_key_service;
+    use crate::test_utils::*;
+    use axum::extract::{Path, State};
+
+    #[tokio::test]
+    async fn test_list_external_api_keys_empty() {
+        let Some(db) = connect_test_database("h_ext_keys_list_empty").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let state = test_app_state(db);
+        let auth = test_auth_user(&user_id);
+
+        let Json(resp) = list_external_api_keys(State(state), auth).await.unwrap();
+        assert!(resp.api_keys.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_list_external_api_keys_returns_user_keys() {
+        let Some(db) = connect_test_database("h_ext_keys_list_ok").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let state = test_app_state(db.clone());
+
+        user_api_key_service::create_api_key(
+            &db,
+            &state.encryption_keys,
+            &user_id,
+            user_api_key_service::CreateApiKeyParams {
+                label: "Test Key",
+                credential_type: "api_key",
+                credential: "sk-test-1234",
+                access_token: None,
+                refresh_token: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: None,
+                connection_id: None,
+                oauth_client_id: None,
+                oauth_client_secret: None,
+                status: "active",
+                source: None,
+                source_id: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let Json(resp) = list_external_api_keys(State(state), test_auth_user(&user_id))
+            .await
+            .unwrap();
+        assert_eq!(resp.api_keys.len(), 1);
+        assert_eq!(resp.api_keys[0].label, "Test Key");
+        assert_eq!(resp.api_keys[0].credential_type, "api_key");
+        assert_eq!(resp.api_keys[0].status, "active");
+    }
+
+    #[tokio::test]
+    async fn test_list_external_api_keys_excludes_other_users() {
+        let Some(db) = connect_test_database("h_ext_keys_list_iso").await else {
+            return;
+        };
+        let user_a = uuid::Uuid::new_v4().to_string();
+        let user_b = uuid::Uuid::new_v4().to_string();
+        let state = test_app_state(db.clone());
+
+        user_api_key_service::create_api_key(
+            &db,
+            &state.encryption_keys,
+            &user_a,
+            user_api_key_service::CreateApiKeyParams {
+                label: "A key",
+                credential_type: "bearer",
+                credential: "bearer-token-a",
+                access_token: None,
+                refresh_token: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: None,
+                connection_id: None,
+                oauth_client_id: None,
+                oauth_client_secret: None,
+                status: "active",
+                source: None,
+                source_id: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let Json(resp) = list_external_api_keys(State(state), test_auth_user(&user_b))
+            .await
+            .unwrap();
+        assert!(resp.api_keys.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_update_external_api_key_label() {
+        let Some(db) = connect_test_database("h_ext_keys_update_label").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+
+        let state = test_app_state(db.clone());
+
+        let created = user_api_key_service::create_api_key(
+            &db,
+            &state.encryption_keys,
+            &user_id,
+            user_api_key_service::CreateApiKeyParams {
+                label: "Old Label",
+                credential_type: "api_key",
+                credential: "sk-old-value",
+                access_token: None,
+                refresh_token: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: None,
+                connection_id: None,
+                oauth_client_id: None,
+                oauth_client_secret: None,
+                status: "active",
+                source: None,
+                source_id: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let Json(resp) = update_external_api_key(
+            State(state),
+            test_auth_user(&user_id),
+            Path(created.id.clone()),
+            Json(UpdateExternalApiKeyRequest {
+                label: Some("New Label".to_string()),
+                credential: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resp.label, "New Label");
+        assert_eq!(resp.id, created.id);
+    }
+
+    #[tokio::test]
+    async fn test_delete_external_api_key_success() {
+        let Some(db) = connect_test_database("h_ext_keys_delete_ok").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+
+        let state = test_app_state(db.clone());
+
+        let created = user_api_key_service::create_api_key(
+            &db,
+            &state.encryption_keys,
+            &user_id,
+            user_api_key_service::CreateApiKeyParams {
+                label: "Ephemeral",
+                credential_type: "bearer",
+                credential: "bearer-123",
+                access_token: None,
+                refresh_token: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: None,
+                connection_id: None,
+                oauth_client_id: None,
+                oauth_client_secret: None,
+                status: "active",
+                source: None,
+                source_id: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let resp = delete_external_api_key(
+            State(state.clone()),
+            test_auth_user(&user_id),
+            Path(created.id.clone()),
+        )
+        .await;
+        assert!(resp.is_ok());
+
+        let remaining = db
+            .collection::<UserApiKey>(USER_API_KEYS)
+            .count_documents(doc! { "_id": &created.id })
+            .await
+            .unwrap();
+        assert_eq!(remaining, 0);
+    }
+}
