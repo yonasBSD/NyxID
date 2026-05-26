@@ -29,6 +29,7 @@ import {
   rewindPairingAction,
 } from "@/pages/cli-pair/reserve-action";
 import { pollOAuthKeyUntilActive } from "./auth-flow-polling";
+import { OAuthCallbackGuidance } from "@/components/shared/twitter-oauth-guidance";
 
 interface FlowProps {
   readonly providerId: string;
@@ -137,6 +138,7 @@ async function createPlaceholderKey(
   targetOrgId?: string | null,
   oauthClientId?: string,
   oauthClientSecret?: string,
+  copyOAuthClientFrom?: string,
 ): Promise<PlaceholderKeyResponse> {
   const body: Record<string, unknown> = {
     service_slug: slug,
@@ -152,18 +154,18 @@ async function createPlaceholderKey(
   // the same behavior.
   const trimmed = endpointUrl?.trim();
   if (trimmed) body.endpoint_url = trimmed;
-  // BYO OAuth Custom App credentials (`credential_mode: "user"`
-  // providers — Lark / Feishu / Twitter). When present, the backend
-  // also encrypts them onto the new `UserApiKey` so this connection's
-  // own refresh path uses them; without this, a refresh after the
-  // first ~2h access token expiry would fail because the legacy
-  // `user_provider_credentials` table can only hold one Custom App
-  // per `(user, provider)` and the new key has no fallback.
-  const trimmedClientId = oauthClientId?.trim();
-  const trimmedClientSecret = oauthClientSecret?.trim();
-  if (trimmedClientId && trimmedClientSecret) {
-    body.oauth_client_id = trimmedClientId;
-    body.oauth_client_secret = trimmedClientSecret;
+  // BYO OAuth Custom App credentials: either paste raw client_id +
+  // secret, OR clone encrypted creds from an existing connection.
+  // Mutually exclusive — the backend rejects both.
+  if (copyOAuthClientFrom) {
+    body.copy_oauth_client_from = copyOAuthClientFrom;
+  } else {
+    const trimmedClientId = oauthClientId?.trim();
+    const trimmedClientSecret = oauthClientSecret?.trim();
+    if (trimmedClientId && trimmedClientSecret) {
+      body.oauth_client_id = trimmedClientId;
+      body.oauth_client_secret = trimmedClientSecret;
+    }
   }
   try {
     return await api.post<PlaceholderKeyResponse>("/keys", body);
@@ -544,6 +546,10 @@ export function OAuthFlow({
   const [authUrl, setAuthUrl] = useState<string | null>(null);
   const [clientId, setClientId] = useState("");
   const [clientSecret, setClientSecret] = useState("");
+  const [copyFromKeyId, setCopyFromKeyId] = useState<string | null>(null);
+  const [existingConnections, setExistingConnections] = useState<
+    Array<{ id: string; slug: string; oauthClientId: string }>
+  >([]);
   const keyIdRef = useRef<string | null>(null);
   const cancelledRef = useRef(false);
   // Set to `true` once THIS tab has successfully latched
@@ -762,21 +768,51 @@ export function OAuthFlow({
   useEffect(() => {
     if (!needsUserOAuthCredentials(credentialMode)) return;
     setPhase("needs-credentials");
-  }, [credentialMode]);
+    // Fetch existing active keys to offer "copy from" when the user
+    // already has a connection to this provider with BYO creds.
+    void (async () => {
+      try {
+        const res = await api.get<{
+          keys: Array<{
+            api_key_id?: string | null;
+            slug: string;
+            catalog_service_slug?: string;
+            oauth_client_id?: string | null;
+            status: string;
+          }>;
+        }>("/keys");
+        const candidates = (res.keys ?? []).filter(
+          (k) =>
+            k.status === "active" &&
+            k.oauth_client_id &&
+            k.api_key_id &&
+            k.catalog_service_slug === slug,
+        );
+        setExistingConnections(
+          candidates.map((k) => ({
+            id: k.api_key_id!,
+            slug: k.slug,
+            oauthClientId: k.oauth_client_id!,
+          })),
+        );
+      } catch {
+        // Best-effort: if the fetch fails we just don't show the picker.
+      }
+    })();
+  }, [credentialMode, slug]);
 
   function saveUserCredentials() {
-    if (!clientId.trim() || !clientSecret.trim()) return;
+    const copyMode = !!copyFromKeyId;
+    if (!copyMode && (!clientId.trim() || !clientSecret.trim())) return;
     // Multi-connection: do NOT call `PUT /providers/{id}/credentials`.
     // The new flow writes the Custom App credentials onto the new
     // `UserApiKey` itself (via `POST /keys` carrying `oauth_client_id`
-    // / `oauth_client_secret`). Writing them to
+    // / `oauth_client_secret`, or `copy_oauth_client_from` when cloning
+    // from an existing connection). Writing them to
     // `user_provider_credentials` here would silently overwrite the
     // Custom App secret of any pre-existing legacy
     // (`connection_id: null`) connection for this same `(user, provider)`
     // — breaking the legacy refresh path which reads from that table.
-    // The `clientId` / `clientSecret` state values flow into the
-    // placeholder-create call in the next phase (see the "starting"
-    // effect's `createPlaceholderKey` call site).
     setError(null);
     setPhase("starting");
   }
@@ -833,6 +869,7 @@ export function OAuthFlow({
             targetOrgId,
             clientId,
             clientSecret,
+            copyFromKeyId ?? undefined,
           );
           placeholderCreateInFlightRef.current = createPromise;
           try {
@@ -981,16 +1018,23 @@ export function OAuthFlow({
   }
 
   // User-OAuth-app credentials sub-step — mirrors the local wizard's
-  // Step 2a / `OAuthCredentialsStep` in the frontend.
+  // Step 2a / `OAuthCredentialsStep` in the frontend. When existing
+  // connections to the same provider exist, the user can copy creds
+  // from one instead of re-pasting raw client_id / client_secret.
   if (phase === "needs-credentials") {
+    const hasCopyOptions = existingConnections.length > 0;
+    const copyModeActive = !!copyFromKeyId;
     return (
       <div className="flex flex-col gap-4">
         <div className="flex flex-col gap-1">
-          <h3 className="font-medium">Paste your OAuth app credentials</h3>
+          <h3 className="font-medium">
+            {hasCopyOptions
+              ? "OAuth app credentials"
+              : "Paste your OAuth app credentials"}
+          </h3>
           <p className="text-[12px] text-muted-foreground">
             This provider expects you to register your own OAuth app
-            (Developer Settings → OAuth Apps) and paste the resulting
-            Client ID and Client Secret below.
+            and supply the resulting Client ID and Client Secret.
           </p>
           {documentationUrl ? (
             <a
@@ -1005,43 +1049,97 @@ export function OAuthFlow({
           ) : null}
         </div>
 
-        <div className="flex flex-col gap-3">
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="pair-aikey-oauth-client-id">Client ID</Label>
-            <Input
-              id="pair-aikey-oauth-client-id"
-              value={clientId}
-              onChange={(e) => {
-                setClientId(e.target.value);
-              }}
-              autoFocus
-              autoComplete="off"
-            />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="pair-aikey-oauth-client-secret">
-              Client Secret
+        {/* OAuthFlow is the authorization-code flow (DeviceCodeFlow
+            handles device codes), so it always redirects through NyxID's
+            callback. Surface the redirect URI the user must register in
+            their just-created OAuth app's developer console. */}
+        <OAuthCallbackGuidance slug={slug} />
+
+        {hasCopyOptions ? (
+          <div className="flex flex-col gap-2">
+            <Label className="text-[12px] font-medium">
+              Use credentials from an existing connection
             </Label>
-            <Input
-              id="pair-aikey-oauth-client-secret"
-              type="password"
-              value={clientSecret}
-              onChange={(e) => {
-                setClientSecret(e.target.value);
-              }}
-              autoComplete="off"
-            />
+            <div className="flex flex-col gap-1.5">
+              {existingConnections.map((conn) => (
+                <button
+                  key={conn.id}
+                  type="button"
+                  onClick={() => {
+                    setCopyFromKeyId(conn.id);
+                    setClientId("");
+                    setClientSecret("");
+                  }}
+                  className={`flex items-center gap-2 rounded-md border px-3 py-2 text-left text-sm transition-colors ${
+                    copyFromKeyId === conn.id
+                      ? "border-primary bg-primary/5"
+                      : "border-border hover:border-primary/50"
+                  }`}
+                >
+                  <span className="flex-1 truncate">{conn.slug}</span>
+                  <span className="shrink-0 text-xs text-muted-foreground">
+                    {conn.oauthClientId}
+                  </span>
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={() => {
+                  setCopyFromKeyId(null);
+                }}
+                className={`flex items-center gap-2 rounded-md border px-3 py-2 text-left text-sm transition-colors ${
+                  !copyFromKeyId
+                    ? "border-primary bg-primary/5"
+                    : "border-border hover:border-primary/50"
+                }`}
+              >
+                Enter new credentials
+              </button>
+            </div>
           </div>
-        </div>
+        ) : null}
+
+        {!copyModeActive ? (
+          <div className="flex flex-col gap-3">
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="pair-aikey-oauth-client-id">Client ID</Label>
+              <Input
+                id="pair-aikey-oauth-client-id"
+                value={clientId}
+                onChange={(e) => {
+                  setClientId(e.target.value);
+                }}
+                autoFocus
+                autoComplete="off"
+              />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="pair-aikey-oauth-client-secret">
+                Client Secret
+              </Label>
+              <Input
+                id="pair-aikey-oauth-client-secret"
+                type="password"
+                value={clientSecret}
+                onChange={(e) => {
+                  setClientSecret(e.target.value);
+                }}
+                autoComplete="off"
+              />
+            </div>
+          </div>
+        ) : null}
 
         {error ? <ErrorLine message={error} /> : null}
 
         <Button
           variant="primary"
           onClick={saveUserCredentials}
-          disabled={!clientId.trim() || !clientSecret.trim()}
+          disabled={
+            !copyModeActive && (!clientId.trim() || !clientSecret.trim())
+          }
         >
-          Save and continue
+          {copyModeActive ? "Continue with existing credentials" : "Save and continue"}
         </Button>
         <Button variant="outline" onClick={() => void cancelAndCleanup()}>
           Cancel

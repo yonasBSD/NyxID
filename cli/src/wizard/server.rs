@@ -227,6 +227,15 @@ fn allowlist_for(kind: FlowKind) -> Vec<ProxyRoute> {
                 path_template: "/api/v1/catalog/:slug",
                 body_fields: &[],
             },
+            // Existing keys — used by the "copy OAuth client from" picker
+            // in the needs-credentials phase so the user can reuse an
+            // existing connection's encrypted client_id/secret instead of
+            // re-pasting. Read-only; no write risk.
+            ProxyRoute {
+                method: Method::GET,
+                path_template: "/api/v1/keys",
+                body_fields: &[],
+            },
             // Unified key creation. Fields are the intersection of what
             // the wizard UI actually sends (see `buildCreateBody` in
             // wizard.js) — NOT the full `CreateKeyRequest` surface. Keeps
