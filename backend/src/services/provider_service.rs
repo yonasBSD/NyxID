@@ -4517,4 +4517,144 @@ mod tests {
         unique.dedup();
         assert_eq!(slugs.len(), unique.len());
     }
+
+    // ── is_lark_family_slug additional coverage ─────────────────────
+
+    #[test]
+    fn is_lark_family_slug_case_sensitive() {
+        assert!(!super::is_lark_family_slug("API-LARK-BOT"));
+        assert!(!super::is_lark_family_slug("Api-Lark-Bot"));
+    }
+
+    #[test]
+    fn is_lark_family_slug_empty_and_partial() {
+        assert!(!super::is_lark_family_slug(""));
+        assert!(!super::is_lark_family_slug("api-lark-bo"));
+        assert!(!super::is_lark_family_slug("api-feishu-bott"));
+    }
+
+    // ── seeded_header_to_model tests ────────────────────────────────
+
+    #[test]
+    fn seeded_header_to_model_copies_all_fields() {
+        let seed = SeededHeader {
+            name: "x-custom",
+            value: "test-value",
+            overridable: true,
+            sensitive: true,
+        };
+        let model = super::seeded_header_to_model(&seed);
+        assert_eq!(model.name, "x-custom");
+        assert_eq!(model.value, "test-value");
+        assert!(model.overridable);
+        assert!(model.sensitive);
+    }
+
+    #[test]
+    fn seeded_header_to_model_non_overridable_non_sensitive() {
+        let seed = SeededHeader {
+            name: "content-type",
+            value: "application/json",
+            overridable: false,
+            sensitive: false,
+        };
+        let model = super::seeded_header_to_model(&seed);
+        assert_eq!(model.name, "content-type");
+        assert_eq!(model.value, "application/json");
+        assert!(!model.overridable);
+        assert!(!model.sensitive);
+    }
+
+    // ── normalize_telegram_bot_token additional coverage ─────────────
+
+    #[test]
+    fn normalize_telegram_bot_token_accepts_minimal_valid_token() {
+        assert_eq!(normalize_telegram_bot_token("abc").unwrap(), "abc");
+    }
+
+    #[test]
+    fn normalize_telegram_bot_token_rejects_embedded_tab() {
+        let err =
+            normalize_telegram_bot_token("abc\tdef").expect_err("embedded tab should be rejected");
+        assert!(matches!(err, AppError::ValidationError(m) if m.contains("whitespace")));
+    }
+
+    #[test]
+    fn normalize_telegram_bot_token_rejects_embedded_newline() {
+        let err = normalize_telegram_bot_token("abc\ndef")
+            .expect_err("embedded newline should be rejected");
+        assert!(matches!(err, AppError::ValidationError(m) if m.contains("whitespace")));
+    }
+
+    // ── seed_capability_override additional coverage ─────────────────
+
+    #[test]
+    fn seed_capability_override_openclaw_has_correct_flags() {
+        let (caps, streaming) = seed_capability_override("llm-openclaw").unwrap();
+        assert!(caps.supports_proxy_read);
+        assert!(caps.supports_proxy_write);
+        assert!(!caps.supports_proxy_binary_upload);
+        assert!(caps.supports_direct_downstream_auth);
+        assert!(!caps.supports_authoring_via_nyx);
+        assert!(streaming);
+    }
+
+    #[test]
+    fn seed_capability_override_returns_none_for_empty_slug() {
+        assert!(seed_capability_override("").is_none());
+    }
+
+    // ── reconcile_seeded_headers additional coverage ─────────────────
+
+    #[test]
+    fn reconcile_seeded_headers_single_seeded_entry() {
+        let single_seed: &[SeededHeader] = &[SeededHeader {
+            name: "x-only",
+            value: "val",
+            overridable: false,
+            sensitive: false,
+        }];
+        let stored = vec![hdr("x-other", "v")];
+        let merged = reconcile_seeded_headers(Some(&stored), single_seed)
+            .expect("missing seeded entry should trigger merge");
+        assert_eq!(merged.len(), 2);
+        assert!(merged.iter().any(|h| h.name == "x-only"));
+        assert!(merged.iter().any(|h| h.name == "x-other"));
+    }
+
+    #[test]
+    fn reconcile_seeded_headers_all_present_returns_none() {
+        let single_seed: &[SeededHeader] = &[SeededHeader {
+            name: "x-present",
+            value: "val",
+            overridable: false,
+            sensitive: false,
+        }];
+        let stored = vec![hdr("x-present", "custom-val")];
+        assert!(reconcile_seeded_headers(Some(&stored), single_seed).is_none());
+    }
+
+    // ── DEFAULT_SERVICE_SEEDS content checks ────────────────────────
+
+    #[test]
+    fn default_service_seeds_all_have_provider_slugs() {
+        for seed in DEFAULT_SERVICE_SEEDS {
+            assert!(
+                !seed.provider_slug.is_empty(),
+                "seed '{}' has empty provider_slug",
+                seed.service_slug
+            );
+        }
+    }
+
+    #[test]
+    fn default_service_seeds_all_have_base_urls() {
+        for seed in DEFAULT_SERVICE_SEEDS {
+            assert!(
+                !seed.base_url.is_empty(),
+                "seed '{}' has empty base_url",
+                seed.service_slug
+            );
+        }
+    }
 }

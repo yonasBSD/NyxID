@@ -440,4 +440,176 @@ mod tests {
     fn shell_escape_handles_single_quotes() {
         assert_eq!(shell_escape("a'b"), "'a'\"'\"'b'");
     }
+
+    // ── bearer_header tests ─────────────────────────────────────────
+
+    #[test]
+    fn bearer_header_produces_valid_header() {
+        let header = super::bearer_header("my-token-123").unwrap();
+        assert_eq!(header.to_str().unwrap(), "Bearer my-token-123");
+    }
+
+    #[test]
+    fn bearer_header_handles_long_token() {
+        let long_token = "a".repeat(500);
+        let header = super::bearer_header(&long_token).unwrap();
+        assert!(header.to_str().unwrap().starts_with("Bearer "));
+        assert_eq!(header.to_str().unwrap().len(), 507);
+    }
+
+    #[test]
+    fn bearer_header_handles_empty_token() {
+        let header = super::bearer_header("").unwrap();
+        assert_eq!(header.to_str().unwrap(), "Bearer ");
+    }
+
+    // ── shell_escape additional edge cases ──────────────────────────
+
+    #[test]
+    fn shell_escape_empty_string() {
+        assert_eq!(shell_escape(""), "''");
+    }
+
+    #[test]
+    fn shell_escape_simple_value_wrapped_in_single_quotes() {
+        assert_eq!(shell_escape("hello"), "'hello'");
+    }
+
+    #[test]
+    fn shell_escape_value_with_spaces() {
+        assert_eq!(shell_escape("hello world"), "'hello world'");
+    }
+
+    #[test]
+    fn shell_escape_value_with_double_quotes() {
+        assert_eq!(shell_escape("say \"hello\""), "'say \"hello\"'");
+    }
+
+    #[test]
+    fn shell_escape_multiple_single_quotes() {
+        assert_eq!(shell_escape("a'b'c"), "'a'\"'\"'b'\"'\"'c'");
+    }
+
+    #[test]
+    fn shell_escape_only_single_quote() {
+        assert_eq!(shell_escape("'"), "''\"'\"''");
+    }
+
+    #[test]
+    fn shell_escape_path_with_spaces() {
+        assert_eq!(
+            shell_escape("/path/to/my file.pem"),
+            "'/path/to/my file.pem'"
+        );
+    }
+
+    #[test]
+    fn shell_escape_value_with_dollar_sign() {
+        // Single quotes prevent variable expansion in shell
+        assert_eq!(shell_escape("$HOME"), "'$HOME'");
+    }
+
+    #[test]
+    fn shell_escape_value_with_backticks() {
+        assert_eq!(shell_escape("`whoami`"), "'`whoami`'");
+    }
+
+    // ── build_ws_url additional edge cases ──────────────────────────
+
+    #[test]
+    fn build_ws_url_from_http_base() {
+        assert_eq!(
+            build_ws_url("http://localhost:3001", "svc-1").unwrap(),
+            "ws://localhost:3001/api/v1/ssh/svc-1"
+        );
+    }
+
+    #[test]
+    fn build_ws_url_strips_existing_path() {
+        assert_eq!(
+            build_ws_url("https://nyxid.example.com/some/path", "svc-1").unwrap(),
+            "wss://nyxid.example.com/api/v1/ssh/svc-1"
+        );
+    }
+
+    #[test]
+    fn build_ws_url_wss_passthrough() {
+        assert_eq!(
+            build_ws_url("wss://nyxid.example.com", "svc-1").unwrap(),
+            "wss://nyxid.example.com/api/v1/ssh/svc-1"
+        );
+    }
+
+    #[test]
+    fn build_ws_url_ws_passthrough() {
+        assert_eq!(
+            build_ws_url("ws://localhost:3001", "svc-1").unwrap(),
+            "ws://localhost:3001/api/v1/ssh/svc-1"
+        );
+    }
+
+    #[test]
+    fn build_ws_url_strips_query_string() {
+        assert_eq!(
+            build_ws_url("https://nyxid.example.com?foo=bar", "svc-1").unwrap(),
+            "wss://nyxid.example.com/api/v1/ssh/svc-1"
+        );
+    }
+
+    #[test]
+    fn build_ws_url_rejects_unsupported_scheme() {
+        assert!(build_ws_url("ftp://nyxid.example.com", "svc-1").is_err());
+    }
+
+    // ── build_issue_cert_url additional edge cases ──────────────────
+
+    #[test]
+    fn build_issue_cert_url_from_https() {
+        assert_eq!(
+            build_issue_cert_url("https://auth.nyxid.dev", "svc-42").unwrap(),
+            "https://auth.nyxid.dev/api/v1/ssh/svc-42/certificate"
+        );
+    }
+
+    #[test]
+    fn build_issue_cert_url_strips_existing_path() {
+        assert_eq!(
+            build_issue_cert_url("http://localhost:3000/old/path", "svc-1").unwrap(),
+            "http://localhost:3000/api/v1/ssh/svc-1/certificate"
+        );
+    }
+
+    #[test]
+    fn build_issue_cert_url_strips_query() {
+        assert_eq!(
+            build_issue_cert_url("http://localhost:3000?token=abc", "svc-1").unwrap(),
+            "http://localhost:3000/api/v1/ssh/svc-1/certificate"
+        );
+    }
+
+    #[test]
+    fn build_issue_cert_url_rejects_invalid_base() {
+        assert!(build_issue_cert_url("not-a-url", "svc-1").is_err());
+    }
+
+    // ── public_key_file_for_identity additional edge cases ──────────
+
+    #[test]
+    fn public_key_file_for_ed25519_identity() {
+        let path =
+            public_key_file_for_identity(&PathBuf::from("/home/user/.ssh/id_ed25519")).unwrap();
+        assert_eq!(path, PathBuf::from("/home/user/.ssh/id_ed25519.pub"));
+    }
+
+    #[test]
+    fn public_key_file_for_rsa_identity() {
+        let path = public_key_file_for_identity(&PathBuf::from("/home/user/.ssh/id_rsa")).unwrap();
+        assert_eq!(path, PathBuf::from("/home/user/.ssh/id_rsa.pub"));
+    }
+
+    #[test]
+    fn public_key_file_for_identity_with_dot_extension() {
+        let path = public_key_file_for_identity(&PathBuf::from("/keys/key.pem")).unwrap();
+        assert_eq!(path, PathBuf::from("/keys/key.pem.pub"));
+    }
 }

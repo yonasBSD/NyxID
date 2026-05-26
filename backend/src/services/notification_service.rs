@@ -660,4 +660,46 @@ mod tests {
         assert_eq!(first.id, second.id);
         assert_eq!(first.user_id, second.user_id);
     }
+
+    #[test]
+    fn unique_devices_single_device() {
+        let devices = vec![make_device("d1", "fcm", "token-aaa")];
+        let unique = unique_devices_by_token(&devices);
+        assert_eq!(unique.len(), 1);
+        assert_eq!(unique[0].device_id, "d1");
+    }
+
+    #[test]
+    fn unique_devices_all_different_tokens() {
+        let devices = vec![
+            make_device("d1", "fcm", "token-a"),
+            make_device("d2", "apns", "token-b"),
+            make_device("d3", "fcm", "token-c"),
+        ];
+        let unique = unique_devices_by_token(&devices);
+        assert_eq!(unique.len(), 3);
+    }
+
+    #[test]
+    fn unique_devices_all_same_token() {
+        let devices = vec![
+            make_device("d1", "fcm", "token-same"),
+            make_device("d2", "apns", "token-same"),
+            make_device("d3", "fcm", "token-same"),
+        ];
+        let unique = unique_devices_by_token(&devices);
+        assert_eq!(unique.len(), 1);
+        assert_eq!(unique[0].device_id, "d1");
+    }
+
+    #[test]
+    fn make_device_populates_required_fields() {
+        let d = make_device("d1", "fcm", "t1");
+        assert_eq!(d.device_id, "d1");
+        assert_eq!(d.platform, "fcm");
+        assert_eq!(d.token, "t1");
+        assert!(d.device_name.is_none());
+        assert!(d.app_id.is_none());
+        assert!(d.last_used_at.is_none());
+    }
 }

@@ -4755,6 +4755,294 @@ mod tests {
         assert!(data.get("owner_user_id").is_none());
         assert!(data.get("connection_id").is_none());
     }
+
+    // ── proxy_error_telemetry_fields additional coverage ────────────
+
+    #[test]
+    fn proxy_error_telemetry_fields_internal_error() {
+        use super::proxy_error_telemetry_fields;
+        use crate::errors::AppError;
+        assert_eq!(
+            proxy_error_telemetry_fields(&AppError::Internal("x".into())),
+            (500, 1006)
+        );
+    }
+
+    #[test]
+    fn proxy_error_telemetry_fields_validation_error() {
+        use super::proxy_error_telemetry_fields;
+        use crate::errors::AppError;
+        assert_eq!(
+            proxy_error_telemetry_fields(&AppError::ValidationError("x".into())),
+            (400, 1008)
+        );
+    }
+
+    #[test]
+    fn proxy_error_telemetry_fields_node_not_found() {
+        use super::proxy_error_telemetry_fields;
+        use crate::errors::AppError;
+        assert_eq!(
+            proxy_error_telemetry_fields(&AppError::NodeNotFound("x".into())),
+            (404, 8000)
+        );
+    }
+
+    #[test]
+    fn proxy_error_telemetry_fields_node_offline() {
+        use super::proxy_error_telemetry_fields;
+        use crate::errors::AppError;
+        assert_eq!(
+            proxy_error_telemetry_fields(&AppError::NodeOffline("x".into())),
+            (503, 8001)
+        );
+    }
+
+    #[test]
+    fn proxy_error_telemetry_fields_node_credential_missing() {
+        use super::proxy_error_telemetry_fields;
+        use crate::errors::AppError;
+        assert_eq!(
+            proxy_error_telemetry_fields(&AppError::NodeCredentialMissing("x".into())),
+            (502, 8004)
+        );
+    }
+
+    #[test]
+    fn proxy_error_telemetry_fields_ws_proxy_downstream() {
+        use super::proxy_error_telemetry_fields;
+        use crate::errors::AppError;
+        assert_eq!(
+            proxy_error_telemetry_fields(&AppError::WsProxyDownstream("x".into())),
+            (502, 8005)
+        );
+    }
+
+    #[test]
+    fn proxy_error_telemetry_fields_api_key_scope_inactive() {
+        use super::proxy_error_telemetry_fields;
+        use crate::errors::AppError;
+        assert_eq!(
+            proxy_error_telemetry_fields(&AppError::ApiKeyScopeInactive),
+            (403, 9001)
+        );
+    }
+
+    #[test]
+    fn proxy_error_telemetry_fields_api_key_scope_not_found() {
+        use super::proxy_error_telemetry_fields;
+        use crate::errors::AppError;
+        assert_eq!(
+            proxy_error_telemetry_fields(&AppError::ApiKeyScopeNotFound("x".into())),
+            (404, 9002)
+        );
+    }
+
+    #[test]
+    fn proxy_error_telemetry_fields_catchall_maps_to_500_0() {
+        use super::proxy_error_telemetry_fields;
+        use crate::errors::AppError;
+        // Conflict is not explicitly handled by the proxy telemetry map
+        assert_eq!(
+            proxy_error_telemetry_fields(&AppError::Conflict("x".into())),
+            (500, 0)
+        );
+    }
+
+    // ── is_codex_transport_path additional edge cases ───────────────
+
+    #[test]
+    fn codex_transport_trailing_and_leading_slashes() {
+        assert!(is_codex_transport_path("/responses/"));
+        assert!(is_codex_transport_path("///responses///"));
+    }
+
+    #[test]
+    fn codex_transport_deeply_nested() {
+        assert!(is_codex_transport_path("v1/v2/responses"));
+        assert!(is_codex_transport_path("/a/b/c/chat/completions"));
+    }
+
+    #[test]
+    fn codex_transport_false_for_partial_match() {
+        assert!(!is_codex_transport_path("my-responses"));
+        assert!(!is_codex_transport_path("chat/completions/extra"));
+    }
+
+    // ── is_chat_completions_proxy_path additional cases ─────────────
+
+    #[test]
+    fn chat_completions_path_with_trailing_slash() {
+        assert!(is_chat_completions_proxy_path("chat/completions/"));
+    }
+
+    #[test]
+    fn chat_completions_path_false_for_responses() {
+        assert!(!is_chat_completions_proxy_path("v1/responses"));
+    }
+
+    // ── is_ws_upgrade_request tests ─────────────────────────────────
+
+    #[test]
+    fn ws_upgrade_request_requires_both_headers() {
+        // Only connection: upgrade, no upgrade header
+        let req = Request::builder()
+            .uri("/test")
+            .header("connection", "Upgrade")
+            .body(Body::empty())
+            .unwrap();
+        assert!(!is_ws_upgrade_request(&req));
+
+        // Only upgrade: websocket, no connection header
+        let req = Request::builder()
+            .uri("/test")
+            .header("upgrade", "websocket")
+            .body(Body::empty())
+            .unwrap();
+        assert!(!is_ws_upgrade_request(&req));
+    }
+
+    #[test]
+    fn ws_upgrade_request_case_insensitive() {
+        let req = Request::builder()
+            .uri("/test")
+            .header("connection", "UPGRADE")
+            .header("upgrade", "WEBSOCKET")
+            .body(Body::empty())
+            .unwrap();
+        assert!(is_ws_upgrade_request(&req));
+    }
+
+    #[test]
+    fn ws_upgrade_request_connection_header_with_multiple_values() {
+        let req = Request::builder()
+            .uri("/test")
+            .header("connection", "keep-alive, Upgrade")
+            .header("upgrade", "websocket")
+            .body(Body::empty())
+            .unwrap();
+        assert!(is_ws_upgrade_request(&req));
+    }
+
+    #[test]
+    fn ws_upgrade_request_non_websocket_upgrade_is_false() {
+        let req = Request::builder()
+            .uri("/test")
+            .header("connection", "Upgrade")
+            .header("upgrade", "h2c")
+            .body(Body::empty())
+            .unwrap();
+        assert!(!is_ws_upgrade_request(&req));
+    }
+
+    // ── should_enforce_runtime_approval additional cases ────────────
+
+    #[test]
+    fn should_enforce_runtime_approval_relay_enforced() {
+        assert!(should_enforce_runtime_approval(true, &AuthMethod::Relay));
+    }
+
+    #[test]
+    fn should_enforce_runtime_approval_delegated_enforced() {
+        assert!(should_enforce_runtime_approval(
+            true,
+            &AuthMethod::Delegated
+        ));
+    }
+
+    // ── extract_via_service additional edge cases ───────────────────
+
+    #[test]
+    fn extract_via_service_percent_encoded_value() {
+        let req = Request::builder()
+            .uri("/test?_nyxid_via=svc%20with%20spaces")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            super::extract_via_service(&req).as_deref(),
+            Some("svc with spaces")
+        );
+    }
+
+    #[test]
+    fn extract_via_service_empty_value() {
+        let req = Request::builder()
+            .uri("/test?_nyxid_via=")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(super::extract_via_service(&req).as_deref(), Some(""));
+    }
+
+    // ── strip_internal_query_params additional edge cases ───────────
+
+    #[test]
+    fn strip_internal_query_params_multiple_internal() {
+        // If we had two internal params, both should be stripped
+        let result = super::strip_internal_query_params("_nyxid_via=us-123");
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn strip_internal_query_params_empty_input() {
+        let result = super::strip_internal_query_params("");
+        // Empty string split on & gives one empty part, which isn't "_nyxid_via"
+        assert_eq!(result, "");
+    }
+
+    // ── append_query_param additional edge cases ────────────────────
+
+    #[test]
+    fn append_query_param_encodes_special_chars_in_name() {
+        let result = super::append_query_param("https://example.com", "key name", "val");
+        assert_eq!(result, "https://example.com?key%20name=val");
+    }
+
+    // ── collect_forward_headers_with_prefixes additional cases ──────
+
+    #[test]
+    fn collect_forward_headers_filters_unauthorized_headers() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("authorization", "Bearer secret".parse().unwrap());
+        headers.insert("x-custom-internal", "value".parse().unwrap());
+        headers.insert("content-type", "application/json".parse().unwrap());
+
+        let result = collect_forward_headers_with_prefixes(
+            &headers,
+            ALLOWED_FORWARD_HEADERS,
+            ALLOWED_FORWARD_HEADER_PREFIXES,
+        );
+        // authorization and x-custom-internal are not in the allowlist
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "content-type");
+    }
+
+    #[test]
+    fn collect_forward_headers_openclaw_prefix() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-openclaw-scopes", "openai:*".parse().unwrap());
+        headers.insert("x-openclaw-model", "gpt-4".parse().unwrap());
+
+        let result = collect_forward_headers_with_prefixes(
+            &headers,
+            ALLOWED_FORWARD_HEADERS,
+            ALLOWED_FORWARD_HEADER_PREFIXES,
+        );
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn validate_range_header_three_ranges_ok() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("range", "bytes=0-1,2-3,4-5".parse().unwrap());
+        assert!(validate_range_header(&headers).is_ok());
+    }
+
+    #[test]
+    fn validate_range_header_exactly_four_ranges_ok() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("range", "bytes=0-1,2-3,4-5,6-7".parse().unwrap());
+        assert!(validate_range_header(&headers).is_ok());
+    }
 }
 
 #[cfg(test)]
