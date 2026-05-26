@@ -55,6 +55,7 @@ mod tests {
             usages: vec![InviteCodeUsage {
                 user_id: uuid::Uuid::new_v4().to_string(),
                 used_at: Utc::now(),
+                email: Some("test@example.com".to_string()),
             }],
         };
         let doc = bson::to_document(&code).expect("serialize");
