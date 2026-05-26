@@ -211,6 +211,62 @@ mod tests {
         assert_eq!(key, "Authorization");
     }
 
+    #[test]
+    fn query_injection_defaults_to_api_key() {
+        let (method, key) = normalize_delegated_injection("openai", "query", None);
+        assert_eq!(method, "query");
+        assert_eq!(key, "api_key");
+    }
+
+    #[test]
+    fn path_injection_defaults_to_empty_key() {
+        let (method, key) = normalize_delegated_injection("openai", "path", None);
+        assert_eq!(method, "path");
+        assert_eq!(key, "");
+    }
+
+    #[test]
+    fn unknown_method_defaults_to_x_api_key() {
+        let (method, key) = normalize_delegated_injection("custom", "header", None);
+        assert_eq!(method, "header");
+        assert_eq!(key, "X-API-Key");
+    }
+
+    #[test]
+    fn explicit_key_overrides_default() {
+        let (method, key) =
+            normalize_delegated_injection("openai", "bearer", Some("X-Custom-Auth"));
+        assert_eq!(method, "bearer");
+        assert_eq!(key, "X-Custom-Auth");
+    }
+
+    #[test]
+    fn query_with_explicit_key() {
+        let (method, key) = normalize_delegated_injection("anthropic", "query", Some("x-api-key"));
+        assert_eq!(method, "query");
+        assert_eq!(key, "x-api-key");
+    }
+
+    #[test]
+    fn telegram_bot_ignores_all_overrides() {
+        let (method, key) = normalize_delegated_injection("telegram-bot", "query", Some("token"));
+        assert_eq!(method, "path");
+        assert_eq!(key, "bot");
+    }
+
+    #[test]
+    fn delegated_credential_clone() {
+        let cred = super::DelegatedCredential {
+            provider_slug: "github".to_string(),
+            injection_method: "bearer".to_string(),
+            injection_key: "Authorization".to_string(),
+            credential: "secret-token".to_string(),
+        };
+        let cloned = cred.clone();
+        assert_eq!(cloned.injection_method, "bearer");
+        assert_eq!(cloned.credential, "secret-token");
+    }
+
     #[tokio::test]
     async fn resolve_delegated_credentials_uses_org_owner_tokens_when_passed_owner_id() {
         let Some(db) = connect_test_database("delegation_service").await else {

@@ -181,4 +181,178 @@ mod tests {
         assert_eq!(event.event_type.as_deref(), Some("test"));
         assert_eq!(event.data, "{\"foo\":1}");
     }
+
+    // --- [DONE] sentinel ---
+
+    #[test]
+    fn parses_done_sentinel() {
+        let mut buf = "data: [DONE]\n\n".to_string();
+        let event = parse_next_event(&mut buf).unwrap();
+        assert_eq!(event.data, "[DONE]");
+        assert_eq!(event.event_type, None); // not valid JSON
+        assert!(buf.is_empty());
+    }
+
+    // --- empty data field ---
+
+    #[test]
+    fn parses_empty_data_field() {
+        let mut buf = "data: \n\n".to_string();
+        let event = parse_next_event(&mut buf).unwrap();
+        assert_eq!(event.data, "");
+    }
+
+    #[test]
+    fn parses_data_with_no_value_after_colon() {
+        let mut buf = "data:\n\n".to_string();
+        let event = parse_next_event(&mut buf).unwrap();
+        assert_eq!(event.data, "");
+    }
+
+    // --- event-only frame (no data lines) ---
+
+    #[test]
+    fn event_only_frame_without_data() {
+        let mut buf = "event: ping\n\n".to_string();
+        let event = parse_next_event(&mut buf).unwrap();
+        assert_eq!(event.event_type.as_deref(), Some("ping"));
+        assert_eq!(event.data, "");
+    }
+
+    // --- multiple data lines produce newline-joined output ---
+
+    #[test]
+    fn three_data_lines_joined_with_newlines() {
+        let mut buf = "data: first\ndata: second\ndata: third\n\n".to_string();
+        let event = parse_next_event(&mut buf).unwrap();
+        assert_eq!(event.data, "first\nsecond\nthird");
+    }
+
+    // --- event type from JSON fallback does not override explicit event header ---
+
+    #[test]
+    fn explicit_event_header_takes_precedence_over_json_type() {
+        let mut buf = "event: custom\ndata: {\"type\":\"json_type\"}\n\n".to_string();
+        let event = parse_next_event(&mut buf).unwrap();
+        assert_eq!(event.event_type.as_deref(), Some("custom"));
+    }
+
+    // --- JSON type extraction with non-string type field ---
+
+    #[test]
+    fn json_type_extraction_ignores_non_string_type() {
+        let mut buf = "data: {\"type\":42}\n\n".to_string();
+        let event = parse_next_event(&mut buf).unwrap();
+        // type field is a number, not a string — should not be extracted
+        assert_eq!(event.event_type, None);
+    }
+
+    // --- JSON type extraction with missing type field ---
+
+    #[test]
+    fn json_without_type_field_has_no_event_type() {
+        let mut buf = "data: {\"foo\":\"bar\"}\n\n".to_string();
+        let event = parse_next_event(&mut buf).unwrap();
+        assert_eq!(event.event_type, None);
+    }
+
+    // --- buffer partially consumed ---
+
+    #[test]
+    fn buffer_retains_unconsumed_data() {
+        let mut buf = "data: first\n\ndata: second".to_string();
+        let event = parse_next_event(&mut buf).unwrap();
+        assert_eq!(event.data, "first");
+        assert_eq!(buf, "data: second");
+        // Second event is incomplete
+        assert!(parse_next_event(&mut buf).is_none());
+    }
+
+    // --- empty buffer ---
+
+    #[test]
+    fn empty_buffer_returns_none() {
+        let mut buf = String::new();
+        assert!(parse_next_event(&mut buf).is_none());
+    }
+
+    // --- only newlines ---
+
+    #[test]
+    fn double_newline_only_is_skipped() {
+        let mut buf = "\n\n".to_string();
+        // Empty frame with no event/data lines should be skipped;
+        // since there's nothing after, returns None.
+        assert!(parse_next_event(&mut buf).is_none());
+        assert!(buf.is_empty());
+    }
+
+    // --- multiple empty frames before real event ---
+
+    #[test]
+    fn multiple_empty_frames_skipped_until_real_event() {
+        let mut buf = "\n\n\n\n\n\ndata: real\n\n".to_string();
+        let event = parse_next_event(&mut buf).unwrap();
+        assert_eq!(event.data, "real");
+        assert!(buf.is_empty());
+    }
+
+    // --- data with extra leading spaces ---
+
+    #[test]
+    fn data_leading_spaces_stripped_only_once() {
+        // SSE spec says the first space after colon is stripped, so
+        // "data:  two spaces" should produce " two spaces"
+        // But our parser uses trim_start which strips all leading whitespace
+        let mut buf = "data:  two spaces\n\n".to_string();
+        let event = parse_next_event(&mut buf).unwrap();
+        assert_eq!(event.data, "two spaces");
+    }
+
+    // --- mixed comment and data lines ---
+
+    #[test]
+    fn comment_lines_within_event_are_ignored() {
+        let mut buf =
+            ": this is a comment\ndata: hello\n: another comment\ndata: world\n\n".to_string();
+        let event = parse_next_event(&mut buf).unwrap();
+        assert_eq!(event.data, "hello\nworld");
+    }
+
+    // --- id and retry lines are ignored ---
+
+    #[test]
+    fn id_and_retry_within_event_are_ignored() {
+        let mut buf = "id: 42\nretry: 5000\nevent: test\ndata: payload\n\n".to_string();
+        let event = parse_next_event(&mut buf).unwrap();
+        assert_eq!(event.event_type.as_deref(), Some("test"));
+        assert_eq!(event.data, "payload");
+    }
+
+    // --- large payload ---
+
+    #[test]
+    fn handles_large_data_payload() {
+        let large = "x".repeat(10_000);
+        let mut buf = format!("data: {large}\n\n");
+        let event = parse_next_event(&mut buf).unwrap();
+        assert_eq!(event.data.len(), 10_000);
+        assert!(buf.is_empty());
+    }
+
+    // --- SseEvent clone and debug ---
+
+    #[test]
+    fn sse_event_supports_clone_and_debug() {
+        let event = SseEvent {
+            event_type: Some("test".to_string()),
+            data: "payload".to_string(),
+        };
+        let cloned = event.clone();
+        assert_eq!(cloned.event_type, event.event_type);
+        assert_eq!(cloned.data, event.data);
+        let debug = format!("{:?}", event);
+        assert!(debug.contains("test"));
+        assert!(debug.contains("payload"));
+    }
 }

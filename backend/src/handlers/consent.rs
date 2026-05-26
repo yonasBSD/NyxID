@@ -80,3 +80,63 @@ pub async fn revoke_my_consent(
         message: "Consent revoked".to_string(),
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- ConsentItem serialization ----
+
+    #[test]
+    fn consent_item_serializes_all_fields() {
+        let item = ConsentItem {
+            id: "consent-1".to_string(),
+            client_id: "client-abc".to_string(),
+            client_name: "My App".to_string(),
+            scopes: "openid profile email".to_string(),
+            granted_at: "2026-01-01T00:00:00+00:00".to_string(),
+            expires_at: Some("2027-01-01T00:00:00+00:00".to_string()),
+        };
+        let json = serde_json::to_value(&item).unwrap();
+        assert_eq!(json["id"], "consent-1");
+        assert_eq!(json["client_id"], "client-abc");
+        assert_eq!(json["client_name"], "My App");
+        assert_eq!(json["scopes"], "openid profile email");
+        assert_eq!(json["granted_at"], "2026-01-01T00:00:00+00:00");
+        assert_eq!(json["expires_at"], "2027-01-01T00:00:00+00:00");
+    }
+
+    #[test]
+    fn consent_item_with_no_expiry() {
+        let item = ConsentItem {
+            id: "consent-2".to_string(),
+            client_id: "client-xyz".to_string(),
+            client_name: "Other App".to_string(),
+            scopes: "openid".to_string(),
+            granted_at: "2026-01-01T00:00:00+00:00".to_string(),
+            expires_at: None,
+        };
+        let json = serde_json::to_value(&item).unwrap();
+        assert!(json["expires_at"].is_null());
+    }
+
+    // ---- ConsentListResponse serialization ----
+
+    #[test]
+    fn consent_list_response_empty() {
+        let resp = ConsentListResponse { consents: vec![] };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["consents"], serde_json::json!([]));
+    }
+
+    // ---- ConsentRevokeResponse serialization ----
+
+    #[test]
+    fn consent_revoke_response_message() {
+        let resp = ConsentRevokeResponse {
+            message: "Consent revoked".to_string(),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["message"], "Consent revoked");
+    }
+}

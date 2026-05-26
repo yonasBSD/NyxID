@@ -367,6 +367,7 @@ pub struct CreateKeyResult {
 }
 
 /// Combined view for GET /keys and GET /keys/:id.
+#[derive(Debug)]
 pub struct KeyView {
     pub id: String,
     pub label: String,
@@ -3000,15 +3001,19 @@ mod tests {
     use std::collections::HashMap;
 
     use chrono::Utc;
+    use futures::TryStreamExt;
     use mongodb::bson::doc;
 
     use super::{
-        AUTO_PROVISION_SOURCE, OauthClientCredentialsInput, OpenApiSpecUrlInput,
-        SlugCollisionStrategy, SshCreateParams, UpdateCredentialAction, auto_provision_source_id,
+        AUTO_PROVISION_SOURCE, MAX_SERVICE_SLUG_LEN, OauthClientCredentialsInput,
+        OpenApiSpecUrlInput, RANDOM_SLUG_SUFFIX_LEN, SlugCollisionStrategy, SshCreateParams,
+        UpdateCredentialAction, auto_provision_no_auth_services, auto_provision_source_id,
         build_key_view, classify_update_credential_action, create_key, derive_effective_auth,
         direct_credential_type_for_service, direct_credential_type_from_auth_method,
-        generate_slug_from_label, identity_config_from_downstream_service,
-        resolve_openapi_spec_url, resolve_unique_slug, revoke_key,
+        ensure_user_api_key_for_update, exact_slug_conflict, generate_slug_from_label, get_key,
+        identity_config_from_downstream_service, is_duplicate_slug_app_error, list_keys,
+        random_slug_suffix, reconcile_provider_key_for_service_routing, resolve_openapi_spec_url,
+        resolve_unique_slug, revoke_key, revoke_key_if_pending, slug_candidate_with_suffix,
         validate_token_exchange_catalog_credential,
     };
     use crate::errors::{AppError, AppResult};
@@ -5874,5 +5879,2272 @@ mod tests {
         assert_eq!(a, b);
         let c = auto_provision_source_id("user-2", "cat-1");
         assert_ne!(a, c);
+    }
+
+    // ── slug_candidate_with_suffix tests ────────────────────────────
+
+    #[test]
+    fn slug_candidate_with_suffix_basic() {
+        let result = slug_candidate_with_suffix("my-service", "2");
+        assert_eq!(result, "my-service-2");
+    }
+
+    #[test]
+    fn slug_candidate_with_suffix_truncates_base_to_fit() {
+        let long_base = "a".repeat(MAX_SERVICE_SLUG_LEN);
+        let result = slug_candidate_with_suffix(&long_base, "xyz");
+        // suffix "xyz" = 3 chars, separator "-" = 1, so base can be at most 76 chars
+        assert!(result.len() <= MAX_SERVICE_SLUG_LEN);
+        assert!(result.ends_with("-xyz"));
+        let base_part = result.strip_suffix("-xyz").unwrap();
+        assert_eq!(base_part.len(), MAX_SERVICE_SLUG_LEN - 4);
+    }
+
+    #[test]
+    fn slug_candidate_with_suffix_trims_trailing_hyphens_on_base() {
+        let result = slug_candidate_with_suffix("my-service---", "3");
+        assert_eq!(result, "my-service-3");
+    }
+
+    #[test]
+    fn slug_candidate_with_suffix_empty_base_falls_back_to_service() {
+        let result = slug_candidate_with_suffix("", "4");
+        assert_eq!(result, "service-4");
+    }
+
+    #[test]
+    fn slug_candidate_with_suffix_only_hyphens_falls_back() {
+        let result = slug_candidate_with_suffix("---", "5");
+        assert_eq!(result, "service-5");
+    }
+
+    #[test]
+    fn slug_candidate_with_suffix_random_4_char_suffix() {
+        let suffix = random_slug_suffix();
+        let result = slug_candidate_with_suffix("test", &suffix);
+        assert!(result.starts_with("test-"));
+        assert_eq!(result.len(), 5 + RANDOM_SLUG_SUFFIX_LEN);
+    }
+
+    // ── random_slug_suffix tests ────────────────────────────────────
+
+    #[test]
+    fn random_slug_suffix_has_correct_length() {
+        let suffix = random_slug_suffix();
+        assert_eq!(suffix.len(), RANDOM_SLUG_SUFFIX_LEN);
+    }
+
+    #[test]
+    fn random_slug_suffix_contains_only_alphanumeric() {
+        for _ in 0..20 {
+            let suffix = random_slug_suffix();
+            assert!(
+                suffix
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
+                "suffix '{suffix}' contains non-alphanumeric chars"
+            );
+        }
+    }
+
+    #[test]
+    fn random_slug_suffix_is_not_always_the_same() {
+        let a = random_slug_suffix();
+        let b = random_slug_suffix();
+        let c = random_slug_suffix();
+        // With 36^4 = 1.6M possibilities, three consecutive identical results
+        // would require a catastrophically broken RNG.
+        assert!(
+            !(a == b && b == c),
+            "three identical random suffixes is extremely unlikely"
+        );
+    }
+
+    // ── exact_slug_conflict tests ───────────────────────────────────
+
+    #[test]
+    fn exact_slug_conflict_produces_conflict_error_with_slug_name() {
+        let err = exact_slug_conflict("my-service");
+        match err {
+            AppError::Conflict(msg) => {
+                assert!(msg.contains("my-service"));
+                assert!(msg.contains("already in use"));
+            }
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+    }
+
+    // ── auto_provision_source_id format tests ───────────────────────
+
+    #[test]
+    fn auto_provision_source_id_format() {
+        let id = auto_provision_source_id("user-abc", "svc-xyz");
+        assert_eq!(id, "user-abc:svc-xyz");
+    }
+
+    // ── is_duplicate_key_error / is_duplicate_slug_app_error ────────
+
+    #[test]
+    fn is_duplicate_slug_app_error_false_for_non_db_errors() {
+        assert!(!is_duplicate_slug_app_error(&AppError::NotFound(
+            "x".into()
+        )));
+        assert!(!is_duplicate_slug_app_error(&AppError::BadRequest(
+            "x".into()
+        )));
+        assert!(!is_duplicate_slug_app_error(&AppError::Internal(
+            "x".into()
+        )));
+    }
+
+    // ── generate_slug_from_label additional edge cases ──────────────
+
+    #[test]
+    fn generate_slug_from_label_leading_special_chars() {
+        assert_eq!(generate_slug_from_label("!!!hello"), "hello");
+    }
+
+    #[test]
+    fn generate_slug_from_label_trailing_hyphens_trimmed() {
+        // If the truncation boundary lands on a hyphen, it should be trimmed
+        let label = format!("{}-", "a".repeat(MAX_SERVICE_SLUG_LEN - 1));
+        let slug = generate_slug_from_label(&label);
+        assert!(!slug.ends_with('-'));
+    }
+
+    #[test]
+    fn generate_slug_from_label_mixed_unicode_and_ascii() {
+        // Unicode chars become hyphens, then collapsed
+        assert_eq!(
+            generate_slug_from_label("cafe-latte-2024"),
+            "cafe-latte-2024"
+        );
+    }
+
+    #[test]
+    fn generate_slug_from_label_numbers_only() {
+        assert_eq!(generate_slug_from_label("12345"), "12345");
+    }
+
+    #[test]
+    fn generate_slug_from_label_single_char() {
+        assert_eq!(generate_slug_from_label("a"), "a");
+    }
+
+    // ── identity_config_from_downstream_service additional cases ────
+
+    #[test]
+    fn identity_config_from_downstream_jwt_mode_defaults_all_flags() {
+        let mut svc = sample_catalog_service();
+        svc.identity_propagation_mode = "jwt".to_string();
+        svc.identity_include_user_id = false;
+        svc.identity_include_email = false;
+        svc.identity_include_name = false;
+
+        let cfg = identity_config_from_downstream_service(&svc);
+        assert_eq!(cfg.identity_propagation_mode, "jwt");
+        assert!(cfg.identity_include_user_id);
+        assert!(cfg.identity_include_email);
+        assert!(cfg.identity_include_name);
+    }
+
+    #[test]
+    fn identity_config_from_downstream_both_mode_with_partial_flags() {
+        let mut svc = sample_catalog_service();
+        svc.identity_propagation_mode = "both".to_string();
+        svc.identity_include_user_id = true;
+        svc.identity_include_email = false;
+        svc.identity_include_name = false;
+
+        let cfg = identity_config_from_downstream_service(&svc);
+        // At least one flag is set, so defaults should NOT be applied
+        assert!(cfg.identity_include_user_id);
+        assert!(!cfg.identity_include_email);
+        assert!(!cfg.identity_include_name);
+    }
+
+    #[test]
+    fn identity_config_forward_access_token_propagated() {
+        let mut svc = sample_catalog_service();
+        svc.forward_access_token = true;
+        let cfg = identity_config_from_downstream_service(&svc);
+        assert!(cfg.forward_access_token);
+    }
+
+    // ── create_key: catalog path with direct credential ─────────────
+
+    #[tokio::test]
+    async fn create_key_catalog_with_credential_provisions_all_three_records() {
+        let Some(db) = connect_test_database("uks_cat_cred").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let mut catalog = sample_catalog_service();
+        catalog.id = uuid::Uuid::new_v4().to_string();
+        catalog.slug = format!("cat-cred-{}", uuid::Uuid::new_v4());
+
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        let result = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            Some(&catalog.slug),
+            None,
+            "sk-test-credential",
+            "My API",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        // All three records created
+        assert!(!result.endpoint.id.is_empty());
+        let api_key = result.api_key.as_ref().expect("credential creates api_key");
+        assert_eq!(api_key.status, "active");
+        assert!(!result.service.id.is_empty());
+        assert_eq!(
+            result.service.catalog_service_id.as_deref(),
+            Some(catalog.id.as_str())
+        );
+        // Identity config inherited from catalog
+        assert_eq!(result.service.identity_propagation_mode, "both");
+        assert!(result.service.identity_include_user_id);
+        assert!(result.service.identity_include_email);
+    }
+
+    #[tokio::test]
+    async fn create_key_catalog_with_endpoint_url_override() {
+        let Some(db) = connect_test_database("uks_cat_ep_override").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let mut catalog = sample_catalog_service();
+        catalog.id = uuid::Uuid::new_v4().to_string();
+        catalog.slug = format!("cat-ep-{}", uuid::Uuid::new_v4());
+        catalog.base_url = "https://default.example.com".to_string();
+
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        let result = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            Some(&catalog.slug),
+            Some("https://custom.example.com/v2"),
+            "secret",
+            "Override EP",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.endpoint.url, "https://custom.example.com/v2");
+    }
+
+    #[tokio::test]
+    async fn create_key_catalog_not_found_returns_error() {
+        let Some(db) = connect_test_database("uks_cat_not_found").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let err = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            Some("nonexistent-catalog-slug"),
+            None,
+            "secret",
+            "Missing",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .err()
+        .expect("nonexistent catalog should fail");
+
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn create_key_catalog_ssh_without_node_fails() {
+        let Some(db) = connect_test_database("uks_cat_ssh_no_node").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let mut catalog = sample_catalog_service();
+        catalog.id = uuid::Uuid::new_v4().to_string();
+        catalog.slug = format!("cat-ssh-{}", uuid::Uuid::new_v4());
+        catalog.service_type = "ssh".to_string();
+
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        let err = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            Some(&catalog.slug),
+            None,
+            "",
+            "SSH Catalog",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .err()
+        .expect("SSH catalog without node should fail");
+
+        assert!(
+            matches!(err, AppError::BadRequest(ref m) if m.contains("SSH services must be routed"))
+        );
+    }
+
+    #[tokio::test]
+    async fn create_key_catalog_direct_requires_credential() {
+        let Some(db) = connect_test_database("uks_cat_no_cred").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let mut catalog = sample_catalog_service();
+        catalog.id = uuid::Uuid::new_v4().to_string();
+        catalog.slug = format!("cat-nocred-{}", uuid::Uuid::new_v4());
+        // Not a provider-backed service, not no-auth
+        catalog.auth_method = "bearer".to_string();
+        catalog.provider_config_id = None;
+
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        let err = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            Some(&catalog.slug),
+            None,
+            "",
+            "Direct No Cred",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .err()
+        .expect("direct catalog without credential should fail");
+
+        assert!(matches!(err, AppError::BadRequest(ref m) if m.contains("Credential is required")));
+    }
+
+    // ── create_key: node-routed catalog ─────────────────────────────
+
+    #[tokio::test]
+    async fn create_key_catalog_node_routed_creates_node_managed_credential() {
+        let Some(db) = connect_test_database("uks_cat_node").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let node_id = uuid::Uuid::new_v4().to_string();
+        insert_active_node(&db, &user_id, &node_id).await;
+
+        let mut catalog = sample_catalog_service();
+        catalog.id = uuid::Uuid::new_v4().to_string();
+        catalog.slug = format!("cat-node-{}", uuid::Uuid::new_v4());
+
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        let result = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            Some(&catalog.slug),
+            None,
+            "",
+            "Node Routed",
+            None,
+            None,
+            None,
+            Some(&node_id),
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        let api_key = result
+            .api_key
+            .expect("node-routed creates node_managed api_key");
+        assert_eq!(api_key.credential_type, "node_managed");
+        assert_eq!(api_key.status, "active");
+        assert_eq!(result.service.node_id.as_deref(), Some(node_id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn create_key_catalog_node_routed_rejects_credential_with_provider() {
+        let Some(db) = connect_test_database("uks_cat_node_prov_cred").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let node_id = uuid::Uuid::new_v4().to_string();
+        insert_active_node(&db, &user_id, &node_id).await;
+
+        let provider = multi_conn_provider("api_key");
+        let mut catalog = multi_conn_catalog(&provider);
+        catalog.id = uuid::Uuid::new_v4().to_string();
+        catalog.slug = format!("cat-np-{}", uuid::Uuid::new_v4());
+
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        let err = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            Some(&catalog.slug),
+            None,
+            "some-secret",
+            "Node Provider",
+            None,
+            None,
+            None,
+            Some(&node_id),
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .err()
+        .expect("node-routed provider with credential should fail");
+
+        assert!(
+            matches!(err, AppError::BadRequest(ref m) if m.contains("authorized on the node agent"))
+        );
+    }
+
+    // ── create_key: custom HTTP with node routing ───────────────────
+
+    #[tokio::test]
+    async fn create_key_custom_http_node_routed() {
+        let Some(db) = connect_test_database("uks_custom_node").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let node_id = uuid::Uuid::new_v4().to_string();
+        insert_active_node(&db, &user_id, &node_id).await;
+
+        let result = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            None,
+            Some("https://local-only.example.com"),
+            "",
+            "Node Custom",
+            Some("node-custom"),
+            Some("bearer"),
+            Some("Authorization"),
+            Some(&node_id),
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        let api_key = result.api_key.expect("node-routed custom creates api_key");
+        assert_eq!(api_key.credential_type, "node_managed");
+        assert_eq!(result.service.auth_method, "bearer");
+        assert_eq!(result.service.node_id.as_deref(), Some(node_id.as_str()));
+    }
+
+    // ── create_key: custom HTTP with openapi_spec_url ───────────────
+
+    #[tokio::test]
+    async fn create_key_custom_http_with_openapi_spec_url() {
+        let Some(db) = connect_test_database("uks_custom_spec_url").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let result = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            None,
+            Some("https://api.example.com"),
+            "secret",
+            "With Spec",
+            Some("with-spec"),
+            Some("bearer"),
+            Some("Authorization"),
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Set("https://api.example.com/openapi.json"),
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            result.endpoint.openapi_spec_url.as_deref(),
+            Some("https://api.example.com/openapi.json")
+        );
+    }
+
+    // ── create_key: custom HTTP with identity config ────────────────
+
+    #[tokio::test]
+    async fn create_key_custom_http_with_identity_config() {
+        let Some(db) = connect_test_database("uks_custom_identity").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let identity = crate::services::user_service_service::IdentityConfig {
+            identity_propagation_mode: "headers".to_string(),
+            identity_include_user_id: true,
+            identity_include_email: true,
+            identity_include_name: false,
+            identity_jwt_audience: Some("https://my-api.example.com".to_string()),
+            forward_access_token: true,
+            inject_delegation_token: false,
+            delegation_token_scope: "read:all".to_string(),
+        };
+
+        let result = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            None,
+            Some("https://api.example.com"),
+            "secret",
+            "Identity Svc",
+            Some("identity-svc"),
+            Some("bearer"),
+            Some("Authorization"),
+            None,
+            None,
+            Some(identity),
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.service.identity_propagation_mode, "headers");
+        assert!(result.service.identity_include_user_id);
+        assert!(result.service.identity_include_email);
+        assert!(!result.service.identity_include_name);
+        assert!(result.service.forward_access_token);
+    }
+
+    // ── list_keys / get_key integration ─────────────────────────────
+
+    #[tokio::test]
+    async fn list_keys_returns_created_keys() {
+        let Some(db) = connect_test_database("uks_list_keys").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        // Create two custom keys
+        let _first = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            None,
+            Some("https://api-a.example.com"),
+            "secret-a",
+            "Service A",
+            Some("svc-a"),
+            Some("bearer"),
+            Some("Authorization"),
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        let _second = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            None,
+            Some("https://api-b.example.com"),
+            "secret-b",
+            "Service B",
+            Some("svc-b"),
+            Some("bearer"),
+            Some("Authorization"),
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        let keys = list_keys(&db, &enc, &user_id).await.unwrap();
+        assert_eq!(keys.len(), 2);
+        let slugs: Vec<&str> = keys.iter().map(|k| k.slug.as_str()).collect();
+        assert!(slugs.contains(&"svc-a"));
+        assert!(slugs.contains(&"svc-b"));
+
+        // Verify fields on one of them
+        let svc_a = keys.iter().find(|k| k.slug == "svc-a").unwrap();
+        assert_eq!(svc_a.label, "Service A");
+        assert_eq!(svc_a.endpoint_url, "https://api-a.example.com");
+        assert_eq!(svc_a.auth_method, "bearer");
+        assert_eq!(svc_a.status, "active");
+        assert!(svc_a.is_active);
+    }
+
+    #[tokio::test]
+    async fn list_keys_empty_for_new_user() {
+        let Some(db) = connect_test_database("uks_list_empty").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let keys = list_keys(&db, &enc, &user_id).await.unwrap();
+        assert!(keys.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_key_returns_correct_view() {
+        let Some(db) = connect_test_database("uks_get_key").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let created = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            None,
+            Some("https://api.example.com"),
+            "my-secret",
+            "Get Test",
+            Some("get-test"),
+            Some("bearer"),
+            Some("Authorization"),
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        let view = get_key(&db, &enc, &user_id, &created.service.id)
+            .await
+            .unwrap();
+
+        assert_eq!(view.id, created.service.id);
+        assert_eq!(view.slug, "get-test");
+        assert_eq!(view.label, "Get Test");
+        assert_eq!(view.endpoint_url, "https://api.example.com");
+        assert_eq!(view.auth_method, "bearer");
+        assert_eq!(view.credential_type, "api_key");
+        assert_eq!(view.status, "active");
+        assert!(view.api_key_id.is_some());
+        assert!(view.is_active);
+    }
+
+    #[tokio::test]
+    async fn get_key_not_found_for_wrong_user() {
+        let Some(db) = connect_test_database("uks_get_key_nf").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_a = uuid::Uuid::new_v4().to_string();
+        let user_b = uuid::Uuid::new_v4().to_string();
+
+        let created = create_key(
+            &db,
+            &enc,
+            &user_a,
+            &user_a,
+            None,
+            Some("https://api.example.com"),
+            "secret",
+            "User A Svc",
+            Some("user-a-svc"),
+            Some("bearer"),
+            Some("Authorization"),
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        let err = get_key(&db, &enc, &user_b, &created.service.id)
+            .await
+            .expect_err("wrong user should not find key");
+
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn get_key_with_catalog_service_shows_catalog_name() {
+        let Some(db) = connect_test_database("uks_get_key_cat").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let mut catalog = sample_catalog_service();
+        catalog.id = uuid::Uuid::new_v4().to_string();
+        catalog.slug = format!("cat-view-{}", uuid::Uuid::new_v4());
+        catalog.name = "My Catalog Service".to_string();
+
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        let created = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            Some(&catalog.slug),
+            None,
+            "secret",
+            "Catalog View Test",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        let view = get_key(&db, &enc, &user_id, &created.service.id)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            view.catalog_service_id.as_deref(),
+            Some(catalog.id.as_str())
+        );
+        assert_eq!(
+            view.catalog_service_name.as_deref(),
+            Some("My Catalog Service")
+        );
+        assert_eq!(
+            view.catalog_service_slug.as_deref(),
+            Some(catalog.slug.as_str())
+        );
+    }
+
+    // ── list_keys after revoke shows only active ────────────────────
+
+    #[tokio::test]
+    async fn list_keys_excludes_revoked_keys() {
+        let Some(db) = connect_test_database("uks_list_revoked").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let first = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            None,
+            Some("https://api-a.example.com"),
+            "secret-a",
+            "Keep",
+            Some("keep-svc"),
+            Some("bearer"),
+            Some("Authorization"),
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        let second = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            None,
+            Some("https://api-b.example.com"),
+            "secret-b",
+            "Delete",
+            Some("delete-svc"),
+            Some("bearer"),
+            Some("Authorization"),
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        revoke_key(&db, &user_id, &user_id, &second.service.id)
+            .await
+            .unwrap();
+
+        let keys = list_keys(&db, &enc, &user_id).await.unwrap();
+        // Revoked services have is_active=false. list_keys calls
+        // list_user_services_with_sources which filters by is_active.
+        let active_slugs: Vec<&str> = keys
+            .iter()
+            .filter(|k| k.is_active)
+            .map(|k| k.slug.as_str())
+            .collect();
+        assert!(active_slugs.contains(&"keep-svc"));
+        assert!(!active_slugs.contains(&"delete-svc"));
+        let _ = first; // suppress unused warning
+    }
+
+    // ── auto_provision_no_auth_services ──────────────────────────────
+
+    #[tokio::test]
+    async fn auto_provision_creates_services_for_public_no_auth_catalog() {
+        let Some(db) = connect_test_database("uks_auto_provision").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        // Insert a public, no-auth catalog service
+        let mut catalog = sample_catalog_service();
+        catalog.id = uuid::Uuid::new_v4().to_string();
+        catalog.slug = format!("public-noauth-{}", uuid::Uuid::new_v4());
+        catalog.auth_method = "none".to_string();
+        catalog.requires_user_credential = false;
+        catalog.visibility = "public".to_string();
+        catalog.service_category = "connection".to_string();
+
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        auto_provision_no_auth_services(&db, &user_id)
+            .await
+            .unwrap();
+
+        // Verify a UserService was created
+        let services: Vec<UserService> = db
+            .collection::<UserService>(USER_SERVICES)
+            .find(doc! { "user_id": &user_id, "catalog_service_id": &catalog.id })
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].source.as_deref(), Some(AUTO_PROVISION_SOURCE));
+        assert!(services[0].api_key_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn auto_provision_is_idempotent() {
+        let Some(db) = connect_test_database("uks_auto_provision_idem").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let mut catalog = sample_catalog_service();
+        catalog.id = uuid::Uuid::new_v4().to_string();
+        catalog.slug = format!("idem-noauth-{}", uuid::Uuid::new_v4());
+        catalog.auth_method = "none".to_string();
+        catalog.requires_user_credential = false;
+        catalog.visibility = "public".to_string();
+        catalog.service_category = "connection".to_string();
+
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        // Run twice
+        auto_provision_no_auth_services(&db, &user_id)
+            .await
+            .unwrap();
+        auto_provision_no_auth_services(&db, &user_id)
+            .await
+            .unwrap();
+
+        // Still only one service
+        let count = db
+            .collection::<UserService>(USER_SERVICES)
+            .count_documents(doc! { "user_id": &user_id, "catalog_service_id": &catalog.id })
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn auto_provision_skips_services_with_spr() {
+        let Some(db) = connect_test_database("uks_auto_provision_spr").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        // catalog: no-auth but has a ServiceProviderRequirement (master cred)
+        let mut catalog = sample_catalog_service();
+        catalog.id = uuid::Uuid::new_v4().to_string();
+        catalog.slug = format!("spr-noauth-{}", uuid::Uuid::new_v4());
+        catalog.auth_method = "none".to_string();
+        catalog.requires_user_credential = false;
+        catalog.visibility = "public".to_string();
+        catalog.service_category = "internal".to_string();
+
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        // Insert SPR for this service
+        use crate::models::service_provider_requirement::{
+            COLLECTION_NAME as SERVICE_PROVIDER_REQUIREMENTS, ServiceProviderRequirement as Spr,
+        };
+        let spr = Spr {
+            id: uuid::Uuid::new_v4().to_string(),
+            service_id: catalog.id.clone(),
+            provider_config_id: "some-provider".to_string(),
+            required: true,
+            scopes: None,
+            injection_method: "bearer".to_string(),
+            injection_key: Some("Authorization".to_string()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        db.collection::<Spr>(SERVICE_PROVIDER_REQUIREMENTS)
+            .insert_one(&spr)
+            .await
+            .unwrap();
+
+        auto_provision_no_auth_services(&db, &user_id)
+            .await
+            .unwrap();
+
+        // No service should be created (SPR means it's not truly no-auth)
+        let count = db
+            .collection::<UserService>(USER_SERVICES)
+            .count_documents(doc! { "user_id": &user_id })
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn auto_provision_skips_private_without_app_ids() {
+        let Some(db) = connect_test_database("uks_auto_provision_private").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let mut catalog = sample_catalog_service();
+        catalog.id = uuid::Uuid::new_v4().to_string();
+        catalog.slug = format!("private-noauth-{}", uuid::Uuid::new_v4());
+        catalog.auth_method = "none".to_string();
+        catalog.requires_user_credential = false;
+        catalog.visibility = "private".to_string();
+        catalog.developer_app_ids = None;
+        catalog.service_category = "connection".to_string();
+
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        auto_provision_no_auth_services(&db, &user_id)
+            .await
+            .unwrap();
+
+        let count = db
+            .collection::<UserService>(USER_SERVICES)
+            .count_documents(doc! { "user_id": &user_id })
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    // ── ensure_user_api_key_for_update integration ──────────────────
+
+    #[tokio::test]
+    async fn ensure_api_key_for_update_rotates_existing_credential() {
+        let Some(db) = connect_test_database("uks_ensure_rotate").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        // Create a service with a credential
+        let created = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            None,
+            Some("https://api.example.com"),
+            "old-secret",
+            "Rotate Test",
+            Some("rotate-test"),
+            Some("bearer"),
+            Some("Authorization"),
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        let original_key_id = created.api_key.as_ref().unwrap().id.clone();
+
+        // Rotate the credential
+        let result = ensure_user_api_key_for_update(
+            &db,
+            &enc,
+            &user_id,
+            &created.service.id,
+            None,
+            Some("new-secret"),
+            None,
+            "Rotate Test",
+            OauthClientCredentialsInput::None,
+        )
+        .await
+        .unwrap();
+
+        // Same key ID, just rotated
+        assert_eq!(result.as_deref(), Some(original_key_id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn ensure_api_key_for_update_provisions_on_upgrade_from_none() {
+        let Some(db) = connect_test_database("uks_ensure_provision").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        // Create a no-auth custom service
+        let created = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            None,
+            Some("https://api.example.com"),
+            "",
+            "Upgrade Test",
+            Some("upgrade-test"),
+            Some("none"),
+            None,
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert!(created.api_key.is_none());
+
+        // Upgrade to bearer with credential
+        let result = ensure_user_api_key_for_update(
+            &db,
+            &enc,
+            &user_id,
+            &created.service.id,
+            Some("bearer"),
+            Some("new-secret"),
+            None,
+            "Upgrade Test",
+            OauthClientCredentialsInput::None,
+        )
+        .await
+        .unwrap();
+
+        // Should have provisioned a new api key
+        assert!(result.is_some());
+        let new_key_id = result.unwrap();
+        let api_key =
+            crate::services::user_api_key_service::get_api_key(&db, &user_id, &new_key_id)
+                .await
+                .unwrap();
+        assert_eq!(api_key.credential_type, "bearer");
+        assert_eq!(api_key.status, "active");
+    }
+
+    #[tokio::test]
+    async fn ensure_api_key_for_update_rejects_credential_while_auth_method_none() {
+        let Some(db) = connect_test_database("uks_ensure_reject_cred_none").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        // Create a no-auth custom service
+        let created = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            None,
+            Some("https://api.example.com"),
+            "",
+            "Reject Test",
+            Some("reject-test"),
+            Some("none"),
+            None,
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        // Try to set credential without changing auth_method
+        let err = ensure_user_api_key_for_update(
+            &db,
+            &enc,
+            &user_id,
+            &created.service.id,
+            None,
+            Some("secret"),
+            None,
+            "Reject Test",
+            OauthClientCredentialsInput::None,
+        )
+        .await
+        .expect_err("should reject credential while auth_method is none");
+
+        assert!(matches!(err, AppError::BadRequest(ref m) if m.contains("auth_method")));
+    }
+
+    #[tokio::test]
+    async fn ensure_api_key_for_update_nothing_when_no_changes() {
+        let Some(db) = connect_test_database("uks_ensure_nothing").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let created = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            None,
+            Some("https://api.example.com"),
+            "secret",
+            "No Changes",
+            Some("no-changes"),
+            Some("bearer"),
+            Some("Authorization"),
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        let original_key_id = created.api_key.as_ref().unwrap().id.clone();
+
+        // Call with no credential and no auth_method change
+        let result = ensure_user_api_key_for_update(
+            &db,
+            &enc,
+            &user_id,
+            &created.service.id,
+            None,
+            None,
+            None,
+            "No Changes",
+            OauthClientCredentialsInput::None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.as_deref(), Some(original_key_id.as_str()));
+    }
+
+    // ── revoke_key_if_pending ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn revoke_key_if_pending_returns_false_for_active_key() {
+        let Some(db) = connect_test_database("uks_revoke_pending_active").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let created = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            None,
+            Some("https://api.example.com"),
+            "secret",
+            "Active Key",
+            Some("active-key"),
+            Some("bearer"),
+            Some("Authorization"),
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        // The key is already active, so revoke_key_if_pending should return false
+        let result = revoke_key_if_pending(&db, &user_id, &user_id, &created.service.id)
+            .await
+            .unwrap();
+
+        assert!(!result, "active key should not be revoked by if_pending");
+
+        // Service should still be active
+        let svc = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! { "_id": &created.service.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(svc.is_active);
+    }
+
+    #[tokio::test]
+    async fn revoke_key_if_pending_returns_false_for_no_api_key() {
+        let Some(db) = connect_test_database("uks_revoke_pending_no_ak").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        // Create no-auth service (no api_key_id)
+        let created = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            None,
+            Some("https://api.example.com"),
+            "",
+            "No Auth",
+            Some("no-auth"),
+            Some("none"),
+            None,
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert!(created.api_key.is_none());
+
+        let result = revoke_key_if_pending(&db, &user_id, &user_id, &created.service.id)
+            .await
+            .unwrap();
+
+        assert!(!result, "no api_key should return false");
+    }
+
+    // ── reconcile_provider_key_for_service_routing ───────────────────
+
+    #[tokio::test]
+    async fn reconcile_provider_key_noop_for_no_auth_service() {
+        let Some(db) = connect_test_database("uks_reconcile_noauth").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let created = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            None,
+            Some("https://api.example.com"),
+            "",
+            "No Auth Reconcile",
+            Some("noauth-reconcile"),
+            Some("none"),
+            None,
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        // Should be a no-op (no api_key to reconcile)
+        reconcile_provider_key_for_service_routing(&db, &user_id, &created.service.id)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconcile_provider_key_noop_for_service_with_credential() {
+        let Some(db) = connect_test_database("uks_reconcile_has_cred").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let created = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            None,
+            Some("https://api.example.com"),
+            "my-secret",
+            "Has Cred Reconcile",
+            Some("hascred-reconcile"),
+            Some("bearer"),
+            Some("Authorization"),
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        // Service has a credential stored; reconcile should be a no-op
+        reconcile_provider_key_for_service_routing(&db, &user_id, &created.service.id)
+            .await
+            .unwrap();
+
+        // Verify key is still active and unchanged
+        let ak_id = created.api_key.as_ref().unwrap().id.clone();
+        let api_key = crate::services::user_api_key_service::get_api_key(&db, &user_id, &ak_id)
+            .await
+            .unwrap();
+        assert_eq!(api_key.status, "active");
+    }
+
+    // ── create_key: catalog with openapi spec URL inheritance ────────
+
+    #[tokio::test]
+    async fn create_key_catalog_inherits_openapi_spec_url() {
+        let Some(db) = connect_test_database("uks_cat_spec_inherit").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let mut catalog = sample_catalog_service();
+        catalog.id = uuid::Uuid::new_v4().to_string();
+        catalog.slug = format!("cat-spec-{}", uuid::Uuid::new_v4());
+        catalog.openapi_spec_url = Some("https://catalog.example.com/openapi.json".to_string());
+
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        let result = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            Some(&catalog.slug),
+            None,
+            "secret",
+            "Spec Inherit",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            result.endpoint.openapi_spec_url.as_deref(),
+            Some("https://catalog.example.com/openapi.json")
+        );
+    }
+
+    #[tokio::test]
+    async fn create_key_catalog_clears_openapi_spec_url() {
+        let Some(db) = connect_test_database("uks_cat_spec_clear").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let mut catalog = sample_catalog_service();
+        catalog.id = uuid::Uuid::new_v4().to_string();
+        catalog.slug = format!("cat-clear-{}", uuid::Uuid::new_v4());
+        catalog.openapi_spec_url = Some("https://catalog.example.com/openapi.json".to_string());
+
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        let result = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            Some(&catalog.slug),
+            None,
+            "secret",
+            "Spec Clear",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Clear,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert!(result.endpoint.openapi_spec_url.is_none());
+    }
+
+    // ── create_key: catalog with gateway_url requirement ────────────
+
+    #[tokio::test]
+    async fn create_key_catalog_requires_gateway_url() {
+        let Some(db) = connect_test_database("uks_cat_gateway").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let mut provider = multi_conn_provider("api_key");
+        provider.requires_gateway_url = true;
+
+        let mut catalog = multi_conn_catalog(&provider);
+        catalog.id = uuid::Uuid::new_v4().to_string();
+        catalog.slug = format!("cat-gw-{}", uuid::Uuid::new_v4());
+
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        // Without endpoint_url, should fail for gateway_url provider
+        let err = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            Some(&catalog.slug),
+            None,
+            "secret",
+            "Gateway Required",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .err()
+        .expect("gateway_url provider without endpoint_url should fail");
+
+        assert!(
+            matches!(err, AppError::BadRequest(ref m) if m.contains("requires an endpoint URL"))
+        );
+    }
+
+    // ── revoke_key: revoke a catalog-backed key ─────────────────────
+
+    #[tokio::test]
+    async fn revoke_key_catalog_backed_cleans_up_all_records() {
+        let Some(db) = connect_test_database("uks_revoke_catalog").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let mut catalog = sample_catalog_service();
+        catalog.id = uuid::Uuid::new_v4().to_string();
+        catalog.slug = format!("cat-revoke-{}", uuid::Uuid::new_v4());
+
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        let created = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            Some(&catalog.slug),
+            None,
+            "secret",
+            "Revoke Catalog",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        revoke_key(&db, &user_id, &user_id, &created.service.id)
+            .await
+            .unwrap();
+
+        // Endpoint deleted
+        let ep_count = db
+            .collection::<mongodb::bson::Document>(USER_ENDPOINTS)
+            .count_documents(doc! { "_id": &created.endpoint.id })
+            .await
+            .unwrap();
+        assert_eq!(ep_count, 0);
+
+        // API key deleted
+        let ak_count = db
+            .collection::<mongodb::bson::Document>(USER_API_KEYS)
+            .count_documents(doc! { "_id": &created.api_key.unwrap().id })
+            .await
+            .unwrap();
+        assert_eq!(ak_count, 0);
+
+        // Service deactivated
+        let svc = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! { "_id": &created.service.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!svc.is_active);
+    }
+
+    // ── create_key: catalog with token_exchange credential ──────────
+
+    #[tokio::test]
+    async fn create_key_catalog_token_exchange_with_valid_credential() {
+        let Some(db) = connect_test_database("uks_cat_tokex").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let mut catalog = lark_bot_catalog_service();
+        catalog.id = uuid::Uuid::new_v4().to_string();
+        catalog.slug = format!("lark-bot-{}", uuid::Uuid::new_v4());
+
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        let result = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            Some(&catalog.slug),
+            None,
+            r#"{"app_id":"cli_xxx","app_secret":"yyy"}"#,
+            "Lark Bot",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert!(result.api_key.is_some());
+        assert_eq!(result.api_key.as_ref().unwrap().status, "active");
+    }
+
+    #[tokio::test]
+    async fn create_key_catalog_token_exchange_rejects_bad_credential() {
+        let Some(db) = connect_test_database("uks_cat_tokex_bad").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let mut catalog = lark_bot_catalog_service();
+        catalog.id = uuid::Uuid::new_v4().to_string();
+        catalog.slug = format!("lark-bot-bad-{}", uuid::Uuid::new_v4());
+
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        let err = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            Some(&catalog.slug),
+            None,
+            "just-a-string",
+            "Lark Bot Bad",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .err()
+        .expect("token_exchange with bad credential should fail");
+
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    // ── ensure_user_api_key_for_update: empty string credential ─────
+
+    #[tokio::test]
+    async fn ensure_api_key_for_update_rejects_empty_string_credential() {
+        let Some(db) = connect_test_database("uks_ensure_empty_cred").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let created = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            None,
+            Some("https://api.example.com"),
+            "secret",
+            "Empty Cred",
+            Some("empty-cred"),
+            Some("bearer"),
+            Some("Authorization"),
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        let err = ensure_user_api_key_for_update(
+            &db,
+            &enc,
+            &user_id,
+            &created.service.id,
+            None,
+            Some(""),
+            None,
+            "Empty Cred",
+            OauthClientCredentialsInput::None,
+        )
+        .await
+        .expect_err("empty string credential should be rejected");
+
+        assert!(matches!(err, AppError::BadRequest(ref m) if m.contains("must not be empty")));
+    }
+
+    // ── create_key: custom with auth_key_name for query auth ────────
+
+    #[tokio::test]
+    async fn create_key_custom_http_query_auth_with_key_name() {
+        let Some(db) = connect_test_database("uks_custom_query_auth").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let result = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            None,
+            Some("https://api.example.com"),
+            "secret-key-value",
+            "Query Auth Svc",
+            Some("query-auth-svc"),
+            Some("query"),
+            Some("api_key"),
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.service.auth_method, "query");
+        assert_eq!(result.service.auth_key_name, "api_key");
+        let ak = result.api_key.expect("query auth creates api key");
+        assert_eq!(ak.credential_type, "api_key");
+    }
+
+    #[tokio::test]
+    async fn create_key_custom_http_query_auth_empty_key_name_fails() {
+        let Some(db) = connect_test_database("uks_custom_query_empty_kn").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let err = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            None,
+            Some("https://api.example.com"),
+            "secret",
+            "Query Empty Key",
+            Some("query-empty-key"),
+            Some("query"),
+            Some(""),
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .err()
+        .expect("query auth with empty key name should fail");
+
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    // ── revoke_key: no-auth service without api_key ─────────────────
+
+    #[tokio::test]
+    async fn revoke_key_no_auth_service_cleans_up() {
+        let Some(db) = connect_test_database("uks_revoke_noauth").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let created = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            None,
+            Some("https://api.example.com"),
+            "",
+            "No Auth Revoke",
+            Some("noauth-revoke"),
+            Some("none"),
+            None,
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert!(created.api_key.is_none());
+
+        revoke_key(&db, &user_id, &user_id, &created.service.id)
+            .await
+            .unwrap();
+
+        // Endpoint deleted
+        let ep_count = db
+            .collection::<mongodb::bson::Document>(USER_ENDPOINTS)
+            .count_documents(doc! { "_id": &created.endpoint.id })
+            .await
+            .unwrap();
+        assert_eq!(ep_count, 0);
+
+        // Service deactivated
+        let svc = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! { "_id": &created.service.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!svc.is_active);
+    }
+
+    // ── reconcile_stale_auto_provisions (via auto_provision) ────────
+
+    #[tokio::test]
+    async fn auto_provision_reconciles_stale_when_catalog_deactivated() {
+        let Some(db) = connect_test_database("uks_reconcile_stale").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        // Create a public no-auth service
+        let mut catalog = sample_catalog_service();
+        catalog.id = uuid::Uuid::new_v4().to_string();
+        catalog.slug = format!("stale-{}", uuid::Uuid::new_v4());
+        catalog.auth_method = "none".to_string();
+        catalog.requires_user_credential = false;
+        catalog.visibility = "public".to_string();
+        catalog.service_category = "connection".to_string();
+
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        // Auto-provision
+        auto_provision_no_auth_services(&db, &user_id)
+            .await
+            .unwrap();
+
+        let count = db
+            .collection::<UserService>(USER_SERVICES)
+            .count_documents(doc! { "user_id": &user_id, "catalog_service_id": &catalog.id })
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+
+        // Deactivate the catalog entry
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .update_one(
+                doc! { "_id": &catalog.id },
+                doc! { "$set": { "is_active": false } },
+            )
+            .await
+            .unwrap();
+
+        // Re-run auto-provision -- reconciliation should delete the stale service
+        auto_provision_no_auth_services(&db, &user_id)
+            .await
+            .unwrap();
+
+        let count = db
+            .collection::<UserService>(USER_SERVICES)
+            .count_documents(doc! { "user_id": &user_id, "catalog_service_id": &catalog.id })
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "stale auto-provisioned service should be deleted");
+    }
+
+    #[tokio::test]
+    async fn auto_provision_reconciles_stale_when_auth_method_changed() {
+        let Some(db) = connect_test_database("uks_reconcile_auth_change").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let mut catalog = sample_catalog_service();
+        catalog.id = uuid::Uuid::new_v4().to_string();
+        catalog.slug = format!("auth-change-{}", uuid::Uuid::new_v4());
+        catalog.auth_method = "none".to_string();
+        catalog.requires_user_credential = false;
+        catalog.visibility = "public".to_string();
+        catalog.service_category = "connection".to_string();
+
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        auto_provision_no_auth_services(&db, &user_id)
+            .await
+            .unwrap();
+
+        // Change auth_method to bearer (no longer truly no-auth)
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .update_one(
+                doc! { "_id": &catalog.id },
+                doc! { "$set": { "auth_method": "bearer" } },
+            )
+            .await
+            .unwrap();
+
+        auto_provision_no_auth_services(&db, &user_id)
+            .await
+            .unwrap();
+
+        let count = db
+            .collection::<UserService>(USER_SERVICES)
+            .count_documents(doc! { "user_id": &user_id, "catalog_service_id": &catalog.id })
+            .await
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "service should be deleted after auth_method changed"
+        );
+    }
+
+    // ── create and list: full round-trip with catalog ────────────────
+
+    #[tokio::test]
+    async fn list_keys_includes_catalog_service_metadata() {
+        let Some(db) = connect_test_database("uks_list_catalog_meta").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let mut catalog = sample_catalog_service();
+        catalog.id = uuid::Uuid::new_v4().to_string();
+        catalog.slug = format!("list-meta-{}", uuid::Uuid::new_v4());
+        catalog.name = "Listed Catalog".to_string();
+
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            Some(&catalog.slug),
+            None,
+            "secret",
+            "Listed Key",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        let keys = list_keys(&db, &enc, &user_id).await.unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(
+            keys[0].catalog_service_name.as_deref(),
+            Some("Listed Catalog")
+        );
+        assert_eq!(
+            keys[0].catalog_service_id.as_deref(),
+            Some(catalog.id.as_str())
+        );
+    }
+
+    // ── ensure_user_api_key_for_update: promote node_managed ────────
+
+    #[tokio::test]
+    async fn ensure_api_key_for_update_promotes_node_managed_to_bearer() {
+        let Some(db) = connect_test_database("uks_ensure_promote").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let node_id = uuid::Uuid::new_v4().to_string();
+        insert_active_node(&db, &user_id, &node_id).await;
+
+        // Create a node-managed service
+        let created = create_key(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            None,
+            Some("https://api.example.com"),
+            "",
+            "Promote Test",
+            Some("promote-test"),
+            Some("bearer"),
+            Some("Authorization"),
+            Some(&node_id),
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        let original_key = created.api_key.as_ref().unwrap();
+        assert_eq!(original_key.credential_type, "node_managed");
+
+        // Promote by supplying a credential
+        let result = ensure_user_api_key_for_update(
+            &db,
+            &enc,
+            &user_id,
+            &created.service.id,
+            None,
+            Some("server-held-secret"),
+            Some(&node_id),
+            "Promote Test",
+            OauthClientCredentialsInput::None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.as_deref(), Some(original_key.id.as_str()));
+
+        // Verify the key was promoted
+        let promoted_key =
+            crate::services::user_api_key_service::get_api_key(&db, &user_id, &original_key.id)
+                .await
+                .unwrap();
+        assert_eq!(promoted_key.credential_type, "bearer");
     }
 }

@@ -496,4 +496,443 @@ mod tests {
         );
         assert!(stored.password_reset_expires_at.is_none());
     }
+
+    #[tokio::test]
+    async fn register_user_happy_path() {
+        let Some(db) = crate::test_utils::connect_test_database("auth_reg_ok").await else {
+            eprintln!("skipping: no local MongoDB available");
+            return;
+        };
+        crate::services::role_service::seed_system_roles(&db)
+            .await
+            .unwrap();
+
+        let result = register_user(
+            &db,
+            "new@example.com",
+            "password123",
+            Some("New"),
+            None,
+            false,
+        )
+        .await
+        .expect("register");
+
+        assert!(result.actually_created);
+        assert!(!result.user_id.is_empty());
+        assert!(!result.email_verification_token.is_empty());
+
+        let stored = db
+            .collection::<User>(USERS)
+            .find_one(doc! { "_id": &result.user_id })
+            .await
+            .unwrap()
+            .expect("user in db");
+        assert_eq!(stored.email, "new@example.com");
+        assert!(stored.password_hash.is_some());
+        assert!(!stored.email_verified);
+        assert!(stored.email_verification_token.is_some());
+    }
+
+    #[tokio::test]
+    async fn register_user_short_password_error() {
+        let Some(db) = crate::test_utils::connect_test_database("auth_reg_short").await else {
+            eprintln!("skipping: no local MongoDB available");
+            return;
+        };
+
+        match register_user(&db, "short@example.com", "1234567", None, None, false).await {
+            Err(AppError::ValidationError(_)) => {}
+            Err(other) => panic!("expected ValidationError, got: {other:?}"),
+            Ok(_) => panic!("expected error for short password"),
+        }
+    }
+
+    #[tokio::test]
+    async fn register_user_long_password_error() {
+        let Some(db) = crate::test_utils::connect_test_database("auth_reg_long").await else {
+            eprintln!("skipping: no local MongoDB available");
+            return;
+        };
+
+        let long_pw = "a".repeat(129);
+        match register_user(&db, "long@example.com", &long_pw, None, None, false).await {
+            Err(AppError::ValidationError(_)) => {}
+            Err(other) => panic!("expected ValidationError, got: {other:?}"),
+            Ok(_) => panic!("expected error for long password"),
+        }
+    }
+
+    #[tokio::test]
+    async fn register_user_duplicate_email_returns_fake_success() {
+        let Some(db) = crate::test_utils::connect_test_database("auth_reg_dup").await else {
+            eprintln!("skipping: no local MongoDB available");
+            return;
+        };
+        crate::services::role_service::seed_system_roles(&db)
+            .await
+            .unwrap();
+
+        register_user(&db, "dup@example.com", "password123", None, None, false)
+            .await
+            .expect("first register");
+
+        let result = register_user(&db, "dup@example.com", "password456", None, None, false)
+            .await
+            .expect("duplicate should return fake success");
+
+        assert!(!result.actually_created);
+    }
+
+    #[tokio::test]
+    async fn register_user_auto_verify_sets_email_verified() {
+        let Some(db) = crate::test_utils::connect_test_database("auth_reg_auto").await else {
+            eprintln!("skipping: no local MongoDB available");
+            return;
+        };
+        crate::services::role_service::seed_system_roles(&db)
+            .await
+            .unwrap();
+
+        let result = register_user(&db, "auto@example.com", "password123", None, None, true)
+            .await
+            .expect("register with auto-verify");
+
+        let stored = db
+            .collection::<User>(USERS)
+            .find_one(doc! { "_id": &result.user_id })
+            .await
+            .unwrap()
+            .expect("user in db");
+        assert!(stored.email_verified);
+        assert!(stored.email_verification_token.is_none());
+    }
+
+    #[tokio::test]
+    async fn authenticate_user_wrong_password() {
+        let Some(db) = crate::test_utils::connect_test_database("auth_pw_wrong").await else {
+            eprintln!("skipping: no local MongoDB available");
+            return;
+        };
+        crate::services::role_service::seed_system_roles(&db)
+            .await
+            .unwrap();
+
+        register_user(&db, "user@example.com", "correct-pw-1", None, None, true)
+            .await
+            .expect("register");
+
+        let err = authenticate_user(&db, "user@example.com", "wrong-password")
+            .await
+            .expect_err("wrong password");
+        assert!(matches!(err, AppError::AuthenticationFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn authenticate_user_inactive_user() {
+        let Some(db) = crate::test_utils::connect_test_database("auth_inactive").await else {
+            eprintln!("skipping: no local MongoDB available");
+            return;
+        };
+        crate::services::role_service::seed_system_roles(&db)
+            .await
+            .unwrap();
+
+        let result = register_user(&db, "inactive@example.com", "password123", None, None, true)
+            .await
+            .expect("register");
+
+        db.collection::<User>(USERS)
+            .update_one(
+                doc! { "_id": &result.user_id },
+                doc! { "$set": { "is_active": false } },
+            )
+            .await
+            .unwrap();
+
+        let err = authenticate_user(&db, "inactive@example.com", "password123")
+            .await
+            .expect_err("inactive user");
+        assert!(matches!(err, AppError::Forbidden(_)));
+    }
+
+    #[tokio::test]
+    async fn authenticate_user_social_only_no_password() {
+        let Some(db) = crate::test_utils::connect_test_database("auth_social").await else {
+            eprintln!("skipping: no local MongoDB available");
+            return;
+        };
+
+        let mut user = make_person();
+        user.email = "social@example.com".to_string();
+        user.password_hash = None;
+        user.social_provider = Some("google".to_string());
+        db.collection::<User>(USERS)
+            .insert_one(&user)
+            .await
+            .unwrap();
+
+        let err = authenticate_user(&db, "social@example.com", "anything")
+            .await
+            .expect_err("social-only user");
+        assert!(matches!(err, AppError::AuthenticationFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn authenticate_user_happy_path() {
+        let Some(db) = crate::test_utils::connect_test_database("auth_login_ok").await else {
+            eprintln!("skipping: no local MongoDB available");
+            return;
+        };
+        crate::services::role_service::seed_system_roles(&db)
+            .await
+            .unwrap();
+
+        register_user(&db, "good@example.com", "password123", None, None, true)
+            .await
+            .expect("register");
+
+        let user = authenticate_user(&db, "good@example.com", "password123")
+            .await
+            .expect("login");
+        assert_eq!(user.email, "good@example.com");
+    }
+
+    #[tokio::test]
+    async fn authenticate_user_nonexistent_email() {
+        let Some(db) = crate::test_utils::connect_test_database("auth_nouser").await else {
+            eprintln!("skipping: no local MongoDB available");
+            return;
+        };
+
+        let err = authenticate_user(&db, "nobody@example.com", "password123")
+            .await
+            .expect_err("nonexistent email");
+        assert!(matches!(err, AppError::AuthenticationFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn authenticate_user_over_max_length_password() {
+        let Some(db) = crate::test_utils::connect_test_database("auth_maxpw").await else {
+            eprintln!("skipping: no local MongoDB available");
+            return;
+        };
+
+        let long_pw = "a".repeat(129);
+        let err = authenticate_user(&db, "any@example.com", &long_pw)
+            .await
+            .expect_err("over max length");
+        assert!(matches!(err, AppError::AuthenticationFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn verify_email_invalid_token() {
+        let Some(db) = crate::test_utils::connect_test_database("auth_verify_bad").await else {
+            eprintln!("skipping: no local MongoDB available");
+            return;
+        };
+
+        let err = verify_email(&db, "invalid-token-value")
+            .await
+            .expect_err("invalid token");
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn verify_email_already_verified() {
+        let Some(db) = crate::test_utils::connect_test_database("auth_verify_dup").await else {
+            eprintln!("skipping: no local MongoDB available");
+            return;
+        };
+        crate::services::role_service::seed_system_roles(&db)
+            .await
+            .unwrap();
+
+        let reg = register_user(&db, "verify@example.com", "password123", None, None, false)
+            .await
+            .expect("register");
+
+        verify_email(&db, &reg.email_verification_token)
+            .await
+            .expect("first verify");
+
+        let err = verify_email(&db, &reg.email_verification_token)
+            .await
+            .expect_err("already verified");
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn verify_email_happy_path() {
+        let Some(db) = crate::test_utils::connect_test_database("auth_verify_ok").await else {
+            eprintln!("skipping: no local MongoDB available");
+            return;
+        };
+        crate::services::role_service::seed_system_roles(&db)
+            .await
+            .unwrap();
+
+        let reg = register_user(&db, "hvp@example.com", "password123", None, None, false)
+            .await
+            .expect("register");
+        assert!(reg.actually_created);
+
+        let user_id = verify_email(&db, &reg.email_verification_token)
+            .await
+            .expect("verify");
+        assert_eq!(user_id, reg.user_id);
+
+        let stored = db
+            .collection::<User>(USERS)
+            .find_one(doc! { "_id": &reg.user_id })
+            .await
+            .unwrap()
+            .expect("user");
+        assert!(stored.email_verified);
+        assert!(stored.email_verification_token.is_none());
+    }
+
+    #[tokio::test]
+    async fn initiate_password_reset_unknown_email_returns_none() {
+        let Some(db) = crate::test_utils::connect_test_database("auth_reset_none").await else {
+            eprintln!("skipping: no local MongoDB available");
+            return;
+        };
+
+        let result = initiate_password_reset(&db, "unknown@example.com")
+            .await
+            .expect("should not error");
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn initiate_password_reset_happy_path() {
+        let Some(db) = crate::test_utils::connect_test_database("auth_reset_ok").await else {
+            eprintln!("skipping: no local MongoDB available");
+            return;
+        };
+        crate::services::role_service::seed_system_roles(&db)
+            .await
+            .unwrap();
+
+        register_user(&db, "reset@example.com", "password123", None, None, true)
+            .await
+            .expect("register");
+
+        let token = initiate_password_reset(&db, "reset@example.com")
+            .await
+            .expect("initiate")
+            .expect("should return token");
+        assert!(!token.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reset_password_short_password() {
+        let Some(db) = crate::test_utils::connect_test_database("auth_rp_short").await else {
+            eprintln!("skipping: no local MongoDB available");
+            return;
+        };
+
+        let err = reset_password(&db, "some-token", "short")
+            .await
+            .expect_err("short password");
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn reset_password_long_password() {
+        let Some(db) = crate::test_utils::connect_test_database("auth_rp_long").await else {
+            eprintln!("skipping: no local MongoDB available");
+            return;
+        };
+
+        let long_pw = "a".repeat(129);
+        let err = reset_password(&db, "some-token", &long_pw)
+            .await
+            .expect_err("long password");
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn reset_password_invalid_token() {
+        let Some(db) = crate::test_utils::connect_test_database("auth_rp_bad").await else {
+            eprintln!("skipping: no local MongoDB available");
+            return;
+        };
+
+        let err = reset_password(&db, "invalid-token-value", "newpassword1")
+            .await
+            .expect_err("invalid token");
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn reset_password_expired_token() {
+        let Some(db) = crate::test_utils::connect_test_database("auth_rp_exp").await else {
+            eprintln!("skipping: no local MongoDB available");
+            return;
+        };
+        crate::services::role_service::seed_system_roles(&db)
+            .await
+            .unwrap();
+
+        let reg = register_user(&db, "expired@example.com", "password123", None, None, true)
+            .await
+            .expect("register");
+
+        let token = initiate_password_reset(&db, "expired@example.com")
+            .await
+            .expect("initiate")
+            .expect("token");
+
+        let past = Utc::now() - chrono::Duration::hours(2);
+        db.collection::<User>(USERS)
+            .update_one(
+                doc! { "_id": &reg.user_id },
+                doc! { "$set": {
+                    "password_reset_expires_at": bson::DateTime::from_chrono(past),
+                }},
+            )
+            .await
+            .unwrap();
+
+        let err = reset_password(&db, &token, "newpassword1")
+            .await
+            .expect_err("expired token");
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn reset_password_happy_path() {
+        let Some(db) = crate::test_utils::connect_test_database("auth_rp_ok").await else {
+            eprintln!("skipping: no local MongoDB available");
+            return;
+        };
+        crate::services::role_service::seed_system_roles(&db)
+            .await
+            .unwrap();
+
+        register_user(&db, "rp-ok@example.com", "oldpassword1", None, None, true)
+            .await
+            .expect("register");
+
+        let token = initiate_password_reset(&db, "rp-ok@example.com")
+            .await
+            .expect("initiate")
+            .expect("token");
+
+        reset_password(&db, &token, "newpassword1")
+            .await
+            .expect("reset");
+
+        let err = authenticate_user(&db, "rp-ok@example.com", "oldpassword1")
+            .await
+            .expect_err("old password should fail");
+        assert!(matches!(err, AppError::AuthenticationFailed(_)));
+
+        let user = authenticate_user(&db, "rp-ok@example.com", "newpassword1")
+            .await
+            .expect("new password should work");
+        assert_eq!(user.email, "rp-ok@example.com");
+    }
 }

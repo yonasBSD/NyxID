@@ -16,6 +16,7 @@ use crate::services::oauth_flow;
 use crate::services::user_credentials_service;
 
 /// Decrypted token ready for injection.
+#[derive(Debug)]
 pub struct DecryptedProviderToken {
     pub token_type: String,
     pub access_token: Option<String>,
@@ -3646,6 +3647,669 @@ mod tests {
         let err = ensure_additional_scopes_supported(&provider, &["scope".to_string()])
             .expect_err("telegram_widget should reject scopes");
         assert!(err.to_string().contains("does not support OAuth scopes"));
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // Integration tests: get_active_token, list_user_tokens,
+    // disconnect_provider, store_api_key (additional coverage)
+    // ───────────────────────────────────────────────────────────────────
+    use crate::models::user_provider_token::COLLECTION_NAME as USER_PROVIDER_TOKENS;
+
+    /// Helper: insert a UserProviderToken directly into the DB for test setup.
+    async fn insert_test_token(db: &mongodb::Database, token: &UserProviderToken) {
+        db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+            .insert_one(token)
+            .await
+            .expect("insert test token");
+    }
+
+    /// Helper: build an api_key-type token with encrypted key, ready for DB insert.
+    async fn make_api_key_token(
+        enc: &crate::crypto::aes::EncryptionKeys,
+        user_id: &str,
+        provider_id: &str,
+        api_key_value: &str,
+        status: &str,
+    ) -> UserProviderToken {
+        let now = Utc::now();
+        let encrypted = enc.encrypt(api_key_value.as_bytes()).await.unwrap();
+        UserProviderToken {
+            id: Uuid::new_v4().to_string(),
+            user_id: user_id.to_string(),
+            provider_config_id: provider_id.to_string(),
+            connection_id: None,
+            credential_user_id: None,
+            token_type: "api_key".to_string(),
+            access_token_encrypted: None,
+            refresh_token_encrypted: None,
+            token_scopes: None,
+            expires_at: None,
+            api_key_encrypted: Some(encrypted),
+            status: status.to_string(),
+            last_refreshed_at: None,
+            last_used_at: None,
+            error_message: None,
+            label: Some("test-api-key".to_string()),
+            metadata: None,
+            gateway_url: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    /// Helper: build an oauth2-type token with encrypted access token.
+    async fn make_oauth_token(
+        enc: &crate::crypto::aes::EncryptionKeys,
+        user_id: &str,
+        provider_id: &str,
+        access_token: &str,
+        status: &str,
+        expires_at: Option<chrono::DateTime<Utc>>,
+    ) -> UserProviderToken {
+        let now = Utc::now();
+        let access_enc = enc.encrypt(access_token.as_bytes()).await.unwrap();
+        UserProviderToken {
+            id: Uuid::new_v4().to_string(),
+            user_id: user_id.to_string(),
+            provider_config_id: provider_id.to_string(),
+            connection_id: None,
+            credential_user_id: None,
+            token_type: "oauth2".to_string(),
+            access_token_encrypted: Some(access_enc),
+            refresh_token_encrypted: None,
+            token_scopes: Some("openid".to_string()),
+            expires_at,
+            api_key_encrypted: None,
+            status: status.to_string(),
+            last_refreshed_at: None,
+            last_used_at: None,
+            error_message: None,
+            label: None,
+            metadata: None,
+            gateway_url: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    // --- get_active_token tests ---
+
+    #[tokio::test]
+    async fn get_active_token_returns_decrypted_api_key() {
+        let Some(db) = connect_test_database("ut_svc_get_active_api_key").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = Uuid::new_v4().to_string();
+        let provider_id = Uuid::new_v4().to_string();
+
+        let token =
+            make_api_key_token(&enc, &user_id, &provider_id, "sk-secret-123", "active").await;
+        insert_test_token(&db, &token).await;
+
+        let result = super::get_active_token(&db, &enc, &user_id, &provider_id)
+            .await
+            .expect("should return decrypted token");
+
+        assert_eq!(result.token_type, "api_key");
+        assert_eq!(result.api_key.as_deref(), Some("sk-secret-123"));
+        assert!(result.access_token.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_active_token_returns_decrypted_oauth2_token() {
+        let Some(db) = connect_test_database("ut_svc_get_active_oauth2").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = Uuid::new_v4().to_string();
+        let provider_id = Uuid::new_v4().to_string();
+
+        // Token that expires far in the future (no refresh needed)
+        let far_future = Utc::now() + Duration::hours(24);
+        let token = make_oauth_token(
+            &enc,
+            &user_id,
+            &provider_id,
+            "access-token-xyz",
+            "active",
+            Some(far_future),
+        )
+        .await;
+        insert_test_token(&db, &token).await;
+
+        let result = super::get_active_token(&db, &enc, &user_id, &provider_id)
+            .await
+            .expect("should return decrypted token");
+
+        assert_eq!(result.token_type, "oauth2");
+        assert_eq!(result.access_token.as_deref(), Some("access-token-xyz"));
+        assert!(result.api_key.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_active_token_updates_last_used_at() {
+        let Some(db) = connect_test_database("ut_svc_get_active_last_used").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = Uuid::new_v4().to_string();
+        let provider_id = Uuid::new_v4().to_string();
+
+        let token = make_api_key_token(&enc, &user_id, &provider_id, "key-abc", "active").await;
+        let token_id = token.id.clone();
+        assert!(token.last_used_at.is_none());
+        insert_test_token(&db, &token).await;
+
+        let _ = super::get_active_token(&db, &enc, &user_id, &provider_id)
+            .await
+            .unwrap();
+
+        // Verify last_used_at was set in the DB
+        let updated = db
+            .collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+            .find_one(doc! { "_id": &token_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            updated.last_used_at.is_some(),
+            "last_used_at should be set after get_active_token"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_active_token_finds_expired_status_tokens() {
+        // get_active_token queries for status in ["active", "expired"]
+        let Some(db) = connect_test_database("ut_svc_get_active_expired_status").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = Uuid::new_v4().to_string();
+        let provider_id = Uuid::new_v4().to_string();
+
+        let token =
+            make_api_key_token(&enc, &user_id, &provider_id, "key-expired", "expired").await;
+        insert_test_token(&db, &token).await;
+
+        let result = super::get_active_token(&db, &enc, &user_id, &provider_id)
+            .await
+            .expect("should find expired-status token");
+        assert_eq!(result.api_key.as_deref(), Some("key-expired"));
+    }
+
+    #[tokio::test]
+    async fn get_active_token_not_found_for_revoked() {
+        let Some(db) = connect_test_database("ut_svc_get_active_revoked").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = Uuid::new_v4().to_string();
+        let provider_id = Uuid::new_v4().to_string();
+
+        let token =
+            make_api_key_token(&enc, &user_id, &provider_id, "key-revoked", "revoked").await;
+        insert_test_token(&db, &token).await;
+
+        let result = super::get_active_token(&db, &enc, &user_id, &provider_id).await;
+        assert!(result.is_err(), "should not find revoked token");
+        assert!(matches!(result.unwrap_err(), AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn get_active_token_not_found_when_empty() {
+        let Some(db) = connect_test_database("ut_svc_get_active_empty").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = Uuid::new_v4().to_string();
+        let provider_id = Uuid::new_v4().to_string();
+
+        let result = super::get_active_token(&db, &enc, &user_id, &provider_id).await;
+        assert!(result.is_err(), "should return NotFound");
+        assert!(matches!(result.unwrap_err(), AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn get_active_token_rejects_unknown_token_type() {
+        let Some(db) = connect_test_database("ut_svc_get_active_unknown_type").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = Uuid::new_v4().to_string();
+        let provider_id = Uuid::new_v4().to_string();
+
+        let now = Utc::now();
+        let token = UserProviderToken {
+            id: Uuid::new_v4().to_string(),
+            user_id: user_id.clone(),
+            provider_config_id: provider_id.clone(),
+            connection_id: None,
+            credential_user_id: None,
+            token_type: "unknown_type".to_string(),
+            access_token_encrypted: None,
+            refresh_token_encrypted: None,
+            token_scopes: None,
+            expires_at: None,
+            api_key_encrypted: None,
+            status: "active".to_string(),
+            last_refreshed_at: None,
+            last_used_at: None,
+            error_message: None,
+            label: None,
+            metadata: None,
+            gateway_url: None,
+            created_at: now,
+            updated_at: now,
+        };
+        insert_test_token(&db, &token).await;
+
+        let result = super::get_active_token(&db, &enc, &user_id, &provider_id).await;
+        assert!(result.is_err(), "unknown token_type should error");
+        let err = result.unwrap_err();
+        assert!(matches!(err, AppError::Internal(_)));
+        assert!(err.to_string().contains("Unknown token type"));
+    }
+
+    // --- list_user_tokens tests ---
+
+    #[tokio::test]
+    async fn list_user_tokens_returns_empty_for_new_user() {
+        let Some(db) = connect_test_database("ut_svc_list_empty").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let result = super::list_user_tokens(&db, &user_id).await.unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_user_tokens_returns_active_tokens_with_provider_info() {
+        let Some(db) = connect_test_database("ut_svc_list_with_provider").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = Uuid::new_v4().to_string();
+        let provider_id = Uuid::new_v4().to_string();
+
+        // Insert a provider config
+        let mut provider = make_provider("api_key");
+        provider.id = provider_id.clone();
+        provider.name = "Anthropic".to_string();
+        provider.slug = "anthropic".to_string();
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+
+        // Insert an active token
+        let token = make_api_key_token(&enc, &user_id, &provider_id, "key-123", "active").await;
+        insert_test_token(&db, &token).await;
+
+        let result = super::list_user_tokens(&db, &user_id).await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].provider_name, "Anthropic");
+        assert_eq!(result[0].provider_slug, "anthropic");
+        assert_eq!(result[0].status, "active");
+        assert_eq!(result[0].token_type, "api_key");
+        assert_eq!(result[0].label.as_deref(), Some("test-api-key"));
+    }
+
+    #[tokio::test]
+    async fn list_user_tokens_excludes_revoked_tokens() {
+        let Some(db) = connect_test_database("ut_svc_list_excludes_revoked").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = Uuid::new_v4().to_string();
+        let provider_id = Uuid::new_v4().to_string();
+
+        let active_token =
+            make_api_key_token(&enc, &user_id, &provider_id, "active-key", "active").await;
+        insert_test_token(&db, &active_token).await;
+
+        let provider_id_2 = Uuid::new_v4().to_string();
+        let revoked_token =
+            make_api_key_token(&enc, &user_id, &provider_id_2, "revoked-key", "revoked").await;
+        insert_test_token(&db, &revoked_token).await;
+
+        let result = super::list_user_tokens(&db, &user_id).await.unwrap();
+        assert_eq!(result.len(), 1, "revoked token should be excluded");
+        assert_eq!(result[0].provider_config_id, provider_id);
+    }
+
+    #[tokio::test]
+    async fn list_user_tokens_handles_missing_provider_gracefully() {
+        let Some(db) = connect_test_database("ut_svc_list_missing_provider").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = Uuid::new_v4().to_string();
+        let provider_id = Uuid::new_v4().to_string();
+
+        // Insert token but NO provider config
+        let token = make_api_key_token(&enc, &user_id, &provider_id, "orphan-key", "active").await;
+        insert_test_token(&db, &token).await;
+
+        let result = super::list_user_tokens(&db, &user_id).await.unwrap();
+        assert_eq!(result.len(), 1);
+        // Falls back to "Unknown" when provider is missing
+        assert_eq!(result[0].provider_name, "Unknown");
+        assert_eq!(result[0].provider_slug, "unknown");
+    }
+
+    #[tokio::test]
+    async fn list_user_tokens_multiple_providers_batch_resolved() {
+        let Some(db) = connect_test_database("ut_svc_list_multi_providers").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = Uuid::new_v4().to_string();
+
+        // Create two providers
+        let pid1 = Uuid::new_v4().to_string();
+        let mut p1 = make_provider("api_key");
+        p1.id = pid1.clone();
+        p1.slug = "provider-alpha".to_string();
+        p1.name = "Alpha".to_string();
+
+        let pid2 = Uuid::new_v4().to_string();
+        let mut p2 = make_provider("api_key");
+        p2.id = pid2.clone();
+        p2.slug = "provider-beta".to_string();
+        p2.name = "Beta".to_string();
+
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&p1)
+            .await
+            .unwrap();
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&p2)
+            .await
+            .unwrap();
+
+        let t1 = make_api_key_token(&enc, &user_id, &pid1, "k1", "active").await;
+        let t2 = make_api_key_token(&enc, &user_id, &pid2, "k2", "active").await;
+        insert_test_token(&db, &t1).await;
+        insert_test_token(&db, &t2).await;
+
+        let result = super::list_user_tokens(&db, &user_id).await.unwrap();
+        assert_eq!(result.len(), 2);
+        let slugs: Vec<&str> = result.iter().map(|s| s.provider_slug.as_str()).collect();
+        assert!(slugs.contains(&"provider-alpha"));
+        assert!(slugs.contains(&"provider-beta"));
+    }
+
+    // --- disconnect_provider tests ---
+
+    #[tokio::test]
+    async fn disconnect_provider_marks_token_as_revoked() {
+        let Some(db) = connect_test_database("ut_svc_disconnect_revoke").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = Uuid::new_v4().to_string();
+        let provider_id = Uuid::new_v4().to_string();
+
+        let token =
+            make_api_key_token(&enc, &user_id, &provider_id, "key-to-revoke", "active").await;
+        let token_id = token.id.clone();
+        insert_test_token(&db, &token).await;
+
+        super::disconnect_provider(&db, &enc, &user_id, &provider_id)
+            .await
+            .expect("disconnect should succeed");
+
+        // Verify token status is now "revoked" and credentials are cleared
+        let updated = db
+            .collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+            .find_one(doc! { "_id": &token_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.status, "revoked");
+        assert!(
+            updated.api_key_encrypted.is_none(),
+            "encrypted key should be cleared"
+        );
+        assert!(updated.access_token_encrypted.is_none());
+        assert!(updated.refresh_token_encrypted.is_none());
+    }
+
+    #[tokio::test]
+    async fn disconnect_provider_not_found_when_no_token() {
+        let Some(db) = connect_test_database("ut_svc_disconnect_not_found").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = Uuid::new_v4().to_string();
+        let provider_id = Uuid::new_v4().to_string();
+
+        let err = super::disconnect_provider(&db, &enc, &user_id, &provider_id)
+            .await
+            .expect_err("should return NotFound");
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn disconnect_provider_not_found_when_already_revoked() {
+        let Some(db) = connect_test_database("ut_svc_disconnect_already_revoked").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = Uuid::new_v4().to_string();
+        let provider_id = Uuid::new_v4().to_string();
+
+        let token = make_api_key_token(&enc, &user_id, &provider_id, "key", "revoked").await;
+        insert_test_token(&db, &token).await;
+
+        let err = super::disconnect_provider(&db, &enc, &user_id, &provider_id)
+            .await
+            .expect_err("should return NotFound for already-revoked token");
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn disconnect_provider_then_get_active_returns_not_found() {
+        // End-to-end: disconnect, then verify get_active_token fails
+        let Some(db) = connect_test_database("ut_svc_disconnect_then_get").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = Uuid::new_v4().to_string();
+        let provider_id = Uuid::new_v4().to_string();
+
+        let token = make_api_key_token(&enc, &user_id, &provider_id, "key-e2e", "active").await;
+        insert_test_token(&db, &token).await;
+
+        // Confirm we can get it
+        let result = super::get_active_token(&db, &enc, &user_id, &provider_id).await;
+        assert!(result.is_ok());
+
+        // Disconnect
+        super::disconnect_provider(&db, &enc, &user_id, &provider_id)
+            .await
+            .unwrap();
+
+        // Now get_active_token should fail
+        let result = super::get_active_token(&db, &enc, &user_id, &provider_id).await;
+        assert!(result.is_err(), "should not find token after disconnect");
+        assert!(matches!(result.unwrap_err(), AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn disconnect_provider_then_list_excludes_it() {
+        let Some(db) = connect_test_database("ut_svc_disconnect_then_list").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = Uuid::new_v4().to_string();
+        let provider_id = Uuid::new_v4().to_string();
+
+        let token = make_api_key_token(&enc, &user_id, &provider_id, "listed-key", "active").await;
+        insert_test_token(&db, &token).await;
+
+        assert_eq!(
+            super::list_user_tokens(&db, &user_id).await.unwrap().len(),
+            1
+        );
+
+        super::disconnect_provider(&db, &enc, &user_id, &provider_id)
+            .await
+            .unwrap();
+
+        let after = super::list_user_tokens(&db, &user_id).await.unwrap();
+        assert!(after.is_empty(), "revoked token should not appear in list");
+    }
+
+    // --- store_api_key + get_active_token round-trip ---
+
+    #[tokio::test]
+    async fn store_api_key_then_get_active_token_roundtrip() {
+        let Some(db) = connect_test_database("ut_svc_store_then_get").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = Uuid::new_v4().to_string();
+        let provider_id = Uuid::new_v4().to_string();
+
+        let mut provider = make_provider("api_key");
+        provider.id = provider_id.clone();
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+
+        super::store_api_key(
+            &db,
+            &enc,
+            &user_id,
+            &provider_id,
+            "roundtrip-key",
+            Some("RT"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let result = super::get_active_token(&db, &enc, &user_id, &provider_id)
+            .await
+            .unwrap();
+        assert_eq!(result.token_type, "api_key");
+        assert_eq!(result.api_key.as_deref(), Some("roundtrip-key"));
+    }
+
+    #[tokio::test]
+    async fn store_api_key_with_gateway_url_roundtrip() {
+        let Some(db) = connect_test_database("ut_svc_store_gateway_url").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = Uuid::new_v4().to_string();
+        let provider_id = Uuid::new_v4().to_string();
+
+        let mut provider = make_provider("api_key");
+        provider.id = provider_id.clone();
+        provider.requires_gateway_url = true;
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+
+        let token = super::store_api_key(
+            &db,
+            &enc,
+            &user_id,
+            &provider_id,
+            "gw-key",
+            Some("OpenClaw"),
+            Some("http://localhost:18789"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(token.gateway_url.as_deref(), Some("http://localhost:18789"));
+        assert_eq!(token.label.as_deref(), Some("OpenClaw"));
+    }
+
+    #[tokio::test]
+    async fn store_api_key_rejects_empty_key() {
+        let Some(db) = connect_test_database("ut_svc_store_empty_key").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = Uuid::new_v4().to_string();
+        let provider_id = Uuid::new_v4().to_string();
+
+        let mut provider = make_provider("api_key");
+        provider.id = provider_id.clone();
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+
+        let err = super::store_api_key(&db, &enc, &user_id, &provider_id, "", None, None)
+            .await
+            .expect_err("empty key should be rejected");
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn store_api_key_rejects_inactive_provider() {
+        let Some(db) = connect_test_database("ut_svc_store_inactive_provider").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = Uuid::new_v4().to_string();
+        let provider_id = Uuid::new_v4().to_string();
+
+        let mut provider = make_provider("api_key");
+        provider.id = provider_id.clone();
+        provider.is_active = false;
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+
+        let err = super::store_api_key(&db, &enc, &user_id, &provider_id, "key", None, None)
+            .await
+            .expect_err("inactive provider should be rejected");
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    // --- peek_oauth_state tests ---
+
+    #[tokio::test]
+    async fn peek_oauth_state_returns_not_found_for_missing() {
+        let Some(db) = connect_test_database("ut_svc_peek_state_missing").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let err = super::peek_oauth_state(&db, "nonexistent-state-id")
+            .await
+            .expect_err("should return error for missing state");
+        assert!(matches!(err, AppError::BadRequest(_)));
     }
 
     #[tokio::test]

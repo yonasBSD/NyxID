@@ -1251,4 +1251,321 @@ mod tests {
                 .is_err()
         );
     }
+
+    // ---- is_auto_discovered_openapi_spec_url ----
+
+    #[test]
+    fn auto_discovered_openapi_matches_probe_paths() {
+        assert!(super::is_auto_discovered_openapi_spec_url(
+            "https://api.example.com",
+            "https://api.example.com/openapi.json"
+        ));
+        assert!(super::is_auto_discovered_openapi_spec_url(
+            "https://api.example.com",
+            "https://api.example.com/swagger.json"
+        ));
+        assert!(super::is_auto_discovered_openapi_spec_url(
+            "https://api.example.com",
+            "https://api.example.com/docs/openapi.json"
+        ));
+        assert!(super::is_auto_discovered_openapi_spec_url(
+            "https://api.example.com",
+            "https://api.example.com/.well-known/openapi"
+        ));
+    }
+
+    #[test]
+    fn auto_discovered_openapi_rejects_non_probe_urls() {
+        assert!(!super::is_auto_discovered_openapi_spec_url(
+            "https://api.example.com",
+            "https://api.example.com/custom/spec.json"
+        ));
+        assert!(!super::is_auto_discovered_openapi_spec_url(
+            "https://api.example.com",
+            "https://other.example.com/openapi.json"
+        ));
+    }
+
+    #[test]
+    fn auto_discovered_openapi_strips_trailing_slash_from_base() {
+        assert!(super::is_auto_discovered_openapi_spec_url(
+            "https://api.example.com/",
+            "https://api.example.com/openapi.json"
+        ));
+    }
+
+    // ---- is_auto_discovered_asyncapi_spec_url ----
+
+    #[test]
+    fn auto_discovered_asyncapi_matches_probe_paths() {
+        assert!(super::is_auto_discovered_asyncapi_spec_url(
+            "https://api.example.com",
+            "https://api.example.com/asyncapi.json"
+        ));
+        assert!(super::is_auto_discovered_asyncapi_spec_url(
+            "https://api.example.com",
+            "https://api.example.com/.well-known/asyncapi"
+        ));
+    }
+
+    #[test]
+    fn auto_discovered_asyncapi_rejects_openapi_paths() {
+        assert!(!super::is_auto_discovered_asyncapi_spec_url(
+            "https://api.example.com",
+            "https://api.example.com/openapi.json"
+        ));
+    }
+
+    // ---- escape_html ----
+
+    #[test]
+    fn escape_html_handles_all_special_chars() {
+        assert_eq!(super::escape_html("&<>\"'"), "&amp;&lt;&gt;&quot;&#x27;");
+    }
+
+    #[test]
+    fn escape_html_passes_through_safe_text() {
+        assert_eq!(super::escape_html("hello world 123"), "hello world 123");
+    }
+
+    #[test]
+    fn escape_html_handles_empty_string() {
+        assert_eq!(super::escape_html(""), "");
+    }
+
+    #[test]
+    fn escape_html_handles_mixed_content() {
+        assert_eq!(
+            super::escape_html("user <script>alert('xss')</script>"),
+            "user &lt;script&gt;alert(&#x27;xss&#x27;)&lt;/script&gt;"
+        );
+    }
+
+    // ---- is_blocked_fetch_hostname ----
+
+    #[test]
+    fn blocked_fetch_hostname_rejects_localhost() {
+        assert!(super::is_blocked_fetch_hostname("localhost"));
+        assert!(super::is_blocked_fetch_hostname("LOCALHOST"));
+        assert!(super::is_blocked_fetch_hostname("LocalHost."));
+    }
+
+    #[test]
+    fn blocked_fetch_hostname_rejects_cloud_metadata() {
+        assert!(super::is_blocked_fetch_hostname("metadata.google.internal"));
+        assert!(super::is_blocked_fetch_hostname(
+            "metadata.google.internal."
+        ));
+    }
+
+    #[test]
+    fn blocked_fetch_hostname_allows_public_hosts() {
+        assert!(!super::is_blocked_fetch_hostname("api.example.com"));
+        assert!(!super::is_blocked_fetch_hostname("example.com"));
+    }
+
+    // ---- normalize_fetch_host ----
+
+    #[test]
+    fn normalize_fetch_host_lowercases() {
+        assert_eq!(
+            super::normalize_fetch_host("API.Example.COM"),
+            "api.example.com"
+        );
+    }
+
+    #[test]
+    fn normalize_fetch_host_strips_brackets() {
+        assert_eq!(super::normalize_fetch_host("[::1]"), "::1");
+    }
+
+    #[test]
+    fn normalize_fetch_host_strips_trailing_dot() {
+        assert_eq!(super::normalize_fetch_host("example.com."), "example.com");
+    }
+
+    #[test]
+    fn normalize_fetch_host_trims_whitespace() {
+        assert_eq!(
+            super::normalize_fetch_host("  example.com  "),
+            "example.com"
+        );
+    }
+
+    #[test]
+    fn normalize_fetch_host_all_normalizations_combined() {
+        assert_eq!(
+            super::normalize_fetch_host("  [API.Example.COM.]  "),
+            "api.example.com"
+        );
+    }
+
+    // ---- is_private_or_internal_ip ----
+
+    #[test]
+    fn private_ip_detects_loopback_v4() {
+        let ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+        assert!(super::is_private_or_internal_ip(ip));
+    }
+
+    #[test]
+    fn private_ip_detects_rfc1918_ranges() {
+        let ip_10: std::net::IpAddr = "10.0.0.1".parse().unwrap();
+        let ip_172: std::net::IpAddr = "172.16.0.1".parse().unwrap();
+        let ip_192: std::net::IpAddr = "192.168.1.1".parse().unwrap();
+        assert!(super::is_private_or_internal_ip(ip_10));
+        assert!(super::is_private_or_internal_ip(ip_172));
+        assert!(super::is_private_or_internal_ip(ip_192));
+    }
+
+    #[test]
+    fn private_ip_detects_link_local_v4() {
+        let ip: std::net::IpAddr = "169.254.1.1".parse().unwrap();
+        assert!(super::is_private_or_internal_ip(ip));
+    }
+
+    #[test]
+    fn private_ip_detects_loopback_v6() {
+        let ip: std::net::IpAddr = "::1".parse().unwrap();
+        assert!(super::is_private_or_internal_ip(ip));
+    }
+
+    #[test]
+    fn private_ip_detects_ula_v6() {
+        let ip: std::net::IpAddr = "fd00::1".parse().unwrap();
+        assert!(super::is_private_or_internal_ip(ip));
+    }
+
+    #[test]
+    fn private_ip_detects_link_local_v6() {
+        let ip: std::net::IpAddr = "fe80::1".parse().unwrap();
+        assert!(super::is_private_or_internal_ip(ip));
+    }
+
+    #[test]
+    fn private_ip_detects_mapped_v4_in_v6() {
+        // ::ffff:127.0.0.1 is an IPv4-mapped IPv6 address for loopback
+        let ip: std::net::IpAddr = "::ffff:127.0.0.1".parse().unwrap();
+        assert!(super::is_private_or_internal_ip(ip));
+    }
+
+    #[test]
+    fn private_ip_allows_public_addresses() {
+        let ip: std::net::IpAddr = "8.8.8.8".parse().unwrap();
+        assert!(!super::is_private_or_internal_ip(ip));
+        let ip6: std::net::IpAddr = "2001:db8::1".parse().unwrap();
+        assert!(!super::is_private_or_internal_ip(ip6));
+    }
+
+    #[test]
+    fn private_ip_detects_unspecified() {
+        let v4: std::net::IpAddr = "0.0.0.0".parse().unwrap();
+        let v6: std::net::IpAddr = "::".parse().unwrap();
+        assert!(super::is_private_or_internal_ip(v4));
+        assert!(super::is_private_or_internal_ip(v6));
+    }
+
+    #[test]
+    fn private_ip_detects_broadcast() {
+        let ip: std::net::IpAddr = "255.255.255.255".parse().unwrap();
+        assert!(super::is_private_or_internal_ip(ip));
+    }
+
+    // ---- is_rfc6598_cgnat ----
+
+    #[test]
+    fn rfc6598_cgnat_detects_range_boundaries() {
+        assert!(super::is_rfc6598_cgnat("100.64.0.0".parse().unwrap()));
+        assert!(super::is_rfc6598_cgnat("100.127.255.255".parse().unwrap()));
+        assert!(super::is_rfc6598_cgnat("100.100.50.25".parse().unwrap()));
+    }
+
+    #[test]
+    fn rfc6598_cgnat_rejects_outside_range() {
+        assert!(!super::is_rfc6598_cgnat("100.63.255.255".parse().unwrap()));
+        assert!(!super::is_rfc6598_cgnat("100.128.0.0".parse().unwrap()));
+        assert!(!super::is_rfc6598_cgnat("8.8.8.8".parse().unwrap()));
+    }
+
+    // ---- detect_streaming_from_openapi (edge cases) ----
+
+    #[test]
+    fn detect_streaming_returns_false_for_empty_paths() {
+        let spec = serde_json::json!({"openapi": "3.1.0", "paths": {}});
+        assert!(!detect_streaming_from_openapi(&spec));
+    }
+
+    #[test]
+    fn detect_streaming_returns_false_without_paths_key() {
+        let spec = serde_json::json!({"openapi": "3.1.0"});
+        assert!(!detect_streaming_from_openapi(&spec));
+    }
+
+    #[test]
+    fn detect_streaming_finds_sse_in_post_method() {
+        let spec = serde_json::json!({
+            "openapi": "3.1.0",
+            "paths": {
+                "/chat/completions": {
+                    "post": {
+                        "responses": {
+                            "200": {
+                                "content": {
+                                    "text/event-stream": {}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        assert!(detect_streaming_from_openapi(&spec));
+    }
+
+    // ---- build_cache_key ----
+
+    #[test]
+    fn build_cache_key_unscoped_is_raw_url() {
+        let key = super::build_cache_key("https://example.com/spec.json", None);
+        assert_eq!(key, "https://example.com/spec.json");
+    }
+
+    #[test]
+    fn build_cache_key_scoped_includes_prefix() {
+        let key = super::build_cache_key("https://example.com/spec.json", Some("user-abc"));
+        assert_eq!(key, "scope:user-abc|https://example.com/spec.json");
+    }
+
+    // ---- redact_url_for_logs (additional edge cases) ----
+
+    #[test]
+    fn redact_url_handles_http_scheme() {
+        let redacted = super::redact_url_for_logs("http://example.com/api/v1");
+        assert_eq!(redacted, "http://example.com/api/v1");
+    }
+
+    #[test]
+    fn redact_url_strips_fragment() {
+        let redacted = super::redact_url_for_logs("https://example.com/docs#section");
+        assert_eq!(redacted, "https://example.com/docs");
+    }
+
+    // ---- build_asyncapi_document ----
+
+    #[test]
+    fn asyncapi_document_strips_trailing_slash_from_base_url() {
+        let doc = build_asyncapi_document("https://nyxid.example.com/");
+        assert_eq!(doc["servers"]["nyxid"]["host"], "https://nyxid.example.com");
+    }
+
+    #[test]
+    fn asyncapi_document_contains_all_expected_channels() {
+        let doc = build_asyncapi_document("https://nyxid.example.com");
+        let channels = doc["channels"].as_object().unwrap();
+        assert!(channels.contains_key("nodeAgent"));
+        assert!(channels.contains_key("sshTunnel"));
+        assert!(channels.contains_key("mcpHttp"));
+        assert!(channels.contains_key("proxySse"));
+        assert!(channels.contains_key("llmSse"));
+    }
 }

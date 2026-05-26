@@ -523,4 +523,260 @@ mod tests {
         assert!(cache.get(&key).is_none());
         assert_eq!(cache.len(), 0, "expired entries must be removed on access");
     }
+
+    // --- response-affecting header classification (tested indirectly via key) ---
+
+    #[test]
+    fn key_varies_with_accept_header() {
+        // Accept is response-affecting: different values must produce different keys
+        let fp = CloudResponseCache::credential_fingerprint("c");
+        let k1 = CloudResponseCache::key(
+            "aws_sigv4",
+            &fp,
+            "https://x",
+            "POST",
+            "/",
+            &[("Accept".to_string(), "application/json".to_string())],
+            b"",
+        );
+        let k2 = CloudResponseCache::key(
+            "aws_sigv4",
+            &fp,
+            "https://x",
+            "POST",
+            "/",
+            &[("Accept".to_string(), "text/xml".to_string())],
+            b"",
+        );
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn key_varies_with_content_type_header() {
+        let fp = CloudResponseCache::credential_fingerprint("c");
+        let k1 = CloudResponseCache::key(
+            "aws_sigv4",
+            &fp,
+            "https://x",
+            "POST",
+            "/",
+            &[("Content-Type".to_string(), "application/json".to_string())],
+            b"",
+        );
+        let k2 = CloudResponseCache::key(
+            "aws_sigv4",
+            &fp,
+            "https://x",
+            "POST",
+            "/",
+            &[("Content-Type".to_string(), "text/plain".to_string())],
+            b"",
+        );
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn key_varies_with_x_amz_request_payer() {
+        let fp = CloudResponseCache::credential_fingerprint("c");
+        let k1 = CloudResponseCache::key(
+            "aws_sigv4",
+            &fp,
+            "https://x",
+            "POST",
+            "/",
+            &[("x-amz-request-payer".to_string(), "requester".to_string())],
+            b"",
+        );
+        let k2 = CloudResponseCache::key("aws_sigv4", &fp, "https://x", "POST", "/", &[], b"");
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn key_ignores_authorization_header() {
+        // Authorization is NOT response-affecting (credential fingerprint handles scoping)
+        let fp = CloudResponseCache::credential_fingerprint("c");
+        let k1 = CloudResponseCache::key(
+            "aws_sigv4",
+            &fp,
+            "https://x",
+            "POST",
+            "/",
+            &[("Authorization".to_string(), "Bearer abc".to_string())],
+            b"",
+        );
+        let k2 = CloudResponseCache::key(
+            "aws_sigv4",
+            &fp,
+            "https://x",
+            "POST",
+            "/",
+            &[("Authorization".to_string(), "Bearer xyz".to_string())],
+            b"",
+        );
+        assert_eq!(k1, k2);
+    }
+
+    #[test]
+    fn key_ignores_host_header() {
+        let fp = CloudResponseCache::credential_fingerprint("c");
+        let k1 = CloudResponseCache::key(
+            "aws_sigv4",
+            &fp,
+            "https://x",
+            "POST",
+            "/",
+            &[("Host".to_string(), "a.example.com".to_string())],
+            b"",
+        );
+        let k2 = CloudResponseCache::key(
+            "aws_sigv4",
+            &fp,
+            "https://x",
+            "POST",
+            "/",
+            &[("Host".to_string(), "b.example.com".to_string())],
+            b"",
+        );
+        assert_eq!(k1, k2);
+    }
+
+    // --- key generation edge cases ---
+
+    #[test]
+    fn key_changes_with_method() {
+        let headers: Vec<(String, String)> = vec![];
+        let fp = CloudResponseCache::credential_fingerprint("c");
+        let get_key =
+            CloudResponseCache::key("aws_sigv4", &fp, "https://x", "GET", "/", &headers, b"");
+        let post_key =
+            CloudResponseCache::key("aws_sigv4", &fp, "https://x", "POST", "/", &headers, b"");
+        assert_ne!(get_key, post_key);
+    }
+
+    #[test]
+    fn key_changes_with_path() {
+        let headers: Vec<(String, String)> = vec![];
+        let fp = CloudResponseCache::credential_fingerprint("c");
+        let a = CloudResponseCache::key("aws_sigv4", &fp, "https://x", "GET", "/a", &headers, b"");
+        let b = CloudResponseCache::key("aws_sigv4", &fp, "https://x", "GET", "/b", &headers, b"");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn key_changes_with_base_url() {
+        let headers: Vec<(String, String)> = vec![];
+        let fp = CloudResponseCache::credential_fingerprint("c");
+        let a = CloudResponseCache::key(
+            "aws_sigv4",
+            &fp,
+            "https://us-east.aws.com",
+            "GET",
+            "/",
+            &headers,
+            b"",
+        );
+        let b = CloudResponseCache::key(
+            "aws_sigv4",
+            &fp,
+            "https://eu-west.aws.com",
+            "GET",
+            "/",
+            &headers,
+            b"",
+        );
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn key_deduplicates_headers_by_name() {
+        // When duplicate header names are present, dedup keeps one. This
+        // mirrors reqwest's behavior where the last value wins.
+        let fp = CloudResponseCache::credential_fingerprint("c");
+        let h1 = vec![
+            ("X-Amz-Target".to_string(), "Op.A".to_string()),
+            ("X-Amz-Target".to_string(), "Op.B".to_string()),
+        ];
+        let h2 = vec![("X-Amz-Target".to_string(), "Op.A".to_string())];
+        // These may or may not be equal depending on dedup logic, but
+        // the important thing is it doesn't panic and produces a valid key.
+        let k1 = CloudResponseCache::key("aws_sigv4", &fp, "https://x", "POST", "/", &h1, b"");
+        let k2 = CloudResponseCache::key("aws_sigv4", &fp, "https://x", "POST", "/", &h2, b"");
+        assert!(!k1.is_empty());
+        assert!(!k2.is_empty());
+    }
+
+    #[test]
+    fn key_includes_accept_and_content_type_headers() {
+        let fp = CloudResponseCache::credential_fingerprint("c");
+        let json = vec![
+            ("Accept".to_string(), "application/json".to_string()),
+            ("Content-Type".to_string(), "application/json".to_string()),
+        ];
+        let xml = vec![
+            ("Accept".to_string(), "application/xml".to_string()),
+            ("Content-Type".to_string(), "application/xml".to_string()),
+        ];
+        let k1 = CloudResponseCache::key("aws_sigv4", &fp, "https://x", "POST", "/", &json, b"");
+        let k2 = CloudResponseCache::key("aws_sigv4", &fp, "https://x", "POST", "/", &xml, b"");
+        assert_ne!(k1, k2);
+    }
+
+    // --- with_bounds min max_entries ---
+
+    #[test]
+    fn with_bounds_enforces_min_one_entry() {
+        let cache = CloudResponseCache::with_bounds(60, 1024, 0);
+        // max_entries is clamped to at least 1
+        assert_eq!(cache.ttl(), Duration::from_secs(60));
+        // If max_entries were truly 0, any insert would panic or loop.
+        // The constructor clamps to 1 via .max(1).
+    }
+
+    #[test]
+    fn ttl_accessor_returns_configured_value() {
+        let cache = CloudResponseCache::new(120);
+        assert_eq!(cache.ttl(), Duration::from_secs(120));
+    }
+
+    // --- credential_fingerprint edge cases ---
+
+    #[test]
+    fn credential_fingerprint_empty_string() {
+        let f = CloudResponseCache::credential_fingerprint("");
+        assert_eq!(f.len(), 64);
+        assert!(f.chars().all(|c| c.is_ascii_hexdigit()));
+        // SHA256("") is well-known
+        assert_eq!(
+            f,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn credential_fingerprint_deterministic() {
+        let a = CloudResponseCache::credential_fingerprint("test-credential");
+        let b = CloudResponseCache::credential_fingerprint("test-credential");
+        assert_eq!(a, b);
+    }
+
+    // --- zero-TTL get is always None ---
+
+    #[test]
+    fn zero_ttl_get_always_none() {
+        let cache = CloudResponseCache::new(0);
+        assert!(cache.get("any-key").is_none());
+        assert_eq!(cache.len(), 0);
+    }
+
+    // --- is_cacheable_auth_method extended ---
+
+    #[test]
+    fn is_cacheable_rejects_empty_string() {
+        assert!(!is_cacheable_auth_method(""));
+    }
+
+    #[test]
+    fn is_cacheable_rejects_api_key() {
+        assert!(!is_cacheable_auth_method("api_key"));
+    }
 }

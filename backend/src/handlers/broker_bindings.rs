@@ -120,3 +120,84 @@ pub async fn revoke_my_broker_binding(
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn broker_binding_list_item_serialization_full() {
+        let item = BrokerBindingListItem {
+            binding_hash: "hash_abc".to_string(),
+            client_id: "client_1".to_string(),
+            client_name: Some("My App".to_string()),
+            external_subject: Some(ExternalSubjectRef {
+                platform: "github".to_string(),
+                tenant: None,
+                external_user_id: "user_123".to_string(),
+            }),
+            scopes: vec!["openid".to_string(), "profile".to_string()],
+            created_at: "2025-01-01T00:00:00Z".to_string(),
+            last_used_at: Some("2025-01-02T00:00:00Z".to_string()),
+        };
+        let json = serde_json::to_value(&item).unwrap();
+        assert_eq!(json["binding_hash"], "hash_abc");
+        assert_eq!(json["client_id"], "client_1");
+        assert_eq!(json["client_name"], "My App");
+        assert_eq!(json["scopes"].as_array().unwrap().len(), 2);
+        assert_eq!(json["last_used_at"], "2025-01-02T00:00:00Z");
+    }
+
+    #[test]
+    fn broker_binding_list_item_serialization_minimal() {
+        let item = BrokerBindingListItem {
+            binding_hash: "hash_def".to_string(),
+            client_id: "client_2".to_string(),
+            client_name: None,
+            external_subject: None,
+            scopes: vec![],
+            created_at: "2025-01-01T00:00:00Z".to_string(),
+            last_used_at: None,
+        };
+        let json = serde_json::to_value(&item).unwrap();
+        assert!(json["client_name"].is_null());
+        assert!(json["external_subject"].is_null());
+        assert!(json["last_used_at"].is_null());
+        assert!(json["scopes"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn broker_binding_list_response_empty() {
+        let resp = BrokerBindingListResponse { bindings: vec![] };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert!(json["bindings"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn broker_binding_list_response_with_items() {
+        let resp = BrokerBindingListResponse {
+            bindings: vec![
+                BrokerBindingListItem {
+                    binding_hash: "h1".to_string(),
+                    client_id: "c1".to_string(),
+                    client_name: Some("App1".to_string()),
+                    external_subject: None,
+                    scopes: vec!["openid".to_string()],
+                    created_at: "2025-01-01T00:00:00Z".to_string(),
+                    last_used_at: None,
+                },
+                BrokerBindingListItem {
+                    binding_hash: "h2".to_string(),
+                    client_id: "c2".to_string(),
+                    client_name: None,
+                    external_subject: None,
+                    scopes: vec![],
+                    created_at: "2025-01-02T00:00:00Z".to_string(),
+                    last_used_at: None,
+                },
+            ],
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["bindings"].as_array().unwrap().len(), 2);
+    }
+}

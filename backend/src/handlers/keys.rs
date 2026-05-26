@@ -3025,4 +3025,896 @@ mod tests {
         assert!(super::extract_app_id_from_credential(r#"{"key": "val"}"#).is_none());
         assert!(super::extract_app_id_from_credential(r#"{"app_id": ""}"#).is_none());
     }
+
+    // ---- create_key integration tests ----
+
+    fn make_create_key_request(
+        label: &str,
+        slug: Option<&str>,
+        endpoint_url: Option<&str>,
+        credential: Option<&str>,
+        auth_method: Option<&str>,
+    ) -> super::CreateKeyRequest {
+        super::CreateKeyRequest {
+            service_slug: None,
+            credential: credential.map(str::to_string),
+            label: label.to_string(),
+            endpoint_url: endpoint_url.map(str::to_string),
+            slug: slug.map(str::to_string),
+            auth_method: auth_method.map(str::to_string),
+            auth_key_name: None,
+            node_id: None,
+            ssh_host: None,
+            ssh_port: None,
+            ssh_certificate_auth: None,
+            ssh_auth_mode: None,
+            ssh_principals: None,
+            ssh_certificate_ttl_minutes: None,
+            identity_propagation_mode: None,
+            identity_include_user_id: None,
+            identity_include_email: None,
+            identity_include_name: None,
+            identity_jwt_audience: None,
+            forward_access_token: None,
+            inject_delegation_token: None,
+            delegation_token_scope: None,
+            target_org_id: None,
+            openapi_spec_url: None,
+            ws_frame_injections: None,
+            oauth_client_id: None,
+            oauth_client_secret: None,
+            copy_oauth_client_from: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn create_key_custom_endpoint_succeeds() {
+        let Some(db) = connect_test_database("h_keys_create_custom").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_id = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &user_id, UserType::Person).await;
+
+        let body = make_create_key_request(
+            "My Custom API",
+            Some("my-custom-api"),
+            Some("https://api.example.com"),
+            Some("sk-test-credential"),
+            Some("bearer"),
+        );
+
+        let Json(response) = super::create_key(
+            State(state),
+            test_auth_user(&user_id),
+            TelemetryContext::default(),
+            Json(body),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.label, "My Custom API");
+        assert_eq!(response.slug, "my-custom-api");
+        assert_eq!(response.endpoint_url, "https://api.example.com");
+        assert_eq!(response.auth_method, "bearer");
+        assert!(response.api_key_id.is_some());
+        assert!(response.is_active);
+        assert_eq!(response.credential_type, "api_key");
+    }
+
+    #[tokio::test]
+    async fn create_key_no_auth_method_succeeds() {
+        let Some(db) = connect_test_database("h_keys_create_no_auth").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_id = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &user_id, UserType::Person).await;
+
+        let body = make_create_key_request(
+            "No Auth Service",
+            Some("no-auth-svc"),
+            Some("https://public-api.example.com"),
+            None,
+            Some("none"),
+        );
+
+        let Json(response) = super::create_key(
+            State(state),
+            test_auth_user(&user_id),
+            TelemetryContext::default(),
+            Json(body),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.label, "No Auth Service");
+        assert_eq!(response.slug, "no-auth-svc");
+        assert_eq!(response.auth_method, "none");
+        assert!(response.api_key_id.is_none());
+        assert_eq!(response.credential_type, "none");
+    }
+
+    #[tokio::test]
+    async fn create_key_missing_slug_and_service_slug_rejected() {
+        let Some(db) = connect_test_database("h_keys_create_no_slug").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_id = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &user_id, UserType::Person).await;
+
+        // No service_slug and no slug means unified_key_service cannot
+        // determine the slug; this should be rejected.
+        let body = make_create_key_request(
+            "Missing Slug",
+            None,
+            Some("https://api.example.com"),
+            Some("sk-test"),
+            Some("bearer"),
+        );
+
+        let err = super::create_key(
+            State(state),
+            test_auth_user(&user_id),
+            TelemetryContext::default(),
+            Json(body),
+        )
+        .await
+        .expect_err("should reject missing slug when no service_slug");
+
+        // The error should be a validation or bad-request error.
+        assert!(
+            matches!(err, AppError::ValidationError(_) | AppError::BadRequest(_)),
+            "expected ValidationError or BadRequest, got {:?}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn create_key_for_org_requires_admin() {
+        let Some(db) = connect_test_database("h_keys_create_org_admin").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let admin_id = uuid::Uuid::new_v4().to_string();
+        let member_id = uuid::Uuid::new_v4().to_string();
+        let org_id = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &admin_id, UserType::Person).await;
+        insert_user(&db, &member_id, UserType::Person).await;
+        insert_user(&db, &org_id, UserType::Org).await;
+        insert_membership(&db, &org_id, &admin_id, OrgRole::Admin).await;
+        insert_membership(&db, &org_id, &member_id, OrgRole::Member).await;
+
+        // Admin should succeed
+        let mut body = make_create_key_request(
+            "Org Service",
+            Some("org-svc"),
+            Some("https://api.example.com"),
+            Some("sk-test"),
+            Some("bearer"),
+        );
+        body.target_org_id = Some(org_id.clone());
+
+        let result = super::create_key(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            TelemetryContext::default(),
+            Json(body),
+        )
+        .await;
+        assert!(result.is_ok(), "admin should create org key");
+
+        // Member should be rejected
+        let mut body2 = make_create_key_request(
+            "Org Service 2",
+            Some("org-svc-2"),
+            Some("https://api2.example.com"),
+            Some("sk-test2"),
+            Some("bearer"),
+        );
+        body2.target_org_id = Some(org_id);
+
+        let err = super::create_key(
+            State(state),
+            test_auth_user(&member_id),
+            TelemetryContext::default(),
+            Json(body2),
+        )
+        .await
+        .expect_err("member should not create org key");
+        assert!(matches!(err, AppError::OrgRoleInsufficient(_)));
+    }
+
+    #[tokio::test]
+    async fn create_key_mutual_exclusion_oauth_fields() {
+        let Some(db) = connect_test_database("h_keys_create_oauth_mutex").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_id = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &user_id, UserType::Person).await;
+
+        let mut body = make_create_key_request(
+            "OAuth Conflict",
+            Some("oauth-conflict"),
+            Some("https://api.example.com"),
+            Some("sk-test"),
+            Some("bearer"),
+        );
+        body.oauth_client_id = Some("client-id".to_string());
+        body.oauth_client_secret = Some("client-secret".to_string());
+        body.copy_oauth_client_from = Some("some-key-id".to_string());
+
+        let err = super::create_key(
+            State(state),
+            test_auth_user(&user_id),
+            TelemetryContext::default(),
+            Json(body),
+        )
+        .await
+        .expect_err("should reject mutually exclusive oauth fields");
+
+        assert!(matches!(err, AppError::BadRequest(msg) if msg.contains("mutually exclusive")));
+    }
+
+    #[tokio::test]
+    async fn create_key_oauth_client_id_requires_secret() {
+        let Some(db) = connect_test_database("h_keys_create_oauth_halved").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_id = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &user_id, UserType::Person).await;
+
+        let mut body = make_create_key_request(
+            "Half OAuth",
+            Some("half-oauth"),
+            Some("https://api.example.com"),
+            Some("sk-test"),
+            Some("bearer"),
+        );
+        body.oauth_client_id = Some("client-id".to_string());
+        // no oauth_client_secret
+
+        let err = super::create_key(
+            State(state),
+            test_auth_user(&user_id),
+            TelemetryContext::default(),
+            Json(body),
+        )
+        .await
+        .expect_err("should reject half-pair oauth credentials");
+
+        assert!(matches!(err, AppError::BadRequest(msg) if msg.contains("supplied together")));
+    }
+
+    // ---- delete_key integration tests ----
+
+    #[tokio::test]
+    async fn delete_key_success() {
+        let Some(db) = connect_test_database("h_keys_delete_ok").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_id = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &user_id, UserType::Person).await;
+
+        // First create a key
+        let body = make_create_key_request(
+            "Deletable Key",
+            Some("deletable-key"),
+            Some("https://api.example.com"),
+            Some("sk-test"),
+            Some("bearer"),
+        );
+        let Json(created) = super::create_key(
+            State(state.clone()),
+            test_auth_user(&user_id),
+            TelemetryContext::default(),
+            Json(body),
+        )
+        .await
+        .unwrap();
+
+        // Delete it
+        let Json(deleted) = super::delete_key(
+            State(state.clone()),
+            test_auth_user(&user_id),
+            TelemetryContext::default(),
+            Path(created.id.clone()),
+            axum::extract::Query(super::DeleteKeyQuery {
+                only_if_pending: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(deleted.deleted);
+        assert!(deleted.message.contains("revoked"));
+
+        // Should be gone now (get returns not found)
+        let err = super::get_key(State(state), test_auth_user(&user_id), Path(created.id))
+            .await
+            .expect_err("deleted key should not be found");
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn delete_key_by_slug_success() {
+        let Some(db) = connect_test_database("h_keys_delete_slug").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_id = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &user_id, UserType::Person).await;
+
+        let body = make_create_key_request(
+            "Deletable By Slug",
+            Some("del-by-slug"),
+            Some("https://api.example.com"),
+            Some("sk-test"),
+            Some("bearer"),
+        );
+        let Json(created) = super::create_key(
+            State(state.clone()),
+            test_auth_user(&user_id),
+            TelemetryContext::default(),
+            Json(body),
+        )
+        .await
+        .unwrap();
+
+        let Json(deleted) = super::delete_key(
+            State(state),
+            test_auth_user(&user_id),
+            TelemetryContext::default(),
+            Path("del-by-slug".to_string()),
+            axum::extract::Query(super::DeleteKeyQuery {
+                only_if_pending: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(deleted.deleted);
+        assert_eq!(created.slug, "del-by-slug");
+    }
+
+    #[tokio::test]
+    async fn delete_key_other_user_forbidden() {
+        let Some(db) = connect_test_database("h_keys_delete_other").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let owner_id = uuid::Uuid::new_v4().to_string();
+        let other_id = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &owner_id, UserType::Person).await;
+        insert_user(&db, &other_id, UserType::Person).await;
+
+        let body = make_create_key_request(
+            "Owner Key",
+            Some("owner-key"),
+            Some("https://api.example.com"),
+            Some("sk-test"),
+            Some("bearer"),
+        );
+        let Json(created) = super::create_key(
+            State(state.clone()),
+            test_auth_user(&owner_id),
+            TelemetryContext::default(),
+            Json(body),
+        )
+        .await
+        .unwrap();
+
+        let err = super::delete_key(
+            State(state),
+            test_auth_user(&other_id),
+            TelemetryContext::default(),
+            Path(created.id),
+            axum::extract::Query(super::DeleteKeyQuery {
+                only_if_pending: None,
+            }),
+        )
+        .await
+        .expect_err("other user should not delete the key");
+
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    // ---- update_key integration tests ----
+
+    #[tokio::test]
+    async fn update_key_label_change_succeeds() {
+        let Some(db) = connect_test_database("h_keys_update_label").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_id = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &user_id, UserType::Person).await;
+
+        let body = make_create_key_request(
+            "Original Label",
+            Some("label-change-svc"),
+            Some("https://api.example.com"),
+            Some("sk-test"),
+            Some("bearer"),
+        );
+        let Json(created) = super::create_key(
+            State(state.clone()),
+            test_auth_user(&user_id),
+            TelemetryContext::default(),
+            Json(body),
+        )
+        .await
+        .unwrap();
+
+        let mut update = empty_update_request();
+        update.label = Some("Updated Label".to_string());
+
+        let Json(updated) = super::update_key(
+            State(state),
+            test_auth_user(&user_id),
+            Path(created.id.clone()),
+            Json(update),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(updated.id, created.id);
+        assert_eq!(updated.label, "Updated Label");
+    }
+
+    #[tokio::test]
+    async fn update_key_by_slug_succeeds() {
+        let Some(db) = connect_test_database("h_keys_update_slug").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_id = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &user_id, UserType::Person).await;
+
+        let body = make_create_key_request(
+            "Slug Updatable",
+            Some("slug-updatable"),
+            Some("https://api.example.com"),
+            Some("sk-test"),
+            Some("bearer"),
+        );
+        let Json(created) = super::create_key(
+            State(state.clone()),
+            test_auth_user(&user_id),
+            TelemetryContext::default(),
+            Json(body),
+        )
+        .await
+        .unwrap();
+
+        let mut update = empty_update_request();
+        update.label = Some("Via Slug".to_string());
+
+        let Json(updated) = super::update_key(
+            State(state),
+            test_auth_user(&user_id),
+            Path("slug-updatable".to_string()),
+            Json(update),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(updated.id, created.id);
+        assert_eq!(updated.label, "Via Slug");
+    }
+
+    #[tokio::test]
+    async fn update_key_other_user_forbidden() {
+        let Some(db) = connect_test_database("h_keys_update_other").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let owner_id = uuid::Uuid::new_v4().to_string();
+        let other_id = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &owner_id, UserType::Person).await;
+        insert_user(&db, &other_id, UserType::Person).await;
+
+        let body = make_create_key_request(
+            "Private Key",
+            Some("private-key"),
+            Some("https://api.example.com"),
+            Some("sk-test"),
+            Some("bearer"),
+        );
+        let Json(created) = super::create_key(
+            State(state.clone()),
+            test_auth_user(&owner_id),
+            TelemetryContext::default(),
+            Json(body),
+        )
+        .await
+        .unwrap();
+
+        let mut update = empty_update_request();
+        update.label = Some("Hijacked".to_string());
+
+        let err = super::update_key(
+            State(state),
+            test_auth_user(&other_id),
+            Path(created.id),
+            Json(update),
+        )
+        .await
+        .expect_err("other user should not update the key");
+
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn update_key_label_validation_rejects_empty() {
+        let Some(db) = connect_test_database("h_keys_update_empty_label").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_id = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &user_id, UserType::Person).await;
+
+        let body = make_create_key_request(
+            "Good Label",
+            Some("good-label-svc"),
+            Some("https://api.example.com"),
+            Some("sk-test"),
+            Some("bearer"),
+        );
+        let Json(created) = super::create_key(
+            State(state.clone()),
+            test_auth_user(&user_id),
+            TelemetryContext::default(),
+            Json(body),
+        )
+        .await
+        .unwrap();
+
+        let mut update = empty_update_request();
+        update.label = Some(String::new());
+
+        let err = super::update_key(
+            State(state),
+            test_auth_user(&user_id),
+            Path(created.id),
+            Json(update),
+        )
+        .await
+        .expect_err("empty label should be rejected");
+
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn update_key_label_validation_rejects_too_long() {
+        let Some(db) = connect_test_database("h_keys_update_long_label").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_id = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &user_id, UserType::Person).await;
+
+        let body = make_create_key_request(
+            "Good Label",
+            Some("good-label-svc2"),
+            Some("https://api.example.com"),
+            Some("sk-test"),
+            Some("bearer"),
+        );
+        let Json(created) = super::create_key(
+            State(state.clone()),
+            test_auth_user(&user_id),
+            TelemetryContext::default(),
+            Json(body),
+        )
+        .await
+        .unwrap();
+
+        let mut update = empty_update_request();
+        update.label = Some("x".repeat(201));
+
+        let err = super::update_key(
+            State(state),
+            test_auth_user(&user_id),
+            Path(created.id),
+            Json(update),
+        )
+        .await
+        .expect_err("too-long label should be rejected");
+
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    // ---- list_keys integration tests ----
+
+    #[tokio::test]
+    async fn list_keys_includes_org_keys() {
+        let Some(db) = connect_test_database("h_keys_list_org_keys").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let org_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &user_id, UserType::Person).await;
+        insert_user(&db, &org_id, UserType::Org).await;
+        insert_membership(&db, &org_id, &user_id, OrgRole::Member).await;
+        insert_key_fixture(&db, &org_id, &service_id, "org-svc", "Org Service").await;
+
+        let Json(response) = super::list_keys(State(state), test_auth_user(&user_id))
+            .await
+            .unwrap();
+
+        assert!(
+            response.keys.iter().any(|k| k.id == service_id),
+            "org keys should be visible to members"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_keys_does_not_include_other_users_keys() {
+        let Some(db) = connect_test_database("h_keys_list_isolation").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_a = uuid::Uuid::new_v4().to_string();
+        let user_b = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &user_a, UserType::Person).await;
+        insert_user(&db, &user_b, UserType::Person).await;
+        insert_key_fixture(&db, &user_a, &service_id, "private-svc", "Private").await;
+
+        let Json(response) = super::list_keys(State(state), test_auth_user(&user_b))
+            .await
+            .unwrap();
+
+        assert!(
+            !response.keys.iter().any(|k| k.id == service_id),
+            "other user's keys should not be visible"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_keys_returns_multiple_owned_keys() {
+        let Some(db) = connect_test_database("h_keys_list_multi").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let svc1 = uuid::Uuid::new_v4().to_string();
+        let svc2 = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &user_id, UserType::Person).await;
+        insert_key_fixture(&db, &user_id, &svc1, "svc-one", "Service One").await;
+        insert_key_fixture(&db, &user_id, &svc2, "svc-two", "Service Two").await;
+
+        let Json(response) = super::list_keys(State(state), test_auth_user(&user_id))
+            .await
+            .unwrap();
+
+        assert!(response.keys.len() >= 2);
+        assert!(response.keys.iter().any(|k| k.id == svc1));
+        assert!(response.keys.iter().any(|k| k.id == svc2));
+    }
+
+    // ---- get_key org scoping tests ----
+
+    #[tokio::test]
+    async fn get_key_scoped_member_sees_allowed_service() {
+        let Some(db) = connect_test_database("h_keys_get_scoped_allowed").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let member_id = uuid::Uuid::new_v4().to_string();
+        let org_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &member_id, UserType::Person).await;
+        insert_user(&db, &org_id, UserType::Org).await;
+
+        // Insert scoped membership that allows this specific service
+        let scoped_membership = test_membership(
+            &org_id,
+            &member_id,
+            OrgRole::Admin,
+            Some(vec![service_id.clone()]),
+        );
+        db.collection(crate::models::org_membership::COLLECTION_NAME)
+            .insert_one(scoped_membership)
+            .await
+            .unwrap();
+
+        insert_key_fixture(&db, &org_id, &service_id, "scoped-svc", "Scoped Service").await;
+
+        let Json(response) = super::get_key(
+            State(state),
+            test_auth_user(&member_id),
+            Path("scoped-svc".to_string()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.id, service_id);
+    }
+
+    #[tokio::test]
+    async fn get_key_scoped_member_cannot_see_out_of_scope_service() {
+        let Some(db) = connect_test_database("h_keys_get_scoped_denied").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let member_id = uuid::Uuid::new_v4().to_string();
+        let org_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &member_id, UserType::Person).await;
+        insert_user(&db, &org_id, UserType::Org).await;
+
+        // Insert scoped membership that allows a DIFFERENT service
+        let other_service_id = uuid::Uuid::new_v4().to_string();
+        let scoped_membership = test_membership(
+            &org_id,
+            &member_id,
+            OrgRole::Admin,
+            Some(vec![other_service_id]),
+        );
+        db.collection(crate::models::org_membership::COLLECTION_NAME)
+            .insert_one(scoped_membership)
+            .await
+            .unwrap();
+
+        insert_key_fixture(&db, &org_id, &service_id, "hidden-svc", "Hidden Service").await;
+
+        let err = super::get_key(
+            State(state),
+            test_auth_user(&member_id),
+            Path("hidden-svc".to_string()),
+        )
+        .await
+        .expect_err("scoped member should not see out-of-scope service");
+
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    // ---- DTO serialization tests ----
+
+    #[test]
+    fn create_key_request_debug_redacts_credential() {
+        let req = make_create_key_request(
+            "Test",
+            Some("test-slug"),
+            Some("https://api.example.com"),
+            Some("super-secret"),
+            Some("bearer"),
+        );
+        let debug = format!("{:?}", req);
+        assert!(
+            !debug.contains("super-secret"),
+            "credential must be redacted in Debug"
+        );
+        assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn create_key_request_debug_redacts_oauth_fields() {
+        let mut req = make_create_key_request(
+            "Test",
+            Some("test-slug"),
+            Some("https://api.example.com"),
+            None,
+            None,
+        );
+        req.oauth_client_id = Some("cli_id_secret".to_string());
+        req.oauth_client_secret = Some("cli_secret_value".to_string());
+        let debug = format!("{:?}", req);
+        assert!(
+            !debug.contains("cli_id_secret"),
+            "oauth_client_id must be redacted"
+        );
+        assert!(
+            !debug.contains("cli_secret_value"),
+            "oauth_client_secret must be redacted"
+        );
+    }
+
+    #[test]
+    fn delete_key_response_serialization() {
+        let response = super::DeleteKeyResponse {
+            message: "Key revoked successfully".to_string(),
+            deleted: true,
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["message"], "Key revoked successfully");
+        assert_eq!(json["deleted"], true);
+    }
+
+    #[test]
+    fn delete_key_response_not_deleted() {
+        let response = super::DeleteKeyResponse {
+            message: "Key is no longer pending_auth; delete skipped".to_string(),
+            deleted: false,
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["deleted"], false);
+    }
+
+    #[test]
+    fn key_list_response_serialization_empty() {
+        let response = super::KeyListResponse { keys: vec![] };
+        let json = serde_json::to_value(&response).unwrap();
+        assert!(json["keys"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_key_query_deserializes_defaults() {
+        let query: super::DeleteKeyQuery = serde_json::from_str("{}").unwrap();
+        assert!(query.only_if_pending.is_none());
+    }
+
+    #[test]
+    fn delete_key_query_deserializes_with_flag() {
+        let query: super::DeleteKeyQuery =
+            serde_json::from_str(r#"{"only_if_pending": true}"#).unwrap();
+        assert_eq!(query.only_if_pending, Some(true));
+    }
+
+    #[test]
+    fn delete_key_query_rejects_unknown_fields() {
+        let result: Result<super::DeleteKeyQuery, _> =
+            serde_json::from_str(r#"{"only_if_pending": true, "unknown_field": 1}"#);
+        assert!(result.is_err(), "unknown fields should be rejected");
+    }
+
+    #[test]
+    fn update_key_request_deserialization_all_none() {
+        let req: super::UpdateKeyRequest = serde_json::from_str("{}").unwrap();
+        assert!(req.label.is_none());
+        assert!(req.endpoint_url.is_none());
+        assert!(req.auth_method.is_none());
+        assert!(req.credential.is_none());
+        assert!(req.node_id.is_none());
+        assert!(req.is_active.is_none());
+    }
+
+    #[test]
+    fn update_key_request_deserialization_partial() {
+        let req: super::UpdateKeyRequest =
+            serde_json::from_str(r#"{"label": "New Label", "is_active": false}"#).unwrap();
+        assert_eq!(req.label.as_deref(), Some("New Label"));
+        assert_eq!(req.is_active, Some(false));
+        assert!(req.endpoint_url.is_none());
+    }
+
+    #[test]
+    fn create_key_request_deserialization_minimal() {
+        let json = r#"{"label": "My Key"}"#;
+        let req: super::CreateKeyRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.label, "My Key");
+        assert!(req.service_slug.is_none());
+        assert!(req.credential.is_none());
+        assert!(req.endpoint_url.is_none());
+        assert!(req.slug.is_none());
+        assert!(req.auth_method.is_none());
+        assert!(req.target_org_id.is_none());
+    }
 }

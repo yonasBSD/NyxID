@@ -706,4 +706,167 @@ mod tests {
         assert!(rebuilt.is_none());
         assert!(seen_tokens.lock().unwrap().is_empty());
     }
+
+    // ---- parse_lark_bot_credentials ----
+
+    #[test]
+    fn parse_lark_bot_credentials_valid_format() {
+        let (app_id, app_secret) = parse_lark_bot_credentials("cli_abc123:secret_xyz").unwrap();
+        assert_eq!(app_id, "cli_abc123");
+        assert_eq!(app_secret, "secret_xyz");
+    }
+
+    #[test]
+    fn parse_lark_bot_credentials_multiple_colons() {
+        // split_once splits at the first colon, so the secret can contain colons
+        let (app_id, app_secret) = parse_lark_bot_credentials("app:secret:with:colons").unwrap();
+        assert_eq!(app_id, "app");
+        assert_eq!(app_secret, "secret:with:colons");
+    }
+
+    #[test]
+    fn parse_lark_bot_credentials_empty_app_id() {
+        let (app_id, app_secret) = parse_lark_bot_credentials(":secret").unwrap();
+        assert_eq!(app_id, "");
+        assert_eq!(app_secret, "secret");
+    }
+
+    #[test]
+    fn parse_lark_bot_credentials_empty_secret() {
+        let (app_id, app_secret) = parse_lark_bot_credentials("app_id:").unwrap();
+        assert_eq!(app_id, "app_id");
+        assert_eq!(app_secret, "");
+    }
+
+    #[test]
+    fn parse_lark_bot_credentials_missing_colon_returns_error() {
+        let result = parse_lark_bot_credentials("no_colon_here");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_lark_bot_credentials_empty_string_returns_error() {
+        let result = parse_lark_bot_credentials("");
+        assert!(result.is_err());
+    }
+
+    // ---- SecretPatch ----
+
+    #[test]
+    fn secret_patch_unchanged_is_copy() {
+        let patch = SecretPatch::Unchanged;
+        let _copy = patch; // SecretPatch is Copy
+        assert!(matches!(_copy, SecretPatch::Unchanged));
+    }
+
+    #[test]
+    fn secret_patch_variants_are_distinct() {
+        let unchanged = SecretPatch::Unchanged;
+        let clear = SecretPatch::Clear;
+        let set = SecretPatch::Set("value");
+
+        assert!(matches!(unchanged, SecretPatch::Unchanged));
+        assert!(matches!(clear, SecretPatch::Clear));
+        assert!(matches!(set, SecretPatch::Set("value")));
+    }
+
+    // ---- maybe_rebuild_lark_bot_token (non-lark platform) ----
+
+    #[tokio::test]
+    async fn maybe_rebuild_returns_none_for_non_lark_platform() {
+        let encryption_keys = test_encryption_keys();
+        let http_client = reqwest::Client::new();
+
+        // Use a Telegram adapter instead of Lark
+        struct TelegramAdapter;
+
+        #[async_trait::async_trait]
+        impl PlatformAdapter for TelegramAdapter {
+            fn platform_id(&self) -> &str {
+                "telegram"
+            }
+
+            async fn verify_webhook(
+                &self,
+                _bot: &ChannelBot,
+                _secrets: Option<&crate::services::channel_platform::PlatformVerifySecrets>,
+                _headers: &axum::http::HeaderMap,
+                _body: &[u8],
+            ) -> AppResult<()> {
+                unimplemented!()
+            }
+
+            async fn parse_inbound(&self, _body: &[u8]) -> AppResult<Vec<InboundMessage>> {
+                unimplemented!()
+            }
+
+            async fn send_reply(
+                &self,
+                _http: &reqwest::Client,
+                _bot_token: &str,
+                _conversation_id: &str,
+                _reply: &OutboundReply,
+            ) -> AppResult<Option<String>> {
+                unimplemented!()
+            }
+
+            async fn register_webhook(
+                &self,
+                _http: &reqwest::Client,
+                _bot_token: &str,
+                _webhook_url: &str,
+                _secret: &str,
+            ) -> AppResult<()> {
+                unimplemented!()
+            }
+
+            async fn verify_bot_token(
+                &self,
+                _http: &reqwest::Client,
+                _bot_token: &str,
+            ) -> AppResult<BotIdentity> {
+                unimplemented!()
+            }
+        }
+
+        let adapter = TelegramAdapter;
+        let mut bot = make_lark_bot(&encryption_keys, "some_token").await;
+        bot.platform = "telegram".to_string();
+
+        let params = UpdateBotParams {
+            label: None,
+            verification_token: None,
+            encrypt_key: SecretPatch::Unchanged,
+            app_id: Some("new_app"),
+            app_secret: Some("new_secret"),
+        };
+
+        let result =
+            maybe_rebuild_lark_bot_token(&encryption_keys, &http_client, &adapter, &bot, &params)
+                .await
+                .unwrap();
+
+        assert!(result.is_none());
+    }
+
+    // ---- decrypt_bot_token ----
+
+    #[tokio::test]
+    async fn decrypt_bot_token_roundtrips() {
+        let encryption_keys = test_encryption_keys();
+        let bot = make_lark_bot(&encryption_keys, "test_app:test_secret").await;
+        let decrypted = decrypt_bot_token(&encryption_keys, &bot).await.unwrap();
+        assert_eq!(decrypted, "test_app:test_secret");
+    }
+
+    // ---- webhook_secret_hash properties ----
+
+    #[test]
+    fn webhook_secret_hash_is_64_hex_chars() {
+        let raw = hex::encode(rand::random::<[u8; 32]>());
+        let hash = hex::encode(Sha256::digest(raw.as_bytes()));
+        assert_eq!(hash.len(), 64);
+        // all chars are hex
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
 }

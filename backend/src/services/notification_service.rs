@@ -660,4 +660,357 @@ mod tests {
         assert_eq!(first.id, second.id);
         assert_eq!(first.user_id, second.user_id);
     }
+
+    #[test]
+    fn unique_devices_single_device() {
+        let devices = vec![make_device("d1", "fcm", "token-aaa")];
+        let unique = unique_devices_by_token(&devices);
+        assert_eq!(unique.len(), 1);
+        assert_eq!(unique[0].device_id, "d1");
+    }
+
+    #[test]
+    fn unique_devices_all_different_tokens() {
+        let devices = vec![
+            make_device("d1", "fcm", "token-a"),
+            make_device("d2", "apns", "token-b"),
+            make_device("d3", "fcm", "token-c"),
+        ];
+        let unique = unique_devices_by_token(&devices);
+        assert_eq!(unique.len(), 3);
+    }
+
+    #[test]
+    fn unique_devices_all_same_token() {
+        let devices = vec![
+            make_device("d1", "fcm", "token-same"),
+            make_device("d2", "apns", "token-same"),
+            make_device("d3", "fcm", "token-same"),
+        ];
+        let unique = unique_devices_by_token(&devices);
+        assert_eq!(unique.len(), 1);
+        assert_eq!(unique[0].device_id, "d1");
+    }
+
+    #[test]
+    fn make_device_populates_required_fields() {
+        let d = make_device("d1", "fcm", "t1");
+        assert_eq!(d.device_id, "d1");
+        assert_eq!(d.platform, "fcm");
+        assert_eq!(d.token, "t1");
+        assert!(d.device_name.is_none());
+        assert!(d.app_id.is_none());
+        assert!(d.last_used_at.is_none());
+    }
+
+    // ================================================================
+    // Integration tests (require running MongoDB)
+    // ================================================================
+
+    use mongodb::bson::doc;
+
+    #[tokio::test]
+    async fn get_or_create_channel_default_values_are_sane() {
+        let Some(db) = connect_test_database("notif_svc_defaults").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let channel = get_or_create_channel(&db, &user_id).await.unwrap();
+
+        // Verify all default values
+        assert_eq!(channel.user_id, user_id);
+        assert!(!channel.telegram_enabled);
+        assert!(channel.telegram_chat_id.is_none());
+        assert!(channel.telegram_username.is_none());
+        assert!(channel.telegram_link_code.is_none());
+        assert!(channel.telegram_link_code_expires_at.is_none());
+        assert_eq!(channel.approval_timeout_secs, 30);
+        assert_eq!(channel.grant_expiry_days, 30);
+        assert!(!channel.approval_required);
+        assert!(!channel.push_enabled);
+        assert!(channel.push_devices.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_or_create_channel_idempotent_for_same_user() {
+        let Some(db) = connect_test_database("notif_svc_idempotent").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let first = get_or_create_channel(&db, &user_id).await.unwrap();
+        let second = get_or_create_channel(&db, &user_id).await.unwrap();
+        let third = get_or_create_channel(&db, &user_id).await.unwrap();
+
+        assert_eq!(first.id, second.id);
+        assert_eq!(second.id, third.id);
+    }
+
+    #[tokio::test]
+    async fn get_or_create_channel_different_users_get_different_channels() {
+        let Some(db) = connect_test_database("notif_svc_diff_users").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_a = uuid::Uuid::new_v4().to_string();
+        let user_b = uuid::Uuid::new_v4().to_string();
+
+        let channel_a = get_or_create_channel(&db, &user_a).await.unwrap();
+        let channel_b = get_or_create_channel(&db, &user_b).await.unwrap();
+
+        assert_ne!(channel_a.id, channel_b.id);
+        assert_eq!(channel_a.user_id, user_a);
+        assert_eq!(channel_b.user_id, user_b);
+    }
+
+    #[tokio::test]
+    async fn get_or_create_channel_returns_modified_channel() {
+        let Some(db) = connect_test_database("notif_svc_modified").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        // Create the channel
+        let channel = get_or_create_channel(&db, &user_id).await.unwrap();
+        assert!(!channel.approval_required);
+
+        // Manually update approval_required in DB
+        let now = bson::DateTime::from_chrono(Utc::now());
+        db.collection::<NotificationChannel>(COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": &channel.id },
+                doc! { "$set": {
+                    "approval_required": true,
+                    "approval_timeout_secs": 60,
+                    "updated_at": now,
+                }},
+            )
+            .await
+            .unwrap();
+
+        // Fetch again -- should return the modified state
+        let updated = get_or_create_channel(&db, &user_id).await.unwrap();
+        assert!(updated.approval_required);
+        assert_eq!(updated.approval_timeout_secs, 60);
+        assert_eq!(updated.id, channel.id);
+    }
+
+    #[tokio::test]
+    async fn get_or_create_channel_with_push_devices_persisted() {
+        let Some(db) = connect_test_database("notif_svc_push_devs").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        // Create the channel
+        let channel = get_or_create_channel(&db, &user_id).await.unwrap();
+        assert!(channel.push_devices.is_empty());
+
+        // Manually add a push device in DB
+        let device = DeviceToken {
+            device_id: uuid::Uuid::new_v4().to_string(),
+            platform: "fcm".to_string(),
+            token: "fcm-test-token-12345".to_string(),
+            device_name: Some("Test Phone".to_string()),
+            app_id: Some("dev.nyxid.app".to_string()),
+            registered_at: Utc::now(),
+            last_used_at: None,
+        };
+        let device_doc = bson::to_bson(&device).unwrap();
+        let now = bson::DateTime::from_chrono(Utc::now());
+        db.collection::<NotificationChannel>(COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": &channel.id },
+                doc! {
+                    "$push": { "push_devices": device_doc },
+                    "$set": { "push_enabled": true, "updated_at": now },
+                },
+            )
+            .await
+            .unwrap();
+
+        // Fetch again
+        let updated = get_or_create_channel(&db, &user_id).await.unwrap();
+        assert!(updated.push_enabled);
+        assert_eq!(updated.push_devices.len(), 1);
+        assert_eq!(updated.push_devices[0].platform, "fcm");
+        assert_eq!(updated.push_devices[0].token, "fcm-test-token-12345");
+        assert_eq!(
+            updated.push_devices[0].device_name.as_deref(),
+            Some("Test Phone")
+        );
+    }
+
+    #[tokio::test]
+    async fn get_or_create_channel_telegram_fields_persist() {
+        let Some(db) = connect_test_database("notif_svc_telegram").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let channel = get_or_create_channel(&db, &user_id).await.unwrap();
+
+        // Simulate Telegram link
+        let now = bson::DateTime::from_chrono(Utc::now());
+        db.collection::<NotificationChannel>(COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": &channel.id },
+                doc! { "$set": {
+                    "telegram_chat_id": 12345_i64,
+                    "telegram_username": "testuser",
+                    "telegram_enabled": true,
+                    "updated_at": now,
+                }},
+            )
+            .await
+            .unwrap();
+
+        let updated = get_or_create_channel(&db, &user_id).await.unwrap();
+        assert!(updated.telegram_enabled);
+        assert_eq!(updated.telegram_chat_id, Some(12345));
+        assert_eq!(updated.telegram_username.as_deref(), Some("testuser"));
+    }
+
+    #[tokio::test]
+    async fn remove_stale_device_tokens_removes_specified_tokens() {
+        let Some(db) = connect_test_database("notif_svc_rm_stale").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let channel = get_or_create_channel(&db, &user_id).await.unwrap();
+
+        // Add two devices
+        let d1 = DeviceToken {
+            device_id: "dev-1".to_string(),
+            platform: "fcm".to_string(),
+            token: "token-1".to_string(),
+            device_name: None,
+            app_id: None,
+            registered_at: Utc::now(),
+            last_used_at: None,
+        };
+        let d2 = DeviceToken {
+            device_id: "dev-2".to_string(),
+            platform: "apns".to_string(),
+            token: "token-2".to_string(),
+            device_name: None,
+            app_id: None,
+            registered_at: Utc::now(),
+            last_used_at: None,
+        };
+        let d1_doc = bson::to_bson(&d1).unwrap();
+        let d2_doc = bson::to_bson(&d2).unwrap();
+        let now = bson::DateTime::from_chrono(Utc::now());
+        db.collection::<NotificationChannel>(COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": &channel.id },
+                doc! {
+                    "$set": {
+                        "push_devices": [d1_doc, d2_doc],
+                        "push_enabled": true,
+                        "updated_at": now,
+                    }
+                },
+            )
+            .await
+            .unwrap();
+
+        // Remove dev-1 as stale
+        remove_stale_device_tokens(&db, &channel.id, &["dev-1".to_string()]).await;
+
+        let updated = get_or_create_channel(&db, &user_id).await.unwrap();
+        assert_eq!(updated.push_devices.len(), 1);
+        assert_eq!(updated.push_devices[0].device_id, "dev-2");
+    }
+
+    #[tokio::test]
+    async fn remove_stale_device_tokens_disables_push_when_empty() {
+        let Some(db) = connect_test_database("notif_svc_rm_stale_disable").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let channel = get_or_create_channel(&db, &user_id).await.unwrap();
+
+        // Add one device
+        let d = DeviceToken {
+            device_id: "dev-only".to_string(),
+            platform: "fcm".to_string(),
+            token: "token-only".to_string(),
+            device_name: None,
+            app_id: None,
+            registered_at: Utc::now(),
+            last_used_at: None,
+        };
+        let d_doc = bson::to_bson(&d).unwrap();
+        let now = bson::DateTime::from_chrono(Utc::now());
+        db.collection::<NotificationChannel>(COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": &channel.id },
+                doc! {
+                    "$set": {
+                        "push_devices": [d_doc],
+                        "push_enabled": true,
+                        "updated_at": now,
+                    }
+                },
+            )
+            .await
+            .unwrap();
+
+        // Remove the only device
+        remove_stale_device_tokens(&db, &channel.id, &["dev-only".to_string()]).await;
+
+        let updated = get_or_create_channel(&db, &user_id).await.unwrap();
+        assert!(updated.push_devices.is_empty());
+        assert!(!updated.push_enabled);
+    }
+
+    #[tokio::test]
+    async fn update_device_last_used_sets_timestamp() {
+        let Some(db) = connect_test_database("notif_svc_upd_last_used").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let channel = get_or_create_channel(&db, &user_id).await.unwrap();
+
+        // Add a device without last_used_at
+        let d = DeviceToken {
+            device_id: "dev-1".to_string(),
+            platform: "fcm".to_string(),
+            token: "token-1".to_string(),
+            device_name: None,
+            app_id: None,
+            registered_at: Utc::now(),
+            last_used_at: None,
+        };
+        let d_doc = bson::to_bson(&d).unwrap();
+        let now = bson::DateTime::from_chrono(Utc::now());
+        db.collection::<NotificationChannel>(COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": &channel.id },
+                doc! {
+                    "$set": {
+                        "push_devices": [d_doc],
+                        "push_enabled": true,
+                        "updated_at": now,
+                    }
+                },
+            )
+            .await
+            .unwrap();
+
+        // Update last_used_at
+        update_device_last_used(&db, &channel.id, &["dev-1".to_string()]).await;
+
+        let updated = get_or_create_channel(&db, &user_id).await.unwrap();
+        assert!(updated.push_devices[0].last_used_at.is_some());
+    }
 }

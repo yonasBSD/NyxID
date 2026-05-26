@@ -1252,4 +1252,261 @@ mod tests {
             &AuthMethod::ServiceAccount
         ));
     }
+
+    // -----------------------------------------------------------------------
+    // convert_method tests
+    // -----------------------------------------------------------------------
+
+    use super::ALLOWED_RESPONSE_HEADERS;
+    use super::MAX_RESPONSE_BODY_SIZE;
+    use super::{convert_headers, convert_method, extract_bearer_token, parse_next_sse_event};
+    use crate::services::delegation_service::DelegatedCredential;
+    use axum::http::Method;
+
+    #[test]
+    fn convert_method_get() {
+        let result = convert_method(&Method::GET).unwrap();
+        assert_eq!(result, reqwest::Method::GET);
+    }
+
+    #[test]
+    fn convert_method_post() {
+        let result = convert_method(&Method::POST).unwrap();
+        assert_eq!(result, reqwest::Method::POST);
+    }
+
+    #[test]
+    fn convert_method_put() {
+        let result = convert_method(&Method::PUT).unwrap();
+        assert_eq!(result, reqwest::Method::PUT);
+    }
+
+    #[test]
+    fn convert_method_delete() {
+        let result = convert_method(&Method::DELETE).unwrap();
+        assert_eq!(result, reqwest::Method::DELETE);
+    }
+
+    #[test]
+    fn convert_method_patch() {
+        let result = convert_method(&Method::PATCH).unwrap();
+        assert_eq!(result, reqwest::Method::PATCH);
+    }
+
+    #[test]
+    fn convert_method_head() {
+        let result = convert_method(&Method::HEAD).unwrap();
+        assert_eq!(result, reqwest::Method::HEAD);
+    }
+
+    #[test]
+    fn convert_method_options() {
+        let result = convert_method(&Method::OPTIONS).unwrap();
+        assert_eq!(result, reqwest::Method::OPTIONS);
+    }
+
+    #[test]
+    fn convert_method_trace_is_unsupported() {
+        let result = convert_method(&Method::TRACE);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn convert_method_connect_is_unsupported() {
+        let result = convert_method(&Method::CONNECT);
+        assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // convert_headers tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn convert_headers_copies_standard_headers() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("content-type", "application/json".parse().unwrap());
+        headers.insert("authorization", "Bearer tok123".parse().unwrap());
+
+        let converted = convert_headers(&headers);
+        assert_eq!(
+            converted.get("content-type").map(|v| v.to_str().unwrap()),
+            Some("application/json")
+        );
+        assert_eq!(
+            converted.get("authorization").map(|v| v.to_str().unwrap()),
+            Some("Bearer tok123")
+        );
+    }
+
+    #[test]
+    fn convert_headers_handles_empty_map() {
+        let headers = axum::http::HeaderMap::new();
+        let converted = convert_headers(&headers);
+        assert!(converted.is_empty());
+    }
+
+    #[test]
+    fn convert_headers_preserves_multiple_headers() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-custom", "value1".parse().unwrap());
+        headers.insert("x-another", "value2".parse().unwrap());
+        headers.insert("accept", "text/plain".parse().unwrap());
+
+        let converted = convert_headers(&headers);
+        assert_eq!(converted.len(), 3);
+    }
+
+    // -----------------------------------------------------------------------
+    // extract_bearer_token tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn extract_bearer_token_finds_bearer_credential() {
+        let creds = vec![
+            DelegatedCredential {
+                provider_slug: "openai".into(),
+                injection_method: "header".into(),
+                injection_key: "X-Custom".into(),
+                credential: "custom-val".into(),
+            },
+            DelegatedCredential {
+                provider_slug: "openai".into(),
+                injection_method: "bearer".into(),
+                injection_key: "Authorization".into(),
+                credential: "sk-test-12345".into(),
+            },
+        ];
+
+        let token = extract_bearer_token(&creds).unwrap();
+        assert_eq!(token, "sk-test-12345");
+    }
+
+    #[test]
+    fn extract_bearer_token_returns_first_bearer() {
+        let creds = vec![
+            DelegatedCredential {
+                provider_slug: "openai".into(),
+                injection_method: "bearer".into(),
+                injection_key: "Authorization".into(),
+                credential: "first-token".into(),
+            },
+            DelegatedCredential {
+                provider_slug: "openai".into(),
+                injection_method: "bearer".into(),
+                injection_key: "Authorization".into(),
+                credential: "second-token".into(),
+            },
+        ];
+
+        let token = extract_bearer_token(&creds).unwrap();
+        assert_eq!(token, "first-token");
+    }
+
+    #[test]
+    fn extract_bearer_token_fails_when_no_bearer() {
+        let creds = vec![DelegatedCredential {
+            provider_slug: "openai".into(),
+            injection_method: "header".into(),
+            injection_key: "X-Key".into(),
+            credential: "not-a-bearer".into(),
+        }];
+
+        let result = extract_bearer_token(&creds);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn extract_bearer_token_fails_on_empty_slice() {
+        let result = extract_bearer_token(&[]);
+        assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_next_sse_event tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_next_sse_event_extracts_data_event() {
+        let mut buffer = "data: {\"id\":\"1\"}\n\n".to_string();
+        let event = parse_next_sse_event(&mut buffer).expect("should parse one event");
+        assert_eq!(event.data, "{\"id\":\"1\"}");
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn parse_next_sse_event_extracts_typed_event() {
+        let mut buffer = "event: message\ndata: hello\n\n".to_string();
+        let event = parse_next_sse_event(&mut buffer).expect("should parse one event");
+        assert_eq!(event.event_type.as_deref(), Some("message"));
+        assert_eq!(event.data, "hello");
+    }
+
+    #[test]
+    fn parse_next_sse_event_returns_none_for_incomplete() {
+        let mut buffer = "data: partial".to_string();
+        assert!(parse_next_sse_event(&mut buffer).is_none());
+        // Buffer should remain intact
+        assert_eq!(buffer, "data: partial");
+    }
+
+    #[test]
+    fn parse_next_sse_event_returns_none_for_empty() {
+        let mut buffer = String::new();
+        assert!(parse_next_sse_event(&mut buffer).is_none());
+    }
+
+    #[test]
+    fn parse_next_sse_event_handles_multiple_data_lines() {
+        let mut buffer = "data: line1\ndata: line2\n\n".to_string();
+        let event = parse_next_sse_event(&mut buffer).expect("should parse");
+        assert_eq!(event.data, "line1\nline2");
+    }
+
+    #[test]
+    fn parse_next_sse_event_consumes_first_leaves_second() {
+        let mut buffer = "data: first\n\ndata: second\n\n".to_string();
+        let event1 = parse_next_sse_event(&mut buffer).expect("should parse first");
+        assert_eq!(event1.data, "first");
+
+        let event2 = parse_next_sse_event(&mut buffer).expect("should parse second");
+        assert_eq!(event2.data, "second");
+
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn parse_next_sse_event_done_marker() {
+        let mut buffer = "data: [DONE]\n\n".to_string();
+        let event = parse_next_sse_event(&mut buffer).expect("should parse [DONE]");
+        assert_eq!(event.data, "[DONE]");
+    }
+
+    // -----------------------------------------------------------------------
+    // ALLOWED_RESPONSE_HEADERS constant tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn allowed_response_headers_contains_essentials() {
+        assert!(ALLOWED_RESPONSE_HEADERS.contains(&"content-type"));
+        assert!(ALLOWED_RESPONSE_HEADERS.contains(&"content-length"));
+        assert!(ALLOWED_RESPONSE_HEADERS.contains(&"cache-control"));
+        assert!(ALLOWED_RESPONSE_HEADERS.contains(&"etag"));
+    }
+
+    #[test]
+    fn allowed_response_headers_excludes_security_sensitive() {
+        // Set-Cookie and Authorization should not be forwarded
+        assert!(!ALLOWED_RESPONSE_HEADERS.contains(&"set-cookie"));
+        assert!(!ALLOWED_RESPONSE_HEADERS.contains(&"authorization"));
+        assert!(!ALLOWED_RESPONSE_HEADERS.contains(&"cookie"));
+    }
+
+    // -----------------------------------------------------------------------
+    // MAX_RESPONSE_BODY_SIZE constant test
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn max_response_body_size_is_50mb() {
+        assert_eq!(MAX_RESPONSE_BODY_SIZE, 50 * 1024 * 1024);
+    }
 }

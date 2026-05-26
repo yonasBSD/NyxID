@@ -411,4 +411,211 @@ mod tests {
             .unwrap();
         assert!(list_resp.connections.is_empty());
     }
+
+    // --- Pure function tests: Debug impls for request types ---
+
+    #[test]
+    fn connect_request_debug_redacts_credential() {
+        let req = ConnectRequest {
+            credential: Some("super-secret-api-key".to_string()),
+            credential_label: Some("Production Key".to_string()),
+        };
+        let debug_output = format!("{:?}", req);
+
+        assert!(debug_output.contains("[REDACTED]"));
+        assert!(!debug_output.contains("super-secret-api-key"));
+        assert!(debug_output.contains("Production Key"));
+    }
+
+    #[test]
+    fn connect_request_debug_none_credential_shows_none() {
+        let req = ConnectRequest {
+            credential: None,
+            credential_label: None,
+        };
+        let debug_output = format!("{:?}", req);
+
+        assert!(debug_output.contains("None"));
+        assert!(!debug_output.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn update_credential_request_debug_redacts_credential() {
+        let req = UpdateCredentialRequest {
+            credential: "sk-very-secret".to_string(),
+            credential_label: Some("Test Key".to_string()),
+        };
+        let debug_output = format!("{:?}", req);
+
+        assert!(debug_output.contains("[REDACTED]"));
+        assert!(!debug_output.contains("sk-very-secret"));
+        assert!(debug_output.contains("Test Key"));
+    }
+
+    // --- Serialization tests: ConnectionItem ---
+
+    #[test]
+    fn connection_item_serialization() {
+        let item = ConnectionItem {
+            service_id: "svc-1".to_string(),
+            service_name: "OpenAI".to_string(),
+            service_category: "connection".to_string(),
+            auth_type: Some("api_key".to_string()),
+            has_credential: true,
+            credential_label: Some("Prod Key".to_string()),
+            connected_at: "2025-06-01T00:00:00+00:00".to_string(),
+        };
+        let json = serde_json::to_value(&item).unwrap();
+
+        assert_eq!(json["service_id"], "svc-1");
+        assert_eq!(json["service_name"], "OpenAI");
+        assert_eq!(json["service_category"], "connection");
+        assert_eq!(json["auth_type"], "api_key");
+        assert_eq!(json["has_credential"], true);
+        assert_eq!(json["credential_label"], "Prod Key");
+        assert_eq!(json["connected_at"], "2025-06-01T00:00:00+00:00");
+    }
+
+    #[test]
+    fn connection_item_serialization_with_null_optionals() {
+        let item = ConnectionItem {
+            service_id: "svc-2".to_string(),
+            service_name: "Internal Service".to_string(),
+            service_category: "internal".to_string(),
+            auth_type: None,
+            has_credential: false,
+            credential_label: None,
+            connected_at: "2025-01-01T00:00:00+00:00".to_string(),
+        };
+        let json = serde_json::to_value(&item).unwrap();
+
+        assert_eq!(json["service_category"], "internal");
+        assert!(json["auth_type"].is_null());
+        assert_eq!(json["has_credential"], false);
+        assert!(json["credential_label"].is_null());
+    }
+
+    // --- Serialization tests: ConnectionListResponse ---
+
+    #[test]
+    fn connection_list_response_serialization_empty() {
+        let resp = ConnectionListResponse {
+            connections: vec![],
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert!(json["connections"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn connection_list_response_serialization_with_items() {
+        let resp = ConnectionListResponse {
+            connections: vec![
+                ConnectionItem {
+                    service_id: "svc-1".to_string(),
+                    service_name: "Service A".to_string(),
+                    service_category: "connection".to_string(),
+                    auth_type: Some("bearer".to_string()),
+                    has_credential: true,
+                    credential_label: None,
+                    connected_at: "2025-01-01T00:00:00+00:00".to_string(),
+                },
+                ConnectionItem {
+                    service_id: "svc-2".to_string(),
+                    service_name: "Service B".to_string(),
+                    service_category: "internal".to_string(),
+                    auth_type: None,
+                    has_credential: false,
+                    credential_label: None,
+                    connected_at: "2025-02-01T00:00:00+00:00".to_string(),
+                },
+            ],
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        let connections = json["connections"].as_array().unwrap();
+        assert_eq!(connections.len(), 2);
+        assert_eq!(connections[0]["service_id"], "svc-1");
+        assert_eq!(connections[1]["service_id"], "svc-2");
+    }
+
+    // --- Serialization tests: ConnectResponse ---
+
+    #[test]
+    fn connect_response_serialization() {
+        let resp = ConnectResponse {
+            service_id: "svc-abc".to_string(),
+            service_name: "Anthropic".to_string(),
+            connected_at: "2025-06-15T12:30:00+00:00".to_string(),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+
+        assert_eq!(json["service_id"], "svc-abc");
+        assert_eq!(json["service_name"], "Anthropic");
+        assert_eq!(json["connected_at"], "2025-06-15T12:30:00+00:00");
+    }
+
+    // --- Serialization tests: DisconnectResponse ---
+
+    #[test]
+    fn disconnect_response_serialization() {
+        let resp = DisconnectResponse {
+            message: "Disconnected from service".to_string(),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["message"], "Disconnected from service");
+    }
+
+    // --- Serialization tests: UpdateCredentialResponse ---
+
+    #[test]
+    fn update_credential_response_serialization() {
+        let resp = UpdateCredentialResponse {
+            message: "Credential updated".to_string(),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["message"], "Credential updated");
+    }
+
+    // --- Deserialization tests: ConnectRequest ---
+
+    #[test]
+    fn connect_request_deserialization_with_credential() {
+        let json = serde_json::json!({
+            "credential": "sk-test-key",
+            "credential_label": "My Key"
+        });
+        let req: ConnectRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.credential.as_deref(), Some("sk-test-key"));
+        assert_eq!(req.credential_label.as_deref(), Some("My Key"));
+    }
+
+    #[test]
+    fn connect_request_deserialization_without_optional_fields() {
+        let json = serde_json::json!({});
+        let req: ConnectRequest = serde_json::from_value(json).unwrap();
+        assert!(req.credential.is_none());
+        assert!(req.credential_label.is_none());
+    }
+
+    // --- Deserialization tests: UpdateCredentialRequest ---
+
+    #[test]
+    fn update_credential_request_deserialization() {
+        let json = serde_json::json!({
+            "credential": "new-secret-key",
+            "credential_label": "Updated Key"
+        });
+        let req: UpdateCredentialRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.credential, "new-secret-key");
+        assert_eq!(req.credential_label.as_deref(), Some("Updated Key"));
+    }
+
+    #[test]
+    fn update_credential_request_deserialization_without_label() {
+        let json = serde_json::json!({
+            "credential": "another-key"
+        });
+        let req: UpdateCredentialRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.credential, "another-key");
+        assert!(req.credential_label.is_none());
+    }
 }

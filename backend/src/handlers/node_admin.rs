@@ -1994,4 +1994,485 @@ mod tests {
             Some("org-1")
         );
     }
+
+    // --- Pure function tests: build_metrics_info ---
+
+    #[test]
+    fn build_metrics_info_zero_requests_yields_zero_success_rate() {
+        let metrics = NodeMetrics::default();
+        let info = build_metrics_info(&metrics);
+
+        assert_eq!(info.total_requests, 0);
+        assert_eq!(info.success_count, 0);
+        assert_eq!(info.error_count, 0);
+        assert!((info.success_rate - 0.0).abs() < f64::EPSILON);
+        assert!((info.avg_latency_ms - 0.0).abs() < f64::EPSILON);
+        assert!(info.last_error.is_none());
+        assert!(info.last_error_at.is_none());
+        assert!(info.last_success_at.is_none());
+    }
+
+    #[test]
+    fn build_metrics_info_computes_success_rate_correctly() {
+        let metrics = NodeMetrics {
+            total_requests: 200,
+            success_count: 150,
+            error_count: 50,
+            avg_latency_ms: 42.5,
+            last_error: Some("timeout".to_string()),
+            last_error_at: Some(Utc::now()),
+            last_success_at: Some(Utc::now()),
+        };
+        let info = build_metrics_info(&metrics);
+
+        assert_eq!(info.total_requests, 200);
+        assert_eq!(info.success_count, 150);
+        assert_eq!(info.error_count, 50);
+        assert!((info.success_rate - 0.75).abs() < f64::EPSILON);
+        assert!((info.avg_latency_ms - 42.5).abs() < f64::EPSILON);
+        assert_eq!(info.last_error.as_deref(), Some("timeout"));
+        assert!(info.last_error_at.is_some());
+        assert!(info.last_success_at.is_some());
+    }
+
+    #[test]
+    fn build_metrics_info_all_successes_yields_one() {
+        let metrics = NodeMetrics {
+            total_requests: 1000,
+            success_count: 1000,
+            error_count: 0,
+            avg_latency_ms: 10.0,
+            last_error: None,
+            last_error_at: None,
+            last_success_at: Some(Utc::now()),
+        };
+        let info = build_metrics_info(&metrics);
+        assert!((info.success_rate - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn build_metrics_info_all_errors_yields_zero_rate() {
+        let metrics = NodeMetrics {
+            total_requests: 50,
+            success_count: 0,
+            error_count: 50,
+            avg_latency_ms: 500.0,
+            last_error: Some("connection refused".to_string()),
+            last_error_at: Some(Utc::now()),
+            last_success_at: None,
+        };
+        let info = build_metrics_info(&metrics);
+        assert!((info.success_rate - 0.0).abs() < f64::EPSILON);
+        assert!(info.last_success_at.is_none());
+    }
+
+    // --- Serialization tests: NodeMetricsInfo ---
+
+    #[test]
+    fn node_metrics_info_serialization_skips_none_fields() {
+        let info = NodeMetricsInfo {
+            total_requests: 10,
+            success_count: 8,
+            error_count: 2,
+            success_rate: 0.8,
+            avg_latency_ms: 25.0,
+            last_error: None,
+            last_error_at: None,
+            last_success_at: None,
+        };
+        let json = serde_json::to_value(&info).unwrap();
+
+        assert_eq!(json["total_requests"], 10);
+        assert_eq!(json["success_count"], 8);
+        assert_eq!(json["error_count"], 2);
+        assert!((json["success_rate"].as_f64().unwrap() - 0.8).abs() < f64::EPSILON);
+        assert!((json["avg_latency_ms"].as_f64().unwrap() - 25.0).abs() < f64::EPSILON);
+        // skip_serializing_if fields should be absent
+        assert!(json.get("last_error").is_none());
+        assert!(json.get("last_error_at").is_none());
+        assert!(json.get("last_success_at").is_none());
+    }
+
+    #[test]
+    fn node_metrics_info_serialization_includes_present_fields() {
+        let info = NodeMetricsInfo {
+            total_requests: 5,
+            success_count: 3,
+            error_count: 2,
+            success_rate: 0.6,
+            avg_latency_ms: 100.0,
+            last_error: Some("bad gateway".to_string()),
+            last_error_at: Some("2025-01-15T10:00:00+00:00".to_string()),
+            last_success_at: Some("2025-01-15T09:00:00+00:00".to_string()),
+        };
+        let json = serde_json::to_value(&info).unwrap();
+
+        assert_eq!(json["last_error"], "bad gateway");
+        assert_eq!(json["last_error_at"], "2025-01-15T10:00:00+00:00");
+        assert_eq!(json["last_success_at"], "2025-01-15T09:00:00+00:00");
+    }
+
+    // --- Serialization tests: NodeInfo ---
+
+    #[test]
+    fn node_info_serialization_skips_none_optional_fields() {
+        let info = NodeInfo {
+            id: "node-1".to_string(),
+            name: "test-node".to_string(),
+            owner: node_service::NodeOwnerInfo {
+                kind: node_service::NodeOwnerKind::User,
+                id: "user-1".to_string(),
+                display_name: "Test User".to_string(),
+            },
+            status: "online".to_string(),
+            is_connected: true,
+            last_heartbeat_at: None,
+            connected_at: None,
+            metadata: None,
+            metrics: None,
+            binding_count: 3,
+            created_at: "2025-01-01T00:00:00+00:00".to_string(),
+        };
+        let json = serde_json::to_value(&info).unwrap();
+
+        assert_eq!(json["id"], "node-1");
+        assert_eq!(json["name"], "test-node");
+        assert_eq!(json["status"], "online");
+        assert_eq!(json["is_connected"], true);
+        assert_eq!(json["binding_count"], 3);
+        assert_eq!(json["created_at"], "2025-01-01T00:00:00+00:00");
+        assert_eq!(json["owner"]["kind"], "user");
+        assert_eq!(json["owner"]["id"], "user-1");
+        assert_eq!(json["owner"]["display_name"], "Test User");
+        // Optional fields absent
+        assert!(json.get("last_heartbeat_at").is_none());
+        assert!(json.get("connected_at").is_none());
+        assert!(json.get("metadata").is_none());
+        assert!(json.get("metrics").is_none());
+    }
+
+    #[test]
+    fn node_info_serialization_includes_all_fields_when_present() {
+        let info = NodeInfo {
+            id: "node-2".to_string(),
+            name: "prod-node".to_string(),
+            owner: node_service::NodeOwnerInfo {
+                kind: node_service::NodeOwnerKind::Org,
+                id: "org-1".to_string(),
+                display_name: "Acme Corp".to_string(),
+            },
+            status: "draining".to_string(),
+            is_connected: false,
+            last_heartbeat_at: Some("2025-06-01T12:00:00+00:00".to_string()),
+            connected_at: Some("2025-06-01T10:00:00+00:00".to_string()),
+            metadata: Some(NodeMetadata {
+                agent_version: Some("1.2.3".to_string()),
+                os: Some("linux".to_string()),
+                arch: Some("x86_64".to_string()),
+                ip_address: Some("10.0.0.1".to_string()),
+            }),
+            metrics: Some(NodeMetricsInfo {
+                total_requests: 100,
+                success_count: 90,
+                error_count: 10,
+                success_rate: 0.9,
+                avg_latency_ms: 50.0,
+                last_error: None,
+                last_error_at: None,
+                last_success_at: None,
+            }),
+            binding_count: 5,
+            created_at: "2025-01-01T00:00:00+00:00".to_string(),
+        };
+        let json = serde_json::to_value(&info).unwrap();
+
+        assert_eq!(json["owner"]["kind"], "org");
+        assert_eq!(json["last_heartbeat_at"], "2025-06-01T12:00:00+00:00");
+        assert_eq!(json["connected_at"], "2025-06-01T10:00:00+00:00");
+        assert_eq!(json["metadata"]["agent_version"], "1.2.3");
+        assert_eq!(json["metadata"]["os"], "linux");
+        assert_eq!(json["metadata"]["arch"], "x86_64");
+        assert_eq!(json["metadata"]["ip_address"], "10.0.0.1");
+        assert_eq!(json["metrics"]["total_requests"], 100);
+    }
+
+    // --- Serialization tests: BindingInfo ---
+
+    #[test]
+    fn binding_info_serialization() {
+        let info = BindingInfo {
+            id: "binding-1".to_string(),
+            service_id: "svc-1".to_string(),
+            service_name: "OpenAI".to_string(),
+            service_slug: "openai".to_string(),
+            is_active: true,
+            priority: 10,
+            created_at: "2025-03-01T00:00:00+00:00".to_string(),
+        };
+        let json = serde_json::to_value(&info).unwrap();
+
+        assert_eq!(json["id"], "binding-1");
+        assert_eq!(json["service_id"], "svc-1");
+        assert_eq!(json["service_name"], "OpenAI");
+        assert_eq!(json["service_slug"], "openai");
+        assert_eq!(json["is_active"], true);
+        assert_eq!(json["priority"], 10);
+        assert_eq!(json["created_at"], "2025-03-01T00:00:00+00:00");
+    }
+
+    // --- Serialization tests: CreateRegistrationTokenResponse ---
+
+    #[test]
+    fn create_registration_token_response_serialization() {
+        let resp = CreateRegistrationTokenResponse {
+            token_id: "tid-1".to_string(),
+            token: "nyx_nreg_abc123".to_string(),
+            name: "my-node".to_string(),
+            expires_at: "2025-06-01T12:00:00+00:00".to_string(),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+
+        assert_eq!(json["token_id"], "tid-1");
+        assert_eq!(json["token"], "nyx_nreg_abc123");
+        assert_eq!(json["name"], "my-node");
+        assert_eq!(json["expires_at"], "2025-06-01T12:00:00+00:00");
+    }
+
+    // --- Serialization tests: RotateTokenResponse ---
+
+    #[test]
+    fn rotate_token_response_serialization() {
+        let resp = RotateTokenResponse {
+            auth_token: "new-token".to_string(),
+            signing_secret: "new-secret".to_string(),
+            message: "Rotated".to_string(),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+
+        assert_eq!(json["auth_token"], "new-token");
+        assert_eq!(json["signing_secret"], "new-secret");
+        assert_eq!(json["message"], "Rotated");
+    }
+
+    // --- Serialization tests: TransferNodeResponse ---
+
+    #[test]
+    fn transfer_node_response_serialization() {
+        let resp = TransferNodeResponse {
+            node_id: "node-1".to_string(),
+            previous_owner: node_service::NodeOwnerInfo {
+                kind: node_service::NodeOwnerKind::User,
+                id: "user-1".to_string(),
+                display_name: "Alice".to_string(),
+            },
+            new_owner: node_service::NodeOwnerInfo {
+                kind: node_service::NodeOwnerKind::Org,
+                id: "org-1".to_string(),
+                display_name: "Acme".to_string(),
+            },
+            deactivated_bindings_count: 2,
+            cleared_user_service_count: 1,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+
+        assert_eq!(json["node_id"], "node-1");
+        assert_eq!(json["previous_owner"]["kind"], "user");
+        assert_eq!(json["previous_owner"]["id"], "user-1");
+        assert_eq!(json["new_owner"]["kind"], "org");
+        assert_eq!(json["new_owner"]["id"], "org-1");
+        assert_eq!(json["deactivated_bindings_count"], 2);
+        assert_eq!(json["cleared_user_service_count"], 1);
+    }
+
+    // --- Serialization tests: PendingCredentialInfo ---
+
+    #[test]
+    fn pending_credential_info_serialization_skips_none_fields() {
+        let info = PendingCredentialInfo {
+            id: "pc-1".to_string(),
+            node_id: "node-1".to_string(),
+            service_slug: "openai".to_string(),
+            injection_method: "header".to_string(),
+            field_name: "Authorization".to_string(),
+            target_url: None,
+            label: None,
+            created_by_user_id: "user-1".to_string(),
+            owner_user_id: "user-1".to_string(),
+            created_at: "2025-01-01T00:00:00+00:00".to_string(),
+            expires_at: "2025-01-01T01:00:00+00:00".to_string(),
+            consumed_at: None,
+            declined_at: None,
+            is_active: true,
+        };
+        let json = serde_json::to_value(&info).unwrap();
+
+        assert_eq!(json["id"], "pc-1");
+        assert_eq!(json["injection_method"], "header");
+        assert_eq!(json["field_name"], "Authorization");
+        assert_eq!(json["is_active"], true);
+        // skip_serializing_if fields absent
+        assert!(json.get("target_url").is_none());
+        assert!(json.get("label").is_none());
+        assert!(json.get("consumed_at").is_none());
+        assert!(json.get("declined_at").is_none());
+    }
+
+    #[test]
+    fn pending_credential_info_serialization_includes_optional_fields() {
+        let info = PendingCredentialInfo {
+            id: "pc-2".to_string(),
+            node_id: "node-1".to_string(),
+            service_slug: "anthropic".to_string(),
+            injection_method: "query-param".to_string(),
+            field_name: "api_key".to_string(),
+            target_url: Some("https://api.anthropic.com".to_string()),
+            label: Some("Production".to_string()),
+            created_by_user_id: "user-1".to_string(),
+            owner_user_id: "org-1".to_string(),
+            created_at: "2025-01-01T00:00:00+00:00".to_string(),
+            expires_at: "2025-01-01T01:00:00+00:00".to_string(),
+            consumed_at: Some("2025-01-01T00:30:00+00:00".to_string()),
+            declined_at: None,
+            is_active: false,
+        };
+        let json = serde_json::to_value(&info).unwrap();
+
+        assert_eq!(json["target_url"], "https://api.anthropic.com");
+        assert_eq!(json["label"], "Production");
+        assert_eq!(json["consumed_at"], "2025-01-01T00:30:00+00:00");
+        assert_eq!(json["is_active"], false);
+        assert!(json.get("declined_at").is_none());
+    }
+
+    // --- Pure function tests: pending_credential_info mapping ---
+
+    #[test]
+    fn pending_credential_info_maps_model_fields_correctly() {
+        let now = Utc::now();
+        let expires = now + chrono::Duration::hours(1);
+        let model = crate::models::node_pending_credential::NodePendingCredential {
+            id: "pc-map-1".to_string(),
+            node_id: "node-map-1".to_string(),
+            service_slug: "github".to_string(),
+            injection_method: crate::models::node_pending_credential::InjectionMethod::Header,
+            field_name: "Authorization".to_string(),
+            target_url: Some("https://api.github.com".to_string()),
+            label: Some("GH Token".to_string()),
+            created_by_user_id: "creator-1".to_string(),
+            owner_user_id: "owner-1".to_string(),
+            created_at: now,
+            expires_at: expires,
+            consumed_at: None,
+            declined_at: Some(now),
+            is_active: false,
+        };
+        let info = pending_credential_info(model.clone());
+
+        assert_eq!(info.id, "pc-map-1");
+        assert_eq!(info.node_id, "node-map-1");
+        assert_eq!(info.service_slug, "github");
+        assert_eq!(info.injection_method, "header");
+        assert_eq!(info.field_name, "Authorization");
+        assert_eq!(info.target_url.as_deref(), Some("https://api.github.com"));
+        assert_eq!(info.label.as_deref(), Some("GH Token"));
+        assert_eq!(info.created_by_user_id, "creator-1");
+        assert_eq!(info.owner_user_id, "owner-1");
+        assert_eq!(info.created_at, now.to_rfc3339());
+        assert_eq!(info.expires_at, expires.to_rfc3339());
+        assert!(info.consumed_at.is_none());
+        assert!(info.declined_at.is_some());
+        assert!(!info.is_active);
+    }
+
+    // --- Serialization tests: MyBoundServicesResponse ---
+
+    #[test]
+    fn my_bound_services_response_serialization() {
+        let resp = MyBoundServicesResponse {
+            service_ids: vec!["svc-1".to_string(), "svc-2".to_string()],
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        let ids = json["service_ids"].as_array().unwrap();
+        assert_eq!(ids.len(), 2);
+        assert_eq!(ids[0], "svc-1");
+        assert_eq!(ids[1], "svc-2");
+    }
+
+    #[test]
+    fn my_bound_services_response_empty_serialization() {
+        let resp = MyBoundServicesResponse {
+            service_ids: vec![],
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert!(json["service_ids"].as_array().unwrap().is_empty());
+    }
+
+    // --- Serialization tests: CreateBindingResponse ---
+
+    #[test]
+    fn create_binding_response_serialization() {
+        let resp = CreateBindingResponse {
+            id: "bind-1".to_string(),
+            service_id: "svc-1".to_string(),
+            service_name: "Anthropic".to_string(),
+            message: "Service binding created".to_string(),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+
+        assert_eq!(json["id"], "bind-1");
+        assert_eq!(json["service_id"], "svc-1");
+        assert_eq!(json["service_name"], "Anthropic");
+        assert_eq!(json["message"], "Service binding created");
+    }
+
+    // --- Serialization tests: NodeListResponse ---
+
+    #[test]
+    fn node_list_response_serialization_empty() {
+        let resp = NodeListResponse { nodes: vec![] };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert!(json["nodes"].as_array().unwrap().is_empty());
+    }
+
+    // --- Serialization tests: BindingListResponse ---
+
+    #[test]
+    fn binding_list_response_serialization_empty() {
+        let resp = BindingListResponse { bindings: vec![] };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert!(json["bindings"].as_array().unwrap().is_empty());
+    }
+
+    // --- Serialization tests: NodeAdminsResponse ---
+
+    #[test]
+    fn node_admins_response_serialization_empty() {
+        let resp = NodeAdminsResponse { admins: vec![] };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert!(json["admins"].as_array().unwrap().is_empty());
+    }
+
+    // --- Pure function tests: audit_event_data_with_owner edge cases ---
+
+    #[test]
+    fn audit_event_data_with_owner_preserves_existing_fields() {
+        let result = audit_event_data_with_owner(
+            "actor-1",
+            "org-1",
+            serde_json::json!({ "node_id": "n1", "extra": true }),
+        );
+        assert_eq!(result.get("node_id").and_then(|v| v.as_str()), Some("n1"));
+        assert_eq!(result.get("extra").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            result.get("owner_user_id").and_then(|v| v.as_str()),
+            Some("org-1")
+        );
+    }
+
+    #[test]
+    fn audit_event_data_with_owner_non_object_value_unchanged() {
+        let result = audit_event_data_with_owner("actor-1", "org-1", serde_json::json!("scalar"));
+        // Non-object values should be returned unchanged (no owner_user_id insertion possible)
+        assert_eq!(result, serde_json::json!("scalar"));
+    }
 }

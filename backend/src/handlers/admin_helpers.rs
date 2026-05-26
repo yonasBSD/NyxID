@@ -281,6 +281,88 @@ mod tests {
         );
     }
 
+    // ── Pure function tests ──
+
+    #[test]
+    fn extract_ip_from_forwarded_for() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "1.2.3.4, 5.6.7.8".parse().unwrap());
+        assert_eq!(extract_ip(&headers), Some("1.2.3.4".to_string()));
+    }
+
+    #[test]
+    fn extract_ip_single_value() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "10.0.0.1".parse().unwrap());
+        assert_eq!(extract_ip(&headers), Some("10.0.0.1".to_string()));
+    }
+
+    #[test]
+    fn extract_ip_missing_header() {
+        let headers = HeaderMap::new();
+        assert!(extract_ip(&headers).is_none());
+    }
+
+    #[test]
+    fn extract_ip_empty_value() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "".parse().unwrap());
+        assert!(extract_ip(&headers).is_none());
+    }
+
+    #[test]
+    fn extract_ip_trims_whitespace() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "  9.8.7.6  , 1.2.3.4".parse().unwrap());
+        assert_eq!(extract_ip(&headers), Some("9.8.7.6".to_string()));
+    }
+
+    #[test]
+    fn extract_user_agent_present() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::USER_AGENT, "Mozilla/5.0".parse().unwrap());
+        assert_eq!(
+            extract_user_agent(&headers),
+            Some("Mozilla/5.0".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_user_agent_missing() {
+        let headers = HeaderMap::new();
+        assert!(extract_user_agent(&headers).is_none());
+    }
+
+    #[test]
+    fn validate_slug_valid() {
+        assert!(validate_slug("my-service").is_ok());
+        assert!(validate_slug("my_service_2").is_ok());
+        assert!(validate_slug("a").is_ok());
+        assert!(validate_slug("123").is_ok());
+    }
+
+    #[test]
+    fn validate_slug_rejects_empty() {
+        assert!(validate_slug("").is_err());
+    }
+
+    #[test]
+    fn validate_slug_rejects_uppercase() {
+        assert!(validate_slug("MyService").is_err());
+    }
+
+    #[test]
+    fn validate_slug_rejects_spaces() {
+        assert!(validate_slug("my service").is_err());
+    }
+
+    #[test]
+    fn validate_slug_rejects_special_chars() {
+        assert!(validate_slug("my.service").is_err());
+        assert!(validate_slug("my/service").is_err());
+        assert!(validate_slug("my@service").is_err());
+    }
+
     #[tokio::test]
     async fn admin_read_does_not_write_operator_audit_entry() {
         use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};

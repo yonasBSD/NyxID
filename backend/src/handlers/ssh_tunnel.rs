@@ -1284,4 +1284,161 @@ mod tests {
 
         assert!(error.to_string().contains("cloud metadata endpoint"));
     }
+
+    // ── ssh_banner_validated: additional edge cases ──────────────────────
+
+    #[test]
+    fn accepts_ssh_2_0_banner_without_preamble() {
+        let buffer = b"SSH-2.0-OpenSSH_9.7\r\n";
+        assert!(ssh_banner_validated(buffer).expect("valid banner"));
+    }
+
+    #[test]
+    fn accepts_ssh_1_99_compatibility_banner() {
+        let buffer = b"SSH-1.99-OpenSSH_9.7\r\n";
+        assert!(ssh_banner_validated(buffer).expect("valid 1.99 banner"));
+    }
+
+    #[test]
+    fn accepts_banner_with_lf_only_line_endings() {
+        let buffer = b"SSH-2.0-dropbear\n";
+        assert!(ssh_banner_validated(buffer).expect("valid LF-only banner"));
+    }
+
+    #[test]
+    fn returns_false_when_buffer_has_no_complete_line() {
+        // No newline yet -- banner validation should return Ok(false) to request
+        // more data.
+        let buffer = b"SSH-2.0-OpenSSH";
+        assert!(!ssh_banner_validated(buffer).expect("incomplete line"));
+    }
+
+    #[test]
+    fn returns_false_for_empty_buffer() {
+        assert!(!ssh_banner_validated(b"").expect("empty buffer"));
+    }
+
+    #[test]
+    fn returns_false_for_preamble_only_no_banner_yet() {
+        // Pre-banner lines that are not SSH identification strings. The spec
+        // allows servers to send informational lines before the banner.
+        let buffer = b"NOTICE: please accept terms\r\n";
+        assert!(!ssh_banner_validated(buffer).expect("preamble without banner"));
+    }
+
+    #[test]
+    fn rejects_ssh_1_0_banner() {
+        let error = ssh_banner_validated(b"SSH-1.0-ancient\r\n")
+            .expect_err("SSH-1.0 should be unsupported");
+        assert!(error.to_string().contains("unsupported SSH banner"));
+    }
+
+    #[test]
+    fn rejects_ssh_3_0_banner() {
+        let error =
+            ssh_banner_validated(b"SSH-3.0-future\r\n").expect_err("SSH-3.0 should be unsupported");
+        assert!(error.to_string().contains("unsupported SSH banner"));
+    }
+
+    #[test]
+    fn accepts_banner_after_multiple_preamble_lines() {
+        let buffer = b"NOTICE: line1\r\nNOTICE: line2\r\nSSH-2.0-OpenSSH_9.7\r\n";
+        assert!(ssh_banner_validated(buffer).expect("banner after multi-line preamble"));
+    }
+
+    #[test]
+    fn rejects_when_preamble_exactly_at_max_bytes_with_no_banner() {
+        // Fill the buffer to exactly MAX_SSH_BANNER_BYTES with non-banner lines.
+        let line = b"AAAA\n";
+        let count = MAX_SSH_BANNER_BYTES / line.len();
+        let mut buffer = Vec::with_capacity(MAX_SSH_BANNER_BYTES);
+        for _ in 0..count {
+            buffer.extend_from_slice(line);
+        }
+        // Pad remainder with newline-terminated content to reach the limit.
+        while buffer.len() < MAX_SSH_BANNER_BYTES {
+            buffer.push(b'X');
+        }
+        let error = ssh_banner_validated(&buffer).expect_err("should exceed limit");
+        assert!(
+            error
+                .to_string()
+                .contains("did not present an SSH identification banner")
+        );
+    }
+
+    #[test]
+    fn banner_validated_just_under_limit_returns_false() {
+        // Buffer filled with non-newline bytes just under the limit should
+        // return Ok(false) because the banner might still arrive.
+        let buffer = vec![b'x'; MAX_SSH_BANNER_BYTES - 1];
+        assert!(!ssh_banner_validated(&buffer).expect("under limit, no newline"));
+    }
+
+    // ── ssh_approval_display_slug: additional edge cases ────────────────
+
+    #[test]
+    fn ssh_approval_display_slug_returns_empty_user_slug_as_is() {
+        // An empty user-service slug is still preferred -- the function does not
+        // second-guess what the user configured.
+        assert_eq!(
+            ssh_approval_display_slug(Some(""), "_ssh_abc", "Service Name"),
+            ""
+        );
+    }
+
+    #[test]
+    fn ssh_approval_display_slug_with_underscore_ssh_prefix_variations() {
+        // Only the exact `_ssh_` prefix triggers the name fallback.
+        assert_eq!(
+            ssh_approval_display_slug(None, "_sshx_1234", "Name"),
+            "_sshx_1234"
+        );
+        assert_eq!(
+            ssh_approval_display_slug(None, "_ssh_", "My Server"),
+            "My Server"
+        );
+    }
+
+    #[test]
+    fn ssh_approval_display_slug_falls_back_to_empty_service_name() {
+        assert_eq!(ssh_approval_display_slug(None, "_ssh_foo", ""), "");
+    }
+
+    // ── Struct serialization / deserialization ───────────────────────────
+
+    #[test]
+    fn issue_ssh_certificate_request_deserialization() {
+        let json = r#"{"public_key":"ssh-ed25519 AAAA...","principal":"deploy"}"#;
+        let req: super::IssueSshCertificateRequest =
+            serde_json::from_str(json).expect("deserialize request");
+        assert_eq!(req.public_key, "ssh-ed25519 AAAA...");
+        assert_eq!(req.principal, "deploy");
+    }
+
+    #[test]
+    fn issue_ssh_certificate_response_serialization() {
+        let resp = super::IssueSshCertificateResponse {
+            service_id: "svc-1".to_string(),
+            key_id: "key-1".to_string(),
+            principal: "deploy".to_string(),
+            certificate: "cert-data".to_string(),
+            ca_public_key: "ca-pub".to_string(),
+            valid_after: "2024-01-01T00:00:00Z".to_string(),
+            valid_before: "2024-01-01T01:00:00Z".to_string(),
+        };
+        let json = serde_json::to_value(&resp).expect("serialize response");
+        assert_eq!(json["service_id"], "svc-1");
+        assert_eq!(json["key_id"], "key-1");
+        assert_eq!(json["principal"], "deploy");
+        assert_eq!(json["certificate"], "cert-data");
+        assert_eq!(json["ca_public_key"], "ca-pub");
+        assert_eq!(json["valid_after"], "2024-01-01T00:00:00Z");
+        assert_eq!(json["valid_before"], "2024-01-01T01:00:00Z");
+    }
+
+    #[test]
+    fn max_ssh_banner_bytes_is_4kb() {
+        assert_eq!(MAX_SSH_BANNER_BYTES, 4096);
+    }
 }

@@ -431,4 +431,309 @@ mod tests {
             &channel, &body
         ));
     }
+
+    // --- Pure function tests: to_settings_response ---
+
+    #[test]
+    fn to_settings_response_defaults_with_no_telegram_and_no_push() {
+        let channel = make_channel();
+        let resp = to_settings_response(&channel);
+
+        assert!(!resp.telegram_connected);
+        assert!(resp.telegram_username.is_none());
+        assert!(!resp.telegram_enabled);
+        assert!(!resp.approval_required);
+        assert_eq!(resp.approval_timeout_secs, 30);
+        assert_eq!(resp.grant_expiry_days, 30);
+        assert!(!resp.push_enabled);
+        assert_eq!(resp.push_device_count, 0);
+    }
+
+    #[test]
+    fn to_settings_response_with_telegram_connected() {
+        let mut channel = make_channel();
+        channel.telegram_chat_id = Some(12345);
+        channel.telegram_username = Some("testuser".to_string());
+        channel.telegram_enabled = true;
+
+        let resp = to_settings_response(&channel);
+
+        assert!(resp.telegram_connected);
+        assert_eq!(resp.telegram_username.as_deref(), Some("testuser"));
+        assert!(resp.telegram_enabled);
+    }
+
+    #[test]
+    fn to_settings_response_counts_push_devices() {
+        let mut channel = make_channel();
+        channel.push_enabled = true;
+        for i in 0..3 {
+            channel
+                .push_devices
+                .push(crate::models::notification_channel::DeviceToken {
+                    device_id: format!("device-{i}"),
+                    platform: "fcm".to_string(),
+                    token: format!("token-{i}"),
+                    device_name: None,
+                    app_id: None,
+                    registered_at: Utc::now(),
+                    last_used_at: None,
+                });
+        }
+
+        let resp = to_settings_response(&channel);
+
+        assert!(resp.push_enabled);
+        assert_eq!(resp.push_device_count, 3);
+    }
+
+    #[test]
+    fn to_settings_response_with_custom_approval_settings() {
+        let mut channel = make_channel();
+        channel.approval_required = true;
+        channel.approval_timeout_secs = 120;
+        channel.grant_expiry_days = 7;
+
+        let resp = to_settings_response(&channel);
+
+        assert!(resp.approval_required);
+        assert_eq!(resp.approval_timeout_secs, 120);
+        assert_eq!(resp.grant_expiry_days, 7);
+    }
+
+    // --- Pure function tests: has_enabled_notification_channel_after_update edge cases ---
+
+    #[test]
+    fn has_enabled_channel_telegram_connected_and_enabled() {
+        let mut channel = make_channel();
+        channel.telegram_chat_id = Some(12345);
+        channel.telegram_enabled = true;
+
+        let body = UpdateNotificationSettingsRequest {
+            telegram_enabled: None,
+            approval_required: None,
+            approval_timeout_secs: None,
+            grant_expiry_days: None,
+            push_enabled: None,
+        };
+
+        assert!(has_enabled_notification_channel_after_update(
+            &channel, &body
+        ));
+    }
+
+    #[test]
+    fn has_enabled_channel_telegram_enabled_but_not_connected() {
+        let mut channel = make_channel();
+        channel.telegram_chat_id = None;
+        channel.telegram_enabled = true;
+
+        let body = UpdateNotificationSettingsRequest {
+            telegram_enabled: None,
+            approval_required: None,
+            approval_timeout_secs: None,
+            grant_expiry_days: None,
+            push_enabled: None,
+        };
+
+        // telegram_enabled=true but no chat_id means not actually connected
+        assert!(!has_enabled_notification_channel_after_update(
+            &channel, &body
+        ));
+    }
+
+    #[test]
+    fn has_enabled_channel_push_enabled_but_no_devices() {
+        let mut channel = make_channel();
+        channel.push_enabled = true;
+        // push_devices is empty
+
+        let body = UpdateNotificationSettingsRequest {
+            telegram_enabled: None,
+            approval_required: None,
+            approval_timeout_secs: None,
+            grant_expiry_days: None,
+            push_enabled: None,
+        };
+
+        assert!(!has_enabled_notification_channel_after_update(
+            &channel, &body
+        ));
+    }
+
+    #[test]
+    fn has_enabled_channel_both_channels_active() {
+        let mut channel = make_channel();
+        channel.telegram_chat_id = Some(12345);
+        channel.telegram_enabled = true;
+        channel.push_enabled = true;
+        channel
+            .push_devices
+            .push(crate::models::notification_channel::DeviceToken {
+                device_id: "d1".to_string(),
+                platform: "apns".to_string(),
+                token: "tok1".to_string(),
+                device_name: None,
+                app_id: None,
+                registered_at: Utc::now(),
+                last_used_at: None,
+            });
+
+        let body = UpdateNotificationSettingsRequest {
+            telegram_enabled: None,
+            approval_required: None,
+            approval_timeout_secs: None,
+            grant_expiry_days: None,
+            push_enabled: None,
+        };
+
+        assert!(has_enabled_notification_channel_after_update(
+            &channel, &body
+        ));
+    }
+
+    #[test]
+    fn has_enabled_channel_body_overrides_take_precedence() {
+        let mut channel = make_channel();
+        channel.telegram_chat_id = Some(12345);
+        channel.telegram_enabled = true;
+
+        // Body disables telegram
+        let body = UpdateNotificationSettingsRequest {
+            telegram_enabled: Some(false),
+            approval_required: None,
+            approval_timeout_secs: None,
+            grant_expiry_days: None,
+            push_enabled: None,
+        };
+
+        assert!(!has_enabled_notification_channel_after_update(
+            &channel, &body
+        ));
+    }
+
+    #[test]
+    fn has_enabled_channel_body_enables_telegram_on_connected_channel() {
+        let mut channel = make_channel();
+        channel.telegram_chat_id = Some(12345);
+        channel.telegram_enabled = false; // currently disabled
+
+        // Body enables telegram
+        let body = UpdateNotificationSettingsRequest {
+            telegram_enabled: Some(true),
+            approval_required: None,
+            approval_timeout_secs: None,
+            grant_expiry_days: None,
+            push_enabled: None,
+        };
+
+        assert!(has_enabled_notification_channel_after_update(
+            &channel, &body
+        ));
+    }
+
+    // --- Serialization tests: NotificationSettingsResponse ---
+
+    #[test]
+    fn notification_settings_response_serialization() {
+        let resp = NotificationSettingsResponse {
+            telegram_connected: true,
+            telegram_username: Some("alice".to_string()),
+            telegram_enabled: true,
+            approval_required: false,
+            approval_timeout_secs: 60,
+            grant_expiry_days: 14,
+            push_enabled: true,
+            push_device_count: 2,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+
+        assert_eq!(json["telegram_connected"], true);
+        assert_eq!(json["telegram_username"], "alice");
+        assert_eq!(json["telegram_enabled"], true);
+        assert_eq!(json["approval_required"], false);
+        assert_eq!(json["approval_timeout_secs"], 60);
+        assert_eq!(json["grant_expiry_days"], 14);
+        assert_eq!(json["push_enabled"], true);
+        assert_eq!(json["push_device_count"], 2);
+    }
+
+    #[test]
+    fn notification_settings_response_null_username() {
+        let resp = NotificationSettingsResponse {
+            telegram_connected: false,
+            telegram_username: None,
+            telegram_enabled: false,
+            approval_required: false,
+            approval_timeout_secs: 30,
+            grant_expiry_days: 30,
+            push_enabled: false,
+            push_device_count: 0,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+
+        assert_eq!(json["telegram_connected"], false);
+        assert!(json["telegram_username"].is_null());
+    }
+
+    // --- Serialization tests: TelegramLinkResponse ---
+
+    #[test]
+    fn telegram_link_response_serialization() {
+        let resp = TelegramLinkResponse {
+            link_code: "NYXID-ABC12345".to_string(),
+            bot_username: "NyxIDBot".to_string(),
+            expires_in_secs: 300,
+            instructions: "Send /start NYXID-ABC12345 to @NyxIDBot on Telegram".to_string(),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+
+        assert_eq!(json["link_code"], "NYXID-ABC12345");
+        assert_eq!(json["bot_username"], "NyxIDBot");
+        assert_eq!(json["expires_in_secs"], 300);
+        assert!(json["instructions"].as_str().unwrap().contains("/start"));
+    }
+
+    // --- Serialization tests: MessageResponse ---
+
+    #[test]
+    fn message_response_serialization() {
+        let resp = MessageResponse {
+            message: "Telegram disconnected".to_string(),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["message"], "Telegram disconnected");
+    }
+
+    // --- Deserialization tests: UpdateNotificationSettingsRequest ---
+
+    #[test]
+    fn update_notification_settings_request_deserialization_all_fields() {
+        let json = serde_json::json!({
+            "telegram_enabled": true,
+            "approval_required": false,
+            "approval_timeout_secs": 120,
+            "grant_expiry_days": 7,
+            "push_enabled": true
+        });
+        let req: UpdateNotificationSettingsRequest = serde_json::from_value(json).unwrap();
+
+        assert_eq!(req.telegram_enabled, Some(true));
+        assert_eq!(req.approval_required, Some(false));
+        assert_eq!(req.approval_timeout_secs, Some(120));
+        assert_eq!(req.grant_expiry_days, Some(7));
+        assert_eq!(req.push_enabled, Some(true));
+    }
+
+    #[test]
+    fn update_notification_settings_request_deserialization_empty_body() {
+        let json = serde_json::json!({});
+        let req: UpdateNotificationSettingsRequest = serde_json::from_value(json).unwrap();
+
+        assert!(req.telegram_enabled.is_none());
+        assert!(req.approval_required.is_none());
+        assert!(req.approval_timeout_secs.is_none());
+        assert!(req.grant_expiry_days.is_none());
+        assert!(req.push_enabled.is_none());
+    }
 }

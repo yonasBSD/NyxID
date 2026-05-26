@@ -1384,4 +1384,96 @@ mod tests {
         let result = parse_cli_token_request_body(body).unwrap().unwrap();
         assert_eq!(result.client_ua, Some("nyxid/1.0".to_string()));
     }
+
+    #[test]
+    fn build_cookie_with_same_site_none() {
+        let c = build_cookie_with_same_site("tok", "abc", 900, "/api", true, None, "None");
+        assert!(c.contains("SameSite=None"));
+        assert!(c.contains("; Secure"));
+        assert!(c.contains("Path=/api"));
+    }
+
+    #[test]
+    fn clear_cookie_with_same_site_includes_domain() {
+        let c = clear_cookie_with_same_site("tok", "/", true, Some(".example.com"), "None");
+        assert!(c.contains("Max-Age=0"));
+        assert!(c.contains("SameSite=None"));
+        assert!(c.contains("Domain=.example.com"));
+    }
+
+    #[test]
+    fn extract_ip_x_forwarded_for_takes_priority_over_real_ip() {
+        let mut h = HeaderMap::new();
+        h.insert("x-forwarded-for", "1.1.1.1".parse().unwrap());
+        h.insert("x-real-ip", "2.2.2.2".parse().unwrap());
+        assert_eq!(extract_ip(&h, None), Some("1.1.1.1".to_string()));
+    }
+
+    #[test]
+    fn extract_user_agent_returns_value() {
+        let mut h = HeaderMap::new();
+        h.insert(header::USER_AGENT, "nyxid-cli/0.5.0".parse().unwrap());
+        assert_eq!(extract_user_agent(&h), Some("nyxid-cli/0.5.0".to_string()));
+    }
+
+    #[test]
+    fn extract_user_agent_missing_returns_none() {
+        assert!(extract_user_agent(&HeaderMap::new()).is_none());
+    }
+
+    #[test]
+    fn looks_like_browser_request_with_sec_fetch() {
+        let mut h = HeaderMap::new();
+        h.insert("sec-fetch-site", "same-origin".parse().unwrap());
+        assert!(looks_like_browser_request(&h));
+    }
+
+    #[test]
+    fn looks_like_browser_request_empty_headers() {
+        assert!(!looks_like_browser_request(&HeaderMap::new()));
+    }
+
+    #[test]
+    fn validate_cli_user_agent_rejects_control_chars() {
+        assert!(validate_cli_user_agent("ok\x00bad").is_err());
+        assert!(validate_cli_user_agent("ok\ttab").is_err());
+    }
+
+    #[test]
+    fn validate_cli_user_agent_accepts_normal_string() {
+        assert!(validate_cli_user_agent("nyxid-cli/0.5.0 (macOS)").is_ok());
+    }
+
+    #[test]
+    fn referrer_domain_scheme_relative() {
+        let mut h = HeaderMap::new();
+        h.insert(header::REFERER, "//cdn.example.com/path".parse().unwrap());
+        assert_eq!(extract_referrer_domain(&h), Some("cdn.example.com".into()));
+    }
+
+    #[test]
+    fn referrer_domain_with_userinfo() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::REFERER,
+            "https://user@host.com/path".parse().unwrap(),
+        );
+        assert_eq!(extract_referrer_domain(&h), Some("host.com".into()));
+    }
+
+    #[test]
+    fn email_domain_with_plus_addressing() {
+        assert_eq!(
+            extract_email_domain("user+tag@gmail.com"),
+            Some("gmail.com".into())
+        );
+    }
+
+    #[test]
+    fn email_domain_multiple_at_signs() {
+        assert_eq!(
+            extract_email_domain("tricky@sign@domain.com"),
+            Some("domain.com".into())
+        );
+    }
 }

@@ -1006,6 +1006,225 @@ pub async fn list_client_consents(
 }
 
 #[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::user::{PlatformRole, User, UserType};
+    use chrono::Utc;
+
+    fn make_user(id: &str) -> User {
+        let now = Utc::now();
+        User {
+            id: id.to_string(),
+            email: format!("{id}@example.com"),
+            password_hash: Some("$argon2id$hash".to_string()),
+            display_name: Some("Test User".to_string()),
+            slug: None,
+            avatar_url: Some("https://example.com/avatar.png".to_string()),
+            email_verified: true,
+            email_verification_token: None,
+            password_reset_token: None,
+            password_reset_expires_at: None,
+            is_active: true,
+            is_admin: false,
+            is_operator: false,
+            role_ids: vec![],
+            group_ids: vec![],
+            invite_code_id: None,
+            mfa_enabled: false,
+            social_provider: None,
+            social_provider_id: None,
+            user_type: UserType::Person,
+            primary_org_id: None,
+            created_at: now,
+            updated_at: now,
+            last_login_at: None,
+            profile_config: Default::default(),
+        }
+    }
+
+    // --- normalize_optional_nonempty tests ---
+
+    #[test]
+    fn normalize_optional_nonempty_none_returns_none() {
+        assert_eq!(normalize_optional_nonempty(None), None);
+    }
+
+    #[test]
+    fn normalize_optional_nonempty_empty_string_returns_none() {
+        assert_eq!(normalize_optional_nonempty(Some("")), None);
+    }
+
+    #[test]
+    fn normalize_optional_nonempty_whitespace_only_returns_none() {
+        assert_eq!(normalize_optional_nonempty(Some("   ")), None);
+        assert_eq!(normalize_optional_nonempty(Some("\t\n")), None);
+    }
+
+    #[test]
+    fn normalize_optional_nonempty_trims_whitespace() {
+        assert_eq!(
+            normalize_optional_nonempty(Some("  hello  ")),
+            Some("hello")
+        );
+    }
+
+    #[test]
+    fn normalize_optional_nonempty_preserves_normal_string() {
+        assert_eq!(normalize_optional_nonempty(Some("hello")), Some("hello"));
+    }
+
+    // --- user_to_admin_item tests ---
+
+    #[test]
+    fn user_to_admin_item_admin_role() {
+        let user = make_user("user-1");
+        let item = user_to_admin_item(user.clone(), PlatformRole::Admin);
+
+        assert_eq!(item.id, "user-1");
+        assert_eq!(item.email, "user-1@example.com");
+        assert_eq!(item.display_name, Some("Test User".to_string()));
+        assert_eq!(
+            item.avatar_url,
+            Some("https://example.com/avatar.png".to_string())
+        );
+        assert!(item.email_verified);
+        assert!(item.is_active);
+        assert!(item.is_admin);
+        assert!(!item.is_operator);
+        assert_eq!(item.role, "admin");
+        assert!(!item.mfa_enabled);
+        assert!(item.last_login_at.is_none());
+    }
+
+    #[test]
+    fn user_to_admin_item_operator_role() {
+        let user = make_user("user-2");
+        let item = user_to_admin_item(user, PlatformRole::Operator);
+
+        assert!(!item.is_admin);
+        assert!(item.is_operator);
+        assert_eq!(item.role, "operator");
+    }
+
+    #[test]
+    fn user_to_admin_item_user_role() {
+        let user = make_user("user-3");
+        let item = user_to_admin_item(user, PlatformRole::User);
+
+        assert!(!item.is_admin);
+        assert!(!item.is_operator);
+        assert_eq!(item.role, "user");
+    }
+
+    #[test]
+    fn user_to_admin_item_with_last_login() {
+        let mut user = make_user("user-4");
+        user.last_login_at = Some(Utc::now());
+        let item = user_to_admin_item(user, PlatformRole::User);
+
+        assert!(item.last_login_at.is_some());
+    }
+
+    #[test]
+    fn user_to_admin_item_no_display_name_or_avatar() {
+        let mut user = make_user("user-5");
+        user.display_name = None;
+        user.avatar_url = None;
+        let item = user_to_admin_item(user, PlatformRole::User);
+
+        assert!(item.display_name.is_none());
+        assert!(item.avatar_url.is_none());
+    }
+
+    #[test]
+    fn user_to_admin_item_mfa_enabled() {
+        let mut user = make_user("user-6");
+        user.mfa_enabled = true;
+        let item = user_to_admin_item(user, PlatformRole::User);
+
+        assert!(item.mfa_enabled);
+    }
+
+    #[test]
+    fn user_to_admin_item_inactive_user() {
+        let mut user = make_user("user-7");
+        user.is_active = false;
+        let item = user_to_admin_item(user, PlatformRole::Admin);
+
+        assert!(!item.is_active);
+        assert!(item.is_admin);
+    }
+
+    #[test]
+    fn user_to_admin_item_created_at_is_rfc3339() {
+        let user = make_user("user-8");
+        let item = user_to_admin_item(user, PlatformRole::User);
+        // Verify it parses as a valid RFC 3339 timestamp
+        chrono::DateTime::parse_from_rfc3339(&item.created_at)
+            .expect("created_at should be valid RFC 3339");
+    }
+
+    // --- Serde round-trip tests for request/response structs ---
+
+    #[test]
+    fn set_role_request_deserializes_with_role_only() {
+        let json = r#"{"role": "operator"}"#;
+        let req: SetRoleRequest = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(req.role, Some("operator".to_string()));
+        assert_eq!(req.is_admin, None);
+    }
+
+    #[test]
+    fn set_role_request_deserializes_with_is_admin_only() {
+        let json = r#"{"is_admin": true}"#;
+        let req: SetRoleRequest = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(req.role, None);
+        assert_eq!(req.is_admin, Some(true));
+    }
+
+    #[test]
+    fn set_role_request_deserializes_empty_body() {
+        let json = r#"{}"#;
+        let req: SetRoleRequest = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(req.role, None);
+        assert_eq!(req.is_admin, None);
+    }
+
+    #[test]
+    fn admin_user_item_serializes_all_fields() {
+        let item = AdminUserItem {
+            id: "id-1".to_string(),
+            email: "test@example.com".to_string(),
+            display_name: Some("Display".to_string()),
+            avatar_url: None,
+            email_verified: true,
+            is_active: true,
+            is_admin: false,
+            is_operator: true,
+            role: "operator".to_string(),
+            mfa_enabled: false,
+            created_at: "2024-01-01T00:00:00+00:00".to_string(),
+            last_login_at: None,
+        };
+        let json = serde_json::to_value(&item).expect("serialize");
+        assert_eq!(json["id"], "id-1");
+        assert_eq!(json["role"], "operator");
+        assert!(json["is_operator"].as_bool().unwrap());
+        assert!(!json["is_admin"].as_bool().unwrap());
+        assert!(json["last_login_at"].is_null());
+    }
+
+    #[test]
+    fn admin_action_response_serializes() {
+        let resp = AdminActionResponse {
+            message: "done".to_string(),
+        };
+        let json = serde_json::to_value(&resp).expect("serialize");
+        assert_eq!(json["message"], "done");
+    }
+}
+
+#[cfg(test)]
 mod operator_route_tests {
     //! End-to-end tests proving the operator role's read/write split holds at
     //! the actual handler entrypoint, not just inside the helper. These are

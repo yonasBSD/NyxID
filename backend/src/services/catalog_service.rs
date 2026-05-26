@@ -758,4 +758,434 @@ mod tests {
         let memberships = vec![membership("org-1", None)];
         assert!(!any_org_service_reachable(&[], &memberships));
     }
+
+    // ================================================================
+    // Integration tests (require running MongoDB)
+    // ================================================================
+
+    use crate::models::downstream_service::test_helpers::dummy_service;
+    use crate::models::downstream_service::{
+        COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+    };
+    use crate::test_utils::{connect_test_database, test_encryption_keys};
+
+    /// Insert a DownstreamService with given overrides.
+    async fn insert_service(db: &mongodb::Database, svc: &DownstreamService) {
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(svc)
+            .await
+            .expect("insert downstream service");
+    }
+
+    fn make_catalog_service(slug: &str, name: &str, user_id: &str) -> DownstreamService {
+        DownstreamService {
+            id: uuid::Uuid::new_v4().to_string(),
+            slug: slug.to_string(),
+            name: name.to_string(),
+            is_active: true,
+            service_type: "http".to_string(),
+            service_category: "connection".to_string(),
+            requires_user_credential: true,
+            visibility: "public".to_string(),
+            created_by: user_id.to_string(),
+            ..dummy_service()
+        }
+    }
+
+    #[tokio::test]
+    async fn list_catalog_returns_active_public_connection_services() {
+        let Some(db) = connect_test_database("cat_svc_list_active").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let svc1 = make_catalog_service("openai", "OpenAI", &user_id);
+        let svc2 = make_catalog_service("anthropic", "Anthropic", &user_id);
+        insert_service(&db, &svc1).await;
+        insert_service(&db, &svc2).await;
+
+        let entries = super::list_catalog(&db, &encryption_keys, &user_id)
+            .await
+            .unwrap();
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn list_catalog_excludes_inactive_services() {
+        let Some(db) = connect_test_database("cat_svc_list_inactive").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let mut svc = make_catalog_service("openai", "OpenAI", &user_id);
+        svc.is_active = false;
+        insert_service(&db, &svc).await;
+
+        let entries = super::list_catalog(&db, &encryption_keys, &user_id)
+            .await
+            .unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_catalog_excludes_ssh_services() {
+        let Some(db) = connect_test_database("cat_svc_list_ssh").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let mut svc = make_catalog_service("my-ssh", "My SSH", &user_id);
+        svc.service_type = "ssh".to_string();
+        insert_service(&db, &svc).await;
+
+        let entries = super::list_catalog(&db, &encryption_keys, &user_id)
+            .await
+            .unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_catalog_excludes_provider_category_services() {
+        let Some(db) = connect_test_database("cat_svc_list_provider").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let mut svc = make_catalog_service("auth-provider", "Auth Provider", &user_id);
+        svc.service_category = "provider".to_string();
+        insert_service(&db, &svc).await;
+
+        let entries = super::list_catalog(&db, &encryption_keys, &user_id)
+            .await
+            .unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_catalog_hides_private_from_non_creator() {
+        let Some(db) = connect_test_database("cat_svc_list_priv_hide").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let creator_id = uuid::Uuid::new_v4().to_string();
+        let viewer_id = uuid::Uuid::new_v4().to_string();
+
+        let mut svc = make_catalog_service("private-svc", "Private", &creator_id);
+        svc.visibility = "private".to_string();
+        insert_service(&db, &svc).await;
+
+        // Creator can see it
+        let creator_entries = super::list_catalog(&db, &encryption_keys, &creator_id)
+            .await
+            .unwrap();
+        assert_eq!(creator_entries.len(), 1);
+
+        // Other user cannot
+        let viewer_entries = super::list_catalog(&db, &encryption_keys, &viewer_id)
+            .await
+            .unwrap();
+        assert!(viewer_entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_catalog_all_includes_no_credential_services() {
+        let Some(db) = connect_test_database("cat_svc_list_all_no_cred").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        // Service with no credential needed and auth_method = "none"
+        let mut svc = make_catalog_service("system-svc", "System", &user_id);
+        svc.requires_user_credential = false;
+        svc.auth_method = "none".to_string();
+        svc.provider_config_id = None;
+        insert_service(&db, &svc).await;
+
+        // list_catalog should exclude it (no credential, no provider)
+        let catalog_entries = super::list_catalog(&db, &encryption_keys, &user_id)
+            .await
+            .unwrap();
+        assert!(catalog_entries.is_empty());
+
+        // list_catalog_all should include it
+        let all_entries = super::list_catalog_all(&db, &encryption_keys, &user_id)
+            .await
+            .unwrap();
+        assert_eq!(all_entries.len(), 1);
+        assert_eq!(all_entries[0].slug, "system-svc");
+    }
+
+    #[tokio::test]
+    async fn list_catalog_all_also_hides_private_from_non_creator() {
+        let Some(db) = connect_test_database("cat_svc_list_all_priv").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let creator_id = uuid::Uuid::new_v4().to_string();
+        let viewer_id = uuid::Uuid::new_v4().to_string();
+
+        let mut svc = make_catalog_service("priv-all", "Private All", &creator_id);
+        svc.visibility = "private".to_string();
+        insert_service(&db, &svc).await;
+
+        let creator_all = super::list_catalog_all(&db, &encryption_keys, &creator_id)
+            .await
+            .unwrap();
+        assert_eq!(creator_all.len(), 1);
+
+        let viewer_all = super::list_catalog_all(&db, &encryption_keys, &viewer_id)
+            .await
+            .unwrap();
+        assert!(viewer_all.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_catalog_sorted_by_name() {
+        let Some(db) = connect_test_database("cat_svc_list_sorted").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let svc_z = make_catalog_service("zzz-svc", "ZZZ Service", &user_id);
+        let svc_a = make_catalog_service("aaa-svc", "AAA Service", &user_id);
+        let svc_m = make_catalog_service("mmm-svc", "MMM Service", &user_id);
+        insert_service(&db, &svc_z).await;
+        insert_service(&db, &svc_a).await;
+        insert_service(&db, &svc_m).await;
+
+        let entries = super::list_catalog(&db, &encryption_keys, &user_id)
+            .await
+            .unwrap();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].name, "AAA Service");
+        assert_eq!(entries[1].name, "MMM Service");
+        assert_eq!(entries[2].name, "ZZZ Service");
+    }
+
+    // --- get_catalog_entry ---
+
+    #[tokio::test]
+    async fn get_catalog_entry_returns_entry_by_slug() {
+        let Some(db) = connect_test_database("cat_svc_get_by_slug").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let svc = make_catalog_service("openai", "OpenAI", &user_id);
+        insert_service(&db, &svc).await;
+
+        let entry = super::get_catalog_entry(&db, &encryption_keys, &user_id, "openai")
+            .await
+            .unwrap();
+        assert_eq!(entry.slug, "openai");
+        assert_eq!(entry.name, "OpenAI");
+    }
+
+    #[tokio::test]
+    async fn get_catalog_entry_returns_not_found_for_missing_slug() {
+        let Some(db) = connect_test_database("cat_svc_get_missing").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let result = super::get_catalog_entry(&db, &encryption_keys, &user_id, "nonexistent").await;
+        assert!(matches!(result, Err(crate::errors::AppError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn get_catalog_entry_returns_not_found_for_inactive() {
+        let Some(db) = connect_test_database("cat_svc_get_inactive").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let mut svc = make_catalog_service("dead-svc", "Dead", &user_id);
+        svc.is_active = false;
+        insert_service(&db, &svc).await;
+
+        let result = super::get_catalog_entry(&db, &encryption_keys, &user_id, "dead-svc").await;
+        assert!(matches!(result, Err(crate::errors::AppError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn get_catalog_entry_private_service_hidden_from_non_creator() {
+        let Some(db) = connect_test_database("cat_svc_get_priv_hide").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let creator_id = uuid::Uuid::new_v4().to_string();
+        let viewer_id = uuid::Uuid::new_v4().to_string();
+
+        let mut svc = make_catalog_service("secret-svc", "Secret", &creator_id);
+        svc.visibility = "private".to_string();
+        insert_service(&db, &svc).await;
+
+        // Creator can see it
+        let entry = super::get_catalog_entry(&db, &encryption_keys, &creator_id, "secret-svc")
+            .await
+            .unwrap();
+        assert_eq!(entry.slug, "secret-svc");
+
+        // Non-creator cannot
+        let result =
+            super::get_catalog_entry(&db, &encryption_keys, &viewer_id, "secret-svc").await;
+        assert!(matches!(result, Err(crate::errors::AppError::NotFound(_))));
+    }
+
+    // --- get_downstream_service_by_slug ---
+
+    #[tokio::test]
+    async fn get_downstream_service_by_slug_returns_service() {
+        let Some(db) = connect_test_database("cat_svc_ds_by_slug").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let svc = make_catalog_service("openai", "OpenAI", &user_id);
+        insert_service(&db, &svc).await;
+
+        let result = super::get_downstream_service_by_slug(&db, "openai", &user_id)
+            .await
+            .unwrap();
+        assert_eq!(result.slug, "openai");
+        assert_eq!(result.id, svc.id);
+    }
+
+    #[tokio::test]
+    async fn get_downstream_service_by_slug_not_found() {
+        let Some(db) = connect_test_database("cat_svc_ds_not_found").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let result = super::get_downstream_service_by_slug(&db, "nope", &user_id).await;
+        assert!(matches!(result, Err(crate::errors::AppError::NotFound(_))));
+    }
+
+    // --- get_required_permissions ---
+
+    #[tokio::test]
+    async fn get_required_permissions_returns_permissions_when_set() {
+        let Some(db) = connect_test_database("cat_svc_req_perms").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let mut svc = make_catalog_service("permed-svc", "Permed", &user_id);
+        svc.required_permissions = Some(vec!["read:data".to_string(), "write:data".to_string()]);
+        insert_service(&db, &svc).await;
+
+        let perms = super::get_required_permissions(&db, &svc.id).await;
+        assert_eq!(perms.len(), 2);
+        assert!(perms.contains(&"read:data".to_string()));
+        assert!(perms.contains(&"write:data".to_string()));
+    }
+
+    #[tokio::test]
+    async fn get_required_permissions_returns_empty_for_missing_service() {
+        let Some(db) = connect_test_database("cat_svc_req_perms_missing").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+
+        let perms = super::get_required_permissions(&db, "nonexistent-id").await;
+        assert!(perms.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_required_permissions_returns_empty_when_field_unset() {
+        let Some(db) = connect_test_database("cat_svc_req_perms_unset").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let svc = make_catalog_service("noperm-svc", "NoPerm", &user_id);
+        insert_service(&db, &svc).await;
+
+        let perms = super::get_required_permissions(&db, &svc.id).await;
+        assert!(perms.is_empty());
+    }
+
+    // --- catalog entry field mapping ---
+
+    #[tokio::test]
+    async fn catalog_entry_maps_rich_metadata_fields() {
+        let Some(db) = connect_test_database("cat_svc_metadata").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let mut svc = make_catalog_service("meta-svc", "Meta Service", &user_id);
+        svc.homepage_url = Some("https://example.com".to_string());
+        svc.repository_url = Some("https://github.com/test/test".to_string());
+        svc.auth_notes = Some("Use your personal API key".to_string());
+        svc.known_limitations = Some("Rate limited to 100 req/min".to_string());
+        svc.description = Some("A test service".to_string());
+        insert_service(&db, &svc).await;
+
+        let entry = super::get_catalog_entry(&db, &encryption_keys, &user_id, "meta-svc")
+            .await
+            .unwrap();
+        assert_eq!(entry.homepage_url.as_deref(), Some("https://example.com"));
+        assert_eq!(
+            entry.repository_url.as_deref(),
+            Some("https://github.com/test/test")
+        );
+        assert_eq!(
+            entry.auth_notes.as_deref(),
+            Some("Use your personal API key")
+        );
+        assert_eq!(
+            entry.known_limitations.as_deref(),
+            Some("Rate limited to 100 req/min")
+        );
+        assert_eq!(entry.description.as_deref(), Some("A test service"));
+    }
+
+    #[tokio::test]
+    async fn list_catalog_internal_category_included() {
+        let Some(db) = connect_test_database("cat_svc_internal").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let mut svc = make_catalog_service("internal-svc", "Internal", &user_id);
+        svc.service_category = "internal".to_string();
+        insert_service(&db, &svc).await;
+
+        let entries = super::list_catalog(&db, &encryption_keys, &user_id)
+            .await
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].slug, "internal-svc");
+    }
 }

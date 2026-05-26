@@ -165,6 +165,7 @@ pub async fn delete_user_credentials(
 }
 
 /// Resolved OAuth client credentials (decrypted).
+#[derive(Debug)]
 pub struct ResolvedOAuthCredentials {
     pub client_id: String,
     pub client_secret: Option<String>,
@@ -458,6 +459,733 @@ mod tests {
             updated_at: Utc::now(),
         }
     }
+
+    // ── Pure function tests (no MongoDB) ──────────────────────────
+
+    #[test]
+    fn provider_has_admin_oauth_credentials_oauth2_with_both() {
+        let provider = make_provider("oauth2", true, true);
+        assert!(super::provider_has_admin_oauth_credentials(&provider));
+    }
+
+    #[test]
+    fn provider_has_admin_oauth_credentials_oauth2_missing_secret() {
+        let provider = make_provider("oauth2", true, false);
+        assert!(!super::provider_has_admin_oauth_credentials(&provider));
+    }
+
+    #[test]
+    fn provider_has_admin_oauth_credentials_oauth2_missing_id() {
+        let provider = make_provider("oauth2", false, true);
+        assert!(!super::provider_has_admin_oauth_credentials(&provider));
+    }
+
+    #[test]
+    fn provider_has_admin_oauth_credentials_oauth2_missing_both() {
+        let provider = make_provider("oauth2", false, false);
+        assert!(!super::provider_has_admin_oauth_credentials(&provider));
+    }
+
+    #[test]
+    fn provider_has_admin_oauth_credentials_device_code_only_needs_client_id() {
+        let provider = make_provider("device_code", true, false);
+        assert!(super::provider_has_admin_oauth_credentials(&provider));
+    }
+
+    #[test]
+    fn provider_has_admin_oauth_credentials_device_code_missing_client_id() {
+        let provider = make_provider("device_code", false, false);
+        assert!(!super::provider_has_admin_oauth_credentials(&provider));
+    }
+
+    #[test]
+    fn provider_has_admin_oauth_credentials_device_code_with_both() {
+        let provider = make_provider("device_code", true, true);
+        assert!(super::provider_has_admin_oauth_credentials(&provider));
+    }
+
+    #[test]
+    fn provider_has_admin_oauth_credentials_api_key_always_false() {
+        let provider = make_provider("api_key", true, true);
+        assert!(!super::provider_has_admin_oauth_credentials(&provider));
+    }
+
+    #[test]
+    fn provider_has_admin_oauth_credentials_unknown_type_false() {
+        let provider = make_provider("unknown_type", true, true);
+        assert!(!super::provider_has_admin_oauth_credentials(&provider));
+    }
+
+    #[test]
+    fn supports_user_credentials_user_mode() {
+        let mut provider = make_provider("oauth2", false, false);
+        provider.credential_mode = "user".to_string();
+        assert!(super::supports_user_credentials(&provider));
+    }
+
+    #[test]
+    fn supports_user_credentials_both_mode() {
+        let mut provider = make_provider("oauth2", false, false);
+        provider.credential_mode = "both".to_string();
+        assert!(super::supports_user_credentials(&provider));
+    }
+
+    #[test]
+    fn supports_user_credentials_admin_mode_is_false() {
+        let mut provider = make_provider("oauth2", false, false);
+        provider.credential_mode = "admin".to_string();
+        assert!(!super::supports_user_credentials(&provider));
+    }
+
+    #[test]
+    fn supports_user_credentials_unknown_mode_is_false() {
+        let mut provider = make_provider("oauth2", false, false);
+        provider.credential_mode = "something_else".to_string();
+        assert!(!super::supports_user_credentials(&provider));
+    }
+
+    fn make_provider(
+        provider_type: &str,
+        has_client_id: bool,
+        has_client_secret: bool,
+    ) -> crate::models::provider_config::ProviderConfig {
+        let now = Utc::now();
+        crate::models::provider_config::ProviderConfig {
+            id: uuid::Uuid::new_v4().to_string(),
+            slug: "test-provider".to_string(),
+            name: "Test Provider".to_string(),
+            description: None,
+            provider_type: provider_type.to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            default_scopes: None,
+            client_id_encrypted: if has_client_id {
+                Some(vec![1, 2, 3])
+            } else {
+                None
+            },
+            client_secret_encrypted: if has_client_secret {
+                Some(vec![4, 5, 6])
+            } else {
+                None
+            },
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: None,
+            is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    // ── Integration tests: upsert / get / delete / resolve credentials ──
+
+    #[tokio::test]
+    async fn upsert_user_credentials_creates_new_record() {
+        let Some(db) = connect_test_database("uc_svc_upsert_create").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+
+        let cred = super::upsert_user_credentials(
+            &db,
+            &enc,
+            &user_id,
+            &provider_id,
+            "my-client-id",
+            Some("my-client-secret"),
+            Some("My Lark App"),
+        )
+        .await
+        .expect("insert should succeed");
+
+        assert_eq!(cred.user_id, user_id);
+        assert_eq!(cred.provider_config_id, provider_id);
+        assert_eq!(cred.label.as_deref(), Some("My Lark App"));
+        assert!(cred.client_id_encrypted.is_some());
+        assert!(cred.client_secret_encrypted.is_some());
+    }
+
+    #[tokio::test]
+    async fn upsert_user_credentials_updates_existing() {
+        let Some(db) = connect_test_database("uc_svc_upsert_update").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+
+        let first = super::upsert_user_credentials(
+            &db,
+            &enc,
+            &user_id,
+            &provider_id,
+            "cid-v1",
+            Some("sec-v1"),
+            Some("Label v1"),
+        )
+        .await
+        .unwrap();
+
+        let second = super::upsert_user_credentials(
+            &db,
+            &enc,
+            &user_id,
+            &provider_id,
+            "cid-v2",
+            Some("sec-v2"),
+            Some("Label v2"),
+        )
+        .await
+        .unwrap();
+
+        // Same record updated (same _id)
+        assert_eq!(first.id, second.id);
+        assert_eq!(second.label.as_deref(), Some("Label v2"));
+        assert!(second.updated_at >= first.updated_at);
+    }
+
+    #[tokio::test]
+    async fn upsert_user_credentials_without_secret() {
+        let Some(db) = connect_test_database("uc_svc_upsert_no_secret").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+
+        let cred = super::upsert_user_credentials(
+            &db,
+            &enc,
+            &user_id,
+            &provider_id,
+            "cid-only",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(cred.client_id_encrypted.is_some());
+        assert!(cred.client_secret_encrypted.is_none());
+        assert!(cred.label.is_none());
+    }
+
+    #[tokio::test]
+    async fn upsert_user_credentials_label_none_preserves_existing_label() {
+        let Some(db) = connect_test_database("uc_svc_upsert_label_preserve").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+
+        // Create with label
+        super::upsert_user_credentials(
+            &db,
+            &enc,
+            &user_id,
+            &provider_id,
+            "cid",
+            Some("sec"),
+            Some("Original"),
+        )
+        .await
+        .unwrap();
+
+        // Update without label (None = "don't change")
+        let updated = super::upsert_user_credentials(
+            &db,
+            &enc,
+            &user_id,
+            &provider_id,
+            "cid-new",
+            Some("sec-new"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(updated.label.as_deref(), Some("Original"));
+    }
+
+    #[tokio::test]
+    async fn get_user_credentials_returns_none_when_missing() {
+        let Some(db) = connect_test_database("uc_svc_get_missing").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let result = super::get_user_credentials(
+            &db,
+            &uuid::Uuid::new_v4().to_string(),
+            &uuid::Uuid::new_v4().to_string(),
+        )
+        .await
+        .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_user_credentials_returns_existing() {
+        let Some(db) = connect_test_database("uc_svc_get_existing").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+
+        super::upsert_user_credentials(
+            &db,
+            &enc,
+            &user_id,
+            &provider_id,
+            "cid",
+            Some("sec"),
+            Some("label"),
+        )
+        .await
+        .unwrap();
+
+        let result = super::get_user_credentials(&db, &user_id, &provider_id)
+            .await
+            .unwrap();
+        assert!(result.is_some());
+        let cred = result.unwrap();
+        assert_eq!(cred.user_id, user_id);
+        assert_eq!(cred.provider_config_id, provider_id);
+    }
+
+    #[tokio::test]
+    async fn get_user_credentials_metadata_returns_without_secrets() {
+        let Some(db) = connect_test_database("uc_svc_get_metadata").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+
+        super::upsert_user_credentials(
+            &db,
+            &enc,
+            &user_id,
+            &provider_id,
+            "cid",
+            Some("sec"),
+            Some("Metadata Label"),
+        )
+        .await
+        .unwrap();
+
+        let meta = super::get_user_credentials_metadata(&db, &user_id, &provider_id)
+            .await
+            .unwrap()
+            .expect("metadata should be Some");
+        assert_eq!(meta.provider_config_id, provider_id);
+        assert_eq!(meta.label.as_deref(), Some("Metadata Label"));
+    }
+
+    #[tokio::test]
+    async fn get_user_credentials_metadata_returns_none_when_missing() {
+        let Some(db) = connect_test_database("uc_svc_get_metadata_missing").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let result = super::get_user_credentials_metadata(
+            &db,
+            &uuid::Uuid::new_v4().to_string(),
+            &uuid::Uuid::new_v4().to_string(),
+        )
+        .await
+        .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_user_credentials_removes_record() {
+        let Some(db) = connect_test_database("uc_svc_delete_ok").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+
+        super::upsert_user_credentials(&db, &enc, &user_id, &provider_id, "cid", Some("sec"), None)
+            .await
+            .unwrap();
+
+        super::delete_user_credentials(&db, &user_id, &provider_id)
+            .await
+            .expect("delete should succeed");
+
+        let after = super::get_user_credentials(&db, &user_id, &provider_id)
+            .await
+            .unwrap();
+        assert!(after.is_none(), "credentials should be gone after delete");
+    }
+
+    #[tokio::test]
+    async fn delete_user_credentials_not_found_when_missing() {
+        let Some(db) = connect_test_database("uc_svc_delete_not_found").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let err = super::delete_user_credentials(
+            &db,
+            &uuid::Uuid::new_v4().to_string(),
+            &uuid::Uuid::new_v4().to_string(),
+        )
+        .await
+        .expect_err("should return NotFound");
+        assert!(matches!(err, crate::errors::AppError::NotFound(_)));
+    }
+
+    // ── resolve_oauth_credentials integration tests ──────────────────
+
+    #[tokio::test]
+    async fn resolve_oauth_credentials_admin_mode_decrypts_provider_creds() {
+        let Some(db) = connect_test_database("uc_svc_resolve_admin").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let cid_enc = enc.encrypt(b"admin-client-id").await.unwrap();
+        let sec_enc = enc.encrypt(b"admin-secret").await.unwrap();
+
+        let mut provider = make_provider("oauth2", true, true);
+        provider.client_id_encrypted = Some(cid_enc);
+        provider.client_secret_encrypted = Some(sec_enc);
+        provider.credential_mode = "admin".to_string();
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let resolved = super::resolve_oauth_credentials(&db, &enc, &provider, &user_id)
+            .await
+            .unwrap();
+
+        assert_eq!(resolved.client_id, "admin-client-id");
+        assert_eq!(resolved.client_secret.as_deref(), Some("admin-secret"));
+        assert!(resolved.credential_user_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_oauth_credentials_user_mode_requires_user_creds() {
+        let Some(db) = connect_test_database("uc_svc_resolve_user_missing").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let mut provider = make_provider("oauth2", false, false);
+        provider.credential_mode = "user".to_string();
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let result = super::resolve_oauth_credentials(&db, &enc, &provider, &user_id).await;
+        assert!(result.is_err(), "should fail without user creds");
+        assert!(matches!(
+            result.unwrap_err(),
+            crate::errors::AppError::BadRequest(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn resolve_oauth_credentials_user_mode_with_stored_creds() {
+        let Some(db) = connect_test_database("uc_svc_resolve_user_ok").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let mut provider = make_provider("oauth2", false, false);
+        provider.credential_mode = "user".to_string();
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        // Store user credentials
+        super::upsert_user_credentials(
+            &db,
+            &enc,
+            &user_id,
+            &provider.id,
+            "user-cid",
+            Some("user-secret"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let resolved = super::resolve_oauth_credentials(&db, &enc, &provider, &user_id)
+            .await
+            .unwrap();
+
+        assert_eq!(resolved.client_id, "user-cid");
+        assert_eq!(resolved.client_secret.as_deref(), Some("user-secret"));
+        assert_eq!(
+            resolved.credential_user_id.as_deref(),
+            Some(user_id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_oauth_credentials_both_mode_prefers_user_creds() {
+        let Some(db) = connect_test_database("uc_svc_resolve_both_user_pref").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let admin_cid_enc = enc.encrypt(b"admin-cid").await.unwrap();
+        let admin_sec_enc = enc.encrypt(b"admin-sec").await.unwrap();
+
+        let mut provider = make_provider("oauth2", true, true);
+        provider.client_id_encrypted = Some(admin_cid_enc);
+        provider.client_secret_encrypted = Some(admin_sec_enc);
+        provider.credential_mode = "both".to_string();
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        // Store user credentials (should be preferred over admin)
+        super::upsert_user_credentials(
+            &db,
+            &enc,
+            &user_id,
+            &provider.id,
+            "user-cid-both",
+            Some("user-sec-both"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let resolved = super::resolve_oauth_credentials(&db, &enc, &provider, &user_id)
+            .await
+            .unwrap();
+
+        assert_eq!(resolved.client_id, "user-cid-both");
+        assert_eq!(resolved.client_secret.as_deref(), Some("user-sec-both"));
+        assert_eq!(
+            resolved.credential_user_id.as_deref(),
+            Some(user_id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_oauth_credentials_both_mode_falls_back_to_admin() {
+        let Some(db) = connect_test_database("uc_svc_resolve_both_admin_fb").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let admin_cid_enc = enc.encrypt(b"admin-fallback-cid").await.unwrap();
+        let admin_sec_enc = enc.encrypt(b"admin-fallback-sec").await.unwrap();
+
+        let mut provider = make_provider("oauth2", true, true);
+        provider.client_id_encrypted = Some(admin_cid_enc);
+        provider.client_secret_encrypted = Some(admin_sec_enc);
+        provider.credential_mode = "both".to_string();
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        // No user credentials stored, should fall back to admin
+
+        let resolved = super::resolve_oauth_credentials(&db, &enc, &provider, &user_id)
+            .await
+            .unwrap();
+
+        assert_eq!(resolved.client_id, "admin-fallback-cid");
+        assert_eq!(
+            resolved.client_secret.as_deref(),
+            Some("admin-fallback-sec")
+        );
+        assert!(resolved.credential_user_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_oauth_credentials_both_mode_fails_when_neither_available() {
+        let Some(db) = connect_test_database("uc_svc_resolve_both_neither").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let mut provider = make_provider("oauth2", false, false);
+        provider.credential_mode = "both".to_string();
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let result = super::resolve_oauth_credentials(&db, &enc, &provider, &user_id).await;
+        assert!(result.is_err(), "should fail with no creds in 'both' mode");
+        assert!(matches!(
+            result.unwrap_err(),
+            crate::errors::AppError::BadRequest(_)
+        ));
+    }
+
+    // ── resolve_token_oauth_credentials integration tests ────────────
+
+    #[tokio::test]
+    async fn resolve_token_oauth_credentials_admin_path() {
+        let Some(db) = connect_test_database("uc_svc_resolve_tok_admin").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let cid_enc = enc.encrypt(b"tok-admin-cid").await.unwrap();
+        let sec_enc = enc.encrypt(b"tok-admin-sec").await.unwrap();
+
+        let mut provider = make_provider("oauth2", true, true);
+        provider.client_id_encrypted = Some(cid_enc);
+        provider.client_secret_encrypted = Some(sec_enc);
+
+        let resolved = super::resolve_token_oauth_credentials(&db, &enc, &provider, None)
+            .await
+            .unwrap();
+
+        assert_eq!(resolved.client_id, "tok-admin-cid");
+        assert_eq!(resolved.client_secret.as_deref(), Some("tok-admin-sec"));
+    }
+
+    #[tokio::test]
+    async fn resolve_token_oauth_credentials_user_path() {
+        let Some(db) = connect_test_database("uc_svc_resolve_tok_user").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let provider = make_provider("oauth2", false, false);
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        super::upsert_user_credentials(
+            &db,
+            &enc,
+            &user_id,
+            &provider.id,
+            "tok-user-cid",
+            Some("tok-user-sec"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let resolved = super::resolve_token_oauth_credentials(&db, &enc, &provider, Some(&user_id))
+            .await
+            .unwrap();
+
+        assert_eq!(resolved.client_id, "tok-user-cid");
+        assert_eq!(resolved.client_secret.as_deref(), Some("tok-user-sec"));
+        assert_eq!(
+            resolved.credential_user_id.as_deref(),
+            Some(user_id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_token_oauth_credentials_fails_when_admin_creds_missing() {
+        let Some(db) = connect_test_database("uc_svc_resolve_tok_admin_miss").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let provider = make_provider("oauth2", false, false);
+
+        let result = super::resolve_token_oauth_credentials(&db, &enc, &provider, None).await;
+        assert!(result.is_err(), "should fail without admin creds");
+        assert!(matches!(
+            result.unwrap_err(),
+            crate::errors::AppError::BadRequest(_)
+        ));
+    }
+
+    // ── CRUD round-trip integration test ─────────────────────────────
+
+    #[tokio::test]
+    async fn credentials_full_lifecycle() {
+        let Some(db) = connect_test_database("uc_svc_full_lifecycle").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+
+        // 1. Create
+        let cred = super::upsert_user_credentials(
+            &db,
+            &enc,
+            &user_id,
+            &provider_id,
+            "lifecycle-cid",
+            Some("lifecycle-sec"),
+            Some("v1"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(cred.label.as_deref(), Some("v1"));
+
+        // 2. Read
+        let fetched = super::get_user_credentials(&db, &user_id, &provider_id)
+            .await
+            .unwrap()
+            .expect("should exist");
+        assert_eq!(fetched.id, cred.id);
+
+        // 3. Update
+        let updated = super::upsert_user_credentials(
+            &db,
+            &enc,
+            &user_id,
+            &provider_id,
+            "lifecycle-cid-v2",
+            Some("lifecycle-sec-v2"),
+            Some("v2"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.id, cred.id);
+        assert_eq!(updated.label.as_deref(), Some("v2"));
+
+        // 4. Read metadata
+        let meta = super::get_user_credentials_metadata(&db, &user_id, &provider_id)
+            .await
+            .unwrap()
+            .expect("metadata should exist");
+        assert_eq!(meta.label.as_deref(), Some("v2"));
+
+        // 5. Delete
+        super::delete_user_credentials(&db, &user_id, &provider_id)
+            .await
+            .unwrap();
+
+        // 6. Verify gone
+        let gone = super::get_user_credentials(&db, &user_id, &provider_id)
+            .await
+            .unwrap();
+        assert!(gone.is_none());
+
+        // 7. Double-delete returns NotFound
+        let err = super::delete_user_credentials(&db, &user_id, &provider_id)
+            .await
+            .expect_err("double delete should fail");
+        assert!(matches!(err, crate::errors::AppError::NotFound(_)));
+    }
+
+    // ── Existing connection-resolution tests ─────────────────────────
 
     #[tokio::test]
     async fn returns_none_when_no_key_matches_connection_id() {

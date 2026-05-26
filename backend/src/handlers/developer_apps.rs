@@ -702,6 +702,224 @@ mod tests {
         assert!(err.is_err());
     }
 
+    // ── Pure function tests (no MongoDB) ──
+
+    #[test]
+    fn validate_redirect_uris_accepts_valid_https() {
+        let result = validate_redirect_uris(&["https://example.com/callback".to_string()]);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), vec!["https://example.com/callback"]);
+    }
+
+    #[test]
+    fn validate_redirect_uris_rejects_empty_list() {
+        let result = validate_redirect_uris(&[]);
+        assert!(matches!(result, Err(AppError::ValidationError(_))));
+    }
+
+    #[test]
+    fn validate_redirect_uris_rejects_empty_string() {
+        let result = validate_redirect_uris(&["".to_string()]);
+        assert!(matches!(result, Err(AppError::ValidationError(_))));
+    }
+
+    #[test]
+    fn validate_redirect_uris_rejects_whitespace_only() {
+        let result = validate_redirect_uris(&["   ".to_string()]);
+        assert!(matches!(result, Err(AppError::ValidationError(_))));
+    }
+
+    #[test]
+    fn validate_redirect_uris_rejects_javascript_scheme() {
+        let result = validate_redirect_uris(&["javascript:alert(1)".to_string()]);
+        assert!(matches!(result, Err(AppError::ValidationError(_))));
+    }
+
+    #[test]
+    fn validate_redirect_uris_rejects_data_scheme() {
+        let result = validate_redirect_uris(&["data:text/html,<h1>hi</h1>".to_string()]);
+        assert!(matches!(result, Err(AppError::ValidationError(_))));
+    }
+
+    #[test]
+    fn validate_redirect_uris_rejects_file_scheme() {
+        let result = validate_redirect_uris(&["file:///etc/passwd".to_string()]);
+        assert!(matches!(result, Err(AppError::ValidationError(_))));
+    }
+
+    #[test]
+    fn validate_redirect_uris_rejects_fragment() {
+        let result = validate_redirect_uris(&["https://example.com/cb#fragment".to_string()]);
+        assert!(matches!(result, Err(AppError::ValidationError(_))));
+    }
+
+    #[test]
+    fn validate_redirect_uris_rejects_invalid_url() {
+        let result = validate_redirect_uris(&["not a url".to_string()]);
+        assert!(matches!(result, Err(AppError::ValidationError(_))));
+    }
+
+    #[test]
+    fn validate_redirect_uris_deduplicates() {
+        let result = validate_redirect_uris(&[
+            "https://example.com/cb".to_string(),
+            "https://example.com/cb".to_string(),
+        ]);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn validate_redirect_uris_trims_whitespace() {
+        let result = validate_redirect_uris(&["  https://example.com/cb  ".to_string()]);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), vec!["https://example.com/cb"]);
+    }
+
+    #[test]
+    fn validate_redirect_uris_allows_localhost() {
+        let result = validate_redirect_uris(&["http://localhost:3000/callback".to_string()]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_redirect_uris_allows_custom_scheme() {
+        let result = validate_redirect_uris(&["myapp://callback".to_string()]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_redirect_uris_multiple_valid() {
+        let result = validate_redirect_uris(&[
+            "https://example.com/cb".to_string(),
+            "https://other.com/cb".to_string(),
+            "http://localhost:3000/cb".to_string(),
+        ]);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 3);
+    }
+
+    #[test]
+    fn normalize_optional_nonempty_returns_none_for_none() {
+        assert!(normalize_optional_nonempty(None).is_none());
+    }
+
+    #[test]
+    fn normalize_optional_nonempty_returns_none_for_empty() {
+        assert!(normalize_optional_nonempty(Some("")).is_none());
+    }
+
+    #[test]
+    fn normalize_optional_nonempty_returns_none_for_whitespace() {
+        assert!(normalize_optional_nonempty(Some("   ")).is_none());
+    }
+
+    #[test]
+    fn normalize_optional_nonempty_trims_and_returns() {
+        assert_eq!(
+            normalize_optional_nonempty(Some("  hello  ")),
+            Some("hello")
+        );
+    }
+
+    #[test]
+    fn normalize_optional_nonempty_preserves_value() {
+        assert_eq!(normalize_optional_nonempty(Some("value")), Some("value"));
+    }
+
+    #[test]
+    fn to_response_maps_oauth_client_fields() {
+        use chrono::Utc;
+        let client = OauthClient {
+            id: "client_1".to_string(),
+            client_name: "My App".to_string(),
+            client_type: "confidential".to_string(),
+            client_secret_hash: "hash".to_string(),
+            redirect_uris: vec!["https://ex.com/cb".to_string()],
+            allowed_scopes: "openid profile".to_string(),
+            grant_types: "authorization_code".to_string(),
+            delegation_scopes: "proxy:*".to_string(),
+            broker_capability_enabled: true,
+            revocation_webhook_url: Some("https://ex.com/revoke".to_string()),
+            revocation_webhook_secret_encrypted: None,
+            is_active: true,
+            created_by: Some("user_1".to_string()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let resp = to_response(client, Some("secret_value".to_string()));
+        assert_eq!(resp.id, "client_1");
+        assert_eq!(resp.client_name, "My App");
+        assert_eq!(resp.client_type, "confidential");
+        assert!(resp.broker_capability_enabled);
+        assert_eq!(resp.client_secret, Some("secret_value".to_string()));
+        assert!(resp.created_at.contains('T'));
+    }
+
+    #[test]
+    fn to_response_omits_secret_when_none() {
+        use chrono::Utc;
+        let client = OauthClient {
+            id: "client_2".to_string(),
+            client_name: "Read App".to_string(),
+            client_type: "public".to_string(),
+            client_secret_hash: String::new(),
+            redirect_uris: vec![],
+            allowed_scopes: "openid".to_string(),
+            grant_types: "authorization_code".to_string(),
+            delegation_scopes: String::new(),
+            broker_capability_enabled: false,
+            revocation_webhook_url: None,
+            revocation_webhook_secret_encrypted: None,
+            is_active: false,
+            created_by: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let resp = to_response(client, None);
+        assert!(resp.client_secret.is_none());
+        assert!(!resp.is_active);
+    }
+
+    #[test]
+    fn developer_oauth_client_response_serialization() {
+        let resp = DeveloperOAuthClientResponse {
+            id: "c1".to_string(),
+            client_name: "App".to_string(),
+            client_type: "public".to_string(),
+            redirect_uris: vec!["https://x.com/cb".to_string()],
+            allowed_scopes: "openid".to_string(),
+            delegation_scopes: String::new(),
+            broker_capability_enabled: false,
+            revocation_webhook_url: None,
+            is_active: true,
+            client_secret: None,
+            created_at: "2025-01-01T00:00:00Z".to_string(),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["id"], "c1");
+        assert!(json.get("client_secret").is_none());
+    }
+
+    #[test]
+    fn developer_oauth_client_response_includes_secret_when_present() {
+        let resp = DeveloperOAuthClientResponse {
+            id: "c2".to_string(),
+            client_name: "App".to_string(),
+            client_type: "confidential".to_string(),
+            redirect_uris: vec![],
+            allowed_scopes: "openid".to_string(),
+            delegation_scopes: String::new(),
+            broker_capability_enabled: false,
+            revocation_webhook_url: None,
+            is_active: true,
+            client_secret: Some("secret_abc".to_string()),
+            created_at: "2025-01-01T00:00:00Z".to_string(),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["client_secret"], "secret_abc");
+    }
+
     #[tokio::test]
     async fn get_nonexistent_client_returns_not_found() {
         let Some(db) = connect_test_database("h_dev_apps_not_found").await else {

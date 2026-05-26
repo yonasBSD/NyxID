@@ -61,3 +61,77 @@ pub(crate) fn derive_key_id_from_str(identifier: &str) -> u8 {
     let digest = Sha256::digest(identifier.as_bytes());
     digest[0]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derive_key_id_is_deterministic() {
+        let key = b"my-secret-key-material";
+        let id1 = derive_key_id(key);
+        let id2 = derive_key_id(key);
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn derive_key_id_different_keys_likely_differ() {
+        let id_a = derive_key_id(b"key-alpha");
+        let id_b = derive_key_id(b"key-beta");
+        // SHA-256 first bytes of different inputs differ with high probability
+        // (1/256 chance of collision). This is a sanity check, not a guarantee.
+        assert_ne!(id_a, id_b);
+    }
+
+    #[test]
+    fn derive_key_id_empty_input() {
+        let id = derive_key_id(b"");
+        // SHA-256("") starts with 0xe3
+        assert_eq!(id, 0xe3);
+    }
+
+    #[test]
+    fn derive_key_id_single_byte() {
+        let id = derive_key_id(&[0x00]);
+        // Should return a valid u8 without panicking
+        let _ = id;
+    }
+
+    #[test]
+    fn derive_key_id_large_input() {
+        let large = vec![0xAB; 10_000];
+        let id = derive_key_id(&large);
+        let _ = id;
+    }
+
+    #[test]
+    fn wrapped_key_stores_key_id_and_ciphertext() {
+        let wk = WrappedKey {
+            key_id: 42,
+            ciphertext: Zeroizing::new(vec![1, 2, 3]),
+        };
+        assert_eq!(wk.key_id, 42);
+        assert_eq!(&*wk.ciphertext, &[1, 2, 3]);
+    }
+
+    #[test]
+    fn wrapped_key_clone_is_independent() {
+        let wk = WrappedKey {
+            key_id: 7,
+            ciphertext: Zeroizing::new(vec![10, 20]),
+        };
+        let cloned = wk.clone();
+        assert_eq!(cloned.key_id, wk.key_id);
+        assert_eq!(&*cloned.ciphertext, &*wk.ciphertext);
+    }
+
+    #[test]
+    fn wrapped_key_debug_does_not_panic() {
+        let wk = WrappedKey {
+            key_id: 0,
+            ciphertext: Zeroizing::new(vec![]),
+        };
+        let debug = format!("{:?}", wk);
+        assert!(!debug.is_empty());
+    }
+}

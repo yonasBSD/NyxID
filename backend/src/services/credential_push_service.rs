@@ -661,6 +661,305 @@ async fn decrypt_api_key_credential(
 }
 
 #[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ────────────────────────────────────────────────────────────────────
+    // ActorScope — pure unit tests
+    // ────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn unrestricted_permits_any_node() {
+        let scope = ActorScope::unrestricted();
+        assert!(scope.permits_node("node-1"));
+        assert!(scope.permits_node("node-999"));
+        assert!(scope.permits_node(""));
+    }
+
+    #[test]
+    fn unrestricted_permits_any_service() {
+        let scope = ActorScope::unrestricted();
+        assert!(scope.permits_service("svc-1"));
+        assert!(scope.permits_service("svc-999"));
+        assert!(scope.permits_service(""));
+    }
+
+    #[test]
+    fn scoped_node_allows_listed_ids() {
+        let scope = ActorScope {
+            allow_all_nodes: false,
+            allowed_node_ids: vec!["node-a".to_string(), "node-b".to_string()],
+            allow_all_services: true,
+            allowed_service_ids: vec![],
+        };
+        assert!(scope.permits_node("node-a"));
+        assert!(scope.permits_node("node-b"));
+        assert!(!scope.permits_node("node-c"));
+    }
+
+    #[test]
+    fn scoped_service_allows_listed_ids() {
+        let scope = ActorScope {
+            allow_all_nodes: true,
+            allowed_node_ids: vec![],
+            allow_all_services: false,
+            allowed_service_ids: vec!["svc-x".to_string(), "svc-y".to_string()],
+        };
+        assert!(scope.permits_service("svc-x"));
+        assert!(scope.permits_service("svc-y"));
+        assert!(!scope.permits_service("svc-z"));
+    }
+
+    #[test]
+    fn empty_allowed_lists_with_allow_all_false_denies_everything() {
+        let scope = ActorScope {
+            allow_all_nodes: false,
+            allowed_node_ids: vec![],
+            allow_all_services: false,
+            allowed_service_ids: vec![],
+        };
+        assert!(!scope.permits_node("node-1"));
+        assert!(!scope.permits_service("svc-1"));
+        assert!(!scope.permits_node(""));
+        assert!(!scope.permits_service(""));
+    }
+
+    #[test]
+    fn allow_all_nodes_overrides_empty_allowed_list() {
+        let scope = ActorScope {
+            allow_all_nodes: true,
+            allowed_node_ids: vec![],
+            allow_all_services: false,
+            allowed_service_ids: vec![],
+        };
+        assert!(scope.permits_node("any-node"));
+        assert!(!scope.permits_service("any-service"));
+    }
+
+    #[test]
+    fn allow_all_services_overrides_empty_allowed_list() {
+        let scope = ActorScope {
+            allow_all_nodes: false,
+            allowed_node_ids: vec![],
+            allow_all_services: true,
+            allowed_service_ids: vec![],
+        };
+        assert!(!scope.permits_node("any-node"));
+        assert!(scope.permits_service("any-service"));
+    }
+
+    #[test]
+    fn duplicate_ids_in_allowed_list_still_permits() {
+        let scope = ActorScope {
+            allow_all_nodes: false,
+            allowed_node_ids: vec!["node-a".to_string(), "node-a".to_string()],
+            allow_all_services: false,
+            allowed_service_ids: vec!["svc-x".to_string(), "svc-x".to_string()],
+        };
+        assert!(scope.permits_node("node-a"));
+        assert!(scope.permits_service("svc-x"));
+        assert!(!scope.permits_node("node-b"));
+        assert!(!scope.permits_service("svc-y"));
+    }
+
+    #[test]
+    fn permits_node_is_case_sensitive() {
+        let scope = ActorScope {
+            allow_all_nodes: false,
+            allowed_node_ids: vec!["Node-A".to_string()],
+            allow_all_services: true,
+            allowed_service_ids: vec![],
+        };
+        assert!(scope.permits_node("Node-A"));
+        assert!(!scope.permits_node("node-a"));
+        assert!(!scope.permits_node("NODE-A"));
+    }
+
+    #[test]
+    fn permits_service_is_case_sensitive() {
+        let scope = ActorScope {
+            allow_all_nodes: true,
+            allowed_node_ids: vec![],
+            allow_all_services: false,
+            allowed_service_ids: vec!["Svc-X".to_string()],
+        };
+        assert!(scope.permits_service("Svc-X"));
+        assert!(!scope.permits_service("svc-x"));
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // build_credential_params_from_fields — pure unit tests
+    // ────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn build_params_bearer_uses_authorization_header() {
+        let params =
+            build_credential_params_from_fields("my-svc", "bearer", "ignored", "tok123", None);
+        assert_eq!(params.injection_method, "header");
+        assert_eq!(params.header_name, Some("Authorization".to_string()));
+        assert_eq!(params.header_value, Some("Bearer tok123".to_string()));
+        assert!(params.param_name.is_none());
+        assert!(params.param_value.is_none());
+        assert!(params.target_url.is_none());
+    }
+
+    #[test]
+    fn build_params_header_uses_custom_header_name() {
+        let params = build_credential_params_from_fields(
+            "my-svc",
+            "header",
+            "X-API-Key",
+            "secret",
+            Some("https://api.example.com".to_string()),
+        );
+        assert_eq!(params.injection_method, "header");
+        assert_eq!(params.header_name, Some("X-API-Key".to_string()));
+        assert_eq!(params.header_value, Some("secret".to_string()));
+        assert_eq!(
+            params.target_url,
+            Some("https://api.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn build_params_query_uses_param_fields() {
+        let params =
+            build_credential_params_from_fields("my-svc", "query", "api_key", "secret", None);
+        assert_eq!(params.injection_method, "query_param");
+        assert!(params.header_name.is_none());
+        assert!(params.header_value.is_none());
+        assert_eq!(params.param_name, Some("api_key".to_string()));
+        assert_eq!(params.param_value, Some("secret".to_string()));
+    }
+
+    #[test]
+    fn build_params_basic_uses_authorization_header() {
+        let params =
+            build_credential_params_from_fields("my-svc", "basic", "ignored", "dXNlcjpwYXNz", None);
+        assert_eq!(params.injection_method, "header");
+        assert_eq!(params.header_name, Some("Authorization".to_string()));
+        assert_eq!(params.header_value, Some("Basic dXNlcjpwYXNz".to_string()));
+    }
+
+    #[test]
+    fn build_params_path_uses_path_prefix() {
+        let params = build_credential_params_from_fields("tg-bot", "path", "bot", "tok123", None);
+        assert_eq!(params.injection_method, "path_prefix");
+        assert_eq!(params.header_name, Some("bot".to_string()));
+        assert_eq!(params.header_value, Some("tok123".to_string()));
+    }
+
+    #[test]
+    fn build_params_none_has_no_credentials() {
+        let params = build_credential_params_from_fields(
+            "my-svc",
+            "none",
+            "",
+            "",
+            Some("https://example.com".to_string()),
+        );
+        assert_eq!(params.injection_method, "none");
+        assert!(params.header_name.is_none());
+        assert!(params.header_value.is_none());
+        assert!(params.param_name.is_none());
+        assert!(params.param_value.is_none());
+        assert_eq!(params.target_url, Some("https://example.com".to_string()));
+    }
+
+    #[test]
+    fn build_params_aws_sigv4_carries_credential_in_header_value() {
+        let cred = r#"{"access_key":"AK","secret_key":"SK","region":"us-east-1"}"#;
+        let params = build_credential_params_from_fields("bedrock", "aws_sigv4", "", cred, None);
+        assert_eq!(params.injection_method, "aws_sigv4");
+        assert!(params.header_name.is_none());
+        assert_eq!(params.header_value, Some(cred.to_string()));
+        assert!(params.param_name.is_none());
+    }
+
+    #[test]
+    fn build_params_unknown_method_falls_back_to_header() {
+        let params = build_credential_params_from_fields(
+            "my-svc",
+            "custom_unknown",
+            "X-Custom",
+            "value",
+            None,
+        );
+        assert_eq!(params.injection_method, "header");
+        assert_eq!(params.header_name, Some("X-Custom".to_string()));
+        assert_eq!(params.header_value, Some("value".to_string()));
+    }
+
+    #[test]
+    fn build_params_preserves_service_slug() {
+        for method in [
+            "bearer",
+            "header",
+            "query",
+            "basic",
+            "path",
+            "none",
+            "aws_sigv4",
+        ] {
+            let params =
+                build_credential_params_from_fields("test-slug", method, "key", "val", None);
+            assert_eq!(params.service_slug, "test-slug", "method={method}");
+        }
+    }
+
+    // --- build_credential_params (via UserService) ---
+
+    #[test]
+    fn build_params_from_user_service_delegates_correctly() {
+        let svc = UserService {
+            id: "svc-1".to_string(),
+            user_id: "user-1".to_string(),
+            slug: "openai".to_string(),
+            endpoint_id: "ep-1".to_string(),
+            api_key_id: Some("ak-1".to_string()),
+            auth_method: "bearer".to_string(),
+            auth_key_name: "Authorization".to_string(),
+            catalog_service_id: None,
+            node_id: Some("node-1".to_string()),
+            node_priority: 0,
+            service_type: "http".to_string(),
+            ssh_auth_mode: crate::models::ssh_auth_mode::SshAuthMode::ProxyOnly,
+            ssh_node_keys_stale: false,
+            identity_propagation_mode: "none".to_string(),
+            identity_include_user_id: false,
+            identity_include_email: false,
+            identity_include_name: false,
+            identity_jwt_audience: None,
+            forward_access_token: false,
+            inject_delegation_token: false,
+            delegation_token_scope: "llm:proxy".to_string(),
+            custom_user_agent: None,
+            default_request_headers: None,
+            ws_frame_injections: Vec::new(),
+            is_active: true,
+            source: None,
+            source_id: None,
+            source_app_id: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let params = build_credential_params(
+            &svc,
+            "sk-test-key",
+            Some("https://api.openai.com".to_string()),
+        );
+        assert_eq!(params.service_slug, "openai");
+        assert_eq!(params.injection_method, "header");
+        assert_eq!(params.header_name, Some("Authorization".to_string()));
+        assert_eq!(params.header_value, Some("Bearer sk-test-key".to_string()));
+        assert_eq!(
+            params.target_url,
+            Some("https://api.openai.com".to_string())
+        );
+    }
+}
+
+#[cfg(test)]
 mod no_auth_strict_push_tests {
     use super::*;
     use crate::services::node_ws_manager::{

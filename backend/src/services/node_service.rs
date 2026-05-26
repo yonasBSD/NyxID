@@ -1625,6 +1625,254 @@ mod tests {
         assert_eq!(listed[0].owner.id, actor_id);
     }
 
+    // ────────────────────────────────────────────────────────────────────
+    // Pure-function tests (no MongoDB required)
+    // ────────────────────────────────────────────────────────────────────
+
+    // --- validate_node_metadata ---
+
+    #[test]
+    fn validate_node_metadata_accepts_all_none_fields() {
+        let meta = NodeMetadata {
+            agent_version: None,
+            os: None,
+            arch: None,
+            ip_address: None,
+        };
+        validate_node_metadata(&meta).expect("all-None metadata should be valid");
+    }
+
+    #[test]
+    fn validate_node_metadata_accepts_valid_fields() {
+        let meta = NodeMetadata {
+            agent_version: Some("1.2.3".to_string()),
+            os: Some("linux".to_string()),
+            arch: Some("x86_64".to_string()),
+            ip_address: Some("192.168.1.1".to_string()),
+        };
+        validate_node_metadata(&meta).expect("valid metadata should pass");
+    }
+
+    #[test]
+    fn validate_node_metadata_accepts_ipv6_address() {
+        let meta = NodeMetadata {
+            agent_version: None,
+            os: None,
+            arch: None,
+            ip_address: Some("::1".to_string()),
+        };
+        validate_node_metadata(&meta).expect("IPv6 loopback should be valid");
+    }
+
+    #[test]
+    fn validate_node_metadata_accepts_full_ipv6() {
+        let meta = NodeMetadata {
+            agent_version: None,
+            os: None,
+            arch: None,
+            ip_address: Some("2001:0db8:85a3:0000:0000:8a2e:0370:7334".to_string()),
+        };
+        validate_node_metadata(&meta).expect("full IPv6 should be valid");
+    }
+
+    #[test]
+    fn validate_node_metadata_rejects_overlong_agent_version() {
+        let meta = NodeMetadata {
+            agent_version: Some("v".repeat(65)),
+            os: None,
+            arch: None,
+            ip_address: None,
+        };
+        let err = validate_node_metadata(&meta).expect_err("agent_version too long");
+        assert!(matches!(err, AppError::ValidationError(msg) if msg.contains("agent_version")));
+    }
+
+    #[test]
+    fn validate_node_metadata_accepts_exactly_64_char_agent_version() {
+        let meta = NodeMetadata {
+            agent_version: Some("v".repeat(64)),
+            os: None,
+            arch: None,
+            ip_address: None,
+        };
+        validate_node_metadata(&meta).expect("64-char agent_version should pass");
+    }
+
+    #[test]
+    fn validate_node_metadata_rejects_overlong_os() {
+        let meta = NodeMetadata {
+            agent_version: None,
+            os: Some("x".repeat(65)),
+            arch: None,
+            ip_address: None,
+        };
+        let err = validate_node_metadata(&meta).expect_err("os too long");
+        assert!(matches!(err, AppError::ValidationError(msg) if msg.contains("os")));
+    }
+
+    #[test]
+    fn validate_node_metadata_rejects_overlong_arch() {
+        let meta = NodeMetadata {
+            agent_version: None,
+            os: None,
+            arch: Some("a".repeat(65)),
+            ip_address: None,
+        };
+        let err = validate_node_metadata(&meta).expect_err("arch too long");
+        assert!(matches!(err, AppError::ValidationError(msg) if msg.contains("arch")));
+    }
+
+    #[test]
+    fn validate_node_metadata_rejects_invalid_ip_address() {
+        let meta = NodeMetadata {
+            agent_version: None,
+            os: None,
+            arch: None,
+            ip_address: Some("not-an-ip".to_string()),
+        };
+        let err = validate_node_metadata(&meta).expect_err("invalid IP");
+        assert!(matches!(err, AppError::ValidationError(msg) if msg.contains("Invalid IP")));
+    }
+
+    #[test]
+    fn validate_node_metadata_rejects_empty_ip_address() {
+        let meta = NodeMetadata {
+            agent_version: None,
+            os: None,
+            arch: None,
+            ip_address: Some(String::new()),
+        };
+        let err = validate_node_metadata(&meta).expect_err("empty IP");
+        assert!(matches!(err, AppError::ValidationError(msg) if msg.contains("Invalid IP")));
+    }
+
+    // --- node_access_can_read ---
+
+    #[test]
+    fn node_access_can_read_allows_direct() {
+        assert!(node_access_can_read(&OwnerAccess::Direct));
+    }
+
+    #[test]
+    fn node_access_can_read_allows_org_admin() {
+        let access = OwnerAccess::AsOrgAdmin {
+            org_user_id: "org-1".to_string(),
+            membership_id: "m-1".to_string(),
+            allowed_service_ids: None,
+        };
+        assert!(node_access_can_read(&access));
+    }
+
+    #[test]
+    fn node_access_can_read_allows_org_member() {
+        let access = OwnerAccess::AsOrgMember {
+            org_user_id: "org-1".to_string(),
+            membership_id: "m-1".to_string(),
+            role: OrgRole::Member,
+            allowed_service_ids: None,
+        };
+        assert!(node_access_can_read(&access));
+    }
+
+    #[test]
+    fn node_access_can_read_denies_org_viewer() {
+        let access = OwnerAccess::AsOrgMember {
+            org_user_id: "org-1".to_string(),
+            membership_id: "m-1".to_string(),
+            role: OrgRole::Viewer,
+            allowed_service_ids: None,
+        };
+        assert!(!node_access_can_read(&access));
+    }
+
+    #[test]
+    fn node_access_can_read_denies_forbidden() {
+        assert!(!node_access_can_read(&OwnerAccess::Forbidden));
+    }
+
+    // --- owner_info_from_user_id ---
+
+    #[test]
+    fn owner_info_from_user_id_with_person_user() {
+        let mut user = test_user("user-1", UserType::Person);
+        user.display_name = Some("Alice".to_string());
+        let info = owner_info_from_user_id("user-1", Some(&user));
+        assert_eq!(info.kind, NodeOwnerKind::User);
+        assert_eq!(info.id, "user-1");
+        assert_eq!(info.display_name, "Alice");
+    }
+
+    #[test]
+    fn owner_info_from_user_id_with_org_user() {
+        let mut user = test_user("org-1", UserType::Org);
+        user.display_name = Some("Acme Corp".to_string());
+        let info = owner_info_from_user_id("org-1", Some(&user));
+        assert_eq!(info.kind, NodeOwnerKind::Org);
+        assert_eq!(info.display_name, "Acme Corp");
+    }
+
+    #[test]
+    fn owner_info_from_user_id_falls_back_to_email_when_display_name_blank() {
+        let mut user = test_user("user-1", UserType::Person);
+        user.email = "bob@example.com".to_string();
+        user.display_name = Some("   ".to_string());
+        let info = owner_info_from_user_id("user-1", Some(&user));
+        assert_eq!(info.display_name, "bob@example.com");
+    }
+
+    #[test]
+    fn owner_info_from_user_id_falls_back_to_email_when_display_name_none() {
+        let mut user = test_user("user-1", UserType::Person);
+        user.email = "bob@example.com".to_string();
+        user.display_name = None;
+        let info = owner_info_from_user_id("user-1", Some(&user));
+        assert_eq!(info.display_name, "bob@example.com");
+    }
+
+    #[test]
+    fn owner_info_from_user_id_falls_back_to_owner_id_when_no_user() {
+        let info = owner_info_from_user_id("unknown-id", None);
+        assert_eq!(info.kind, NodeOwnerKind::User);
+        assert_eq!(info.id, "unknown-id");
+        assert_eq!(info.display_name, "unknown-id");
+    }
+
+    #[test]
+    fn owner_info_from_user_id_falls_back_to_id_when_email_blank() {
+        let mut user = test_user("user-1", UserType::Person);
+        user.email = "   ".to_string();
+        user.display_name = None;
+        let info = owner_info_from_user_id("user-1", Some(&user));
+        assert_eq!(info.display_name, "user-1");
+    }
+
+    // --- admin_info_from_user ---
+
+    #[test]
+    fn admin_info_from_user_with_user_present() {
+        let mut user = test_user("user-1", UserType::Person);
+        user.email = "admin@example.com".to_string();
+        user.display_name = Some("Admin User".to_string());
+        let info = admin_info_from_user("user-1", Some(&user), NodeAdminRole::Owner);
+        assert_eq!(info.user_id, "user-1");
+        assert_eq!(info.display_name, Some("Admin User".to_string()));
+        assert_eq!(info.email, Some("admin@example.com".to_string()));
+        assert_eq!(info.role, NodeAdminRole::Owner);
+    }
+
+    #[test]
+    fn admin_info_from_user_without_user() {
+        let info = admin_info_from_user("user-1", None, NodeAdminRole::Admin);
+        assert_eq!(info.user_id, "user-1");
+        assert_eq!(info.display_name, None);
+        assert_eq!(info.email, None);
+        assert_eq!(info.role, NodeAdminRole::Admin);
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // Integration tests (require MongoDB)
+    // ────────────────────────────────────────────────────────────────────
+
     #[tokio::test]
     async fn register_node_uses_registration_token_user_id_as_owner() {
         let Some(db) = connect_test_database("node_register_token_owner").await else {

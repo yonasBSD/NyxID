@@ -177,3 +177,204 @@ pub trait PlatformAdapter: Send + Sync {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn platform_verify_secrets_default_all_none() {
+        let secrets = PlatformVerifySecrets::default();
+        assert!(secrets.slack_signing_secret.is_none());
+        assert!(secrets.lark_verification_token.is_none());
+        assert!(secrets.lark_encrypt_key.is_none());
+    }
+
+    #[test]
+    fn platform_verify_secrets_debug_redacts_slack_signing_secret() {
+        let secrets = PlatformVerifySecrets {
+            slack_signing_secret: Some("super-secret-slack-value".to_string()),
+            lark_verification_token: None,
+            lark_encrypt_key: None,
+        };
+        let debug_output = format!("{:?}", secrets);
+        assert!(
+            !debug_output.contains("super-secret-slack-value"),
+            "debug output must not contain the raw slack secret"
+        );
+        assert!(
+            debug_output.contains("[REDACTED]"),
+            "debug output must show [REDACTED]"
+        );
+    }
+
+    #[test]
+    fn platform_verify_secrets_debug_redacts_lark_verification_token() {
+        let secrets = PlatformVerifySecrets {
+            slack_signing_secret: None,
+            lark_verification_token: Some("lark-token-value".to_string()),
+            lark_encrypt_key: None,
+        };
+        let debug_output = format!("{:?}", secrets);
+        assert!(!debug_output.contains("lark-token-value"));
+        assert!(debug_output.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn platform_verify_secrets_debug_redacts_lark_encrypt_key() {
+        let secrets = PlatformVerifySecrets {
+            slack_signing_secret: None,
+            lark_verification_token: None,
+            lark_encrypt_key: Some("encrypt-key-raw".to_string()),
+        };
+        let debug_output = format!("{:?}", secrets);
+        assert!(!debug_output.contains("encrypt-key-raw"));
+        assert!(debug_output.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn platform_verify_secrets_debug_redacts_all_fields() {
+        let secrets = PlatformVerifySecrets {
+            slack_signing_secret: Some("s1".to_string()),
+            lark_verification_token: Some("s2".to_string()),
+            lark_encrypt_key: Some("s3".to_string()),
+        };
+        let debug_output = format!("{:?}", secrets);
+        assert!(!debug_output.contains("s1"));
+        assert!(!debug_output.contains("s2"));
+        assert!(!debug_output.contains("s3"));
+        assert_eq!(
+            debug_output.matches("[REDACTED]").count(),
+            3,
+            "all three secrets should be redacted"
+        );
+    }
+
+    #[test]
+    fn platform_verify_secrets_debug_none_fields_show_none() {
+        let secrets = PlatformVerifySecrets::default();
+        let debug_output = format!("{:?}", secrets);
+        assert!(
+            debug_output.contains("None"),
+            "None fields should display as None, got: {debug_output}"
+        );
+        assert!(
+            !debug_output.contains("[REDACTED]"),
+            "no [REDACTED] when all fields are None"
+        );
+    }
+
+    #[test]
+    fn outbound_reply_serde_roundtrip() {
+        let reply = OutboundReply {
+            text: Some("hello".to_string()),
+            reply_to_platform_message_id: Some("msg-123".to_string()),
+            metadata: Some(serde_json::json!({"parse_mode": "markdown"})),
+        };
+        let json = serde_json::to_string(&reply).expect("serialize");
+        let restored: OutboundReply = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(restored.text.as_deref(), Some("hello"));
+        assert_eq!(
+            restored.reply_to_platform_message_id.as_deref(),
+            Some("msg-123")
+        );
+        assert!(restored.metadata.is_some());
+    }
+
+    #[test]
+    fn outbound_reply_serde_roundtrip_with_none_fields() {
+        let reply = OutboundReply {
+            text: None,
+            reply_to_platform_message_id: None,
+            metadata: None,
+        };
+        let json = serde_json::to_string(&reply).expect("serialize");
+        let restored: OutboundReply = serde_json::from_str(&json).expect("deserialize");
+        assert!(restored.text.is_none());
+        assert!(restored.reply_to_platform_message_id.is_none());
+        assert!(restored.metadata.is_none());
+    }
+
+    #[test]
+    fn inbound_message_serde_roundtrip() {
+        let msg = InboundMessage {
+            platform_message_id: "pm-1".to_string(),
+            conversation_id: "conv-1".to_string(),
+            conversation_type: "private".to_string(),
+            sender_platform_id: "user-42".to_string(),
+            sender_display_name: Some("Alice".to_string()),
+            content_type: "text".to_string(),
+            text: Some("hi there".to_string()),
+            attachments: vec![],
+            reply_to_platform_message_id: None,
+            thread_id: None,
+            raw_data: serde_json::json!({}),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        let restored: InboundMessage = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(restored.platform_message_id, "pm-1");
+        assert_eq!(restored.conversation_id, "conv-1");
+        assert_eq!(restored.text.as_deref(), Some("hi there"));
+    }
+
+    #[test]
+    fn inbound_attachment_serde_roundtrip() {
+        let att = InboundAttachment {
+            content_type: "image".to_string(),
+            url: "https://cdn.example.com/img.png".to_string(),
+            filename: Some("img.png".to_string()),
+            mime_type: Some("image/png".to_string()),
+            size_bytes: Some(12345),
+        };
+        let json = serde_json::to_string(&att).expect("serialize");
+        let restored: InboundAttachment = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(restored.content_type, "image");
+        assert_eq!(restored.url, "https://cdn.example.com/img.png");
+        assert_eq!(restored.filename.as_deref(), Some("img.png"));
+        assert_eq!(restored.size_bytes, Some(12345));
+    }
+
+    #[test]
+    fn inbound_message_with_attachments_roundtrip() {
+        let msg = InboundMessage {
+            platform_message_id: "pm-2".to_string(),
+            conversation_id: "conv-2".to_string(),
+            conversation_type: "group".to_string(),
+            sender_platform_id: "user-99".to_string(),
+            sender_display_name: None,
+            content_type: "file".to_string(),
+            text: None,
+            attachments: vec![InboundAttachment {
+                content_type: "file".to_string(),
+                url: "https://files.example.com/doc.pdf".to_string(),
+                filename: Some("doc.pdf".to_string()),
+                mime_type: Some("application/pdf".to_string()),
+                size_bytes: Some(999_999),
+            }],
+            reply_to_platform_message_id: Some("pm-1".to_string()),
+            thread_id: Some("thread-abc".to_string()),
+            raw_data: serde_json::json!({"event_type": "message"}),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        let restored: InboundMessage = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(restored.attachments.len(), 1);
+        assert_eq!(restored.attachments[0].filename.as_deref(), Some("doc.pdf"));
+        assert_eq!(
+            restored.reply_to_platform_message_id.as_deref(),
+            Some("pm-1")
+        );
+        assert_eq!(restored.thread_id.as_deref(), Some("thread-abc"));
+    }
+
+    #[test]
+    fn outbound_edit_serde_roundtrip() {
+        let edit = OutboundEdit {
+            text: Some("updated text".to_string()),
+            metadata: Some(serde_json::json!({"card_id": "c1"})),
+        };
+        let json = serde_json::to_string(&edit).expect("serialize");
+        let restored: OutboundEdit = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(restored.text.as_deref(), Some("updated text"));
+        assert!(restored.metadata.is_some());
+    }
+}

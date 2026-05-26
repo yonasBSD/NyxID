@@ -134,4 +134,145 @@ mod tests {
             "default-src 'self'"
         );
     }
+
+    /// Helper to get a middleware-wrapped response for header value assertions.
+    async fn get_security_response() -> Response {
+        let app = Router::new()
+            .route("/test", get(ok_handler))
+            .layer(axum::middleware::from_fn(security_headers_middleware));
+        app.oneshot(Request::builder().uri("/test").body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn hsts_includes_preload_and_subdomains() {
+        let resp = get_security_response().await;
+        let hsts = resp
+            .headers()
+            .get(header::STRICT_TRANSPORT_SECURITY)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            hsts.contains("max-age=31536000"),
+            "HSTS missing 1-year max-age"
+        );
+        assert!(
+            hsts.contains("includeSubDomains"),
+            "HSTS missing includeSubDomains"
+        );
+        assert!(hsts.contains("preload"), "HSTS missing preload");
+    }
+
+    #[tokio::test]
+    async fn default_csp_denies_all() {
+        let resp = get_security_response().await;
+        let csp = resp
+            .headers()
+            .get(header::CONTENT_SECURITY_POLICY)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            csp.contains("default-src 'none'"),
+            "CSP missing default-src 'none': {csp}"
+        );
+        assert!(
+            csp.contains("frame-ancestors 'none'"),
+            "CSP missing frame-ancestors: {csp}"
+        );
+    }
+
+    #[tokio::test]
+    async fn x_frame_options_is_deny() {
+        let resp = get_security_response().await;
+        assert_eq!(resp.headers().get(header::X_FRAME_OPTIONS).unwrap(), "DENY");
+    }
+
+    #[tokio::test]
+    async fn referrer_policy_is_strict_origin() {
+        let resp = get_security_response().await;
+        assert_eq!(
+            resp.headers().get(header::REFERRER_POLICY).unwrap(),
+            "strict-origin-when-cross-origin"
+        );
+    }
+
+    #[tokio::test]
+    async fn permissions_policy_restricts_sensitive_apis() {
+        let resp = get_security_response().await;
+        let pp = resp
+            .headers()
+            .get("permissions-policy")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            pp.contains("camera=()"),
+            "permissions-policy missing camera=(): {pp}"
+        );
+        assert!(
+            pp.contains("microphone=()"),
+            "permissions-policy missing microphone=(): {pp}"
+        );
+        assert!(
+            pp.contains("geolocation=()"),
+            "permissions-policy missing geolocation=(): {pp}"
+        );
+        assert!(
+            pp.contains("interest-cohort=()"),
+            "permissions-policy missing interest-cohort=(): {pp}"
+        );
+    }
+
+    #[tokio::test]
+    async fn xss_protection_header_set() {
+        let resp = get_security_response().await;
+        let xss = resp
+            .headers()
+            .get("x-xss-protection")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(xss, "1; mode=block");
+    }
+
+    #[tokio::test]
+    async fn cache_control_prevents_caching() {
+        let resp = get_security_response().await;
+        let cc = resp
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            cc.contains("no-store"),
+            "Cache-Control missing no-store: {cc}"
+        );
+        assert!(
+            cc.contains("no-cache"),
+            "Cache-Control missing no-cache: {cc}"
+        );
+        assert!(
+            cc.contains("must-revalidate"),
+            "Cache-Control missing must-revalidate: {cc}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pragma_no_cache_set() {
+        let resp = get_security_response().await;
+        assert_eq!(resp.headers().get(header::PRAGMA).unwrap(), "no-cache");
+    }
+
+    #[tokio::test]
+    async fn nosniff_header_value() {
+        let resp = get_security_response().await;
+        assert_eq!(
+            resp.headers().get(header::X_CONTENT_TYPE_OPTIONS).unwrap(),
+            "nosniff"
+        );
+    }
 }

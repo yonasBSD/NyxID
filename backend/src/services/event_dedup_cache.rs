@@ -242,4 +242,133 @@ mod tests {
         // A second insert_if_absent is a no-op (already present).
         assert!(!cache.insert_if_absent("conv", "evt-flow"));
     }
+
+    // --- same event_id in different conversations ---
+
+    #[test]
+    fn same_event_id_different_conversations_are_independent() {
+        let cache = EventDedupCache::new(16, Duration::from_secs(60));
+        assert!(cache.insert_if_absent("conv-a", "evt-1"));
+        assert!(cache.insert_if_absent("conv-b", "evt-1"));
+        assert!(cache.insert_if_absent("conv-c", "evt-1"));
+        assert_eq!(cache.len(), 3);
+        // Each should be seen as a duplicate within its own conversation
+        assert!(!cache.insert_if_absent("conv-a", "evt-1"));
+        assert!(!cache.insert_if_absent("conv-b", "evt-1"));
+    }
+
+    // --- cleanup preserves non-expired entries ---
+
+    #[test]
+    fn cleanup_preserves_fresh_entries() {
+        let cache = EventDedupCache::new(16, Duration::from_secs(300));
+        cache.insert_if_absent("conv", "evt-fresh-1");
+        cache.insert_if_absent("conv", "evt-fresh-2");
+        cache.cleanup();
+        assert_eq!(cache.len(), 2);
+        assert!(cache.contains("conv", "evt-fresh-1"));
+        assert!(cache.contains("conv", "evt-fresh-2"));
+    }
+
+    // --- hit count tracks duplicates accurately ---
+
+    #[test]
+    fn hit_count_increments_per_duplicate() {
+        let cache = EventDedupCache::new(16, Duration::from_secs(60));
+        assert_eq!(cache.hit_count(), 0);
+        cache.insert_if_absent("conv", "evt-1");
+        assert_eq!(cache.hit_count(), 0); // first insert is not a hit
+        cache.insert_if_absent("conv", "evt-1");
+        assert_eq!(cache.hit_count(), 1);
+        cache.insert_if_absent("conv", "evt-1");
+        assert_eq!(cache.hit_count(), 2);
+    }
+
+    // --- capacity of 1 ---
+
+    #[test]
+    fn capacity_one_evicts_immediately() {
+        let cache = EventDedupCache::new(1, Duration::from_secs(60));
+        assert!(cache.insert_if_absent("conv", "evt-1"));
+        assert_eq!(cache.len(), 1);
+        assert!(cache.insert_if_absent("conv", "evt-2"));
+        assert_eq!(cache.len(), 1);
+        // evt-1 was evicted
+        assert!(cache.insert_if_absent("conv", "evt-1"));
+        assert_eq!(cache.eviction_count(), 2);
+    }
+
+    // --- stale entry replaced on re-insert ---
+
+    #[test]
+    fn stale_entry_is_replaced_on_reinsert() {
+        let cache = EventDedupCache::new(16, Duration::from_millis(30));
+        assert!(cache.insert_if_absent("conv", "evt-stale"));
+        sleep(Duration::from_millis(50));
+        // Entry expired; re-insert should succeed
+        assert!(cache.insert_if_absent("conv", "evt-stale"));
+        // And now it's fresh again
+        assert!(!cache.insert_if_absent("conv", "evt-stale"));
+    }
+
+    // --- interleaved inserts across conversations ---
+
+    #[test]
+    fn interleaved_conversations_fifo_eviction() {
+        let cache = EventDedupCache::new(3, Duration::from_secs(60));
+        cache.insert_if_absent("conv-a", "e1");
+        cache.insert_if_absent("conv-b", "e2");
+        cache.insert_if_absent("conv-c", "e3");
+        // Evicts oldest (conv-a, e1)
+        cache.insert_if_absent("conv-d", "e4");
+        assert_eq!(cache.len(), 3);
+        // conv-a/e1 is gone
+        assert!(!cache.contains("conv-a", "e1"));
+        assert!(cache.contains("conv-b", "e2"));
+        assert!(cache.contains("conv-d", "e4"));
+    }
+
+    // --- concurrent access (basic smoke test) ---
+
+    #[test]
+    fn concurrent_inserts_do_not_panic() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let cache = Arc::new(EventDedupCache::new(256, Duration::from_secs(60)));
+        let mut handles = Vec::new();
+
+        for t in 0..4 {
+            let cache = Arc::clone(&cache);
+            handles.push(thread::spawn(move || {
+                for i in 0..100 {
+                    cache.insert_if_absent(&format!("conv-{t}"), &format!("evt-{i}"));
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // All 4 threads * 100 events = 400 unique entries (capacity 256)
+        assert!(cache.len() <= 256);
+    }
+
+    // --- cleanup on empty cache ---
+
+    #[test]
+    fn cleanup_on_empty_cache_does_not_panic() {
+        let cache = EventDedupCache::new(16, Duration::from_secs(60));
+        cache.cleanup();
+        assert_eq!(cache.len(), 0);
+    }
+
+    // --- eviction_count starts at zero ---
+
+    #[test]
+    fn eviction_count_starts_at_zero() {
+        let cache = EventDedupCache::new(16, Duration::from_secs(60));
+        assert_eq!(cache.eviction_count(), 0);
+    }
 }

@@ -2928,4 +2928,224 @@ mod tests {
             "http"
         );
     }
+
+    // ── legacy_ssh_auth_mode_from_downstream_doc ──
+
+    #[test]
+    fn legacy_ssh_auth_mode_returns_none_when_no_ssh_config() {
+        let doc = doc! { "name": "plain-service" };
+        assert_eq!(legacy_ssh_auth_mode_from_downstream_doc(&doc), None);
+    }
+
+    #[test]
+    fn legacy_ssh_auth_mode_prefers_explicit_ssh_auth_mode_cert() {
+        let doc = doc! {
+            "ssh_config": {
+                "ssh_auth_mode": "cert",
+                "certificate_auth_enabled": false, // should be ignored
+            }
+        };
+        assert_eq!(
+            legacy_ssh_auth_mode_from_downstream_doc(&doc),
+            Some(SshAuthMode::Cert)
+        );
+    }
+
+    #[test]
+    fn legacy_ssh_auth_mode_prefers_explicit_ssh_auth_mode_node_key() {
+        let doc = doc! {
+            "ssh_config": {
+                "ssh_auth_mode": "node_key",
+            }
+        };
+        assert_eq!(
+            legacy_ssh_auth_mode_from_downstream_doc(&doc),
+            Some(SshAuthMode::NodeKey)
+        );
+    }
+
+    #[test]
+    fn legacy_ssh_auth_mode_prefers_explicit_ssh_auth_mode_proxy_only() {
+        let doc = doc! {
+            "ssh_config": {
+                "ssh_auth_mode": "proxy_only",
+            }
+        };
+        assert_eq!(
+            legacy_ssh_auth_mode_from_downstream_doc(&doc),
+            Some(SshAuthMode::ProxyOnly)
+        );
+    }
+
+    #[test]
+    fn legacy_ssh_auth_mode_falls_back_to_cert_enabled_true() {
+        let doc = doc! {
+            "ssh_config": {
+                "certificate_auth_enabled": true,
+            }
+        };
+        assert_eq!(
+            legacy_ssh_auth_mode_from_downstream_doc(&doc),
+            Some(SshAuthMode::Cert)
+        );
+    }
+
+    #[test]
+    fn legacy_ssh_auth_mode_falls_back_to_cert_enabled_false() {
+        let doc = doc! {
+            "ssh_config": {
+                "certificate_auth_enabled": false,
+            }
+        };
+        assert_eq!(
+            legacy_ssh_auth_mode_from_downstream_doc(&doc),
+            Some(SshAuthMode::ProxyOnly)
+        );
+    }
+
+    #[test]
+    fn legacy_ssh_auth_mode_missing_cert_enabled_defaults_to_proxy_only() {
+        // ssh_config exists but has neither ssh_auth_mode nor
+        // certificate_auth_enabled -- defaults to false -> ProxyOnly
+        let doc = doc! {
+            "ssh_config": {
+                "some_other_field": "value",
+            }
+        };
+        assert_eq!(
+            legacy_ssh_auth_mode_from_downstream_doc(&doc),
+            Some(SshAuthMode::ProxyOnly)
+        );
+    }
+
+    #[test]
+    fn legacy_ssh_auth_mode_returns_none_for_invalid_ssh_auth_mode_string() {
+        // When ssh_auth_mode field exists but is not a valid variant,
+        // parse().ok() returns None and that None is returned immediately
+        // (the return on line 1684 always fires when the field exists).
+        let doc = doc! {
+            "ssh_config": {
+                "ssh_auth_mode": "invalid_value",
+                "certificate_auth_enabled": true,
+            }
+        };
+        assert_eq!(legacy_ssh_auth_mode_from_downstream_doc(&doc), None);
+    }
+
+    #[test]
+    fn legacy_ssh_auth_mode_empty_ssh_config_gives_proxy_only() {
+        let doc = doc! { "ssh_config": {} };
+        assert_eq!(
+            legacy_ssh_auth_mode_from_downstream_doc(&doc),
+            Some(SshAuthMode::ProxyOnly)
+        );
+    }
+
+    // ── resolve_available_slug_from_existing (additional edge cases) ──
+
+    #[test]
+    fn resolve_available_slug_returns_base_even_when_suffixed_slugs_exist() {
+        // Base is free but suffixed variants are taken
+        let active_slugs = HashSet::from(["svc-2".to_string(), "svc-3".to_string()]);
+        let resolved = resolve_available_slug_from_existing("svc", &active_slugs);
+        assert_eq!(resolved.as_deref(), Some("svc"));
+    }
+
+    #[test]
+    fn resolve_available_slug_finds_first_gap_in_sequence() {
+        // base and 2 are taken, 3 is available
+        let active_slugs = HashSet::from(["api".to_string(), "api-2".to_string()]);
+        let resolved = resolve_available_slug_from_existing("api", &active_slugs);
+        assert_eq!(resolved.as_deref(), Some("api-3"));
+    }
+
+    #[test]
+    fn resolve_available_slug_returns_suffix_2_when_only_base_taken() {
+        let active_slugs = HashSet::from(["openai".to_string()]);
+        let resolved = resolve_available_slug_from_existing("openai", &active_slugs);
+        assert_eq!(resolved.as_deref(), Some("openai-2"));
+    }
+
+    #[test]
+    fn resolve_available_slug_handles_empty_base_slug() {
+        let resolved = resolve_available_slug_from_existing("", &HashSet::new());
+        assert_eq!(resolved.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn resolve_available_slug_handles_empty_base_slug_when_taken() {
+        let active_slugs = HashSet::from(["".to_string()]);
+        let resolved = resolve_available_slug_from_existing("", &active_slugs);
+        assert_eq!(resolved.as_deref(), Some("-2"));
+    }
+
+    // ── inherited_identity_fields (additional edge cases) ──
+
+    #[test]
+    fn inherited_identity_fields_none_returns_all_defaults() {
+        let fields = inherited_identity_fields(None);
+        assert_eq!(
+            fields,
+            InheritedIdentityFields {
+                identity_propagation_mode: "none".to_string(),
+                identity_include_user_id: false,
+                identity_include_email: false,
+                identity_include_name: false,
+                identity_jwt_audience: None,
+                forward_access_token: false,
+                inject_delegation_token: false,
+                delegation_token_scope: "llm:proxy".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn inherited_identity_fields_preserves_none_jwt_audience() {
+        let mut service = sample_downstream_service();
+        service.identity_jwt_audience = None;
+        let fields = inherited_identity_fields(Some(&service));
+        assert_eq!(fields.identity_jwt_audience, None);
+    }
+
+    #[test]
+    fn inherited_identity_fields_preserves_all_true_flags() {
+        let mut service = sample_downstream_service();
+        service.identity_include_user_id = true;
+        service.identity_include_email = true;
+        service.identity_include_name = true;
+        service.forward_access_token = true;
+        service.inject_delegation_token = true;
+        let fields = inherited_identity_fields(Some(&service));
+        assert!(fields.identity_include_user_id);
+        assert!(fields.identity_include_email);
+        assert!(fields.identity_include_name);
+        assert!(fields.forward_access_token);
+        assert!(fields.inject_delegation_token);
+    }
+
+    #[test]
+    fn inherited_identity_fields_preserves_all_false_flags() {
+        let mut service = sample_downstream_service();
+        service.identity_include_user_id = false;
+        service.identity_include_email = false;
+        service.identity_include_name = false;
+        service.forward_access_token = false;
+        service.inject_delegation_token = false;
+        let fields = inherited_identity_fields(Some(&service));
+        assert!(!fields.identity_include_user_id);
+        assert!(!fields.identity_include_email);
+        assert!(!fields.identity_include_name);
+        assert!(!fields.forward_access_token);
+        assert!(!fields.inject_delegation_token);
+    }
+
+    #[test]
+    fn inherited_identity_fields_preserves_custom_propagation_mode() {
+        let mut service = sample_downstream_service();
+        service.identity_propagation_mode = "header".to_string();
+        service.delegation_token_scope = "custom:scope".to_string();
+        let fields = inherited_identity_fields(Some(&service));
+        assert_eq!(fields.identity_propagation_mode, "header");
+        assert_eq!(fields.delegation_token_scope, "custom:scope");
+    }
 }

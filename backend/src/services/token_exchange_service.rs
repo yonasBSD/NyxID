@@ -302,4 +302,65 @@ mod tests {
         // The exchange_token function checks this and rejects it
         assert_eq!(Some(true), Some(true)); // placeholder: claim check is inline
     }
+
+    #[test]
+    fn validate_delegation_scope_single_scope_matching_exactly() {
+        let result = validate_delegation_scope("proxy:*", "proxy:*");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "proxy:*");
+    }
+
+    #[test]
+    fn validate_delegation_scope_all_allowed_scopes_requested() {
+        let result = validate_delegation_scope(
+            "llm:proxy proxy:* llm:status",
+            "llm:proxy proxy:* llm:status",
+        );
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "llm:proxy proxy:* llm:status");
+    }
+
+    #[test]
+    fn validate_delegation_scope_rejects_partial_mismatch() {
+        let result = validate_delegation_scope("llm:proxy admin:full", "llm:proxy proxy:*");
+        assert!(matches!(result, Err(AppError::InvalidScope(_))));
+    }
+
+    #[test]
+    fn validate_delegation_scope_whitespace_handling() {
+        let result = validate_delegation_scope("  llm:proxy  ", "llm:proxy proxy:*");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "llm:proxy");
+    }
+
+    #[test]
+    fn validate_delegation_scope_empty_requested_returns_empty() {
+        let result = validate_delegation_scope("", "llm:proxy proxy:*");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "");
+    }
+
+    #[test]
+    fn validate_delegation_scope_whitespace_only_requested_returns_empty() {
+        let result = validate_delegation_scope("   ", "llm:proxy");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "");
+    }
+
+    #[test]
+    fn token_exchange_response_fields() {
+        let resp = TokenExchangeResponse {
+            access_token: "tok_abc".to_string(),
+            issued_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
+            token_type: "Bearer".to_string(),
+            expires_in: 900,
+            scope: "llm:proxy".to_string(),
+            user_id: "user_1".to_string(),
+        };
+        assert_eq!(resp.access_token, "tok_abc");
+        assert_eq!(resp.token_type, "Bearer");
+        assert_eq!(resp.expires_in, 900);
+        assert_eq!(resp.scope, "llm:proxy");
+        assert_eq!(resp.user_id, "user_1");
+    }
 }

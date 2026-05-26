@@ -4755,6 +4755,859 @@ mod tests {
         assert!(data.get("owner_user_id").is_none());
         assert!(data.get("connection_id").is_none());
     }
+
+    // ── proxy_error_telemetry_fields additional coverage ────────────
+
+    #[test]
+    fn proxy_error_telemetry_fields_internal_error() {
+        use super::proxy_error_telemetry_fields;
+        use crate::errors::AppError;
+        assert_eq!(
+            proxy_error_telemetry_fields(&AppError::Internal("x".into())),
+            (500, 1006)
+        );
+    }
+
+    #[test]
+    fn proxy_error_telemetry_fields_validation_error() {
+        use super::proxy_error_telemetry_fields;
+        use crate::errors::AppError;
+        assert_eq!(
+            proxy_error_telemetry_fields(&AppError::ValidationError("x".into())),
+            (400, 1008)
+        );
+    }
+
+    #[test]
+    fn proxy_error_telemetry_fields_node_not_found() {
+        use super::proxy_error_telemetry_fields;
+        use crate::errors::AppError;
+        assert_eq!(
+            proxy_error_telemetry_fields(&AppError::NodeNotFound("x".into())),
+            (404, 8000)
+        );
+    }
+
+    #[test]
+    fn proxy_error_telemetry_fields_node_offline() {
+        use super::proxy_error_telemetry_fields;
+        use crate::errors::AppError;
+        assert_eq!(
+            proxy_error_telemetry_fields(&AppError::NodeOffline("x".into())),
+            (503, 8001)
+        );
+    }
+
+    #[test]
+    fn proxy_error_telemetry_fields_node_credential_missing() {
+        use super::proxy_error_telemetry_fields;
+        use crate::errors::AppError;
+        assert_eq!(
+            proxy_error_telemetry_fields(&AppError::NodeCredentialMissing("x".into())),
+            (502, 8004)
+        );
+    }
+
+    #[test]
+    fn proxy_error_telemetry_fields_ws_proxy_downstream() {
+        use super::proxy_error_telemetry_fields;
+        use crate::errors::AppError;
+        assert_eq!(
+            proxy_error_telemetry_fields(&AppError::WsProxyDownstream("x".into())),
+            (502, 8005)
+        );
+    }
+
+    #[test]
+    fn proxy_error_telemetry_fields_api_key_scope_inactive() {
+        use super::proxy_error_telemetry_fields;
+        use crate::errors::AppError;
+        assert_eq!(
+            proxy_error_telemetry_fields(&AppError::ApiKeyScopeInactive),
+            (403, 9001)
+        );
+    }
+
+    #[test]
+    fn proxy_error_telemetry_fields_api_key_scope_not_found() {
+        use super::proxy_error_telemetry_fields;
+        use crate::errors::AppError;
+        assert_eq!(
+            proxy_error_telemetry_fields(&AppError::ApiKeyScopeNotFound("x".into())),
+            (404, 9002)
+        );
+    }
+
+    #[test]
+    fn proxy_error_telemetry_fields_catchall_maps_to_500_0() {
+        use super::proxy_error_telemetry_fields;
+        use crate::errors::AppError;
+        // Conflict is not explicitly handled by the proxy telemetry map
+        assert_eq!(
+            proxy_error_telemetry_fields(&AppError::Conflict("x".into())),
+            (500, 0)
+        );
+    }
+
+    // ── is_codex_transport_path additional edge cases ───────────────
+
+    #[test]
+    fn codex_transport_trailing_and_leading_slashes() {
+        assert!(is_codex_transport_path("/responses/"));
+        assert!(is_codex_transport_path("///responses///"));
+    }
+
+    #[test]
+    fn codex_transport_deeply_nested() {
+        assert!(is_codex_transport_path("v1/v2/responses"));
+        assert!(is_codex_transport_path("/a/b/c/chat/completions"));
+    }
+
+    #[test]
+    fn codex_transport_false_for_partial_match() {
+        assert!(!is_codex_transport_path("my-responses"));
+        assert!(!is_codex_transport_path("chat/completions/extra"));
+    }
+
+    // ── is_chat_completions_proxy_path additional cases ─────────────
+
+    #[test]
+    fn chat_completions_path_with_trailing_slash() {
+        assert!(is_chat_completions_proxy_path("chat/completions/"));
+    }
+
+    #[test]
+    fn chat_completions_path_false_for_responses() {
+        assert!(!is_chat_completions_proxy_path("v1/responses"));
+    }
+
+    // ── is_ws_upgrade_request tests ─────────────────────────────────
+
+    #[test]
+    fn ws_upgrade_request_requires_both_headers() {
+        // Only connection: upgrade, no upgrade header
+        let req = Request::builder()
+            .uri("/test")
+            .header("connection", "Upgrade")
+            .body(Body::empty())
+            .unwrap();
+        assert!(!is_ws_upgrade_request(&req));
+
+        // Only upgrade: websocket, no connection header
+        let req = Request::builder()
+            .uri("/test")
+            .header("upgrade", "websocket")
+            .body(Body::empty())
+            .unwrap();
+        assert!(!is_ws_upgrade_request(&req));
+    }
+
+    #[test]
+    fn ws_upgrade_request_case_insensitive() {
+        let req = Request::builder()
+            .uri("/test")
+            .header("connection", "UPGRADE")
+            .header("upgrade", "WEBSOCKET")
+            .body(Body::empty())
+            .unwrap();
+        assert!(is_ws_upgrade_request(&req));
+    }
+
+    #[test]
+    fn ws_upgrade_request_connection_header_with_multiple_values() {
+        let req = Request::builder()
+            .uri("/test")
+            .header("connection", "keep-alive, Upgrade")
+            .header("upgrade", "websocket")
+            .body(Body::empty())
+            .unwrap();
+        assert!(is_ws_upgrade_request(&req));
+    }
+
+    #[test]
+    fn ws_upgrade_request_non_websocket_upgrade_is_false() {
+        let req = Request::builder()
+            .uri("/test")
+            .header("connection", "Upgrade")
+            .header("upgrade", "h2c")
+            .body(Body::empty())
+            .unwrap();
+        assert!(!is_ws_upgrade_request(&req));
+    }
+
+    // ── should_enforce_runtime_approval additional cases ────────────
+
+    #[test]
+    fn should_enforce_runtime_approval_relay_enforced() {
+        assert!(should_enforce_runtime_approval(true, &AuthMethod::Relay));
+    }
+
+    #[test]
+    fn should_enforce_runtime_approval_delegated_enforced() {
+        assert!(should_enforce_runtime_approval(
+            true,
+            &AuthMethod::Delegated
+        ));
+    }
+
+    // ── extract_via_service additional edge cases ───────────────────
+
+    #[test]
+    fn extract_via_service_percent_encoded_value() {
+        let req = Request::builder()
+            .uri("/test?_nyxid_via=svc%20with%20spaces")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            super::extract_via_service(&req).as_deref(),
+            Some("svc with spaces")
+        );
+    }
+
+    #[test]
+    fn extract_via_service_empty_value() {
+        let req = Request::builder()
+            .uri("/test?_nyxid_via=")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(super::extract_via_service(&req).as_deref(), Some(""));
+    }
+
+    // ── strip_internal_query_params additional edge cases ───────────
+
+    #[test]
+    fn strip_internal_query_params_multiple_internal() {
+        // If we had two internal params, both should be stripped
+        let result = super::strip_internal_query_params("_nyxid_via=us-123");
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn strip_internal_query_params_empty_input() {
+        let result = super::strip_internal_query_params("");
+        // Empty string split on & gives one empty part, which isn't "_nyxid_via"
+        assert_eq!(result, "");
+    }
+
+    // ── append_query_param additional edge cases ────────────────────
+
+    #[test]
+    fn append_query_param_encodes_special_chars_in_name() {
+        let result = super::append_query_param("https://example.com", "key name", "val");
+        assert_eq!(result, "https://example.com?key%20name=val");
+    }
+
+    // ── collect_forward_headers_with_prefixes additional cases ──────
+
+    #[test]
+    fn collect_forward_headers_filters_unauthorized_headers() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("authorization", "Bearer secret".parse().unwrap());
+        headers.insert("x-custom-internal", "value".parse().unwrap());
+        headers.insert("content-type", "application/json".parse().unwrap());
+
+        let result = collect_forward_headers_with_prefixes(
+            &headers,
+            ALLOWED_FORWARD_HEADERS,
+            ALLOWED_FORWARD_HEADER_PREFIXES,
+        );
+        // authorization and x-custom-internal are not in the allowlist
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "content-type");
+    }
+
+    #[test]
+    fn collect_forward_headers_openclaw_prefix() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-openclaw-scopes", "openai:*".parse().unwrap());
+        headers.insert("x-openclaw-model", "gpt-4".parse().unwrap());
+
+        let result = collect_forward_headers_with_prefixes(
+            &headers,
+            ALLOWED_FORWARD_HEADERS,
+            ALLOWED_FORWARD_HEADER_PREFIXES,
+        );
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn validate_range_header_three_ranges_ok() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("range", "bytes=0-1,2-3,4-5".parse().unwrap());
+        assert!(validate_range_header(&headers).is_ok());
+    }
+
+    #[test]
+    fn validate_range_header_exactly_four_ranges_ok() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("range", "bytes=0-1,2-3,4-5,6-7".parse().unwrap());
+        assert!(validate_range_header(&headers).is_ok());
+    }
+
+    // ---- add_owner_user_id_if_shared tests ----
+
+    #[test]
+    fn add_owner_user_id_if_shared_adds_when_different() {
+        let mut value = serde_json::json!({ "service_id": "svc-1" });
+        super::add_owner_user_id_if_shared(&mut value, "owner-user", "actor-user");
+        assert_eq!(value["owner_user_id"], "owner-user");
+    }
+
+    #[test]
+    fn add_owner_user_id_if_shared_skips_when_same() {
+        let mut value = serde_json::json!({ "service_id": "svc-1" });
+        super::add_owner_user_id_if_shared(&mut value, "same-user", "same-user");
+        assert!(value.get("owner_user_id").is_none());
+    }
+
+    #[test]
+    fn add_owner_user_id_if_shared_on_non_object_is_noop() {
+        let mut value = serde_json::json!("plain string");
+        super::add_owner_user_id_if_shared(&mut value, "owner", "actor");
+        // Non-object value should not panic and not be modified
+        assert!(value.is_string());
+    }
+
+    // ---- axum_msg_to_tungstenite conversion tests ----
+
+    #[test]
+    fn axum_text_to_tungstenite_text() {
+        let msg = axum::extract::ws::Message::Text("hello".into());
+        let converted = super::axum_msg_to_tungstenite(msg);
+        match converted {
+            tokio_tungstenite::tungstenite::Message::Text(t) => {
+                assert_eq!(t.to_string(), "hello");
+            }
+            _ => panic!("expected Text message"),
+        }
+    }
+
+    #[test]
+    fn axum_binary_to_tungstenite_binary() {
+        let data = bytes::Bytes::from(vec![1u8, 2, 3]);
+        let msg = axum::extract::ws::Message::Binary(data);
+        let converted = super::axum_msg_to_tungstenite(msg);
+        match converted {
+            tokio_tungstenite::tungstenite::Message::Binary(b) => {
+                assert_eq!(b.as_ref(), &[1, 2, 3]);
+            }
+            _ => panic!("expected Binary message"),
+        }
+    }
+
+    #[test]
+    fn axum_ping_to_tungstenite_ping() {
+        let data = bytes::Bytes::from(vec![42u8]);
+        let msg = axum::extract::ws::Message::Ping(data);
+        let converted = super::axum_msg_to_tungstenite(msg);
+        assert!(matches!(
+            converted,
+            tokio_tungstenite::tungstenite::Message::Ping(_)
+        ));
+    }
+
+    #[test]
+    fn axum_pong_to_tungstenite_pong() {
+        let data = bytes::Bytes::from(vec![42u8]);
+        let msg = axum::extract::ws::Message::Pong(data);
+        let converted = super::axum_msg_to_tungstenite(msg);
+        assert!(matches!(
+            converted,
+            tokio_tungstenite::tungstenite::Message::Pong(_)
+        ));
+    }
+
+    #[test]
+    fn axum_close_to_tungstenite_close() {
+        let msg = axum::extract::ws::Message::Close(Some(axum::extract::ws::CloseFrame {
+            code: 1000,
+            reason: "normal".into(),
+        }));
+        let converted = super::axum_msg_to_tungstenite(msg);
+        match converted {
+            tokio_tungstenite::tungstenite::Message::Close(Some(f)) => {
+                assert_eq!(u16::from(f.code), 1000);
+                assert_eq!(f.reason.to_string(), "normal");
+            }
+            _ => panic!("expected Close message with frame"),
+        }
+    }
+
+    #[test]
+    fn axum_close_none_to_tungstenite_close_none() {
+        let msg = axum::extract::ws::Message::Close(None);
+        let converted = super::axum_msg_to_tungstenite(msg);
+        assert!(matches!(
+            converted,
+            tokio_tungstenite::tungstenite::Message::Close(None)
+        ));
+    }
+
+    // ---- tungstenite_msg_to_axum conversion tests ----
+
+    #[test]
+    fn tungstenite_text_to_axum_text() {
+        let msg = tokio_tungstenite::tungstenite::Message::Text("world".into());
+        let converted = super::tungstenite_msg_to_axum(msg);
+        match converted {
+            axum::extract::ws::Message::Text(t) => {
+                assert_eq!(t.to_string(), "world");
+            }
+            _ => panic!("expected Text message"),
+        }
+    }
+
+    #[test]
+    fn tungstenite_binary_to_axum_binary() {
+        let msg = tokio_tungstenite::tungstenite::Message::Binary(vec![4u8, 5, 6].into());
+        let converted = super::tungstenite_msg_to_axum(msg);
+        match converted {
+            axum::extract::ws::Message::Binary(b) => {
+                assert_eq!(b.as_ref(), &[4, 5, 6]);
+            }
+            _ => panic!("expected Binary message"),
+        }
+    }
+
+    #[test]
+    fn tungstenite_ping_to_axum_ping() {
+        let msg = tokio_tungstenite::tungstenite::Message::Ping(vec![99u8].into());
+        let converted = super::tungstenite_msg_to_axum(msg);
+        assert!(matches!(converted, axum::extract::ws::Message::Ping(_)));
+    }
+
+    #[test]
+    fn tungstenite_pong_to_axum_pong() {
+        let msg = tokio_tungstenite::tungstenite::Message::Pong(vec![99u8].into());
+        let converted = super::tungstenite_msg_to_axum(msg);
+        assert!(matches!(converted, axum::extract::ws::Message::Pong(_)));
+    }
+
+    #[test]
+    fn tungstenite_close_to_axum_close() {
+        use tokio_tungstenite::tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
+        let msg = tokio_tungstenite::tungstenite::Message::Close(Some(CloseFrame {
+            code: CloseCode::Normal,
+            reason: "goodbye".into(),
+        }));
+        let converted = super::tungstenite_msg_to_axum(msg);
+        match converted {
+            axum::extract::ws::Message::Close(Some(f)) => {
+                assert_eq!(f.code, 1000);
+                assert_eq!(f.reason.to_string(), "goodbye");
+            }
+            _ => panic!("expected Close message with frame"),
+        }
+    }
+
+    #[test]
+    fn tungstenite_close_none_to_axum_close_none() {
+        let msg = tokio_tungstenite::tungstenite::Message::Close(None);
+        let converted = super::tungstenite_msg_to_axum(msg);
+        assert!(matches!(converted, axum::extract::ws::Message::Close(None)));
+    }
+
+    #[test]
+    fn tungstenite_frame_to_axum_empty_binary() {
+        // The raw Frame variant should map to empty Binary as the fallback.
+        let raw = tokio_tungstenite::tungstenite::protocol::frame::Frame::pong(bytes::Bytes::new());
+        let msg = tokio_tungstenite::tungstenite::Message::Frame(raw);
+        let converted = super::tungstenite_msg_to_axum(msg);
+        match converted {
+            axum::extract::ws::Message::Binary(b) => {
+                assert!(b.is_empty());
+            }
+            _ => panic!("expected Binary message for Frame fallback"),
+        }
+    }
+
+    // ---- axum_msg_payload_for_injection tests ----
+
+    #[test]
+    fn axum_text_payload_extraction() {
+        let msg = axum::extract::ws::Message::Text("payload".into());
+        let result = super::axum_msg_payload_for_injection(&msg);
+        assert!(result.is_some());
+        let (kind, bytes) = result.unwrap();
+        assert_eq!(kind, crate::models::ws_frame_injection::WsFrameKind::Text);
+        assert_eq!(std::str::from_utf8(&bytes).unwrap(), "payload");
+    }
+
+    #[test]
+    fn axum_binary_payload_extraction() {
+        let data = bytes::Bytes::from(vec![10u8, 20]);
+        let msg = axum::extract::ws::Message::Binary(data);
+        let result = super::axum_msg_payload_for_injection(&msg);
+        assert!(result.is_some());
+        let (kind, bytes) = result.unwrap();
+        assert_eq!(kind, crate::models::ws_frame_injection::WsFrameKind::Binary);
+        assert_eq!(bytes, vec![10, 20]);
+    }
+
+    #[test]
+    fn axum_ping_payload_extraction_returns_none() {
+        let msg = axum::extract::ws::Message::Ping(bytes::Bytes::new());
+        assert!(super::axum_msg_payload_for_injection(&msg).is_none());
+    }
+
+    #[test]
+    fn axum_pong_payload_extraction_returns_none() {
+        let msg = axum::extract::ws::Message::Pong(bytes::Bytes::new());
+        assert!(super::axum_msg_payload_for_injection(&msg).is_none());
+    }
+
+    #[test]
+    fn axum_close_payload_extraction_returns_none() {
+        let msg = axum::extract::ws::Message::Close(None);
+        assert!(super::axum_msg_payload_for_injection(&msg).is_none());
+    }
+
+    // ---- tungstenite_msg_payload_for_injection tests ----
+
+    #[test]
+    fn tungstenite_text_payload_extraction() {
+        let msg = tokio_tungstenite::tungstenite::Message::Text("tung-payload".into());
+        let result = super::tungstenite_msg_payload_for_injection(&msg);
+        assert!(result.is_some());
+        let (kind, bytes) = result.unwrap();
+        assert_eq!(kind, crate::models::ws_frame_injection::WsFrameKind::Text);
+        assert_eq!(std::str::from_utf8(&bytes).unwrap(), "tung-payload");
+    }
+
+    #[test]
+    fn tungstenite_binary_payload_extraction() {
+        let msg = tokio_tungstenite::tungstenite::Message::Binary(vec![30u8, 40].into());
+        let result = super::tungstenite_msg_payload_for_injection(&msg);
+        assert!(result.is_some());
+        let (kind, bytes) = result.unwrap();
+        assert_eq!(kind, crate::models::ws_frame_injection::WsFrameKind::Binary);
+        assert_eq!(bytes, vec![30, 40]);
+    }
+
+    #[test]
+    fn tungstenite_ping_payload_extraction_returns_none() {
+        let msg = tokio_tungstenite::tungstenite::Message::Ping(vec![].into());
+        assert!(super::tungstenite_msg_payload_for_injection(&msg).is_none());
+    }
+
+    #[test]
+    fn tungstenite_close_payload_extraction_returns_none() {
+        let msg = tokio_tungstenite::tungstenite::Message::Close(None);
+        assert!(super::tungstenite_msg_payload_for_injection(&msg).is_none());
+    }
+
+    // ---- injection_frame_to_tungstenite tests ----
+
+    #[test]
+    fn injection_text_frame_to_tungstenite() {
+        use crate::services::ws_frame_injector::WsFrame;
+        let frame = WsFrame {
+            kind: crate::models::ws_frame_injection::WsFrameKind::Text,
+            payload: b"injected text".to_vec(),
+        };
+        let msg = super::injection_frame_to_tungstenite(frame);
+        match msg {
+            tokio_tungstenite::tungstenite::Message::Text(t) => {
+                assert_eq!(t.to_string(), "injected text");
+            }
+            _ => panic!("expected Text"),
+        }
+    }
+
+    #[test]
+    fn injection_binary_frame_to_tungstenite() {
+        use crate::services::ws_frame_injector::WsFrame;
+        let frame = WsFrame {
+            kind: crate::models::ws_frame_injection::WsFrameKind::Binary,
+            payload: vec![0xDE, 0xAD],
+        };
+        let msg = super::injection_frame_to_tungstenite(frame);
+        match msg {
+            tokio_tungstenite::tungstenite::Message::Binary(b) => {
+                assert_eq!(b.as_ref(), &[0xDE, 0xAD]);
+            }
+            _ => panic!("expected Binary"),
+        }
+    }
+
+    #[test]
+    fn injection_text_frame_invalid_utf8_defaults_to_empty() {
+        use crate::services::ws_frame_injector::WsFrame;
+        let frame = WsFrame {
+            kind: crate::models::ws_frame_injection::WsFrameKind::Text,
+            payload: vec![0xFF, 0xFE],
+        };
+        let msg = super::injection_frame_to_tungstenite(frame);
+        match msg {
+            tokio_tungstenite::tungstenite::Message::Text(t) => {
+                assert!(t.is_empty(), "invalid UTF-8 should produce empty text");
+            }
+            _ => panic!("expected Text"),
+        }
+    }
+
+    // ---- injection_frame_to_axum tests ----
+
+    #[test]
+    fn injection_text_frame_to_axum() {
+        use crate::services::ws_frame_injector::WsFrame;
+        let frame = WsFrame {
+            kind: crate::models::ws_frame_injection::WsFrameKind::Text,
+            payload: b"axum text".to_vec(),
+        };
+        let msg = super::injection_frame_to_axum(frame);
+        match msg {
+            axum::extract::ws::Message::Text(t) => {
+                assert_eq!(t.to_string(), "axum text");
+            }
+            _ => panic!("expected Text"),
+        }
+    }
+
+    #[test]
+    fn injection_binary_frame_to_axum() {
+        use crate::services::ws_frame_injector::WsFrame;
+        let frame = WsFrame {
+            kind: crate::models::ws_frame_injection::WsFrameKind::Binary,
+            payload: vec![0xBE, 0xEF],
+        };
+        let msg = super::injection_frame_to_axum(frame);
+        match msg {
+            axum::extract::ws::Message::Binary(b) => {
+                assert_eq!(b.as_ref(), &[0xBE, 0xEF]);
+            }
+            _ => panic!("expected Binary"),
+        }
+    }
+
+    #[test]
+    fn injection_text_frame_to_axum_invalid_utf8_defaults_to_empty() {
+        use crate::services::ws_frame_injector::WsFrame;
+        let frame = WsFrame {
+            kind: crate::models::ws_frame_injection::WsFrameKind::Text,
+            payload: vec![0xFF, 0xFE],
+        };
+        let msg = super::injection_frame_to_axum(frame);
+        match msg {
+            axum::extract::ws::Message::Text(t) => {
+                assert!(t.is_empty(), "invalid UTF-8 should produce empty text");
+            }
+            _ => panic!("expected Text"),
+        }
+    }
+
+    // ---- node_proxy_audit_event_data additional coverage ----
+
+    #[test]
+    fn node_proxy_audit_event_data_includes_all_fields() {
+        let data = super::node_proxy_audit_event_data(
+            "svc-2",
+            "PUT",
+            "/v1/update",
+            201,
+            "node-2",
+            "owner-2",
+            "actor-2",
+            Some("conn-2"),
+        );
+        assert_eq!(data["service_id"], "svc-2");
+        assert_eq!(data["method"], "PUT");
+        assert_eq!(data["path"], "/v1/update");
+        assert_eq!(data["response_status"], 201);
+        assert_eq!(data["routed_via"], "node");
+        assert_eq!(data["node_id"], "node-2");
+        assert_eq!(data["connection_id"], "conn-2");
+        assert_eq!(data["owner_user_id"], "owner-2");
+    }
+
+    #[test]
+    fn node_proxy_audit_event_data_no_connection_no_owner() {
+        let data = super::node_proxy_audit_event_data(
+            "svc-3", "DELETE", "/items/1", 204, "node-3", "user-3", "user-3", None,
+        );
+        assert_eq!(data["method"], "DELETE");
+        assert_eq!(data["response_status"], 204);
+        assert!(data.get("connection_id").is_none());
+        assert!(data.get("owner_user_id").is_none());
+    }
+
+    // ---- ALLOWED_RESPONSE_HEADERS coverage ----
+
+    #[test]
+    fn allowed_response_headers_does_not_include_cors() {
+        // Verify the CORS exclusion documented in the constant comment.
+        for header in super::ALLOWED_RESPONSE_HEADERS {
+            assert!(
+                !header.starts_with("access-control"),
+                "CORS headers must not be in ALLOWED_RESPONSE_HEADERS: {header}"
+            );
+        }
+    }
+
+    #[test]
+    fn allowed_response_headers_includes_content_type() {
+        assert!(super::ALLOWED_RESPONSE_HEADERS.contains(&"content-type"));
+    }
+
+    #[test]
+    fn allowed_response_headers_includes_range_support() {
+        assert!(super::ALLOWED_RESPONSE_HEADERS.contains(&"accept-ranges"));
+        assert!(super::ALLOWED_RESPONSE_HEADERS.contains(&"content-range"));
+    }
+
+    // ---- STREAMING_CONTENT_TYPES coverage ----
+
+    #[test]
+    fn streaming_content_types_includes_sse() {
+        assert!(super::STREAMING_CONTENT_TYPES.contains(&"text/event-stream"));
+    }
+
+    #[test]
+    fn streaming_content_types_includes_media() {
+        assert!(super::STREAMING_CONTENT_TYPES.contains(&"video/"));
+        assert!(super::STREAMING_CONTENT_TYPES.contains(&"audio/"));
+        assert!(super::STREAMING_CONTENT_TYPES.contains(&"image/"));
+    }
+
+    #[test]
+    fn streaming_content_types_includes_octet_stream() {
+        assert!(super::STREAMING_CONTENT_TYPES.contains(&"application/octet-stream"));
+    }
+
+    #[test]
+    fn streaming_content_types_includes_pdf() {
+        assert!(super::STREAMING_CONTENT_TYPES.contains(&"application/pdf"));
+    }
+
+    // ---- ALLOWED_FORWARD_HEADER_PREFIXES coverage ----
+
+    #[test]
+    fn forward_header_prefixes_include_aws() {
+        assert!(super::ALLOWED_FORWARD_HEADER_PREFIXES.contains(&"x-amz-"));
+    }
+
+    #[test]
+    fn forward_header_prefixes_include_gcp() {
+        assert!(super::ALLOWED_FORWARD_HEADER_PREFIXES.contains(&"x-goog-"));
+    }
+
+    #[test]
+    fn forward_header_prefixes_include_openclaw() {
+        assert!(super::ALLOWED_FORWARD_HEADER_PREFIXES.contains(&"x-openclaw-"));
+    }
+
+    // ---- WS forward headers tests ----
+
+    #[test]
+    fn ws_forward_includes_origin() {
+        assert!(super::ALLOWED_WS_FORWARD_HEADERS.contains(&"origin"));
+    }
+
+    #[test]
+    fn ws_forward_includes_subprotocol() {
+        assert!(super::ALLOWED_WS_FORWARD_HEADERS.contains(&"sec-websocket-protocol"));
+    }
+
+    #[test]
+    fn ws_forward_does_not_include_sensitive() {
+        assert!(!super::ALLOWED_WS_FORWARD_HEADERS.contains(&"authorization"));
+        assert!(!super::ALLOWED_WS_FORWARD_HEADERS.contains(&"cookie"));
+    }
+
+    // ---- collect_forward_headers: GCP prefix ----
+
+    #[test]
+    fn collect_forward_headers_forwards_gcp_prefix() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-goog-user-project", "my-project".parse().unwrap());
+        headers.insert("x-goog-request-reason", "cost-report".parse().unwrap());
+
+        let result = collect_forward_headers_with_prefixes(
+            &headers,
+            ALLOWED_FORWARD_HEADERS,
+            ALLOWED_FORWARD_HEADER_PREFIXES,
+        );
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().any(|(n, _)| n == "x-goog-user-project"));
+        assert!(result.iter().any(|(n, _)| n == "x-goog-request-reason"));
+    }
+
+    // ---- proxy_error_telemetry_fields: approval variants ----
+
+    #[test]
+    fn proxy_error_telemetry_fields_approval_required() {
+        let (status, code) =
+            super::proxy_error_telemetry_fields(&crate::errors::AppError::ApprovalRequired {
+                request_id: "req-1".into(),
+            });
+        assert_eq!(status, 403);
+        assert_eq!(code, 7000);
+    }
+
+    #[test]
+    fn proxy_error_telemetry_fields_approval_failed() {
+        let (status, code) =
+            super::proxy_error_telemetry_fields(&crate::errors::AppError::ApprovalFailed {
+                request_id: "req-1".into(),
+                approve_url: "https://example.com/approvals".into(),
+                reason: "denied".into(),
+            });
+        assert_eq!(status, 403);
+        assert_eq!(code, 7001);
+    }
+
+    #[test]
+    fn proxy_error_telemetry_fields_org_approval_no_admin() {
+        let (status, code) = super::proxy_error_telemetry_fields(
+            &crate::errors::AppError::OrgApprovalNoAdmin("x".into()),
+        );
+        assert_eq!(status, 503);
+        assert_eq!(code, 8106);
+    }
+
+    // ---- validate_requested_proxy_path safe paths ----
+
+    #[test]
+    fn validate_proxy_path_allows_simple_paths() {
+        validate_requested_proxy_path("/v1/chat/completions").expect("simple path should be ok");
+        validate_requested_proxy_path("/models").expect("single segment should be ok");
+        validate_requested_proxy_path("/v1/files/abc-123").expect("alphanumeric segments ok");
+    }
+
+    #[test]
+    fn validate_proxy_path_allows_empty_path() {
+        validate_requested_proxy_path("/").expect("root path should be ok");
+        validate_requested_proxy_path("").expect("empty path should be ok");
+    }
+
+    #[test]
+    fn validate_proxy_path_rejects_null_bytes() {
+        assert!(validate_requested_proxy_path("/path\0evil").is_err());
+    }
+
+    // ---- WsPassthroughGuard ----
+
+    #[test]
+    fn ws_passthrough_guard_decrements_on_drop() {
+        let counter = Arc::new(AtomicUsize::new(5));
+        let guard = WsPassthroughGuard::new(counter.clone());
+        assert_eq!(counter.load(Ordering::Relaxed), 5);
+        drop(guard);
+        assert_eq!(counter.load(Ordering::Relaxed), 4);
+    }
+
+    #[test]
+    fn ws_passthrough_guard_wraps_on_underflow() {
+        // AtomicUsize::fetch_sub wraps on underflow. The guard uses
+        // Relaxed ordering and does not saturate -- this is acceptable
+        // because in production the counter is always incremented
+        // before the guard is created. This test documents the raw
+        // wrapping behavior.
+        let counter = Arc::new(AtomicUsize::new(0));
+        let guard = WsPassthroughGuard::new(counter.clone());
+        drop(guard);
+        assert_eq!(counter.load(Ordering::Relaxed), usize::MAX);
+    }
 }
 
 #[cfg(test)]

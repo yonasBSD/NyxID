@@ -1826,4 +1826,101 @@ mod tests {
         assert!(parsed.arguments.is_none());
         assert!(parsed.is_destructive.is_none());
     }
+
+    #[test]
+    fn doc_ownership_builds_correct_filter() {
+        let doc = doc_ownership("user_abc", "svc_123");
+        assert_eq!(doc.get_str("_id").unwrap(), "svc_123");
+        assert_eq!(doc.get_str("user_id").unwrap(), "user_abc");
+        assert!(doc.get_bool("is_active").unwrap());
+    }
+
+    #[test]
+    fn approval_status_response_serialization() {
+        let resp = ApprovalStatusResponse {
+            status: "pending".to_string(),
+            expires_at: "2025-01-01T00:05:00Z".to_string(),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["status"], "pending");
+        assert_eq!(json["expires_at"], "2025-01-01T00:05:00Z");
+    }
+
+    #[test]
+    fn decide_response_serialization_with_decided_at() {
+        let resp = DecideResponse {
+            id: "req_1".to_string(),
+            status: "approved".to_string(),
+            decided_at: Some("2025-01-01T00:01:00Z".to_string()),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["status"], "approved");
+        assert_eq!(json["decided_at"], "2025-01-01T00:01:00Z");
+    }
+
+    #[test]
+    fn decide_response_serialization_without_decided_at() {
+        let resp = DecideResponse {
+            id: "req_2".to_string(),
+            status: "pending".to_string(),
+            decided_at: None,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert!(json["decided_at"].is_null());
+    }
+
+    #[test]
+    fn message_response_serialization() {
+        let resp = MessageResponse {
+            message: "done".to_string(),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["message"], "done");
+    }
+
+    #[test]
+    fn create_approval_response_serialization() {
+        let resp = CreateApprovalResponse {
+            id: "req_abc".to_string(),
+            status: "pending".to_string(),
+            expires_at: "2025-01-01T00:05:00Z".to_string(),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["id"], "req_abc");
+        assert_eq!(json["status"], "pending");
+    }
+
+    #[test]
+    fn approval_grant_item_skip_serializing_none_fields() {
+        let item = ApprovalGrantItem {
+            id: "g1".to_string(),
+            service_id: "svc_1".to_string(),
+            service_name: "OpenAI".to_string(),
+            requester_type: "api_key".to_string(),
+            requester_id: "key_1".to_string(),
+            requester_label: None,
+            granted_at: "2025-01-01T00:00:00Z".to_string(),
+            expires_at: "2025-02-01T00:00:00Z".to_string(),
+            org_scoped: false,
+            org_id: None,
+            org_name: None,
+        };
+        let json = serde_json::to_value(&item).unwrap();
+        assert!(json.get("org_id").is_none());
+        assert!(json.get("org_name").is_none());
+        assert!(json["requester_label"].is_null());
+    }
+
+    #[test]
+    fn to_approval_request_item_decided_at_is_formatted() {
+        let mut request = sample_request("user_1");
+        request.decided_at = Some(Utc::now());
+        request.decision_channel = Some("push".to_string());
+
+        let item = to_approval_request_item(request, None);
+
+        assert!(item.decided_at.is_some());
+        assert!(item.decided_at.unwrap().contains('T'));
+        assert_eq!(item.decision_channel.as_deref(), Some("push"));
+    }
 }

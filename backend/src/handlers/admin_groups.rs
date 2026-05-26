@@ -373,6 +373,181 @@ pub async fn get_user_groups(
 }
 
 #[cfg(test)]
+mod pure_tests {
+    use super::*;
+    use crate::models::role::Role;
+    use chrono::Utc;
+
+    fn make_role(id: &str, slug: &str) -> Role {
+        let now = Utc::now();
+        Role {
+            id: id.to_string(),
+            name: "Test Role".to_string(),
+            slug: slug.to_string(),
+            description: Some("A test role".to_string()),
+            permissions: vec!["read".to_string(), "write".to_string()],
+            is_default: false,
+            is_system: false,
+            client_id: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    // --- role_to_response tests ---
+
+    #[test]
+    fn role_to_response_maps_all_fields() {
+        let role = make_role("role-1", "test-role");
+        let resp = role_to_response(role);
+
+        assert_eq!(resp.id, "role-1");
+        assert_eq!(resp.name, "Test Role");
+        assert_eq!(resp.slug, "test-role");
+        assert_eq!(resp.description, Some("A test role".to_string()));
+        assert_eq!(resp.permissions, vec!["read", "write"]);
+        assert!(!resp.is_default);
+        assert!(!resp.is_system);
+        assert!(resp.client_id.is_none());
+    }
+
+    #[test]
+    fn role_to_response_system_role_with_client_id() {
+        let now = Utc::now();
+        let role = Role {
+            id: "sys-1".to_string(),
+            name: "Admin".to_string(),
+            slug: "admin".to_string(),
+            description: None,
+            permissions: vec!["*".to_string()],
+            is_default: true,
+            is_system: true,
+            client_id: Some("client-1".to_string()),
+            created_at: now,
+            updated_at: now,
+        };
+        let resp = role_to_response(role);
+
+        assert!(resp.is_default);
+        assert!(resp.is_system);
+        assert_eq!(resp.client_id, Some("client-1".to_string()));
+        assert!(resp.description.is_none());
+    }
+
+    #[test]
+    fn role_to_response_timestamps_are_rfc3339() {
+        let role = make_role("role-2", "ts-role");
+        let resp = role_to_response(role);
+
+        chrono::DateTime::parse_from_rfc3339(&resp.created_at)
+            .expect("created_at should be valid RFC 3339");
+        chrono::DateTime::parse_from_rfc3339(&resp.updated_at)
+            .expect("updated_at should be valid RFC 3339");
+    }
+
+    #[test]
+    fn role_to_response_empty_permissions() {
+        let now = Utc::now();
+        let role = Role {
+            id: "role-3".to_string(),
+            name: "Empty".to_string(),
+            slug: "empty".to_string(),
+            description: None,
+            permissions: vec![],
+            is_default: false,
+            is_system: false,
+            client_id: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let resp = role_to_response(role);
+
+        assert!(resp.permissions.is_empty());
+    }
+
+    // --- Serde tests ---
+
+    #[test]
+    fn create_group_request_deserializes() {
+        let json = r#"{
+            "name": "Engineering",
+            "slug": "engineering",
+            "description": "Eng team",
+            "role_ids": ["role-1"],
+            "parent_group_id": "parent-1"
+        }"#;
+        let req: CreateGroupRequest = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(req.name, "Engineering");
+        assert_eq!(req.slug, "engineering");
+        assert_eq!(req.description, Some("Eng team".to_string()));
+        assert_eq!(req.role_ids, vec!["role-1"]);
+        assert_eq!(req.parent_group_id, Some("parent-1".to_string()));
+    }
+
+    #[test]
+    fn create_group_request_minimal() {
+        let json = r#"{"name": "Team", "slug": "team"}"#;
+        let req: CreateGroupRequest = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(req.name, "Team");
+        assert!(req.description.is_none());
+        assert!(req.role_ids.is_empty());
+        assert!(req.parent_group_id.is_none());
+    }
+
+    #[test]
+    fn update_group_request_all_none() {
+        let json = r#"{}"#;
+        let req: UpdateGroupRequest = serde_json::from_str(json).expect("deserialize");
+        assert!(req.name.is_none());
+        assert!(req.slug.is_none());
+        assert!(req.description.is_none());
+        assert!(req.role_ids.is_none());
+        assert!(req.parent_group_id.is_none());
+    }
+
+    #[test]
+    fn group_response_serializes_all_fields() {
+        let resp = GroupResponse {
+            id: "g-1".to_string(),
+            name: "Eng".to_string(),
+            slug: "eng".to_string(),
+            description: Some("Engineering".to_string()),
+            roles: vec![],
+            parent_group_id: None,
+            member_count: 5,
+            created_at: "2024-01-01T00:00:00+00:00".to_string(),
+            updated_at: "2024-01-01T00:00:00+00:00".to_string(),
+        };
+        let json = serde_json::to_value(&resp).expect("serialize");
+        assert_eq!(json["id"], "g-1");
+        assert_eq!(json["member_count"], 5);
+        assert!(json["parent_group_id"].is_null());
+        assert!(json["roles"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn group_member_item_serializes() {
+        let item = GroupMemberItem {
+            id: "u-1".to_string(),
+            email: "member@example.com".to_string(),
+            display_name: Some("Member".to_string()),
+        };
+        let json = serde_json::to_value(&item).expect("serialize");
+        assert_eq!(json["id"], "u-1");
+        assert_eq!(json["email"], "member@example.com");
+    }
+
+    #[test]
+    fn group_membership_response_serializes() {
+        let resp = GroupMembershipResponse {
+            message: "Member added".to_string(),
+        };
+        let json = serde_json::to_value(&resp).expect("serialize");
+        assert_eq!(json["message"], "Member added");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::models::user::{COLLECTION_NAME as USERS, UserType};

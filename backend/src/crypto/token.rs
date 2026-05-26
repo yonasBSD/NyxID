@@ -154,4 +154,126 @@ mod tests {
     fn test_constant_time_eq_empty() {
         assert!(constant_time_eq(b"", b""));
     }
+
+    #[test]
+    fn test_constant_time_eq_single_byte_match() {
+        assert!(constant_time_eq(b"x", b"x"));
+    }
+
+    #[test]
+    fn test_constant_time_eq_single_byte_mismatch() {
+        assert!(!constant_time_eq(b"x", b"y"));
+    }
+
+    #[test]
+    fn test_constant_time_eq_one_empty_one_not() {
+        assert!(!constant_time_eq(b"", b"a"));
+        assert!(!constant_time_eq(b"a", b""));
+    }
+
+    #[test]
+    fn test_constant_time_eq_differ_in_last_byte() {
+        assert!(!constant_time_eq(b"abcde", b"abcdf"));
+    }
+
+    #[test]
+    fn test_constant_time_eq_differ_in_first_byte() {
+        assert!(!constant_time_eq(b"Xbcde", b"abcde"));
+    }
+
+    #[test]
+    fn test_hash_token_known_value() {
+        // SHA-256 of the empty string is a well-known constant
+        let expected = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        assert_eq!(hash_token(""), expected);
+    }
+
+    #[test]
+    fn test_hash_token_known_value_hello() {
+        // SHA-256 of "hello" is well-known
+        let expected = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        assert_eq!(hash_token("hello"), expected);
+    }
+
+    #[test]
+    fn test_hash_token_output_is_lowercase_hex() {
+        let hash = hash_token("some-input");
+        assert!(
+            hash.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+        );
+    }
+
+    #[test]
+    fn test_hash_token_length_always_64() {
+        for input in ["", "x", "a longer string for testing", "nyx_abc123"] {
+            assert_eq!(
+                hash_token(input).len(),
+                64,
+                "hash of {input:?} should be 64 hex chars"
+            );
+        }
+    }
+
+    #[test]
+    fn test_random_token_no_prefix() {
+        let token = generate_random_token();
+        // Should be pure hex, no prefix
+        assert!(!token.starts_with("nyx_"));
+        assert!(!token.starts_with("0x"));
+    }
+
+    #[test]
+    fn test_api_key_full_key_length() {
+        let (_, full_key, _) = generate_api_key();
+        // "nyx_" prefix (4 chars) + 32 bytes hex-encoded (64 chars) = 68 chars
+        assert_eq!(full_key.len(), 4 + API_KEY_LENGTH * 2);
+    }
+
+    #[test]
+    fn test_api_key_prefix_matches_key_body() {
+        let (prefix, full_key, _) = generate_api_key();
+        // The prefix should be the first API_KEY_PREFIX_LENGTH chars of the hex body (after "nyx_")
+        let key_body = full_key.strip_prefix("nyx_").unwrap();
+        assert_eq!(&key_body[..API_KEY_PREFIX_LENGTH], &prefix);
+    }
+
+    #[test]
+    fn test_api_key_hash_is_sha256_of_full_key() {
+        let (_, full_key, hash) = generate_api_key();
+        // Manually compute SHA-256 and compare
+        let mut hasher = Sha256::new();
+        hasher.update(full_key.as_bytes());
+        let expected = hex::encode(hasher.finalize());
+        assert_eq!(hash, expected);
+    }
+
+    #[test]
+    fn test_multiple_random_tokens_all_different() {
+        let tokens: Vec<String> = (0..10).map(|_| generate_random_token()).collect();
+        for i in 0..tokens.len() {
+            for j in (i + 1)..tokens.len() {
+                assert_ne!(tokens[i], tokens[j], "tokens at index {i} and {j} collided");
+            }
+        }
+    }
+
+    #[test]
+    fn test_hash_token_unicode_input() {
+        let hash = hash_token("hello-world-\u{1F600}");
+        assert_eq!(hash.len(), 64);
+        // Deterministic
+        assert_eq!(hash, hash_token("hello-world-\u{1F600}"));
+    }
+
+    #[test]
+    fn test_constant_time_eq_binary_values() {
+        let a: Vec<u8> = (0..=255).collect();
+        let b: Vec<u8> = (0..=255).collect();
+        assert!(constant_time_eq(&a, &b));
+
+        let mut c = a.clone();
+        c[128] ^= 1; // flip one bit
+        assert!(!constant_time_eq(&a, &c));
+    }
 }

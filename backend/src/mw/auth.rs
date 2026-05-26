@@ -1362,4 +1362,298 @@ mod tests {
         assert!(user.can_write());
         assert!(user.ensure_write_scope().is_ok());
     }
+
+    // -- scope_contains / scope helpers --
+
+    #[test]
+    fn scope_contains_finds_single_scope() {
+        assert!(scope_contains("proxy", "proxy"));
+    }
+
+    #[test]
+    fn scope_contains_finds_scope_in_list() {
+        assert!(scope_contains("read proxy write", "proxy"));
+        assert!(scope_contains("read proxy write", "read"));
+        assert!(scope_contains("read proxy write", "write"));
+    }
+
+    #[test]
+    fn scope_contains_rejects_missing_scope() {
+        assert!(!scope_contains("read proxy", "write"));
+    }
+
+    #[test]
+    fn scope_contains_rejects_partial_match() {
+        assert!(!scope_contains("proxy:*", "proxy"));
+        assert!(!scope_contains("proxy", "proxy:*"));
+    }
+
+    #[test]
+    fn scope_contains_handles_empty_scopes() {
+        assert!(!scope_contains("", "proxy"));
+    }
+
+    #[test]
+    fn scope_contains_handles_extra_whitespace() {
+        assert!(scope_contains("  read   proxy   write  ", "proxy"));
+    }
+
+    #[test]
+    fn scope_allows_rest_proxy_with_proxy_scope() {
+        assert!(scope_allows_rest_proxy("proxy"));
+        assert!(scope_allows_rest_proxy("read proxy"));
+    }
+
+    #[test]
+    fn scope_allows_rest_proxy_with_wide_scope() {
+        assert!(scope_allows_rest_proxy("proxy:*"));
+        assert!(scope_allows_rest_proxy("read proxy:*"));
+    }
+
+    #[test]
+    fn scope_allows_rest_proxy_rejects_llm_only() {
+        assert!(!scope_allows_rest_proxy("llm:proxy"));
+        assert!(!scope_allows_rest_proxy("read write"));
+    }
+
+    #[test]
+    fn scope_allows_llm_proxy_with_any_proxy_scope() {
+        assert!(scope_allows_llm_proxy("proxy"));
+        assert!(scope_allows_llm_proxy("proxy:*"));
+        assert!(scope_allows_llm_proxy("llm:proxy"));
+    }
+
+    #[test]
+    fn scope_allows_llm_proxy_rejects_non_proxy() {
+        assert!(!scope_allows_llm_proxy("read write"));
+        assert!(!scope_allows_llm_proxy("admin"));
+    }
+
+    // -- path_matches_prefix --
+
+    #[test]
+    fn path_matches_prefix_exact() {
+        assert!(path_matches_prefix("/api/v1", "/api/v1"));
+    }
+
+    #[test]
+    fn path_matches_prefix_with_subpath() {
+        assert!(path_matches_prefix("/api/v1/keys", "/api/v1"));
+        assert!(path_matches_prefix("/api/v1/keys/abc", "/api/v1"));
+    }
+
+    #[test]
+    fn path_matches_prefix_rejects_partial_segment() {
+        // "/api/v1extra" should NOT match prefix "/api/v1"
+        assert!(!path_matches_prefix("/api/v1extra", "/api/v1"));
+    }
+
+    #[test]
+    fn path_matches_prefix_rejects_unrelated() {
+        assert!(!path_matches_prefix("/other/path", "/api/v1"));
+    }
+
+    // -- approval_requester_type --
+
+    #[test]
+    fn approval_requester_type_api_key() {
+        let user = test_auth_user(AuthMethod::ApiKey, "proxy");
+        assert_eq!(user.approval_requester_type(), Some("api_key"));
+    }
+
+    #[test]
+    fn approval_requester_type_delegated() {
+        let user = test_auth_user(AuthMethod::Delegated, "proxy");
+        assert_eq!(user.approval_requester_type(), Some("delegated"));
+    }
+
+    #[test]
+    fn approval_requester_type_service_account() {
+        let user = test_auth_user(AuthMethod::ServiceAccount, "proxy");
+        assert_eq!(user.approval_requester_type(), Some("service_account"));
+    }
+
+    #[test]
+    fn approval_requester_type_access_token() {
+        let user = test_auth_user(AuthMethod::AccessToken, "proxy");
+        assert_eq!(user.approval_requester_type(), Some("access_token"));
+    }
+
+    #[test]
+    fn approval_requester_type_relay() {
+        let user = test_auth_user(AuthMethod::Relay, "proxy");
+        assert_eq!(user.approval_requester_type(), Some("relay"));
+    }
+
+    #[test]
+    fn approval_requester_type_session_is_none() {
+        let user = test_auth_user(AuthMethod::Session, "");
+        assert_eq!(user.approval_requester_type(), None);
+    }
+
+    // -- approval_requester_id --
+
+    #[test]
+    fn approval_requester_id_without_acting_client() {
+        let user = test_auth_user(AuthMethod::ApiKey, "proxy");
+        assert_eq!(user.approval_requester_id(), user.user_id.to_string());
+    }
+
+    #[test]
+    fn approval_requester_id_with_acting_client() {
+        let mut user = test_auth_user(AuthMethod::Delegated, "proxy");
+        user.acting_client_id = Some("client-abc".to_string());
+        assert_eq!(user.approval_requester_id(), "client-abc");
+    }
+
+    // -- effective_approval_owner_user_id --
+
+    #[test]
+    fn effective_approval_owner_defaults_to_user_id() {
+        let user = test_auth_user(AuthMethod::Session, "");
+        assert_eq!(
+            user.effective_approval_owner_user_id(),
+            user.user_id.to_string()
+        );
+    }
+
+    #[test]
+    fn effective_approval_owner_uses_override_when_set() {
+        let mut user = test_auth_user(AuthMethod::ServiceAccount, "proxy");
+        user.approval_owner_user_id = Some("owner-xyz".to_string());
+        assert_eq!(user.effective_approval_owner_user_id(), "owner-xyz");
+    }
+
+    // -- has_scope --
+
+    #[test]
+    fn has_scope_finds_exact_match() {
+        let user = test_auth_user(AuthMethod::ApiKey, "read proxy write");
+        assert!(user.has_scope("proxy"));
+        assert!(user.has_scope("read"));
+        assert!(user.has_scope("write"));
+    }
+
+    #[test]
+    fn has_scope_rejects_absent_scope() {
+        let user = test_auth_user(AuthMethod::ApiKey, "read proxy");
+        assert!(!user.has_scope("admin"));
+        assert!(!user.has_scope("write"));
+    }
+
+    // -- ensure_rest_proxy_access / ensure_llm_proxy_access errors --
+
+    #[test]
+    fn ensure_rest_proxy_access_error_mentions_expected_scopes() {
+        let user = test_auth_user(AuthMethod::ApiKey, "read");
+        let err = user.ensure_rest_proxy_access().unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("proxy"),
+            "Error should mention proxy scope: {msg}"
+        );
+    }
+
+    #[test]
+    fn ensure_llm_proxy_access_error_mentions_expected_scopes() {
+        let user = test_auth_user(AuthMethod::ApiKey, "read");
+        let err = user.ensure_llm_proxy_access().unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("llm:proxy") || msg.contains("proxy"),
+            "Error should mention LLM scope: {msg}"
+        );
+    }
+
+    // -- relay auth method bypasses --
+
+    #[test]
+    fn relay_auth_method_allows_proxy_with_proxy_scope() {
+        let user = test_auth_user(AuthMethod::Relay, "proxy");
+        assert!(user.can_use_rest_proxy());
+        assert!(user.can_use_llm_proxy());
+    }
+
+    #[test]
+    fn relay_auth_method_without_proxy_scope_cannot_rest_proxy() {
+        let user = test_auth_user(AuthMethod::Relay, "read");
+        assert!(!user.can_use_rest_proxy());
+    }
+
+    // -- parse_cookie edge cases --
+
+    #[test]
+    fn parse_cookie_with_no_value() {
+        // "key=" has empty value
+        assert_eq!(parse_cookie("nyx_session=", "nyx_session"), Some(""));
+    }
+
+    #[test]
+    fn parse_cookie_duplicate_keys_returns_first() {
+        let header = "nyx_session=first; nyx_session=second";
+        assert_eq!(parse_cookie(header, "nyx_session"), Some("first"));
+    }
+
+    #[test]
+    fn parse_cookie_name_substring_not_matched() {
+        let header = "nyx_session_extra=abc";
+        assert_eq!(parse_cookie(header, "nyx_session"), None);
+    }
+
+    // -- is_jwt_delegated with padded base64 --
+
+    #[test]
+    fn is_jwt_delegated_handles_padded_base64() {
+        let payload = serde_json::json!({
+            "sub": "u",
+            "delegated": true
+        });
+        // Use URL_SAFE (with padding) to produce a padded payload
+        let payload_b64 =
+            base64::engine::general_purpose::URL_SAFE.encode(serde_json::to_vec(&payload).unwrap());
+        let fake_jwt = format!("eyJhbGciOiJSUzI1NiJ9.{payload_b64}.sig");
+        assert!(is_jwt_delegated(&fake_jwt));
+    }
+
+    #[test]
+    fn is_jwt_service_account_handles_padded_base64() {
+        let payload = serde_json::json!({
+            "sub": "s",
+            "sa": true
+        });
+        let payload_b64 =
+            base64::engine::general_purpose::URL_SAFE.encode(serde_json::to_vec(&payload).unwrap());
+        let fake_jwt = format!("eyJhbGciOiJSUzI1NiJ9.{payload_b64}.sig");
+        assert!(is_jwt_service_account(&fake_jwt));
+    }
+
+    // -- management write scope: delegation / relay routes are exempt --
+
+    #[test]
+    fn delegation_refresh_route_exempt_from_management_write_scope() {
+        assert!(!api_key_management_write_requires_scope(
+            &Method::POST,
+            "/api/v1/delegation/refresh"
+        ));
+    }
+
+    #[test]
+    fn channel_relay_reply_route_exempt_from_management_write_scope() {
+        assert!(!api_key_management_write_requires_scope(
+            &Method::POST,
+            "/api/v1/channel-relay/reply"
+        ));
+    }
+
+    #[test]
+    fn get_requests_never_require_management_write_scope() {
+        assert!(!api_key_management_write_requires_scope(
+            &Method::GET,
+            "/api/v1/keys"
+        ));
+        assert!(!api_key_management_write_requires_scope(
+            &Method::GET,
+            "/api/v1/api-keys"
+        ));
+    }
 }

@@ -58,3 +58,66 @@ pub async fn list_sessions(
 
     Ok(Json(items))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_item_serializes_all_fields() {
+        let item = SessionItem {
+            id: "sess-1".to_string(),
+            ip_address: Some("192.168.1.1".to_string()),
+            user_agent: Some("Mozilla/5.0".to_string()),
+            created_at: "2026-01-01T00:00:00+00:00".to_string(),
+            expires_at: "2026-01-08T00:00:00+00:00".to_string(),
+        };
+        let json = serde_json::to_value(&item).unwrap();
+        assert_eq!(json["id"], "sess-1");
+        assert_eq!(json["ip_address"], "192.168.1.1");
+        assert_eq!(json["user_agent"], "Mozilla/5.0");
+        assert_eq!(json["created_at"], "2026-01-01T00:00:00+00:00");
+        assert_eq!(json["expires_at"], "2026-01-08T00:00:00+00:00");
+    }
+
+    #[test]
+    fn session_item_with_none_optional_fields() {
+        let item = SessionItem {
+            id: "sess-2".to_string(),
+            ip_address: None,
+            user_agent: None,
+            created_at: "2026-01-01T00:00:00+00:00".to_string(),
+            expires_at: "2026-01-08T00:00:00+00:00".to_string(),
+        };
+        let json = serde_json::to_value(&item).unwrap();
+        assert!(json["ip_address"].is_null());
+        assert!(json["user_agent"].is_null());
+        // Required fields still present
+        assert_eq!(json["id"], "sess-2");
+    }
+
+    #[test]
+    fn session_item_vec_serializes_as_array() {
+        let items = vec![
+            SessionItem {
+                id: "sess-a".to_string(),
+                ip_address: None,
+                user_agent: None,
+                created_at: "2026-01-01T00:00:00+00:00".to_string(),
+                expires_at: "2026-01-08T00:00:00+00:00".to_string(),
+            },
+            SessionItem {
+                id: "sess-b".to_string(),
+                ip_address: Some("10.0.0.1".to_string()),
+                user_agent: Some("curl/8.0".to_string()),
+                created_at: "2026-01-02T00:00:00+00:00".to_string(),
+                expires_at: "2026-01-09T00:00:00+00:00".to_string(),
+            },
+        ];
+        let json = serde_json::to_value(&items).unwrap();
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["id"], "sess-a");
+        assert_eq!(arr[1]["id"], "sess-b");
+    }
+}

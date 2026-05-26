@@ -607,6 +607,108 @@ mod tests {
         assert!(list.endpoints.is_empty());
     }
 
+    #[test]
+    fn endpoint_response_maps_all_fields() {
+        let ep = UserEndpoint {
+            id: "ep-1".into(),
+            user_id: "u-1".into(),
+            label: "My EP".into(),
+            url: "https://api.example.com/v1".into(),
+            catalog_service_id: Some("cat-1".into()),
+            openapi_spec_url: Some("https://api.example.com/openapi.json".into()),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let resp = endpoint_response(ep);
+        assert_eq!(resp.id, "ep-1");
+        assert_eq!(resp.label, "My EP");
+        assert_eq!(resp.url, "https://api.example.com/v1");
+        assert_eq!(resp.catalog_service_id.as_deref(), Some("cat-1"));
+        assert_eq!(
+            resp.openapi_spec_url.as_deref(),
+            Some("https://api.example.com/openapi.json")
+        );
+    }
+
+    #[test]
+    fn endpoint_response_handles_none_optionals() {
+        let ep = UserEndpoint {
+            id: "ep-2".into(),
+            user_id: "u-2".into(),
+            label: "Minimal".into(),
+            url: "https://example.com".into(),
+            catalog_service_id: None,
+            openapi_spec_url: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let resp = endpoint_response(ep);
+        assert!(resp.catalog_service_id.is_none());
+        assert!(resp.openapi_spec_url.is_none());
+    }
+
+    #[test]
+    fn parsed_endpoint_to_response_maps_all_fields() {
+        let parsed = openapi_parser::ParsedEndpoint {
+            name: "list_users".into(),
+            description: Some("List all users".into()),
+            method: "GET".into(),
+            path: "/users".into(),
+            parameters: Some(serde_json::json!([{"name": "limit", "in": "query"}])),
+            request_body_schema: None,
+            request_content_type: None,
+            request_body_required: false,
+        };
+        let resp = parsed_endpoint_to_response(parsed);
+        assert_eq!(resp.name, "list_users");
+        assert_eq!(resp.description.as_deref(), Some("List all users"));
+        assert_eq!(resp.method, "GET");
+        assert_eq!(resp.path, "/users");
+        assert!(resp.parameters.is_some());
+        assert!(!resp.request_body_required);
+    }
+
+    #[test]
+    fn parsed_endpoint_to_response_with_body() {
+        let parsed = openapi_parser::ParsedEndpoint {
+            name: "create_user".into(),
+            description: None,
+            method: "POST".into(),
+            path: "/users".into(),
+            parameters: None,
+            request_body_schema: Some(serde_json::json!({"type": "object"})),
+            request_content_type: Some("application/json".into()),
+            request_body_required: true,
+        };
+        let resp = parsed_endpoint_to_response(parsed);
+        assert_eq!(resp.name, "create_user");
+        assert!(resp.description.is_none());
+        assert!(resp.request_body_schema.is_some());
+        assert_eq!(
+            resp.request_content_type.as_deref(),
+            Some("application/json")
+        );
+        assert!(resp.request_body_required);
+    }
+
+    #[test]
+    fn endpoint_response_serializes_without_none_fields() {
+        let ep = UserEndpoint {
+            id: "ep-3".into(),
+            user_id: "u-3".into(),
+            label: "Test".into(),
+            url: "https://example.com".into(),
+            catalog_service_id: None,
+            openapi_spec_url: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let resp = endpoint_response(ep);
+        let json = serde_json::to_value(&resp).unwrap();
+        assert!(!json.as_object().unwrap().contains_key("catalog_service_id"));
+        assert!(!json.as_object().unwrap().contains_key("openapi_spec_url"));
+    }
+
     #[tokio::test]
     async fn list_openapi_endpoints_no_spec_returns_empty() {
         let Some(db) = connect_test_database("h_user_ep_openapi_empty").await else {

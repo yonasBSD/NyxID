@@ -237,4 +237,142 @@ mod tests {
             "should not hit AWS for a malformed credential"
         );
     }
+
+    #[tokio::test]
+    async fn aws_verify_rejects_empty_json_object() {
+        let (base_url, mock) = start_aws_mock(200, "{}").await;
+        let client = reqwest::Client::new();
+        let err = verify_aws_sigv4(&client, "{}", &base_url)
+            .await
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("malformed") || msg.contains("Expected fields"),
+            "expected malformed-credential error, got: {msg}"
+        );
+        assert_eq!(
+            mock.hits.load(Ordering::SeqCst),
+            0,
+            "should not hit network for incomplete credential"
+        );
+    }
+
+    #[tokio::test]
+    async fn aws_verify_rejects_missing_secret_key() {
+        let (base_url, mock) = start_aws_mock(200, "{}").await;
+        let client = reqwest::Client::new();
+        let cred = r#"{"access_key_id":"AKIDEXAMPLE","region":"us-east-1","service":"ce"}"#;
+        let err = verify_aws_sigv4(&client, cred, &base_url)
+            .await
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("malformed"),
+            "expected malformed-credential error, got: {msg}"
+        );
+        assert_eq!(mock.hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn aws_verify_invalid_signature_hint() {
+        let (base_url, _) = start_aws_mock(
+            400,
+            "{\"__type\":\"InvalidSignatureException\",\"message\":\"The request signature we calculated does not match\"}",
+        )
+        .await;
+        let client = reqwest::Client::new();
+        let err = verify_aws_sigv4(&client, &valid_aws_credential(), &base_url)
+            .await
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("secret_access_key") || msg.contains("signature"),
+            "expected InvalidSignature hint, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn aws_verify_generic_400_has_no_extra_hint() {
+        let (base_url, _) = start_aws_mock(
+            400,
+            "{\"__type\":\"SomeOtherError\",\"message\":\"unknown\"}",
+        )
+        .await;
+        let client = reqwest::Client::new();
+        let err = verify_aws_sigv4(&client, &valid_aws_credential(), &base_url)
+            .await
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("400"),
+            "error should contain status code: {msg}"
+        );
+        // Should NOT contain IAM or signature hints for generic errors
+        assert!(
+            !msg.contains("ce:GetCostAndUsage"),
+            "generic 400 should not have IAM hint: {msg}"
+        );
+        assert!(
+            !msg.contains("secret_access_key"),
+            "generic 400 should not have signature hint: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn aws_verify_soft_warns_on_500() {
+        let (base_url, _) = start_aws_mock(500, "Internal Server Error").await;
+        let client = reqwest::Client::new();
+        let result = verify_aws_sigv4(&client, &valid_aws_credential(), &base_url).await;
+        assert!(result.is_ok(), "expected soft-warn on 500, got {result:?}");
+    }
+
+    #[tokio::test]
+    async fn aws_verify_hard_fails_on_401() {
+        let (base_url, _) = start_aws_mock(401, "{\"message\":\"not authorized\"}").await;
+        let client = reqwest::Client::new();
+        let err = verify_aws_sigv4(&client, &valid_aws_credential(), &base_url)
+            .await
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("401"), "error should contain status: {msg}");
+    }
+
+    #[tokio::test]
+    async fn aws_verify_response_body_truncated_in_error() {
+        // Simulate a very long response body
+        let long_body = "x".repeat(2000);
+        let (base_url, _) = start_aws_mock(400, &long_body).await;
+        let client = reqwest::Client::new();
+        let err = verify_aws_sigv4(&client, &valid_aws_credential(), &base_url)
+            .await
+            .unwrap_err();
+        let msg = format!("{err}");
+        // The snippet is capped at 400 chars
+        assert!(
+            msg.len() < 600,
+            "error message should be bounded, got {} chars",
+            msg.len()
+        );
+    }
+
+    #[test]
+    fn verify_timeout_is_reasonable() {
+        // Ensure the timeout constant is between 1 and 30 seconds
+        assert!(VERIFY_TIMEOUT.as_secs() >= 1);
+        assert!(VERIFY_TIMEOUT.as_secs() <= 30);
+    }
+
+    #[tokio::test]
+    async fn aws_verify_trailing_slash_normalization() {
+        // base_url with trailing slash should work the same as without
+        let (base_url, mock) = start_aws_mock(200, "{}").await;
+        let client = reqwest::Client::new();
+        let url_with_slash = format!("{base_url}/");
+        let result = verify_aws_sigv4(&client, &valid_aws_credential(), &url_with_slash).await;
+        assert!(
+            result.is_ok(),
+            "trailing slash should not break probe: {result:?}"
+        );
+        assert_eq!(mock.hits.load(Ordering::SeqCst), 1);
+    }
 }
