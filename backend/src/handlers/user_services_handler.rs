@@ -512,3 +512,269 @@ fn user_service_with_source_response(item: UserServiceWithSource) -> UserService
         credential_source: source.into(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::org_membership::OrgRole;
+    use crate::services::user_service_service::CredentialSource;
+    use crate::test_utils::test_user_service;
+
+    // ---- OrgRoleResponse From<OrgRole> ----
+
+    #[test]
+    fn org_role_response_from_admin() {
+        let resp: OrgRoleResponse = OrgRole::Admin.into();
+        assert!(matches!(resp, OrgRoleResponse::Admin));
+    }
+
+    #[test]
+    fn org_role_response_from_member() {
+        let resp: OrgRoleResponse = OrgRole::Member.into();
+        assert!(matches!(resp, OrgRoleResponse::Member));
+    }
+
+    #[test]
+    fn org_role_response_from_viewer() {
+        let resp: OrgRoleResponse = OrgRole::Viewer.into();
+        assert!(matches!(resp, OrgRoleResponse::Viewer));
+    }
+
+    // ---- OrgRoleResponse JSON serialization ----
+
+    #[test]
+    fn org_role_response_serializes_snake_case() {
+        let admin = serde_json::to_value(OrgRoleResponse::Admin).unwrap();
+        assert_eq!(admin, serde_json::json!("admin"));
+
+        let member = serde_json::to_value(OrgRoleResponse::Member).unwrap();
+        assert_eq!(member, serde_json::json!("member"));
+
+        let viewer = serde_json::to_value(OrgRoleResponse::Viewer).unwrap();
+        assert_eq!(viewer, serde_json::json!("viewer"));
+    }
+
+    // ---- CredentialSourceResponse From<CredentialSource> ----
+
+    #[test]
+    fn credential_source_response_personal() {
+        let resp: CredentialSourceResponse = CredentialSource::Personal.into();
+        assert!(matches!(resp, CredentialSourceResponse::Personal));
+    }
+
+    #[test]
+    fn credential_source_response_org() {
+        let source = CredentialSource::Org {
+            org_user_id: "org-user-1".to_string(),
+            org_name: "Acme Corp".to_string(),
+            org_avatar_url: Some("https://example.com/avatar.png".to_string()),
+            role: OrgRole::Admin,
+            allowed: true,
+        };
+        let resp: CredentialSourceResponse = source.into();
+        match resp {
+            CredentialSourceResponse::Org {
+                org_id,
+                org_name,
+                avatar_url,
+                role,
+                allowed,
+            } => {
+                assert_eq!(org_id, "org-user-1");
+                assert_eq!(org_name, "Acme Corp");
+                assert_eq!(
+                    avatar_url,
+                    Some("https://example.com/avatar.png".to_string())
+                );
+                assert!(matches!(role, OrgRoleResponse::Admin));
+                assert!(allowed);
+            }
+            _ => panic!("expected Org variant"),
+        }
+    }
+
+    #[test]
+    fn credential_source_response_org_no_avatar() {
+        let source = CredentialSource::Org {
+            org_user_id: "org-2".to_string(),
+            org_name: "No Avatar Org".to_string(),
+            org_avatar_url: None,
+            role: OrgRole::Viewer,
+            allowed: false,
+        };
+        let resp: CredentialSourceResponse = source.into();
+        match resp {
+            CredentialSourceResponse::Org {
+                avatar_url,
+                role,
+                allowed,
+                ..
+            } => {
+                assert!(avatar_url.is_none());
+                assert!(matches!(role, OrgRoleResponse::Viewer));
+                assert!(!allowed);
+            }
+            _ => panic!("expected Org variant"),
+        }
+    }
+
+    // ---- CredentialSourceResponse JSON serialization ----
+
+    #[test]
+    fn credential_source_response_personal_json() {
+        let json = serde_json::to_value(CredentialSourceResponse::Personal).unwrap();
+        assert_eq!(json["type"], "personal");
+    }
+
+    #[test]
+    fn credential_source_response_org_json() {
+        let resp = CredentialSourceResponse::Org {
+            org_id: "oid".to_string(),
+            org_name: "Org".to_string(),
+            avatar_url: None,
+            role: OrgRoleResponse::Member,
+            allowed: true,
+        };
+        let json = serde_json::to_value(resp).unwrap();
+        assert_eq!(json["type"], "org");
+        assert_eq!(json["org_id"], "oid");
+        assert_eq!(json["role"], "member");
+        assert_eq!(json["allowed"], true);
+        // avatar_url should be present as null (not omitted)
+        assert!(json.get("avatar_url").is_some());
+    }
+
+    // ---- user_service_response ----
+
+    #[test]
+    fn user_service_response_maps_all_fields() {
+        let svc = test_user_service(
+            "svc-1",
+            "user-1",
+            "openai",
+            "ep-1",
+            Some("cat-1"),
+            Some("node-1"),
+        );
+        let created_at = svc.created_at;
+        let updated_at = svc.updated_at;
+
+        let resp = user_service_response(svc);
+
+        assert_eq!(resp.id, "svc-1");
+        assert_eq!(resp.slug, "openai");
+        assert_eq!(resp.endpoint_id, "ep-1");
+        assert!(resp.api_key_id.is_none());
+        assert_eq!(resp.auth_method, "none");
+        assert_eq!(resp.auth_key_name, "");
+        assert_eq!(resp.catalog_service_id, Some("cat-1".to_string()));
+        assert_eq!(resp.node_id, Some("node-1".to_string()));
+        assert_eq!(resp.node_priority, 0);
+        assert!(resp.is_active);
+        assert_eq!(resp.identity_propagation_mode, "none");
+        assert!(!resp.identity_include_user_id);
+        assert!(!resp.identity_include_email);
+        assert!(!resp.identity_include_name);
+        assert!(resp.identity_jwt_audience.is_none());
+        assert!(!resp.forward_access_token);
+        assert!(!resp.inject_delegation_token);
+        assert_eq!(resp.delegation_token_scope, "llm:proxy");
+        assert!(resp.custom_user_agent.is_none());
+        assert!(resp.default_request_headers.is_none());
+        assert!(resp.ws_frame_injections.is_empty());
+        assert_eq!(resp.created_at, created_at.to_rfc3339());
+        assert_eq!(resp.updated_at, updated_at.to_rfc3339());
+        // user_service_response wraps with Personal source
+        assert!(matches!(
+            resp.credential_source,
+            CredentialSourceResponse::Personal
+        ));
+    }
+
+    #[test]
+    fn user_service_response_none_optional_fields() {
+        let svc = test_user_service("svc-2", "user-2", "custom", "ep-2", None, None);
+        let resp = user_service_response(svc);
+
+        assert!(resp.catalog_service_id.is_none());
+        assert!(resp.node_id.is_none());
+    }
+
+    // ---- user_service_with_source_response ----
+
+    #[test]
+    fn user_service_with_source_response_personal() {
+        let svc = test_user_service("svc-3", "user-3", "anthropic", "ep-3", None, None);
+        let item = UserServiceWithSource {
+            service: svc,
+            source: CredentialSource::Personal,
+        };
+        let resp = user_service_with_source_response(item);
+        assert!(matches!(
+            resp.credential_source,
+            CredentialSourceResponse::Personal
+        ));
+        assert_eq!(resp.slug, "anthropic");
+    }
+
+    #[test]
+    fn user_service_with_source_response_org() {
+        let svc = test_user_service("svc-4", "org-user-1", "cohere", "ep-4", Some("cat-2"), None);
+        let item = UserServiceWithSource {
+            service: svc,
+            source: CredentialSource::Org {
+                org_user_id: "org-user-1".to_string(),
+                org_name: "Dev Team".to_string(),
+                org_avatar_url: Some("https://img.example.com/org.png".to_string()),
+                role: OrgRole::Member,
+                allowed: true,
+            },
+        };
+        let resp = user_service_with_source_response(item);
+        match resp.credential_source {
+            CredentialSourceResponse::Org {
+                org_id,
+                org_name,
+                avatar_url,
+                role,
+                allowed,
+            } => {
+                assert_eq!(org_id, "org-user-1");
+                assert_eq!(org_name, "Dev Team");
+                assert_eq!(
+                    avatar_url,
+                    Some("https://img.example.com/org.png".to_string())
+                );
+                assert!(matches!(role, OrgRoleResponse::Member));
+                assert!(allowed);
+            }
+            _ => panic!("expected Org variant"),
+        }
+        assert_eq!(resp.slug, "cohere");
+    }
+
+    // ---- UserServiceResponse JSON serialization ----
+
+    #[test]
+    fn user_service_response_json_skips_none_fields() {
+        let svc = test_user_service("svc-5", "user-5", "test", "ep-5", None, None);
+        let resp = user_service_response(svc);
+        let json = serde_json::to_value(&resp).unwrap();
+
+        // Fields with skip_serializing_if = "Option::is_none" should be absent
+        assert!(json.get("api_key_id").is_none());
+        assert!(json.get("catalog_service_id").is_none());
+        assert!(json.get("node_id").is_none());
+        assert!(json.get("identity_jwt_audience").is_none());
+        assert!(json.get("custom_user_agent").is_none());
+        assert!(json.get("default_request_headers").is_none());
+
+        // Required fields must be present
+        assert!(json.get("id").is_some());
+        assert!(json.get("slug").is_some());
+        assert!(json.get("endpoint_id").is_some());
+        assert!(json.get("auth_method").is_some());
+        assert!(json.get("is_active").is_some());
+        assert!(json.get("credential_source").is_some());
+    }
+}

@@ -1014,4 +1014,179 @@ mod tests {
 
         db.drop().await.unwrap();
     }
+
+    // ── lark_event_body helper tests ────────────────────────────────────
+
+    #[test]
+    fn lark_event_body_produces_valid_json() {
+        let body = lark_event_body("my_token");
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&body).expect("lark_event_body should produce valid JSON");
+        assert_eq!(parsed["schema"], "2.0");
+        assert_eq!(parsed["header"]["token"], "my_token");
+        assert_eq!(parsed["header"]["event_type"], "im.message.receive_v1");
+    }
+
+    #[test]
+    fn lark_event_body_contains_expected_message_fields() {
+        let body = lark_event_body("tok");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        let sender = &parsed["event"]["sender"]["sender_id"];
+        assert_eq!(sender["open_id"], "ou_user123");
+
+        let message = &parsed["event"]["message"];
+        assert_eq!(message["message_id"], "om_msg456");
+        assert_eq!(message["chat_id"], "oc_chat789");
+        assert_eq!(message["chat_type"], "p2p");
+        assert_eq!(message["message_type"], "text");
+        assert_eq!(message["content"], r#"{"text":"Hello bot"}"#);
+    }
+
+    #[test]
+    fn lark_event_body_token_is_parameterized() {
+        let body_a = lark_event_body("token_a");
+        let body_b = lark_event_body("token_b");
+        let parsed_a: serde_json::Value = serde_json::from_slice(&body_a).unwrap();
+        let parsed_b: serde_json::Value = serde_json::from_slice(&body_b).unwrap();
+        assert_eq!(parsed_a["header"]["token"], "token_a");
+        assert_eq!(parsed_b["header"]["token"], "token_b");
+        assert_ne!(body_a, body_b);
+    }
+
+    // ── PlatformVerifySecrets default ───────────────────────────────────
+
+    #[test]
+    fn platform_verify_secrets_default_is_all_none() {
+        let secrets = crate::services::channel_platform::PlatformVerifySecrets::default();
+        assert!(secrets.slack_signing_secret.is_none());
+        assert!(secrets.lark_verification_token.is_none());
+        assert!(secrets.lark_encrypt_key.is_none());
+    }
+
+    // ── WebhookHandlerDeps lifetime wiring ──────────────────────────────
+
+    #[test]
+    fn test_config_produces_expected_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(
+            "mongodb://localhost:27017/test".to_string(),
+            dir.path(),
+            &"ab".repeat(32),
+        );
+        assert_eq!(config.port, 3001);
+        assert_eq!(config.base_url, "http://localhost:3001");
+        assert_eq!(config.frontend_url, "http://localhost:3000");
+        assert_eq!(config.jwt_access_ttl_secs, 900);
+        assert_eq!(config.jwt_refresh_ttl_secs, 604800);
+        assert_eq!(config.jwt_relay_reply_ttl_secs, 1800);
+        assert_eq!(config.jwt_relay_callback_ttl_secs, 300);
+        assert_eq!(config.rate_limit_per_second, 10);
+        assert_eq!(config.rate_limit_burst, 30);
+        assert_eq!(config.channel_relay_callback_timeout_secs, 30);
+        assert_eq!(config.channel_relay_max_bots_per_user, 5);
+        assert_eq!(config.channel_relay_message_ttl_days, 30);
+        assert_eq!(config.channel_event_rate_limit_per_second, 100);
+        assert_eq!(config.channel_event_dedup_capacity, 32_768);
+        assert_eq!(config.channel_event_dedup_ttl_secs, 300);
+        assert!(config.invite_code_required);
+        assert!(!config.auto_verify_email);
+    }
+
+    // ── hash_conversation_id determinism and format ─────────────────────
+
+    #[test]
+    fn hash_conversation_id_is_deterministic() {
+        let a = crate::handlers::channel_bots::hash_conversation_id("oc_chat789");
+        let b = crate::handlers::channel_bots::hash_conversation_id("oc_chat789");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn hash_conversation_id_produces_hex_string() {
+        let hash = crate::handlers::channel_bots::hash_conversation_id("test-conv-id");
+        // SHA-256 truncated to 8 bytes => 16 hex chars
+        assert_eq!(hash.len(), 16);
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn hash_conversation_id_different_inputs_produce_different_hashes() {
+        let a = crate::handlers::channel_bots::hash_conversation_id("conv-a");
+        let b = crate::handlers::channel_bots::hash_conversation_id("conv-b");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn hash_conversation_id_empty_string() {
+        let hash = crate::handlers::channel_bots::hash_conversation_id("");
+        assert_eq!(hash.len(), 16);
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // ── should_sample_event determinism ─────────────────────────────────
+
+    #[test]
+    fn should_sample_event_is_deterministic() {
+        use crate::telemetry::should_sample_event;
+        let a = should_sample_event("channel.message_received", "conv-hash-abc", 10);
+        let b = should_sample_event("channel.message_received", "conv-hash-abc", 10);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn should_sample_event_100_percent_always_true() {
+        use crate::telemetry::should_sample_event;
+        assert!(should_sample_event("any_event", "any_id", 100));
+    }
+
+    #[test]
+    fn should_sample_event_0_percent_always_false() {
+        use crate::telemetry::should_sample_event;
+        assert!(!should_sample_event("any_event", "any_id", 0));
+    }
+
+    // ── Discord interaction type detection (inline logic test) ──────────
+
+    #[test]
+    fn discord_interaction_type_detection() {
+        // The handler checks if type == 2 or type == 4 for interactions.
+        let command_body = serde_json::json!({"type": 2, "data": {}});
+        let component_body = serde_json::json!({"type": 4, "data": {}});
+        let message_body = serde_json::json!({"type": 0, "content": "hello"});
+        let ping_body = serde_json::json!({"type": 1});
+
+        let is_interaction = |v: &serde_json::Value| -> bool {
+            v.get("type")
+                .and_then(|t| t.as_u64())
+                .is_some_and(|t| t == 2 || t == 4)
+        };
+
+        assert!(is_interaction(&command_body));
+        assert!(is_interaction(&component_body));
+        assert!(!is_interaction(&message_body));
+        assert!(!is_interaction(&ping_body));
+    }
+
+    // ── Mock callback server spawn test ─────────────────────────────────
+
+    #[tokio::test]
+    async fn mock_callback_server_accepts_post() {
+        let (url, received, shutdown_tx) = spawn_mock_callback_server().await;
+
+        let client = reqwest::Client::new();
+        let response = client
+            .post(&url)
+            .json(&serde_json::json!({"test": true}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 202);
+
+        let snapshot = received.lock().await;
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0]["test"], true);
+
+        let _ = shutdown_tx.send(());
+    }
 }

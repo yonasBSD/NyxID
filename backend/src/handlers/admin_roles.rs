@@ -375,6 +375,179 @@ pub async fn bulk_assign_role(
 }
 
 #[cfg(test)]
+mod pure_tests {
+    use super::*;
+    use crate::models::role::Role;
+    use chrono::Utc;
+
+    fn make_role(id: &str, slug: &str) -> Role {
+        let now = Utc::now();
+        Role {
+            id: id.to_string(),
+            name: "Test Role".to_string(),
+            slug: slug.to_string(),
+            description: Some("A test role".to_string()),
+            permissions: vec!["read".to_string(), "write".to_string()],
+            is_default: false,
+            is_system: false,
+            client_id: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    // --- role_to_response tests ---
+
+    #[test]
+    fn role_to_response_maps_all_fields() {
+        let role = make_role("role-1", "test-role");
+        let resp = role_to_response(role);
+
+        assert_eq!(resp.id, "role-1");
+        assert_eq!(resp.name, "Test Role");
+        assert_eq!(resp.slug, "test-role");
+        assert_eq!(resp.description, Some("A test role".to_string()));
+        assert_eq!(resp.permissions, vec!["read", "write"]);
+        assert!(!resp.is_default);
+        assert!(!resp.is_system);
+        assert!(resp.client_id.is_none());
+    }
+
+    #[test]
+    fn role_to_response_with_system_default_role() {
+        let now = Utc::now();
+        let role = Role {
+            id: "sys-1".to_string(),
+            name: "Admin".to_string(),
+            slug: "admin".to_string(),
+            description: None,
+            permissions: vec!["*".to_string()],
+            is_default: true,
+            is_system: true,
+            client_id: Some("client-1".to_string()),
+            created_at: now,
+            updated_at: now,
+        };
+        let resp = role_to_response(role);
+
+        assert!(resp.is_default);
+        assert!(resp.is_system);
+        assert_eq!(resp.client_id, Some("client-1".to_string()));
+        assert!(resp.description.is_none());
+    }
+
+    #[test]
+    fn role_to_response_timestamps_are_rfc3339() {
+        let role = make_role("role-2", "timestamped");
+        let resp = role_to_response(role);
+
+        chrono::DateTime::parse_from_rfc3339(&resp.created_at)
+            .expect("created_at should be valid RFC 3339");
+        chrono::DateTime::parse_from_rfc3339(&resp.updated_at)
+            .expect("updated_at should be valid RFC 3339");
+    }
+
+    #[test]
+    fn role_to_response_empty_permissions() {
+        let now = Utc::now();
+        let role = Role {
+            id: "role-3".to_string(),
+            name: "Empty".to_string(),
+            slug: "empty".to_string(),
+            description: None,
+            permissions: vec![],
+            is_default: false,
+            is_system: false,
+            client_id: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let resp = role_to_response(role);
+
+        assert!(resp.permissions.is_empty());
+    }
+
+    // --- Serde tests ---
+
+    #[test]
+    fn create_role_request_deserializes() {
+        let json = r#"{
+            "name": "Editor",
+            "slug": "editor",
+            "description": "Can edit",
+            "permissions": ["edit", "view"],
+            "is_default": true,
+            "client_id": "client-abc"
+        }"#;
+        let req: CreateRoleRequest = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(req.name, "Editor");
+        assert_eq!(req.slug, "editor");
+        assert_eq!(req.description, Some("Can edit".to_string()));
+        assert_eq!(req.permissions, vec!["edit", "view"]);
+        assert_eq!(req.is_default, Some(true));
+        assert_eq!(req.client_id, Some("client-abc".to_string()));
+    }
+
+    #[test]
+    fn create_role_request_minimal() {
+        let json = r#"{"name": "Viewer", "slug": "viewer", "permissions": []}"#;
+        let req: CreateRoleRequest = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(req.name, "Viewer");
+        assert!(req.description.is_none());
+        assert!(req.is_default.is_none());
+        assert!(req.client_id.is_none());
+    }
+
+    #[test]
+    fn update_role_request_all_none() {
+        let json = r#"{}"#;
+        let req: UpdateRoleRequest = serde_json::from_str(json).expect("deserialize");
+        assert!(req.name.is_none());
+        assert!(req.slug.is_none());
+        assert!(req.description.is_none());
+        assert!(req.permissions.is_none());
+        assert!(req.is_default.is_none());
+    }
+
+    #[test]
+    fn role_response_serializes_all_fields() {
+        let resp = RoleResponse {
+            id: "r-1".to_string(),
+            name: "Admin".to_string(),
+            slug: "admin".to_string(),
+            description: Some("Full access".to_string()),
+            permissions: vec!["*".to_string()],
+            is_default: false,
+            is_system: true,
+            client_id: None,
+            created_at: "2024-01-01T00:00:00+00:00".to_string(),
+            updated_at: "2024-01-01T00:00:00+00:00".to_string(),
+        };
+        let json = serde_json::to_value(&resp).expect("serialize");
+        assert_eq!(json["id"], "r-1");
+        assert_eq!(json["slug"], "admin");
+        assert!(json["is_system"].as_bool().unwrap());
+        assert!(json["client_id"].is_null());
+    }
+
+    #[test]
+    fn bulk_assign_request_defaults() {
+        let json = r#"{}"#;
+        let req: BulkAssignRequest = serde_json::from_str(json).expect("deserialize");
+        assert!(!req.all);
+        assert!(req.user_ids.is_empty());
+    }
+
+    #[test]
+    fn bulk_assign_request_with_all() {
+        let json = r#"{"all": true}"#;
+        let req: BulkAssignRequest = serde_json::from_str(json).expect("deserialize");
+        assert!(req.all);
+        assert!(req.user_ids.is_empty());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};

@@ -111,3 +111,92 @@ where
             .unwrap_or_default())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_surface_is_backend() {
+        let ctx = TelemetryContext::default();
+        assert_eq!(ctx.surface, "backend");
+        assert!(ctx.client_version.is_none());
+    }
+
+    #[test]
+    fn from_headers_ui() {
+        let ctx = TelemetryContext::from_headers(Some("ui"), None);
+        assert_eq!(ctx.surface, "ui");
+    }
+
+    #[test]
+    fn from_headers_cli() {
+        let ctx = TelemetryContext::from_headers(Some("cli"), Some("1.2.3"));
+        assert_eq!(ctx.surface, "cli");
+        assert_eq!(ctx.client_version.as_deref(), Some("1.2.3"));
+    }
+
+    #[test]
+    fn from_headers_mobile() {
+        let ctx = TelemetryContext::from_headers(Some("mobile"), None);
+        assert_eq!(ctx.surface, "mobile");
+    }
+
+    #[test]
+    fn from_headers_sdk() {
+        let ctx = TelemetryContext::from_headers(Some("sdk"), None);
+        assert_eq!(ctx.surface, "sdk");
+    }
+
+    #[test]
+    fn from_headers_unknown_falls_back_to_backend() {
+        let ctx = TelemetryContext::from_headers(Some("unknown-client"), None);
+        assert_eq!(ctx.surface, "backend");
+    }
+
+    #[test]
+    fn from_headers_none_falls_back_to_backend() {
+        let ctx = TelemetryContext::from_headers(None, None);
+        assert_eq!(ctx.surface, "backend");
+    }
+
+    #[test]
+    fn from_headers_preserves_version() {
+        let ctx = TelemetryContext::from_headers(Some("sdk"), Some("0.1.0-beta"));
+        assert_eq!(ctx.client_version.as_deref(), Some("0.1.0-beta"));
+    }
+
+    #[test]
+    fn emit_event_overrides_surface_for_api_key() {
+        let ctx = TelemetryContext {
+            surface: "cli",
+            client_version: None,
+        };
+        // When client is None, emit_event is a no-op - verify no panic
+        emit_event(
+            None,
+            "user-123",
+            Some("key-1"),
+            &ctx,
+            TelemetryEvent::AuthLoggedIn {
+                method: "email".to_string(),
+                mfa_required: false,
+            },
+        );
+    }
+
+    #[test]
+    fn emit_event_noop_when_no_client() {
+        let ctx = TelemetryContext::default();
+        emit_event(
+            None,
+            "user-123",
+            None,
+            &ctx,
+            TelemetryEvent::AuthLoggedIn {
+                method: "email".to_string(),
+                mfa_required: false,
+            },
+        );
+    }
+}

@@ -1473,4 +1473,190 @@ mod tests {
         ));
         assert_eq!(contact_email_for_display(&user), None);
     }
+
+    // ── synthetic_org_email ──
+
+    #[test]
+    fn synthetic_org_email_format() {
+        let email = synthetic_org_email("abc-123");
+        assert_eq!(email, "org-abc-123@nyxid.local");
+    }
+
+    #[test]
+    fn synthetic_org_email_with_uuid() {
+        let id = "11111111-2222-3333-4444-555555555555";
+        let email = synthetic_org_email(id);
+        assert_eq!(email, format!("org-{}{}", id, ORG_PLACEHOLDER_EMAIL_SUFFIX));
+    }
+
+    #[test]
+    fn synthetic_org_email_empty_id() {
+        let email = synthetic_org_email("");
+        assert_eq!(email, format!("org-{}", ORG_PLACEHOLDER_EMAIL_SUFFIX));
+    }
+
+    // ── contact_email_for_display (additional edge cases) ──
+
+    #[test]
+    fn contact_email_for_display_whitespace_only_is_none() {
+        let user = make_org_user("   ");
+        assert_eq!(contact_email_for_display(&user), None);
+    }
+
+    #[test]
+    fn contact_email_for_display_trims_leading_trailing_spaces() {
+        let user = make_org_user("  real@example.com  ");
+        assert_eq!(
+            contact_email_for_display(&user),
+            Some("real@example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn contact_email_for_display_different_org_id_placeholder_not_hidden() {
+        // A placeholder that belongs to a DIFFERENT org id should NOT be
+        // hidden for this org.
+        let user = make_org_user("org-different-id@nyxid.local");
+        assert_eq!(
+            contact_email_for_display(&user),
+            Some("org-different-id@nyxid.local".to_string())
+        );
+    }
+
+    // ── OwnerAccess::allows_any_resource ──
+
+    #[test]
+    fn allows_any_resource_direct_always_true() {
+        assert!(OwnerAccess::Direct.allows_any_resource(&[]));
+        assert!(OwnerAccess::Direct.allows_any_resource(&["svc-1".to_string()]));
+        assert!(
+            OwnerAccess::Direct.allows_any_resource(&["svc-1".to_string(), "svc-2".to_string(),])
+        );
+    }
+
+    #[test]
+    fn allows_any_resource_forbidden_always_false() {
+        assert!(!OwnerAccess::Forbidden.allows_any_resource(&[]));
+        assert!(!OwnerAccess::Forbidden.allows_any_resource(&["svc-1".to_string()]));
+    }
+
+    #[test]
+    fn allows_any_resource_unscoped_admin_allows_all() {
+        let admin = OwnerAccess::AsOrgAdmin {
+            org_user_id: "org".to_string(),
+            membership_id: "m".to_string(),
+            allowed_service_ids: None,
+        };
+        assert!(admin.allows_any_resource(&[]));
+        assert!(admin.allows_any_resource(&["svc-1".to_string()]));
+    }
+
+    #[test]
+    fn allows_any_resource_scoped_admin_matches_any_in_scope() {
+        let admin = OwnerAccess::AsOrgAdmin {
+            org_user_id: "org".to_string(),
+            membership_id: "m".to_string(),
+            allowed_service_ids: Some(vec!["svc-1".to_string(), "svc-2".to_string()]),
+        };
+        // One match is enough
+        assert!(admin.allows_any_resource(&["svc-1".to_string(), "svc-99".to_string()]));
+        // No match
+        assert!(!admin.allows_any_resource(&["svc-99".to_string()]));
+    }
+
+    #[test]
+    fn allows_any_resource_scoped_admin_empty_input_returns_false() {
+        // Empty resource ids with a scoped admin means "orphan resource" --
+        // no concrete claim.
+        let admin = OwnerAccess::AsOrgAdmin {
+            org_user_id: "org".to_string(),
+            membership_id: "m".to_string(),
+            allowed_service_ids: Some(vec!["svc-1".to_string()]),
+        };
+        assert!(!admin.allows_any_resource(&[]));
+    }
+
+    #[test]
+    fn allows_any_resource_scoped_member_matches() {
+        let member = OwnerAccess::AsOrgMember {
+            org_user_id: "org".to_string(),
+            membership_id: "m".to_string(),
+            role: OrgRole::Member,
+            allowed_service_ids: Some(vec!["svc-3".to_string()]),
+        };
+        assert!(member.allows_any_resource(&["svc-3".to_string()]));
+        assert!(!member.allows_any_resource(&["svc-4".to_string()]));
+    }
+
+    #[test]
+    fn allows_any_resource_unscoped_member_allows_all() {
+        let member = OwnerAccess::AsOrgMember {
+            org_user_id: "org".to_string(),
+            membership_id: "m".to_string(),
+            role: OrgRole::Viewer,
+            allowed_service_ids: None,
+        };
+        assert!(member.allows_any_resource(&["svc-1".to_string()]));
+        assert!(member.allows_any_resource(&[]));
+    }
+
+    #[test]
+    fn allows_any_resource_empty_scope_blocks_everything() {
+        let member = OwnerAccess::AsOrgMember {
+            org_user_id: "org".to_string(),
+            membership_id: "m".to_string(),
+            role: OrgRole::Member,
+            allowed_service_ids: Some(vec![]),
+        };
+        assert!(!member.allows_any_resource(&["svc-1".to_string()]));
+        assert!(!member.allows_any_resource(&[]));
+    }
+
+    // ── OwnerAccess structural / variant coverage ──
+
+    #[test]
+    fn owner_access_org_admin_can_write_and_read() {
+        let admin = OwnerAccess::AsOrgAdmin {
+            org_user_id: "org-1".to_string(),
+            membership_id: "m-1".to_string(),
+            allowed_service_ids: Some(vec!["svc-1".to_string()]),
+        };
+        assert!(admin.can_write());
+        assert!(admin.can_read());
+    }
+
+    #[test]
+    fn owner_access_viewer_cannot_write_but_can_read() {
+        let viewer = OwnerAccess::AsOrgMember {
+            org_user_id: "org-1".to_string(),
+            membership_id: "m-1".to_string(),
+            role: OrgRole::Viewer,
+            allowed_service_ids: Some(vec![]),
+        };
+        assert!(!viewer.can_write());
+        assert!(viewer.can_read());
+    }
+
+    #[test]
+    fn owner_access_debug_and_clone() {
+        let access = OwnerAccess::AsOrgAdmin {
+            org_user_id: "org-1".to_string(),
+            membership_id: "m-1".to_string(),
+            allowed_service_ids: None,
+        };
+        let cloned = access.clone();
+        assert_eq!(access, cloned);
+        // Verify Debug impl does not panic
+        let _ = format!("{:?}", access);
+    }
+
+    #[test]
+    fn owner_access_equality() {
+        let a = OwnerAccess::Direct;
+        let b = OwnerAccess::Direct;
+        assert_eq!(a, b);
+
+        let c = OwnerAccess::Forbidden;
+        assert_ne!(a, c);
+    }
 }

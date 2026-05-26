@@ -465,4 +465,174 @@ mod tests {
         let hash2 = hash_token(&secret);
         assert_eq!(hash1, hash2);
     }
+
+    #[test]
+    fn client_id_hex_chars_only() {
+        let id = generate_client_id();
+        let hex_part = &id[3..];
+        assert!(hex_part.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn client_secret_hex_chars_only() {
+        let secret = generate_client_secret();
+        let hex_part = &secret[4..];
+        assert!(hex_part.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn secret_prefix_matches_first_eight_chars() {
+        let secret = generate_client_secret();
+        let prefix = &secret[..8];
+        assert!(prefix.starts_with("sas_"));
+    }
+
+    #[tokio::test]
+    async fn create_service_account_happy_path() {
+        let Some(db) = crate::test_utils::connect_test_database("sa_create_ok").await else {
+            eprintln!("skipping: no local MongoDB available");
+            return;
+        };
+
+        let creator_id = Uuid::new_v4().to_string();
+        let (sa, raw_secret) = create_service_account(
+            &db,
+            "Test SA",
+            Some("A test account"),
+            "read write",
+            &[],
+            None,
+            &creator_id,
+        )
+        .await
+        .expect("create service account");
+
+        assert_eq!(sa.name, "Test SA");
+        assert_eq!(sa.description.as_deref(), Some("A test account"));
+        assert_eq!(sa.allowed_scopes, "read write");
+        assert!(sa.is_active);
+        assert!(sa.client_id.starts_with("sa_"));
+        assert!(raw_secret.starts_with("sas_"));
+        assert_eq!(sa.created_by, creator_id);
+        assert_eq!(sa.owner_user_id.as_deref(), Some(creator_id.as_str()));
+
+        let stored = get_service_account(&db, &sa.id).await.expect("get sa");
+        assert_eq!(stored.name, "Test SA");
+        let stored_hash = hash_token(&raw_secret);
+        assert_eq!(stored.client_secret_hash, stored_hash);
+    }
+
+    #[tokio::test]
+    async fn create_service_account_empty_name_error() {
+        let Some(db) = crate::test_utils::connect_test_database("sa_empty_name").await else {
+            eprintln!("skipping: no local MongoDB available");
+            return;
+        };
+
+        let err = create_service_account(&db, "", None, "read", &[], None, "creator")
+            .await
+            .expect_err("empty name");
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn create_service_account_long_name_error() {
+        let Some(db) = crate::test_utils::connect_test_database("sa_long_name").await else {
+            eprintln!("skipping: no local MongoDB available");
+            return;
+        };
+
+        let long_name = "x".repeat(101);
+        let err = create_service_account(&db, &long_name, None, "read", &[], None, "creator")
+            .await
+            .expect_err("long name");
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn create_service_account_empty_scopes_error() {
+        let Some(db) = crate::test_utils::connect_test_database("sa_no_scope").await else {
+            eprintln!("skipping: no local MongoDB available");
+            return;
+        };
+
+        let err = create_service_account(&db, "SA", None, "", &[], None, "creator")
+            .await
+            .expect_err("empty scopes");
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn create_service_account_zero_rate_limit_error() {
+        let Some(db) = crate::test_utils::connect_test_database("sa_zero_rl").await else {
+            eprintln!("skipping: no local MongoDB available");
+            return;
+        };
+
+        let err = create_service_account(&db, "SA", None, "read", &[], Some(0), "creator")
+            .await
+            .expect_err("zero rate limit");
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn create_service_account_description_too_long_error() {
+        let Some(db) = crate::test_utils::connect_test_database("sa_long_desc").await else {
+            eprintln!("skipping: no local MongoDB available");
+            return;
+        };
+
+        let long_desc = "d".repeat(501);
+        let err = create_service_account(&db, "SA", Some(&long_desc), "read", &[], None, "creator")
+            .await
+            .expect_err("long description");
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn create_service_account_with_rate_limit() {
+        let Some(db) = crate::test_utils::connect_test_database("sa_with_rl").await else {
+            eprintln!("skipping: no local MongoDB available");
+            return;
+        };
+
+        let (sa, _) = create_service_account(&db, "RL SA", None, "read", &[], Some(50), "creator")
+            .await
+            .expect("create");
+        assert_eq!(sa.rate_limit_override, Some(50));
+    }
+
+    #[tokio::test]
+    async fn get_service_account_not_found() {
+        let Some(db) = crate::test_utils::connect_test_database("sa_get_nf").await else {
+            eprintln!("skipping: no local MongoDB available");
+            return;
+        };
+
+        let err = get_service_account(&db, "nonexistent")
+            .await
+            .expect_err("not found");
+        assert!(matches!(err, AppError::ServiceAccountNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn create_service_account_invalid_role_ids_error() {
+        let Some(db) = crate::test_utils::connect_test_database("sa_bad_roles").await else {
+            eprintln!("skipping: no local MongoDB available");
+            return;
+        };
+
+        let err = create_service_account(
+            &db,
+            "SA",
+            None,
+            "read",
+            &["fake-role-id".to_string()],
+            None,
+            "creator",
+        )
+        .await
+        .expect_err("bad role ids");
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
 }

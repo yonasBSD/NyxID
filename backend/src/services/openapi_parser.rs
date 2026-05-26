@@ -1540,4 +1540,556 @@ mod tests {
         assert!(body.schema.is_none());
         assert!(body.required);
     }
+
+    // ---- is_concrete_content_type ----
+
+    #[test]
+    fn is_concrete_content_type_rejects_wildcard() {
+        assert!(!is_concrete_content_type("*/*"));
+    }
+
+    #[test]
+    fn is_concrete_content_type_rejects_empty() {
+        assert!(!is_concrete_content_type(""));
+    }
+
+    #[test]
+    fn is_concrete_content_type_accepts_json() {
+        assert!(is_concrete_content_type("application/json"));
+    }
+
+    #[test]
+    fn is_concrete_content_type_accepts_with_params() {
+        assert!(is_concrete_content_type("application/json; charset=utf-8"));
+    }
+
+    #[test]
+    fn is_concrete_content_type_accepts_octet_stream() {
+        assert!(is_concrete_content_type("application/octet-stream"));
+    }
+
+    #[test]
+    fn is_concrete_content_type_accepts_multipart() {
+        assert!(is_concrete_content_type("multipart/form-data"));
+    }
+
+    // ---- is_binary_media ----
+
+    #[test]
+    fn is_binary_media_by_content_type() {
+        let media = serde_json::json!({});
+        let spec = serde_json::json!({});
+        assert!(is_binary_media("application/octet-stream", &media, &spec));
+        assert!(is_binary_media("image/png", &media, &spec));
+    }
+
+    #[test]
+    fn is_binary_media_by_schema_format() {
+        let media = serde_json::json!({
+            "schema": { "type": "string", "format": "binary" }
+        });
+        let spec = serde_json::json!({});
+        assert!(is_binary_media("application/json", &media, &spec));
+    }
+
+    #[test]
+    fn is_binary_media_false_for_json_object() {
+        let media = serde_json::json!({
+            "schema": { "type": "object" }
+        });
+        let spec = serde_json::json!({});
+        assert!(!is_binary_media("application/json", &media, &spec));
+    }
+
+    #[test]
+    fn is_binary_media_resolves_schema_refs() {
+        let spec = serde_json::json!({
+            "components": {
+                "schemas": {
+                    "BinaryBlob": {
+                        "type": "string",
+                        "format": "binary"
+                    }
+                }
+            }
+        });
+        let media = serde_json::json!({
+            "schema": { "$ref": "#/components/schemas/BinaryBlob" }
+        });
+        assert!(is_binary_media("application/json", &media, &spec));
+    }
+
+    // ---- is_upload_media ----
+
+    #[test]
+    fn is_upload_media_detects_binary_content_type() {
+        let media = serde_json::json!({});
+        let spec = serde_json::json!({});
+        assert!(is_upload_media("application/octet-stream", &media, &spec));
+    }
+
+    #[test]
+    fn is_upload_media_detects_multipart_with_binary_field() {
+        let media = serde_json::json!({
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "file": { "type": "string", "format": "binary" }
+                }
+            }
+        });
+        let spec = serde_json::json!({});
+        assert!(is_upload_media("multipart/form-data", &media, &spec));
+    }
+
+    #[test]
+    fn is_upload_media_false_for_multipart_without_binary() {
+        let media = serde_json::json!({
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" }
+                }
+            }
+        });
+        let spec = serde_json::json!({});
+        assert!(!is_upload_media("multipart/form-data", &media, &spec));
+    }
+
+    // ---- normalize_parameter_name ----
+
+    #[test]
+    fn normalize_parameter_name_lowercases_headers() {
+        assert_eq!(normalize_parameter_name("header", "X-Api-Key"), "x-api-key");
+    }
+
+    #[test]
+    fn normalize_parameter_name_trims_header_whitespace() {
+        assert_eq!(
+            normalize_parameter_name("header", "  X-Api-Key  "),
+            "x-api-key"
+        );
+    }
+
+    #[test]
+    fn normalize_parameter_name_preserves_query_case() {
+        assert_eq!(normalize_parameter_name("query", "pageSize"), "pageSize");
+    }
+
+    #[test]
+    fn normalize_parameter_name_preserves_path_case() {
+        assert_eq!(normalize_parameter_name("path", "userId"), "userId");
+    }
+
+    // ---- parameter_identity ----
+
+    #[test]
+    fn parameter_identity_extracts_name_and_location() {
+        let param = serde_json::json!({"name": "limit", "in": "query"});
+        let identity = parameter_identity(&param);
+        assert_eq!(identity, Some(("limit".to_string(), "query".to_string())));
+    }
+
+    #[test]
+    fn parameter_identity_normalizes_header_name() {
+        let param = serde_json::json!({"name": "X-Request-Id", "in": "header"});
+        let identity = parameter_identity(&param);
+        assert_eq!(
+            identity,
+            Some(("x-request-id".to_string(), "header".to_string()))
+        );
+    }
+
+    #[test]
+    fn parameter_identity_returns_none_without_name() {
+        let param = serde_json::json!({"in": "query"});
+        assert!(parameter_identity(&param).is_none());
+    }
+
+    #[test]
+    fn parameter_identity_returns_none_without_in() {
+        let param = serde_json::json!({"name": "limit"});
+        assert!(parameter_identity(&param).is_none());
+    }
+
+    // ---- should_include_parameter ----
+
+    #[test]
+    fn should_include_parameter_accepts_valid_locations() {
+        for location in ["path", "query", "header", "cookie"] {
+            let param = serde_json::json!({"name": "test", "in": location});
+            assert!(
+                should_include_parameter(&param),
+                "should include parameter in '{location}'"
+            );
+        }
+    }
+
+    #[test]
+    fn should_include_parameter_rejects_body_and_form_data() {
+        for location in ["body", "formData"] {
+            let param = serde_json::json!({"name": "test", "in": location});
+            assert!(
+                !should_include_parameter(&param),
+                "should not include parameter in '{location}'"
+            );
+        }
+    }
+
+    #[test]
+    fn should_include_parameter_rejects_empty_name() {
+        let param = serde_json::json!({"name": "", "in": "query"});
+        assert!(!should_include_parameter(&param));
+    }
+
+    #[test]
+    fn should_include_parameter_rejects_missing_name() {
+        let param = serde_json::json!({"in": "query"});
+        assert!(!should_include_parameter(&param));
+    }
+
+    #[test]
+    fn should_include_parameter_rejects_missing_in() {
+        let param = serde_json::json!({"name": "limit"});
+        assert!(!should_include_parameter(&param));
+    }
+
+    // ---- resolve_local_ref ----
+
+    #[test]
+    fn resolve_local_ref_follows_json_pointer() {
+        let root = serde_json::json!({
+            "components": {
+                "schemas": {
+                    "User": { "type": "object" }
+                }
+            }
+        });
+        let ref_value = serde_json::json!({"$ref": "#/components/schemas/User"});
+        let resolved = resolve_local_ref(&root, &ref_value);
+        assert_eq!(resolved.unwrap()["type"], "object");
+    }
+
+    #[test]
+    fn resolve_local_ref_returns_none_for_missing_target() {
+        let root = serde_json::json!({});
+        let ref_value = serde_json::json!({"$ref": "#/components/schemas/Missing"});
+        assert!(resolve_local_ref(&root, &ref_value).is_none());
+    }
+
+    #[test]
+    fn resolve_local_ref_returns_none_for_non_local_ref() {
+        let root = serde_json::json!({});
+        let ref_value = serde_json::json!({"$ref": "https://example.com/schema.json"});
+        assert!(resolve_local_ref(&root, &ref_value).is_none());
+    }
+
+    #[test]
+    fn resolve_local_ref_returns_none_without_ref_key() {
+        let root = serde_json::json!({});
+        let value = serde_json::json!({"type": "object"});
+        assert!(resolve_local_ref(&root, &value).is_none());
+    }
+
+    // ---- resolve_schema_refs ----
+
+    #[test]
+    fn resolve_schema_refs_expands_nested_properties() {
+        let root = serde_json::json!({
+            "components": {
+                "schemas": {
+                    "Address": {
+                        "type": "object",
+                        "properties": {
+                            "street": { "type": "string" }
+                        }
+                    }
+                }
+            }
+        });
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "address": { "$ref": "#/components/schemas/Address" }
+            }
+        });
+        let resolved = resolve_schema_refs(&root, &schema);
+        assert_eq!(
+            resolved["properties"]["address"]["properties"]["street"]["type"],
+            "string"
+        );
+    }
+
+    #[test]
+    fn resolve_schema_refs_handles_array_items() {
+        let root = serde_json::json!({
+            "components": {
+                "schemas": {
+                    "Item": { "type": "string" }
+                }
+            }
+        });
+        let schema = serde_json::json!({
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/Item" }
+        });
+        let resolved = resolve_schema_refs(&root, &schema);
+        assert_eq!(resolved["items"]["type"], "string");
+    }
+
+    #[test]
+    fn resolve_schema_refs_handles_all_of() {
+        let root = serde_json::json!({
+            "components": {
+                "schemas": {
+                    "Base": { "type": "object", "properties": { "id": { "type": "string" } } }
+                }
+            }
+        });
+        let schema = serde_json::json!({
+            "allOf": [
+                { "$ref": "#/components/schemas/Base" },
+                { "properties": { "name": { "type": "string" } } }
+            ]
+        });
+        let resolved = resolve_schema_refs(&root, &schema);
+        let all_of = resolved["allOf"].as_array().unwrap();
+        assert_eq!(all_of[0]["properties"]["id"]["type"], "string");
+    }
+
+    #[test]
+    fn resolve_schema_refs_handles_circular_refs() {
+        let root = serde_json::json!({
+            "components": {
+                "schemas": {
+                    "Node": {
+                        "type": "object",
+                        "properties": {
+                            "children": {
+                                "type": "array",
+                                "items": { "$ref": "#/components/schemas/Node" }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let schema = serde_json::json!({"$ref": "#/components/schemas/Node"});
+        // Should not stack overflow -- the cycle is broken by the visited set
+        let resolved = resolve_schema_refs(&root, &schema);
+        assert_eq!(resolved["type"], "object");
+    }
+
+    #[test]
+    fn resolve_schema_refs_expands_additional_properties() {
+        let root = serde_json::json!({
+            "components": {
+                "schemas": {
+                    "Value": { "type": "string" }
+                }
+            }
+        });
+        let schema = serde_json::json!({
+            "type": "object",
+            "additionalProperties": { "$ref": "#/components/schemas/Value" }
+        });
+        let resolved = resolve_schema_refs(&root, &schema);
+        assert_eq!(resolved["additionalProperties"]["type"], "string");
+    }
+
+    // ---- default_swagger2_form_content_type ----
+
+    #[test]
+    fn default_swagger2_form_content_type_file_upload() {
+        assert_eq!(
+            default_swagger2_form_content_type(Swagger2FormBodyKind::FileUpload),
+            "multipart/form-data"
+        );
+    }
+
+    #[test]
+    fn default_swagger2_form_content_type_form_fields() {
+        assert_eq!(
+            default_swagger2_form_content_type(Swagger2FormBodyKind::FormFields),
+            "application/x-www-form-urlencoded"
+        );
+    }
+
+    // ---- select_swagger2_form_content_type ----
+
+    #[test]
+    fn select_swagger2_form_content_type_file_upload_finds_multipart() {
+        let types = vec![
+            serde_json::json!("application/json"),
+            serde_json::json!("multipart/form-data"),
+        ];
+        let result = select_swagger2_form_content_type(&types, Swagger2FormBodyKind::FileUpload);
+        assert_eq!(result.as_deref(), Some("multipart/form-data"));
+    }
+
+    #[test]
+    fn select_swagger2_form_content_type_form_fields_prefers_urlencoded() {
+        let types = vec![
+            serde_json::json!("multipart/form-data"),
+            serde_json::json!("application/x-www-form-urlencoded"),
+        ];
+        let result = select_swagger2_form_content_type(&types, Swagger2FormBodyKind::FormFields);
+        assert_eq!(result.as_deref(), Some("application/x-www-form-urlencoded"));
+    }
+
+    #[test]
+    fn select_swagger2_form_content_type_form_fields_falls_back_to_multipart() {
+        let types = vec![
+            serde_json::json!("application/json"),
+            serde_json::json!("multipart/form-data"),
+        ];
+        let result = select_swagger2_form_content_type(&types, Swagger2FormBodyKind::FormFields);
+        assert_eq!(result.as_deref(), Some("multipart/form-data"));
+    }
+
+    #[test]
+    fn select_swagger2_form_content_type_returns_none_when_no_match() {
+        let types = vec![serde_json::json!("application/json")];
+        let result = select_swagger2_form_content_type(&types, Swagger2FormBodyKind::FileUpload);
+        assert!(result.is_none());
+    }
+
+    // ---- select_swagger2_content_type ----
+
+    #[test]
+    fn select_swagger2_content_type_prefers_binary_for_binary_schema() {
+        let value = serde_json::json!(["application/json", "application/octet-stream"]);
+        let result = select_swagger2_content_type(&value, true, None);
+        assert_eq!(result.as_deref(), Some("application/octet-stream"));
+    }
+
+    #[test]
+    fn select_swagger2_content_type_returns_first_when_not_binary() {
+        let value = serde_json::json!(["application/json", "text/plain"]);
+        let result = select_swagger2_content_type(&value, false, None);
+        assert_eq!(result.as_deref(), Some("application/json"));
+    }
+
+    #[test]
+    fn select_swagger2_content_type_returns_none_for_non_array() {
+        let value = serde_json::json!("application/json");
+        let result = select_swagger2_content_type(&value, false, None);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn select_swagger2_content_type_form_data_takes_priority() {
+        let value = serde_json::json!([
+            "application/json",
+            "multipart/form-data",
+            "application/octet-stream"
+        ]);
+        let result =
+            select_swagger2_content_type(&value, true, Some(Swagger2FormBodyKind::FileUpload));
+        assert_eq!(result.as_deref(), Some("multipart/form-data"));
+    }
+
+    // ---- parse_openapi_spec_value ----
+
+    #[test]
+    fn parse_openapi_spec_value_rejects_non_spec_document() {
+        let spec = serde_json::json!({"foo": "bar"});
+        let result = parse_openapi_spec_value(&spec);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_openapi_spec_value_rejects_missing_paths() {
+        let spec = serde_json::json!({"openapi": "3.0.0"});
+        let result = parse_openapi_spec_value(&spec);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_openapi_spec_value_parses_minimal_openapi3() {
+        let spec = serde_json::json!({
+            "openapi": "3.0.0",
+            "paths": {
+                "/users": {
+                    "get": {
+                        "operationId": "listUsers",
+                        "responses": { "200": {} }
+                    }
+                }
+            }
+        });
+        let endpoints = parse_openapi_spec_value(&spec).unwrap();
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0].name, "listusers");
+        assert_eq!(endpoints[0].method, "GET");
+        assert_eq!(endpoints[0].path, "/users");
+    }
+
+    #[test]
+    fn parse_openapi_spec_value_parses_swagger2() {
+        let spec = serde_json::json!({
+            "swagger": "2.0",
+            "paths": {
+                "/items": {
+                    "post": {
+                        "summary": "Create item",
+                        "parameters": [
+                            {"in": "body", "name": "item", "schema": {"type": "object"}}
+                        ]
+                    }
+                }
+            }
+        });
+        let endpoints = parse_openapi_spec_value(&spec).unwrap();
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0].method, "POST");
+    }
+
+    // ---- extract_swagger2_consumes ----
+
+    #[test]
+    fn extract_swagger2_consumes_falls_back_to_octet_stream_for_binary_schema() {
+        let op = serde_json::json!({});
+        let spec = serde_json::json!({});
+        let schema = serde_json::json!({"type": "string", "format": "binary"});
+        let result = extract_swagger2_consumes(&op, &spec, Some(&schema), None);
+        assert_eq!(result.as_deref(), Some("application/octet-stream"));
+    }
+
+    #[test]
+    fn extract_swagger2_consumes_falls_back_to_form_default_without_consumes() {
+        let op = serde_json::json!({});
+        let spec = serde_json::json!({});
+        let result =
+            extract_swagger2_consumes(&op, &spec, None, Some(Swagger2FormBodyKind::FileUpload));
+        assert_eq!(result.as_deref(), Some("multipart/form-data"));
+    }
+
+    #[test]
+    fn extract_swagger2_consumes_returns_none_without_schema_or_form() {
+        let op = serde_json::json!({});
+        let spec = serde_json::json!({});
+        let result = extract_swagger2_consumes(&op, &spec, None, None);
+        assert!(result.is_none());
+    }
+
+    // ---- merge_parameter ----
+
+    #[test]
+    fn merge_parameter_replaces_by_identity() {
+        let mut params =
+            vec![serde_json::json!({"name": "limit", "in": "query", "required": false})];
+        let new_param = serde_json::json!({"name": "limit", "in": "query", "required": true});
+        merge_parameter(&mut params, new_param);
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0]["required"], true);
+    }
+
+    #[test]
+    fn merge_parameter_appends_different_params() {
+        let mut params = vec![serde_json::json!({"name": "limit", "in": "query"})];
+        let new_param = serde_json::json!({"name": "offset", "in": "query"});
+        merge_parameter(&mut params, new_param);
+        assert_eq!(params.len(), 2);
+    }
 }

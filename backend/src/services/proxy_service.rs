@@ -4736,4 +4736,284 @@ mod tests {
     fn default_proxy_user_agent_contains_version() {
         assert!(DEFAULT_PROXY_USER_AGENT.starts_with("NyxID-Proxy/"));
     }
+
+    // ---- contains_dot_segment edge cases ----
+
+    #[test]
+    fn contains_dot_segment_empty_string() {
+        assert!(!contains_dot_segment(""));
+    }
+
+    #[test]
+    fn contains_dot_segment_leading_dot_segment() {
+        assert!(contains_dot_segment("./a/b"));
+        assert!(contains_dot_segment("../a/b"));
+    }
+
+    #[test]
+    fn contains_dot_segment_trailing_dot_segment() {
+        assert!(contains_dot_segment("a/b/."));
+        assert!(contains_dot_segment("a/b/.."));
+    }
+
+    #[test]
+    fn contains_dot_segment_only_dot() {
+        assert!(contains_dot_segment("."));
+        assert!(contains_dot_segment(".."));
+    }
+
+    #[test]
+    fn contains_dot_segment_similar_but_safe() {
+        assert!(!contains_dot_segment("a/...b/c"));
+        assert!(!contains_dot_segment("a/.hidden/b"));
+        assert!(!contains_dot_segment("..config"));
+    }
+
+    // ---- credential_header_name ----
+
+    fn make_proxy_target_with_auth(auth_method: &str, auth_key_name: &str) -> ProxyTarget {
+        let mut ds = test_minimal_downstream();
+        ds.token_exchange_config = None;
+        ProxyTarget {
+            base_url: "https://example.test".into(),
+            auth_method: auth_method.into(),
+            auth_key_name: auth_key_name.into(),
+            credential: "secret".into(),
+            service: ds,
+            catalog_default_headers: vec![],
+            user_service_default_headers: vec![],
+            ws_frame_injections: vec![],
+            connection_id: None,
+        }
+    }
+
+    #[test]
+    fn credential_header_name_bearer() {
+        let t = make_proxy_target_with_auth("bearer", "");
+        assert_eq!(credential_header_name(&t), Some("authorization".into()));
+    }
+
+    #[test]
+    fn credential_header_name_bot_bearer() {
+        let t = make_proxy_target_with_auth("bot_bearer", "");
+        assert_eq!(credential_header_name(&t), Some("authorization".into()));
+    }
+
+    #[test]
+    fn credential_header_name_basic() {
+        let t = make_proxy_target_with_auth("basic", "");
+        assert_eq!(credential_header_name(&t), Some("authorization".into()));
+    }
+
+    #[test]
+    fn credential_header_name_aws_sigv4_via_helper() {
+        let t = make_proxy_target_with_auth("aws_sigv4", "");
+        assert_eq!(credential_header_name(&t), Some("authorization".into()));
+    }
+
+    #[test]
+    fn credential_header_name_header_custom() {
+        let t = make_proxy_target_with_auth("header", "X-Api-Key");
+        assert_eq!(credential_header_name(&t), Some("X-Api-Key".into()));
+    }
+
+    #[test]
+    fn credential_header_name_header_empty_key() {
+        let t = make_proxy_target_with_auth("header", "  ");
+        assert_eq!(credential_header_name(&t), None);
+    }
+
+    #[test]
+    fn credential_header_name_query_returns_none() {
+        let t = make_proxy_target_with_auth("query", "api_key");
+        assert_eq!(credential_header_name(&t), None);
+    }
+
+    #[test]
+    fn credential_header_name_path_returns_none() {
+        let t = make_proxy_target_with_auth("path", "bot");
+        assert_eq!(credential_header_name(&t), None);
+    }
+
+    #[test]
+    fn credential_header_name_none_returns_none() {
+        let t = make_proxy_target_with_auth("none", "");
+        assert_eq!(credential_header_name(&t), None);
+    }
+
+    #[test]
+    fn credential_header_name_body_returns_none() {
+        let t = make_proxy_target_with_auth("body", "app_secret");
+        assert_eq!(credential_header_name(&t), None);
+    }
+
+    // ---- inject_credential_into_json_body ----
+
+    #[test]
+    fn body_injection_creates_new_object_when_empty() {
+        let result = inject_credential_into_json_body(None, "api_key", "sk-123").unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&result).unwrap();
+        assert_eq!(v["api_key"], "sk-123");
+    }
+
+    #[test]
+    fn body_injection_creates_new_object_from_empty_bytes() {
+        let result = inject_credential_into_json_body(Some(b""), "secret", "val").unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&result).unwrap();
+        assert_eq!(v["secret"], "val");
+    }
+
+    #[test]
+    fn body_injection_merges_into_existing_object_via_helper() {
+        let existing = br#"{"model":"gpt-4"}"#;
+        let result = inject_credential_into_json_body(Some(existing), "api_key", "sk-x").unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&result).unwrap();
+        assert_eq!(v["model"], "gpt-4");
+        assert_eq!(v["api_key"], "sk-x");
+    }
+
+    #[test]
+    fn body_injection_does_not_overwrite_existing_key() {
+        let existing = br#"{"api_key":"user-provided"}"#;
+        let result =
+            inject_credential_into_json_body(Some(existing), "api_key", "injected").unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&result).unwrap();
+        assert_eq!(v["api_key"], "user-provided");
+    }
+
+    // ---- prepare_delegated_request ----
+
+    #[test]
+    fn prepare_delegated_bearer_injection() {
+        let creds = vec![DelegatedCredential {
+            provider_slug: "openai".into(),
+            injection_method: "bearer".into(),
+            injection_key: "Authorization".into(),
+            credential: "sk-123".into(),
+        }];
+        let result = prepare_delegated_request("/chat", None, &creds).unwrap();
+        assert_eq!(result.path, "chat");
+        assert_eq!(result.delegated_headers.len(), 1);
+        assert_eq!(result.delegated_headers[0].0, "Authorization");
+        assert_eq!(result.delegated_headers[0].1, "Bearer sk-123");
+        assert!(result.query.is_none());
+    }
+
+    #[test]
+    fn prepare_delegated_header_injection() {
+        let creds = vec![DelegatedCredential {
+            provider_slug: "custom".into(),
+            injection_method: "header".into(),
+            injection_key: "X-Api-Key".into(),
+            credential: "key-abc".into(),
+        }];
+        let result = prepare_delegated_request("/api", None, &creds).unwrap();
+        assert_eq!(result.delegated_headers.len(), 1);
+        assert_eq!(result.delegated_headers[0].0, "X-Api-Key");
+        assert_eq!(result.delegated_headers[0].1, "key-abc");
+    }
+
+    #[test]
+    fn prepare_delegated_query_injection() {
+        let creds = vec![DelegatedCredential {
+            provider_slug: "maps".into(),
+            injection_method: "query".into(),
+            injection_key: "key".into(),
+            credential: "maps-key".into(),
+        }];
+        let result = prepare_delegated_request("/geocode", None, &creds).unwrap();
+        assert!(result.delegated_headers.is_empty());
+        assert_eq!(result.query.as_deref(), Some("key=maps-key"));
+    }
+
+    #[test]
+    fn prepare_delegated_query_appends_to_existing() {
+        let creds = vec![DelegatedCredential {
+            provider_slug: "maps".into(),
+            injection_method: "query".into(),
+            injection_key: "key".into(),
+            credential: "maps-key".into(),
+        }];
+        let result = prepare_delegated_request("/geocode", Some("address=NYC"), &creds).unwrap();
+        assert_eq!(result.query.as_deref(), Some("address=NYC&key=maps-key"));
+    }
+
+    #[test]
+    fn prepare_delegated_multiple_creds() {
+        let creds = vec![
+            DelegatedCredential {
+                provider_slug: "a".into(),
+                injection_method: "bearer".into(),
+                injection_key: "Authorization".into(),
+                credential: "tok-a".into(),
+            },
+            DelegatedCredential {
+                provider_slug: "b".into(),
+                injection_method: "query".into(),
+                injection_key: "secret".into(),
+                credential: "sec-b".into(),
+            },
+        ];
+        let result = prepare_delegated_request("/multi", None, &creds).unwrap();
+        assert_eq!(result.delegated_headers.len(), 1);
+        assert_eq!(result.query.as_deref(), Some("secret=sec-b"));
+    }
+
+    #[test]
+    fn prepare_delegated_empty_creds() {
+        let result = prepare_delegated_request("/plain", Some("q=1"), &[]).unwrap();
+        assert_eq!(result.path, "plain");
+        assert_eq!(result.query.as_deref(), Some("q=1"));
+        assert!(result.delegated_headers.is_empty());
+    }
+
+    // ---- validate_path_injection edge cases ----
+
+    #[test]
+    fn validate_path_injection_prefix_accepts_valid() {
+        assert!(validate_path_injection_prefix("bot").is_ok());
+        assert!(validate_path_injection_prefix("prefix123").is_ok());
+    }
+
+    #[test]
+    fn validate_path_injection_credential_accepts_valid() {
+        assert!(validate_path_injection_credential("token123").is_ok());
+        assert!(validate_path_injection_credential("abc-def").is_ok());
+    }
+
+    // ---- percent encoding edge cases ----
+
+    #[test]
+    fn contains_percent_encoded_path_breaker_backslash() {
+        assert!(contains_percent_encoded_path_breaker("a%5Cb"));
+        assert!(contains_percent_encoded_path_breaker("a%5cb"));
+    }
+
+    #[test]
+    fn contains_percent_encoded_path_breaker_null() {
+        assert!(contains_percent_encoded_path_breaker("a%00b"));
+    }
+
+    #[test]
+    fn contains_percent_encoded_path_breaker_query() {
+        assert!(contains_percent_encoded_path_breaker("a%3Fb"));
+        assert!(contains_percent_encoded_path_breaker("a%3fb"));
+    }
+
+    #[test]
+    fn contains_percent_encoded_path_breaker_fragment() {
+        assert!(contains_percent_encoded_path_breaker("a%23b"));
+    }
+
+    #[test]
+    fn contains_percent_encoded_path_breaker_safe_strings() {
+        assert!(!contains_percent_encoded_path_breaker("hello-world"));
+        assert!(!contains_percent_encoded_path_breaker("a%20b"));
+    }
+
+    #[test]
+    fn contains_nested_percent_encoded_safe() {
+        assert!(!contains_nested_percent_encoded_path_breaker("hello"));
+        assert!(!contains_nested_percent_encoded_path_breaker("a%20b"));
+    }
 }

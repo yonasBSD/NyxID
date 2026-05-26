@@ -2249,4 +2249,342 @@ mod tests {
         let normalized = normalize_identity_config(&config).unwrap();
         assert_eq!(normalized.delegation_token_scope, "proxy:*");
     }
+
+    // ────────────────────────────────────────────────────────────────────
+    // Additional pure-function tests
+    // ────────────────────────────────────────────────────────────────────
+
+    // --- validate_slug: edge cases ---
+
+    #[test]
+    fn validate_slug_accepts_single_character() {
+        validate_slug("a").expect("single char slug should be valid");
+    }
+
+    #[test]
+    fn validate_slug_accepts_all_digits() {
+        validate_slug("12345").expect("all-digit slug should be valid");
+    }
+
+    #[test]
+    fn validate_slug_accepts_digits_and_hyphens() {
+        validate_slug("a-1-b-2").expect("mixed slug should be valid");
+    }
+
+    #[test]
+    fn validate_slug_rejects_underscore() {
+        let err = validate_slug("my_service").expect_err("underscore not allowed");
+        assert!(matches!(err, AppError::ValidationError(msg) if msg.contains("lowercase")));
+    }
+
+    #[test]
+    fn validate_slug_rejects_period() {
+        let err = validate_slug("my.service").expect_err("period not allowed");
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[test]
+    fn validate_slug_rejects_spaces() {
+        let err = validate_slug("my service").expect_err("spaces not allowed");
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[test]
+    fn validate_slug_rejects_consecutive_hyphens_at_various_positions() {
+        for slug in ["a--b", "--ab", "ab--", "a---b"] {
+            let err = validate_slug(slug).expect_err(&format!("should reject: {slug}"));
+            assert!(
+                matches!(err, AppError::ValidationError(ref msg) if msg.contains("hyphen")),
+                "slug={slug}: unexpected error: {err:?}"
+            );
+        }
+    }
+
+    // --- validate_auth_method: exhaustive ---
+
+    #[test]
+    fn validate_auth_method_rejects_whitespace_only() {
+        assert!(validate_auth_method("  ").is_err());
+    }
+
+    #[test]
+    fn validate_auth_method_is_case_sensitive() {
+        assert!(validate_auth_method("Bearer").is_err());
+        assert!(validate_auth_method("HEADER").is_err());
+        assert!(validate_auth_method("None").is_err());
+    }
+
+    // --- auth_method_requires_key_name: full matrix ---
+
+    #[test]
+    fn auth_method_requires_key_name_full_matrix() {
+        let expected_true = ["header", "query", "path", "body"];
+        let expected_false = [
+            "bearer",
+            "bot_bearer",
+            "basic",
+            "token_exchange",
+            "aws_sigv4",
+            "none",
+        ];
+        for method in expected_true {
+            assert!(
+                auth_method_requires_key_name(method),
+                "expected true for {method}"
+            );
+        }
+        for method in expected_false {
+            assert!(
+                !auth_method_requires_key_name(method),
+                "expected false for {method}"
+            );
+        }
+    }
+
+    #[test]
+    fn auth_method_requires_key_name_unknown_method_returns_false() {
+        assert!(!auth_method_requires_key_name("custom_unknown"));
+        assert!(!auth_method_requires_key_name(""));
+    }
+
+    // --- auth_key_name_required_message ---
+
+    #[test]
+    fn auth_key_name_required_message_contains_method() {
+        let msg = auth_key_name_required_message("header");
+        assert!(msg.contains("'header'"));
+        assert!(msg.contains("auth_key_name"));
+    }
+
+    #[test]
+    fn auth_key_name_required_message_for_query() {
+        let msg = auth_key_name_required_message("query");
+        assert!(msg.contains("'query'"));
+        assert!(msg.contains("key"));
+    }
+
+    #[test]
+    fn auth_key_name_required_message_for_body() {
+        let msg = auth_key_name_required_message("body");
+        assert!(msg.contains("'body'"));
+        assert!(msg.contains("app_secret"));
+    }
+
+    // --- IdentityConfig::none ---
+
+    #[test]
+    fn identity_config_none_all_booleans_false() {
+        let config = IdentityConfig::none();
+        assert!(!config.identity_include_user_id);
+        assert!(!config.identity_include_email);
+        assert!(!config.identity_include_name);
+        assert!(!config.forward_access_token);
+        assert!(!config.inject_delegation_token);
+        assert!(config.identity_jwt_audience.is_none());
+    }
+
+    // --- validate_identity_config ---
+
+    #[test]
+    fn validate_identity_config_accepts_all_valid_modes() {
+        for mode in ["none", "headers", "jwt", "both"] {
+            let config = IdentityConfig {
+                identity_propagation_mode: mode.to_string(),
+                ..IdentityConfig::none()
+            };
+            validate_identity_config(&config)
+                .unwrap_or_else(|e| panic!("mode {mode} should be valid: {e}"));
+        }
+    }
+
+    #[test]
+    fn validate_identity_config_rejects_unknown_mode() {
+        let config = IdentityConfig {
+            identity_propagation_mode: "custom".to_string(),
+            ..IdentityConfig::none()
+        };
+        let err = validate_identity_config(&config).expect_err("unknown mode");
+        assert!(
+            matches!(err, AppError::ValidationError(msg) if msg.contains("identity_propagation_mode"))
+        );
+    }
+
+    #[test]
+    fn validate_identity_config_rejects_empty_mode() {
+        let config = IdentityConfig {
+            identity_propagation_mode: String::new(),
+            ..IdentityConfig::none()
+        };
+        assert!(validate_identity_config(&config).is_err());
+    }
+
+    #[test]
+    fn validate_identity_config_accepts_exactly_2048_char_audience() {
+        let config = IdentityConfig {
+            identity_jwt_audience: Some("a".repeat(2048)),
+            ..IdentityConfig::none()
+        };
+        validate_identity_config(&config).expect("2048-char audience should be accepted");
+    }
+
+    #[test]
+    fn validate_identity_config_accepts_none_audience() {
+        let config = IdentityConfig {
+            identity_jwt_audience: None,
+            ..IdentityConfig::none()
+        };
+        validate_identity_config(&config).expect("None audience should be fine");
+    }
+
+    #[test]
+    fn validate_identity_config_accepts_all_valid_scopes() {
+        for scope in ["llm:proxy", "proxy:*", "llm:status"] {
+            let config = IdentityConfig {
+                delegation_token_scope: scope.to_string(),
+                ..IdentityConfig::none()
+            };
+            validate_identity_config(&config)
+                .unwrap_or_else(|e| panic!("scope {scope} should be valid: {e}"));
+        }
+    }
+
+    #[test]
+    fn validate_identity_config_accepts_multiple_valid_scopes() {
+        let config = IdentityConfig {
+            delegation_token_scope: "llm:proxy proxy:*".to_string(),
+            ..IdentityConfig::none()
+        };
+        validate_identity_config(&config).expect("combined scopes should be valid");
+    }
+
+    #[test]
+    fn validate_identity_config_rejects_scope_with_one_invalid() {
+        let config = IdentityConfig {
+            delegation_token_scope: "llm:proxy admin:full".to_string(),
+            ..IdentityConfig::none()
+        };
+        let err = validate_identity_config(&config).expect_err("mixed scope has invalid");
+        assert!(matches!(err, AppError::ValidationError(msg) if msg.contains("admin:full")));
+    }
+
+    // --- normalize_identity_config ---
+
+    #[test]
+    fn normalize_identity_config_collapses_whitespace_in_scope() {
+        let config = IdentityConfig {
+            delegation_token_scope: "llm:proxy    llm:status".to_string(),
+            ..IdentityConfig::none()
+        };
+        let normalized = normalize_identity_config(&config).unwrap();
+        assert_eq!(normalized.delegation_token_scope, "llm:proxy llm:status");
+    }
+
+    #[test]
+    fn normalize_identity_config_preserves_booleans() {
+        let config = IdentityConfig {
+            identity_propagation_mode: "headers".to_string(),
+            identity_include_user_id: true,
+            identity_include_email: true,
+            identity_include_name: true,
+            identity_jwt_audience: Some("https://example.com".to_string()),
+            forward_access_token: true,
+            inject_delegation_token: true,
+            delegation_token_scope: "proxy:*".to_string(),
+        };
+        let normalized = normalize_identity_config(&config).unwrap();
+        assert!(normalized.identity_include_user_id);
+        assert!(normalized.identity_include_email);
+        assert!(normalized.identity_include_name);
+        assert!(normalized.forward_access_token);
+        assert!(normalized.inject_delegation_token);
+        assert_eq!(
+            normalized.identity_jwt_audience,
+            Some("https://example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_identity_config_propagates_validation_errors() {
+        let config = IdentityConfig {
+            identity_propagation_mode: "bogus".to_string(),
+            ..IdentityConfig::none()
+        };
+        assert!(normalize_identity_config(&config).is_err());
+    }
+
+    // --- ssh_node_keys_stale_after_transition: additional edge cases ---
+
+    #[test]
+    fn ssh_stale_identity_transition_node_key_to_node_key_not_stale() {
+        assert!(!ssh_node_keys_stale_after_transition(
+            false,
+            SshAuthMode::NodeKey,
+            SshAuthMode::NodeKey
+        ));
+    }
+
+    #[test]
+    fn ssh_stale_cert_to_node_key_not_stale() {
+        assert!(!ssh_node_keys_stale_after_transition(
+            false,
+            SshAuthMode::Cert,
+            SshAuthMode::NodeKey
+        ));
+    }
+
+    #[test]
+    fn ssh_stale_node_key_to_cert_is_stale() {
+        assert!(ssh_node_keys_stale_after_transition(
+            false,
+            SshAuthMode::NodeKey,
+            SshAuthMode::Cert
+        ));
+    }
+
+    #[test]
+    fn ssh_stale_node_key_to_proxy_only_is_stale() {
+        assert!(ssh_node_keys_stale_after_transition(
+            false,
+            SshAuthMode::NodeKey,
+            SshAuthMode::ProxyOnly
+        ));
+    }
+
+    #[test]
+    fn ssh_already_stale_stays_stale_regardless_of_transition() {
+        for from in [
+            SshAuthMode::Cert,
+            SshAuthMode::NodeKey,
+            SshAuthMode::ProxyOnly,
+        ] {
+            for to in [
+                SshAuthMode::Cert,
+                SshAuthMode::NodeKey,
+                SshAuthMode::ProxyOnly,
+            ] {
+                assert!(
+                    ssh_node_keys_stale_after_transition(true, from, to),
+                    "already stale must stay stale: {from} -> {to}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ssh_proxy_only_to_cert_not_stale() {
+        assert!(!ssh_node_keys_stale_after_transition(
+            false,
+            SshAuthMode::ProxyOnly,
+            SshAuthMode::Cert
+        ));
+    }
+
+    #[test]
+    fn ssh_cert_to_proxy_only_not_stale() {
+        assert!(!ssh_node_keys_stale_after_transition(
+            false,
+            SshAuthMode::Cert,
+            SshAuthMode::ProxyOnly
+        ));
+    }
 }

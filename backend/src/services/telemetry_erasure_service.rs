@@ -163,3 +163,75 @@ async fn drain_once(db: &Database, telemetry: &TelemetryClient) -> AppResult<()>
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::telemetry_erasure_job::{
+        COLLECTION_NAME, TelemetryErasureJob, TelemetryErasureStatus,
+    };
+    use crate::test_utils::connect_test_database;
+    use futures::TryStreamExt;
+
+    #[tokio::test]
+    async fn enqueue_inserts_pending_job() {
+        let Some(db) = connect_test_database("tele_erasure_enqueue").await else {
+            return;
+        };
+
+        let user_id = "user-to-erase-1";
+        let job_id = enqueue(&db, user_id).await.unwrap();
+
+        // Verify the job was persisted
+        let coll = db.collection::<TelemetryErasureJob>(COLLECTION_NAME);
+        let job = coll
+            .find_one(doc! { "_id": &job_id })
+            .await
+            .unwrap()
+            .expect("job should exist in DB");
+
+        assert_eq!(job.id, job_id);
+        assert_eq!(job.user_id, user_id);
+        assert_eq!(job.status, TelemetryErasureStatus::Pending);
+        assert_eq!(job.attempts, 0);
+        assert!(job.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn enqueue_multiple_jobs_for_same_user() {
+        let Some(db) = connect_test_database("tele_erasure_multi").await else {
+            return;
+        };
+
+        let user_id = "user-to-erase-2";
+        let id1 = enqueue(&db, user_id).await.unwrap();
+        let id2 = enqueue(&db, user_id).await.unwrap();
+
+        // Both should exist with distinct IDs
+        assert_ne!(id1, id2);
+
+        let coll = db.collection::<TelemetryErasureJob>(COLLECTION_NAME);
+        let jobs: Vec<TelemetryErasureJob> = coll
+            .find(doc! { "user_id": user_id })
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(jobs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn enqueue_returns_unique_job_id() {
+        let Some(db) = connect_test_database("tele_erasure_unique_id").await else {
+            return;
+        };
+
+        let id1 = enqueue(&db, "user-a").await.unwrap();
+        let id2 = enqueue(&db, "user-b").await.unwrap();
+        assert_ne!(id1, id2);
+        // Job IDs should be valid UUIDs (36 chars with hyphens)
+        assert_eq!(id1.len(), 36);
+        assert_eq!(id2.len(), 36);
+    }
+}

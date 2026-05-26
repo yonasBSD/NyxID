@@ -1351,4 +1351,546 @@ mod tests {
             Ok(_) => panic!("duplicate slug patch should fail"),
         }
     }
+
+    // ── invite_to_response: pure mapping tests ──────────────────────────
+
+    #[test]
+    fn invite_to_response_without_redeemer() {
+        use crate::models::org_invite::OrgInvite;
+        use crate::models::org_membership::{MemberScopeSource, OrgRole};
+        use chrono::Utc;
+
+        let now = Utc::now();
+        let invite = OrgInvite {
+            id: "inv-1".to_string(),
+            org_user_id: "org-1".to_string(),
+            nonce: "abc123".to_string(),
+            role: OrgRole::Member,
+            scope_source: MemberScopeSource::Inherit,
+            allowed_service_ids: None,
+            created_by: "admin-1".to_string(),
+            expires_at: now + chrono::Duration::hours(24),
+            redeemed_by: None,
+            redeemed_at: None,
+            created_at: now,
+        };
+
+        let resp = super::invite_to_response(invite, None);
+        assert_eq!(resp.id, "inv-1");
+        assert_eq!(resp.nonce, "abc123");
+        assert_eq!(resp.role, OrgRoleWire::Member);
+        assert_eq!(resp.scope_source, MemberScopeSourceWire::Inherit);
+        assert!(resp.allowed_service_ids.is_none());
+        assert_eq!(resp.created_by, "admin-1");
+        assert!(resp.redeemed_by.is_none());
+        assert!(resp.redeemed_by_email.is_none());
+        assert!(resp.redeemed_by_display_name.is_none());
+        assert!(resp.redeemed_at.is_none());
+    }
+
+    #[test]
+    fn invite_to_response_with_redeemer() {
+        use crate::models::org_invite::OrgInvite;
+        use crate::models::org_membership::{MemberScopeSource, OrgRole};
+        use crate::models::user::{User, UserProfileConfig, UserType};
+        use chrono::Utc;
+
+        let now = Utc::now();
+        let invite = OrgInvite {
+            id: "inv-2".to_string(),
+            org_user_id: "org-1".to_string(),
+            nonce: "def456".to_string(),
+            role: OrgRole::Admin,
+            scope_source: MemberScopeSource::Override,
+            allowed_service_ids: Some(vec!["svc-a".to_string()]),
+            created_by: "admin-1".to_string(),
+            expires_at: now + chrono::Duration::hours(24),
+            redeemed_by: Some("user-2".to_string()),
+            redeemed_at: Some(now),
+            created_at: now,
+        };
+        let redeemer = User {
+            id: "user-2".to_string(),
+            email: "redeemer@test.com".to_string(),
+            password_hash: None,
+            display_name: Some("Redeemer User".to_string()),
+            slug: None,
+            avatar_url: None,
+            email_verified: true,
+            email_verification_token: None,
+            password_reset_token: None,
+            password_reset_expires_at: None,
+            is_active: true,
+            is_admin: false,
+            is_operator: false,
+            role_ids: vec![],
+            group_ids: vec![],
+            invite_code_id: None,
+            mfa_enabled: false,
+            social_provider: None,
+            social_provider_id: None,
+            user_type: UserType::Person,
+            primary_org_id: None,
+            created_at: now,
+            updated_at: now,
+            last_login_at: None,
+            profile_config: UserProfileConfig::default(),
+        };
+
+        let resp = super::invite_to_response(invite, Some(&redeemer));
+        assert_eq!(resp.id, "inv-2");
+        assert_eq!(resp.role, OrgRoleWire::Admin);
+        assert_eq!(resp.scope_source, MemberScopeSourceWire::Override);
+        assert_eq!(resp.allowed_service_ids, Some(vec!["svc-a".to_string()]));
+        assert_eq!(resp.redeemed_by.as_deref(), Some("user-2"));
+        assert_eq!(resp.redeemed_by_email.as_deref(), Some("redeemer@test.com"));
+        assert_eq!(
+            resp.redeemed_by_display_name.as_deref(),
+            Some("Redeemer User")
+        );
+        assert!(resp.redeemed_at.is_some());
+    }
+
+    #[test]
+    fn invite_to_response_with_redeemer_without_display_name() {
+        use crate::models::org_invite::OrgInvite;
+        use crate::models::org_membership::{MemberScopeSource, OrgRole};
+        use crate::models::user::{User, UserProfileConfig, UserType};
+        use chrono::Utc;
+
+        let now = Utc::now();
+        let invite = OrgInvite {
+            id: "inv-3".to_string(),
+            org_user_id: "org-1".to_string(),
+            nonce: "ghi789".to_string(),
+            role: OrgRole::Viewer,
+            scope_source: MemberScopeSource::Inherit,
+            allowed_service_ids: None,
+            created_by: "admin-1".to_string(),
+            expires_at: now + chrono::Duration::hours(24),
+            redeemed_by: Some("user-3".to_string()),
+            redeemed_at: Some(now),
+            created_at: now,
+        };
+        let redeemer = User {
+            id: "user-3".to_string(),
+            email: "no-name@test.com".to_string(),
+            password_hash: None,
+            display_name: None,
+            slug: None,
+            avatar_url: None,
+            email_verified: true,
+            email_verification_token: None,
+            password_reset_token: None,
+            password_reset_expires_at: None,
+            is_active: true,
+            is_admin: false,
+            is_operator: false,
+            role_ids: vec![],
+            group_ids: vec![],
+            invite_code_id: None,
+            mfa_enabled: false,
+            social_provider: None,
+            social_provider_id: None,
+            user_type: UserType::Person,
+            primary_org_id: None,
+            created_at: now,
+            updated_at: now,
+            last_login_at: None,
+            profile_config: UserProfileConfig::default(),
+        };
+
+        let resp = super::invite_to_response(invite, Some(&redeemer));
+        assert_eq!(resp.redeemed_by_email.as_deref(), Some("no-name@test.com"));
+        assert!(resp.redeemed_by_display_name.is_none());
+    }
+
+    // ── slug_for_response: pure mapping tests ───────────────────────────
+
+    #[test]
+    fn slug_for_response_returns_existing_slug() {
+        use crate::models::user::{User, UserProfileConfig, UserType};
+        use chrono::Utc;
+
+        let now = Utc::now();
+        let org = User {
+            id: "org-1".to_string(),
+            email: "org@nyxid.local".to_string(),
+            password_hash: None,
+            display_name: Some("Acme Corp".to_string()),
+            slug: Some("acme-corp".to_string()),
+            avatar_url: None,
+            email_verified: false,
+            email_verification_token: None,
+            password_reset_token: None,
+            password_reset_expires_at: None,
+            is_active: true,
+            is_admin: false,
+            is_operator: false,
+            role_ids: vec![],
+            group_ids: vec![],
+            invite_code_id: None,
+            mfa_enabled: false,
+            social_provider: None,
+            social_provider_id: None,
+            user_type: UserType::Org,
+            primary_org_id: None,
+            created_at: now,
+            updated_at: now,
+            last_login_at: None,
+            profile_config: UserProfileConfig::default(),
+        };
+        assert_eq!(super::slug_for_response(&org), "acme-corp");
+    }
+
+    #[test]
+    fn slug_for_response_generates_slug_from_display_name() {
+        use crate::models::user::{User, UserProfileConfig, UserType};
+        use chrono::Utc;
+
+        let now = Utc::now();
+        let org = User {
+            id: "org-2".to_string(),
+            email: "org@nyxid.local".to_string(),
+            password_hash: None,
+            display_name: Some("My Cool Org".to_string()),
+            slug: None,
+            avatar_url: None,
+            email_verified: false,
+            email_verification_token: None,
+            password_reset_token: None,
+            password_reset_expires_at: None,
+            is_active: true,
+            is_admin: false,
+            is_operator: false,
+            role_ids: vec![],
+            group_ids: vec![],
+            invite_code_id: None,
+            mfa_enabled: false,
+            social_provider: None,
+            social_provider_id: None,
+            user_type: UserType::Org,
+            primary_org_id: None,
+            created_at: now,
+            updated_at: now,
+            last_login_at: None,
+            profile_config: UserProfileConfig::default(),
+        };
+        assert_eq!(super::slug_for_response(&org), "my-cool-org");
+    }
+
+    #[test]
+    fn slug_for_response_falls_back_to_org_when_no_display_name_or_slug() {
+        use crate::models::user::{User, UserProfileConfig, UserType};
+        use chrono::Utc;
+
+        let now = Utc::now();
+        let org = User {
+            id: "org-3".to_string(),
+            email: "org@nyxid.local".to_string(),
+            password_hash: None,
+            display_name: None,
+            slug: None,
+            avatar_url: None,
+            email_verified: false,
+            email_verification_token: None,
+            password_reset_token: None,
+            password_reset_expires_at: None,
+            is_active: true,
+            is_admin: false,
+            is_operator: false,
+            role_ids: vec![],
+            group_ids: vec![],
+            invite_code_id: None,
+            mfa_enabled: false,
+            social_provider: None,
+            social_provider_id: None,
+            user_type: UserType::Org,
+            primary_org_id: None,
+            created_at: now,
+            updated_at: now,
+            last_login_at: None,
+            profile_config: UserProfileConfig::default(),
+        };
+        // When both slug and display_name are None, falls back to slugify("org")
+        assert_eq!(super::slug_for_response(&org), "org");
+    }
+
+    // ── resolve_scope_source_for_update: additional edge cases ──────────
+
+    #[test]
+    fn resolve_scope_source_for_update_infers_override_when_service_ids_provided() {
+        use crate::models::org_membership::MemberScopeSource;
+        let ids: Option<Vec<String>> = Some(vec!["svc-1".to_string()]);
+        assert_eq!(
+            super::resolve_scope_source_for_update(None, Some(&ids)),
+            Some(MemberScopeSource::Override)
+        );
+    }
+
+    #[test]
+    fn resolve_scope_source_for_update_infers_override_even_for_null_clear() {
+        use crate::models::org_membership::MemberScopeSource;
+        let ids: Option<Vec<String>> = None;
+        // Passing Some(&None) means the field was explicitly set to null
+        assert_eq!(
+            super::resolve_scope_source_for_update(None, Some(&ids)),
+            Some(MemberScopeSource::Override)
+        );
+    }
+
+    #[test]
+    fn resolve_scope_source_for_update_explicit_wins_over_inferred() {
+        use crate::models::org_membership::MemberScopeSource;
+        let ids: Option<Vec<String>> = Some(vec!["svc-1".to_string()]);
+        assert_eq!(
+            super::resolve_scope_source_for_update(
+                Some(MemberScopeSourceWire::Inherit),
+                Some(&ids),
+            ),
+            Some(MemberScopeSource::Inherit)
+        );
+    }
+
+    // ── Wire type serde round-trips ─────────────────────────────────────
+
+    #[test]
+    fn org_role_wire_json_serialization() {
+        assert_eq!(
+            serde_json::to_string(&OrgRoleWire::Admin).unwrap(),
+            r#""admin""#
+        );
+        assert_eq!(
+            serde_json::to_string(&OrgRoleWire::Member).unwrap(),
+            r#""member""#
+        );
+        assert_eq!(
+            serde_json::to_string(&OrgRoleWire::Viewer).unwrap(),
+            r#""viewer""#
+        );
+    }
+
+    #[test]
+    fn org_role_wire_json_deserialization() {
+        assert_eq!(
+            serde_json::from_str::<OrgRoleWire>(r#""admin""#).unwrap(),
+            OrgRoleWire::Admin
+        );
+        assert_eq!(
+            serde_json::from_str::<OrgRoleWire>(r#""member""#).unwrap(),
+            OrgRoleWire::Member
+        );
+        assert_eq!(
+            serde_json::from_str::<OrgRoleWire>(r#""viewer""#).unwrap(),
+            OrgRoleWire::Viewer
+        );
+    }
+
+    #[test]
+    fn org_role_wire_rejects_unknown_role() {
+        assert!(serde_json::from_str::<OrgRoleWire>(r#""superadmin""#).is_err());
+    }
+
+    #[test]
+    fn member_scope_source_wire_json_roundtrip() {
+        assert_eq!(
+            serde_json::to_string(&MemberScopeSourceWire::Inherit).unwrap(),
+            r#""inherit""#
+        );
+        assert_eq!(
+            serde_json::to_string(&MemberScopeSourceWire::Override).unwrap(),
+            r#""override""#
+        );
+        assert_eq!(
+            serde_json::from_str::<MemberScopeSourceWire>(r#""inherit""#).unwrap(),
+            MemberScopeSourceWire::Inherit
+        );
+        assert_eq!(
+            serde_json::from_str::<MemberScopeSourceWire>(r#""override""#).unwrap(),
+            MemberScopeSourceWire::Override
+        );
+    }
+
+    // ── CreateOrgRequest validation edge cases ──────────────────────────
+
+    #[test]
+    fn create_org_request_valid_minimal() {
+        let req = CreateOrgRequest {
+            display_name: "A".to_string(),
+            contact_email: None,
+            avatar_url: None,
+        };
+        assert!(req.validate().is_ok());
+    }
+
+    #[test]
+    fn create_org_request_valid_with_email() {
+        let req = CreateOrgRequest {
+            display_name: "Valid Org".to_string(),
+            contact_email: Some("admin@example.com".to_string()),
+            avatar_url: None,
+        };
+        assert!(req.validate().is_ok());
+    }
+
+    #[test]
+    fn create_org_request_max_length_display_name() {
+        let req = CreateOrgRequest {
+            display_name: "x".repeat(128),
+            contact_email: None,
+            avatar_url: None,
+        };
+        assert!(req.validate().is_ok());
+    }
+
+    // ── UpdateOrgRequest validation ─────────────────────────────────────
+
+    #[test]
+    fn update_org_request_empty_display_name_rejected() {
+        let req = UpdateOrgRequest {
+            display_name: Some(String::new()),
+            slug: None,
+            avatar_url: None,
+            contact_email: None,
+        };
+        assert!(req.validate().is_err());
+    }
+
+    #[test]
+    fn update_org_request_too_long_display_name_rejected() {
+        let req = UpdateOrgRequest {
+            display_name: Some("x".repeat(129)),
+            slug: None,
+            avatar_url: None,
+            contact_email: None,
+        };
+        assert!(req.validate().is_err());
+    }
+
+    #[test]
+    fn update_org_request_valid_display_name() {
+        let req = UpdateOrgRequest {
+            display_name: Some("Updated Name".to_string()),
+            slug: None,
+            avatar_url: None,
+            contact_email: None,
+        };
+        assert!(req.validate().is_ok());
+    }
+
+    #[test]
+    fn update_org_request_all_none_passes_validation() {
+        let req = UpdateOrgRequest {
+            display_name: None,
+            slug: None,
+            avatar_url: None,
+            contact_email: None,
+        };
+        assert!(req.validate().is_ok());
+    }
+
+    // ── CreateInviteRequest deserialization ──────────────────────────────
+
+    #[test]
+    fn create_invite_request_minimal() {
+        let req: super::CreateInviteRequest = serde_json::from_str(r#"{"role":"member"}"#).unwrap();
+        assert_eq!(req.role, OrgRoleWire::Member);
+        assert!(req.scope_source.is_none());
+        assert!(req.allowed_service_ids.is_none());
+        assert!(req.ttl_hours.is_none());
+    }
+
+    #[test]
+    fn create_invite_request_with_all_fields() {
+        let req: super::CreateInviteRequest = serde_json::from_str(
+            r#"{"role":"admin","scope_source":"override","allowed_service_ids":["svc-1"],"ttl_hours":48}"#,
+        )
+        .unwrap();
+        assert_eq!(req.role, OrgRoleWire::Admin);
+        assert_eq!(req.scope_source, Some(MemberScopeSourceWire::Override));
+        assert_eq!(req.allowed_service_ids, Some(vec!["svc-1".to_string()]));
+        assert_eq!(req.ttl_hours, Some(48));
+    }
+
+    // ── AddMemberRequest deserialization ─────────────────────────────────
+
+    #[test]
+    fn add_member_request_minimal() {
+        let req: super::AddMemberRequest =
+            serde_json::from_str(r#"{"user_id":"u-1","role":"viewer"}"#).unwrap();
+        assert_eq!(req.user_id, "u-1");
+        assert_eq!(req.role, OrgRoleWire::Viewer);
+        assert!(req.scope_source.is_none());
+        assert!(req.allowed_service_ids.is_none());
+    }
+
+    #[test]
+    fn add_member_request_with_scope_override() {
+        let req: super::AddMemberRequest = serde_json::from_str(
+            r#"{"user_id":"u-2","role":"member","scope_source":"override","allowed_service_ids":["svc-a","svc-b"]}"#,
+        )
+        .unwrap();
+        assert_eq!(req.scope_source, Some(MemberScopeSourceWire::Override));
+        assert_eq!(
+            req.allowed_service_ids,
+            Some(vec!["svc-a".to_string(), "svc-b".to_string()])
+        );
+    }
+
+    // ── SetPrimaryOrgRequest deserialization ─────────────────────────────
+
+    #[test]
+    fn set_primary_org_request_with_value() {
+        let req: super::SetPrimaryOrgRequest =
+            serde_json::from_str(r#"{"primary_org_id":"org-1"}"#).unwrap();
+        assert_eq!(req.primary_org_id.as_deref(), Some("org-1"));
+    }
+
+    #[test]
+    fn set_primary_org_request_with_null() {
+        let req: super::SetPrimaryOrgRequest =
+            serde_json::from_str(r#"{"primary_org_id":null}"#).unwrap();
+        assert!(req.primary_org_id.is_none());
+    }
+
+    // ── OrgResponse serialization ───────────────────────────────────────
+
+    #[test]
+    fn org_response_serialization() {
+        let resp = super::OrgResponse {
+            id: "org-1".to_string(),
+            slug: "acme".to_string(),
+            display_name: Some("Acme".to_string()),
+            avatar_url: None,
+            contact_email: Some("admin@acme.com".to_string()),
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            your_role: OrgRoleWire::Admin,
+            member_count: 5,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["id"], "org-1");
+        assert_eq!(json["slug"], "acme");
+        assert_eq!(json["your_role"], "admin");
+        assert_eq!(json["member_count"], 5);
+    }
+
+    // ── ORG_INVITE_MAX_TTL_HOURS constant ───────────────────────────────
+
+    #[test]
+    fn org_invite_max_ttl_hours_is_30_days() {
+        assert_eq!(super::ORG_INVITE_MAX_TTL_HOURS, 24 * 30);
+    }
+
+    // ── RedeemInviteResponse serialization ──────────────────────────────
+
+    #[test]
+    fn redeem_invite_response_serialization() {
+        let resp = super::RedeemInviteResponse {
+            org_id: "org-1".to_string(),
+            role: OrgRoleWire::Member,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["org_id"], "org-1");
+        assert_eq!(json["role"], "member");
+    }
 }

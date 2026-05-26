@@ -454,4 +454,141 @@ mod tests {
         };
         assert!(valid);
     }
+
+    #[test]
+    fn create_totp_returns_valid_instance() {
+        let secret = Secret::generate_secret();
+        let result = create_totp(secret.to_bytes().unwrap(), "NyxID", "test@example.com");
+        assert!(result.is_ok());
+        let totp = result.unwrap();
+        let code = totp.generate_current().unwrap();
+        assert_eq!(code.len(), 6);
+        assert!(code.chars().all(|c| c.is_ascii_digit()));
+    }
+
+    #[test]
+    fn create_totp_url_contains_issuer_and_account() {
+        let secret = Secret::generate_secret();
+        let totp = create_totp(secret.to_bytes().unwrap(), "NyxID", "user@example.com").unwrap();
+        let url = totp.get_url();
+        assert!(url.contains("NyxID"));
+        assert!(url.contains("user%40example.com") || url.contains("user@example.com"));
+        assert!(url.starts_with("otpauth://totp/"));
+    }
+
+    #[test]
+    fn create_totp_with_empty_secret_fails() {
+        let result = create_totp(vec![], "NyxID", "user@example.com");
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_verify_totp_setup_not_found() {
+        let Some(db) = connect_test_database("mfa_setup_nf").await else {
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+
+        let err = verify_totp_setup(
+            &db,
+            &encryption_keys,
+            "nonexistent-factor-id",
+            "nonexistent-user",
+            "123456",
+        )
+        .await
+        .expect_err("should not find factor");
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn test_verify_totp_setup_already_verified() {
+        let Some(db) = connect_test_database("mfa_already_v").await else {
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let user_id = Uuid::new_v4().to_string();
+
+        let Ok(setup) = setup_totp(&db, &encryption_keys, &user_id, "user@example.com").await
+        else {
+            eprintln!("Skipping: MongoDB connection lost during TOTP setup");
+            return;
+        };
+
+        let secret = Secret::Encoded(setup.secret.clone());
+        let totp = TOTP::new(
+            Algorithm::SHA1,
+            6,
+            1,
+            30,
+            secret.to_bytes().unwrap(),
+            Some("NyxID".to_string()),
+            user_id.clone(),
+        )
+        .unwrap();
+        let code = totp.generate_current().unwrap();
+
+        let Ok(_) =
+            verify_totp_setup(&db, &encryption_keys, &setup.factor_id, &user_id, &code).await
+        else {
+            eprintln!("Skipping: MongoDB connection lost during TOTP verify");
+            return;
+        };
+
+        let code2 = totp.generate_current().unwrap();
+        let err = verify_totp_setup(&db, &encryption_keys, &setup.factor_id, &user_id, &code2)
+            .await
+            .expect_err("already verified");
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn test_verify_totp_login_no_active_factor() {
+        let Some(db) = connect_test_database("mfa_login_nf").await else {
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let user_id = Uuid::new_v4().to_string();
+
+        let err = verify_totp(&db, &encryption_keys, &user_id, "123456")
+            .await
+            .expect_err("no active factor");
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn test_setup_totp_qr_url_format() {
+        let Some(db) = connect_test_database("mfa_qr_fmt").await else {
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let user_id = Uuid::new_v4().to_string();
+
+        let result = setup_totp(&db, &encryption_keys, &user_id, "alice@example.com")
+            .await
+            .expect("setup");
+        assert!(result.qr_code_url.starts_with("otpauth://totp/"));
+        assert!(result.qr_code_url.contains("NyxID"));
+        assert!(result.qr_code_url.contains("secret="));
+    }
+
+    #[tokio::test]
+    async fn test_setup_totp_different_users_get_different_secrets() {
+        let Some(db) = connect_test_database("mfa_diff_sec").await else {
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let user1 = Uuid::new_v4().to_string();
+        let user2 = Uuid::new_v4().to_string();
+
+        let setup1 = setup_totp(&db, &encryption_keys, &user1, "user1@example.com")
+            .await
+            .expect("setup1");
+        let setup2 = setup_totp(&db, &encryption_keys, &user2, "user2@example.com")
+            .await
+            .expect("setup2");
+
+        assert_ne!(setup1.secret, setup2.secret);
+        assert_ne!(setup1.factor_id, setup2.factor_id);
+    }
 }

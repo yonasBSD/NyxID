@@ -2252,4 +2252,435 @@ mod tests {
             format!("SSH service not found: {downstream_service_id}")
         );
     }
+
+    // -----------------------------------------------------------------------
+    // tool_result tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tool_result_success_returns_ok_status() {
+        let resp = tool_result(Some(serde_json::json!(42)), "all good", false);
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn tool_result_error_returns_ok_status_with_is_error() {
+        // MCP conveys errors through isError, not HTTP status
+        let resp = tool_result(Some(serde_json::json!(42)), "boom", true);
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn tool_result_with_null_id() {
+        let resp = tool_result(None, "test", false);
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // -----------------------------------------------------------------------
+    // mcp_401 tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn mcp_401_returns_unauthorized_status() {
+        let resp = mcp_401("https://auth.example.com");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn mcp_401_includes_www_authenticate_header() {
+        let resp = mcp_401("https://auth.example.com/");
+        let header = resp
+            .headers()
+            .get("www-authenticate")
+            .expect("missing www-authenticate");
+        let value = header.to_str().unwrap();
+        assert!(value.contains("Bearer"));
+        assert!(value.contains("/.well-known/oauth-protected-resource"));
+    }
+
+    #[test]
+    fn mcp_401_strips_trailing_slash_from_base_url() {
+        let resp = mcp_401("https://auth.example.com/");
+        let header = resp
+            .headers()
+            .get("www-authenticate")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        // Should not produce double slash before .well-known
+        assert!(!header.contains("//."));
+        assert!(header.contains("https://auth.example.com/.well-known/oauth-protected-resource"));
+    }
+
+    #[test]
+    fn mcp_401_includes_json_content_type() {
+        let resp = mcp_401("https://example.com");
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .expect("missing content-type");
+        assert_eq!(ct.to_str().unwrap(), "application/json");
+    }
+
+    // -----------------------------------------------------------------------
+    // mcp_403 variants tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn mcp_403_insufficient_scope_returns_forbidden() {
+        let resp = mcp_403_insufficient_scope();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn mcp_403_api_key_insufficient_scope_returns_forbidden() {
+        let resp = mcp_403_api_key_insufficient_scope();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    // -----------------------------------------------------------------------
+    // rpc_scope_forbidden tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn rpc_scope_forbidden_returns_ok_status() {
+        // JSON-RPC errors use 200 OK for the HTTP layer
+        let resp = rpc_scope_forbidden(Some(serde_json::json!(5)), "not allowed");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn rpc_scope_forbidden_with_none_id() {
+        let resp = rpc_scope_forbidden(None, "scope missing");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // -----------------------------------------------------------------------
+    // mcp_extract_user_agent tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn mcp_extract_user_agent_returns_ua() {
+        let mut headers = HeaderMap::new();
+        headers.insert(axum::http::header::USER_AGENT, "MyCLI/1.0".parse().unwrap());
+        assert_eq!(
+            mcp_extract_user_agent(&headers).as_deref(),
+            Some("MyCLI/1.0")
+        );
+    }
+
+    #[test]
+    fn mcp_extract_user_agent_returns_none_when_absent() {
+        let headers = HeaderMap::new();
+        assert!(mcp_extract_user_agent(&headers).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // mcp_extract_ip edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn mcp_extract_ip_ignores_empty_forwarded_for() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "".parse().unwrap());
+        headers.insert("x-real-ip", "10.0.0.1".parse().unwrap());
+        assert_eq!(mcp_extract_ip(&headers).as_deref(), Some("10.0.0.1"));
+    }
+
+    #[test]
+    fn mcp_extract_ip_trims_whitespace_in_real_ip() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-real-ip", "  8.8.8.8  ".parse().unwrap());
+        assert_eq!(mcp_extract_ip(&headers).as_deref(), Some("8.8.8.8"));
+    }
+
+    #[test]
+    fn mcp_extract_ip_single_forwarded_for() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "203.0.113.50".parse().unwrap());
+        assert_eq!(mcp_extract_ip(&headers).as_deref(), Some("203.0.113.50"));
+    }
+
+    // -----------------------------------------------------------------------
+    // require_session tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn require_session_returns_session_id_when_present() {
+        let mut headers = HeaderMap::new();
+        headers.insert("mcp-session-id", "sess-abc-123".parse().unwrap());
+        let sid = require_session(&headers).expect("should succeed");
+        assert_eq!(sid, "sess-abc-123");
+    }
+
+    #[test]
+    fn require_session_returns_error_when_missing() {
+        let headers = HeaderMap::new();
+        let err = require_session(&headers);
+        assert!(err.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // app_error_to_rpc tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn app_error_to_rpc_handles_rate_limited() {
+        let resp = app_error_to_rpc(
+            Some(serde_json::json!(1)),
+            &crate::errors::AppError::RateLimited,
+        );
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn app_error_to_rpc_handles_scope_forbidden() {
+        let resp = app_error_to_rpc(
+            Some(serde_json::json!(2)),
+            &crate::errors::AppError::ApiKeyScopeForbidden("nope".into()),
+        );
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn app_error_to_rpc_handles_generic_error() {
+        let resp = app_error_to_rpc(None, &crate::errors::AppError::Internal("unknown".into()));
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // -----------------------------------------------------------------------
+    // mcp_exec_context tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn mcp_exec_context_from_api_key_auth() {
+        let auth = api_key_auth(vec!["svc-1".into()]);
+        let ctx = mcp_exec_context(&auth);
+        assert_eq!(ctx.api_key_id, Some("key-1"));
+        assert!(!ctx.allow_all_nodes);
+        assert!(ctx.allowed_node_ids.is_empty());
+    }
+
+    #[test]
+    fn mcp_exec_context_from_user_auth() {
+        let auth = McpAuthContext::user("user-1".into());
+        let ctx = mcp_exec_context(&auth);
+        assert!(ctx.api_key_id.is_none());
+        assert!(ctx.allow_all_nodes);
+    }
+
+    // -----------------------------------------------------------------------
+    // mcp_node_scope tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn mcp_node_scope_unrestricted_for_user_auth() {
+        let auth = McpAuthContext::user("user-1".into());
+        assert!(matches!(
+            mcp_node_scope(&auth),
+            crate::services::mcp_service::NodeScope::Unrestricted
+        ));
+    }
+
+    #[test]
+    fn mcp_node_scope_unrestricted_when_allow_all_nodes() {
+        let mut auth = api_key_auth(Vec::new());
+        auth.allow_all_nodes = true;
+        assert!(matches!(
+            mcp_node_scope(&auth),
+            crate::services::mcp_service::NodeScope::Unrestricted
+        ));
+    }
+
+    #[test]
+    fn mcp_node_scope_allowed_when_scoped_nodes() {
+        let mut auth = api_key_auth(Vec::new());
+        auth.allow_all_nodes = false;
+        auth.allowed_node_ids = vec!["node-a".into(), "node-b".into()];
+        match mcp_node_scope(&auth) {
+            crate::services::mcp_service::NodeScope::Allowed(ids) => {
+                assert_eq!(ids.len(), 2);
+                assert_eq!(ids[0], "node-a");
+                assert_eq!(ids[1], "node-b");
+            }
+            _ => panic!("expected NodeScope::Allowed"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // accepts_sse extended tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn accepts_sse_returns_true_for_mixed_accept_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "accept",
+            "application/json, text/event-stream".parse().unwrap(),
+        );
+        assert!(accepts_sse(&headers));
+    }
+
+    // -----------------------------------------------------------------------
+    // rpc_success / rpc_error with various id types
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn rpc_success_with_string_id() {
+        let resp = rpc_success(Some(serde_json::json!("abc")), serde_json::json!(null));
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn rpc_success_with_null_id() {
+        let resp = rpc_success(None, serde_json::json!({"data": [1,2,3]}));
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn rpc_error_with_null_id() {
+        let resp = rpc_error(None, -32700, "Parse error");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // -----------------------------------------------------------------------
+    // McpAuthContext::user field defaults
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn mcp_auth_context_user_defaults() {
+        let ctx = McpAuthContext::user("u-xyz".to_string());
+        assert_eq!(ctx.user_id, "u-xyz");
+        assert!(!ctx.is_api_key);
+        assert!(ctx.api_key_id.is_none());
+        assert!(ctx.api_key_name.is_none());
+        assert!(ctx.allow_all_services);
+        assert!(ctx.allow_all_nodes);
+        assert!(ctx.allowed_service_ids.is_empty());
+        assert!(ctx.allowed_node_ids.is_empty());
+        assert!(ctx.rate_limit_per_second.is_none());
+        assert!(ctx.rate_limit_burst.is_none());
+        assert!(ctx.ip_address.is_none());
+        assert!(ctx.user_agent.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // is_scoped_api_key extended edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn is_scoped_api_key_false_for_non_api_key_even_with_restrictions() {
+        // User auth (not API key) is never "scoped" even with mismatched fields
+        let mut auth = McpAuthContext::user("u-1".into());
+        auth.allow_all_services = false;
+        auth.allow_all_nodes = false;
+        assert!(!is_scoped_api_key(&auth));
+    }
+
+    #[test]
+    fn is_scoped_api_key_both_restricted() {
+        let mut auth = api_key_auth(vec!["svc-1".into()]);
+        auth.allow_all_services = false;
+        auth.allow_all_nodes = false;
+        assert!(is_scoped_api_key(&auth));
+    }
+
+    // -----------------------------------------------------------------------
+    // filter_services_by_scope extended tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn filter_services_by_scope_empty_allow_list_drops_everything() {
+        let auth = api_key_auth(Vec::new());
+        let services = vec![
+            user_managed("svc-a"),
+            user_managed("svc-b"),
+            platform("svc-c"),
+        ];
+        let filtered = filter_services_by_scope(services, &auth);
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn filter_services_by_scope_preserves_order() {
+        let auth = api_key_auth(vec!["svc-b".into(), "svc-a".into()]);
+        let services = vec![
+            user_managed("svc-a"),
+            user_managed("svc-b"),
+            user_managed("svc-c"),
+        ];
+        let filtered = filter_services_by_scope(services, &auth);
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered[0].service_id, "svc-a");
+        assert_eq!(filtered[1].service_id, "svc-b");
+    }
+
+    // -----------------------------------------------------------------------
+    // ensure_service_in_scope extended tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ensure_scope_allows_user_managed_in_list() {
+        let auth = api_key_auth(vec!["svc-a".into()]);
+        let svc = user_managed("svc-a");
+        assert!(ensure_service_in_scope(&auth, &svc, Some(serde_json::json!(1))).is_ok());
+    }
+
+    #[test]
+    fn ensure_scope_rejects_platform_service_for_scoped_key() {
+        let auth = api_key_auth(vec!["svc-a".into()]);
+        let svc = platform("svc-a");
+        assert!(ensure_service_in_scope(&auth, &svc, None).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // tool_result_with_notifications tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tool_result_with_notifications_returns_ok() {
+        let notifications = vec![serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/tools/list_changed",
+        })];
+        let resp = tool_result_with_notifications(
+            Some(serde_json::json!(1)),
+            "connected",
+            false,
+            notifications,
+        );
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn tool_result_with_empty_notifications() {
+        let resp =
+            tool_result_with_notifications(Some(serde_json::json!(1)), "data", false, Vec::new());
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // -----------------------------------------------------------------------
+    // SSH_META_TOOL_NAMES constant tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ssh_meta_tool_names_contains_expected_tools() {
+        assert!(SSH_META_TOOL_NAMES.contains(&"nyx__ssh_exec"));
+        assert!(SSH_META_TOOL_NAMES.contains(&"nyx__ssh_list_services"));
+        assert!(!SSH_META_TOOL_NAMES.contains(&"nyx__call_tool"));
+    }
+
+    // -----------------------------------------------------------------------
+    // JSONRPC_VERSION / MCP_PROTOCOL_VERSION constants
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn jsonrpc_version_is_2_0() {
+        assert_eq!(JSONRPC_VERSION, "2.0");
+    }
+
+    #[test]
+    fn mcp_protocol_version_is_set() {
+        assert!(!MCP_PROTOCOL_VERSION.is_empty());
+    }
 }

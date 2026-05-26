@@ -283,6 +283,251 @@ pub async fn deactivate_invite_code(
 }
 
 #[cfg(test)]
+mod pure_tests {
+    use super::*;
+    use crate::models::invite_code::{InviteCode, InviteCodeUsage};
+    use crate::services::invite_code_service::InviteCodeUsageUser;
+    use chrono::Utc;
+    use std::collections::HashMap;
+
+    fn make_invite_code(id: &str, created_by: &str) -> InviteCode {
+        let now = Utc::now();
+        InviteCode {
+            id: id.to_string(),
+            code: "NYXID-TEST123".to_string(),
+            max_uses: 10,
+            used_count: 1,
+            created_by: created_by.to_string(),
+            note: Some("Test note".to_string()),
+            is_active: true,
+            created_at: now,
+            updated_at: now,
+            usages: vec![InviteCodeUsage {
+                user_id: "user-1".to_string(),
+                used_at: now,
+                email: Some("user1@example.com".to_string()),
+            }],
+        }
+    }
+
+    fn make_users_map() -> HashMap<String, InviteCodeUsageUser> {
+        let mut map = HashMap::new();
+        map.insert(
+            "user-1".to_string(),
+            InviteCodeUsageUser {
+                email: "user1@example.com".to_string(),
+                display_name: Some("User One".to_string()),
+            },
+        );
+        map.insert(
+            "admin-1".to_string(),
+            InviteCodeUsageUser {
+                email: "admin@example.com".to_string(),
+                display_name: Some("Admin User".to_string()),
+            },
+        );
+        map
+    }
+
+    // --- usage_to_response tests ---
+
+    #[test]
+    fn usage_to_response_with_known_user() {
+        let now = Utc::now();
+        let usage = InviteCodeUsage {
+            user_id: "user-1".to_string(),
+            used_at: now,
+            email: Some("user1@example.com".to_string()),
+        };
+        let users = make_users_map();
+        let resp = usage_to_response(usage, &users);
+
+        assert_eq!(resp.user_id, "user-1");
+        assert_eq!(resp.user_email, Some("user1@example.com".to_string()));
+        assert_eq!(resp.user_display_name, Some("User One".to_string()));
+        chrono::DateTime::parse_from_rfc3339(&resp.used_at)
+            .expect("used_at should be valid RFC 3339");
+    }
+
+    #[test]
+    fn usage_to_response_with_unknown_user() {
+        let now = Utc::now();
+        let usage = InviteCodeUsage {
+            user_id: "deleted-user".to_string(),
+            used_at: now,
+            email: None,
+        };
+        let users = make_users_map();
+        let resp = usage_to_response(usage, &users);
+
+        assert_eq!(resp.user_id, "deleted-user");
+        assert!(resp.user_email.is_none());
+        assert!(resp.user_display_name.is_none());
+    }
+
+    #[test]
+    fn usage_to_response_with_empty_users_map() {
+        let now = Utc::now();
+        let usage = InviteCodeUsage {
+            user_id: "user-1".to_string(),
+            used_at: now,
+            email: None,
+        };
+        let resp = usage_to_response(usage, &HashMap::new());
+
+        assert_eq!(resp.user_id, "user-1");
+        assert!(resp.user_email.is_none());
+        assert!(resp.user_display_name.is_none());
+    }
+
+    // --- to_response tests ---
+
+    #[test]
+    fn to_response_with_known_creator() {
+        let ic = make_invite_code("ic-1", "admin-1");
+        let users = make_users_map();
+        let resp = to_response(ic, &users);
+
+        assert_eq!(resp.id, "ic-1");
+        assert_eq!(resp.code, "NYXID-TEST123");
+        assert_eq!(resp.max_uses, 10);
+        assert_eq!(resp.used_count, 1);
+        assert_eq!(resp.created_by, "admin-1");
+        assert!(resp.is_active);
+        assert_eq!(resp.note, Some("Test note".to_string()));
+        assert_eq!(resp.usages.len(), 1);
+
+        let creator = resp.creator.expect("creator should be resolved");
+        assert_eq!(creator.email, "admin@example.com");
+        assert_eq!(creator.display_name, Some("Admin User".to_string()));
+    }
+
+    #[test]
+    fn to_response_with_deleted_creator() {
+        let ic = make_invite_code("ic-2", "deleted-admin");
+        let users = make_users_map();
+        let resp = to_response(ic, &users);
+
+        assert!(resp.creator.is_none());
+        assert_eq!(resp.created_by, "deleted-admin");
+    }
+
+    #[test]
+    fn to_response_with_no_usages() {
+        let now = Utc::now();
+        let ic = InviteCode {
+            id: "ic-3".to_string(),
+            code: "NYXID-EMPTY".to_string(),
+            max_uses: 5,
+            used_count: 0,
+            created_by: "admin-1".to_string(),
+            note: None,
+            is_active: true,
+            created_at: now,
+            updated_at: now,
+            usages: vec![],
+        };
+        let users = make_users_map();
+        let resp = to_response(ic, &users);
+
+        assert!(resp.usages.is_empty());
+        assert!(resp.note.is_none());
+    }
+
+    #[test]
+    fn to_response_timestamps_are_rfc3339() {
+        let ic = make_invite_code("ic-4", "admin-1");
+        let users = make_users_map();
+        let resp = to_response(ic, &users);
+
+        chrono::DateTime::parse_from_rfc3339(&resp.created_at)
+            .expect("created_at should be valid RFC 3339");
+        chrono::DateTime::parse_from_rfc3339(&resp.updated_at)
+            .expect("updated_at should be valid RFC 3339");
+    }
+
+    #[test]
+    fn to_response_enriches_multiple_usages() {
+        let now = Utc::now();
+        let ic = InviteCode {
+            id: "ic-5".to_string(),
+            code: "NYXID-MULTI".to_string(),
+            max_uses: 100,
+            used_count: 2,
+            created_by: "admin-1".to_string(),
+            note: None,
+            is_active: true,
+            created_at: now,
+            updated_at: now,
+            usages: vec![
+                InviteCodeUsage {
+                    user_id: "user-1".to_string(),
+                    used_at: now,
+                    email: Some("user1@example.com".to_string()),
+                },
+                InviteCodeUsage {
+                    user_id: "unknown-user".to_string(),
+                    used_at: now,
+                    email: None,
+                },
+            ],
+        };
+        let users = make_users_map();
+        let resp = to_response(ic, &users);
+
+        assert_eq!(resp.usages.len(), 2);
+        assert_eq!(
+            resp.usages[0].user_email,
+            Some("user1@example.com".to_string())
+        );
+        assert!(resp.usages[1].user_email.is_none());
+    }
+
+    // --- Serde tests ---
+
+    #[test]
+    fn create_invite_code_request_deserializes_defaults() {
+        let json = r#"{}"#;
+        let req: CreateInviteCodeRequest = serde_json::from_str(json).expect("deserialize");
+        assert!(req.max_uses.is_none());
+        assert!(req.note.is_none());
+    }
+
+    #[test]
+    fn create_invite_code_request_deserializes_with_values() {
+        let json = r#"{"max_uses": 5, "note": "Beta"}"#;
+        let req: CreateInviteCodeRequest = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(req.max_uses, Some(5));
+        assert_eq!(req.note, Some("Beta".to_string()));
+    }
+
+    #[test]
+    fn invite_code_response_serializes_all_fields() {
+        let resp = InviteCodeResponse {
+            id: "id-1".to_string(),
+            code: "NYXID-ABC".to_string(),
+            max_uses: 10,
+            used_count: 0,
+            created_by: "admin".to_string(),
+            creator: Some(InviteCodeCreator {
+                email: "admin@example.com".to_string(),
+                display_name: None,
+            }),
+            note: None,
+            is_active: true,
+            created_at: "2024-01-01T00:00:00+00:00".to_string(),
+            updated_at: "2024-01-01T00:00:00+00:00".to_string(),
+            usages: vec![],
+        };
+        let json = serde_json::to_value(&resp).expect("serialize");
+        assert_eq!(json["code"], "NYXID-ABC");
+        assert!(json["is_active"].as_bool().unwrap());
+        assert!(json["note"].is_null());
+        assert!(json["creator"]["email"].as_str().is_some());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};

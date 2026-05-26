@@ -335,4 +335,273 @@ mod tests {
         assert!(!response.0.is_admin);
         assert!(response.0.is_operator);
     }
+
+    // --- Serialization tests: UserProfileResponse ---
+
+    #[test]
+    fn user_profile_response_serialization_full() {
+        let resp = UserProfileResponse {
+            id: "user-1".to_string(),
+            email: "test@example.com".to_string(),
+            display_name: Some("Alice".to_string()),
+            avatar_url: Some("https://example.com/avatar.png".to_string()),
+            email_verified: true,
+            mfa_enabled: false,
+            is_admin: true,
+            is_operator: false,
+            role: "admin".to_string(),
+            is_active: true,
+            social_provider: Some("google".to_string()),
+            created_at: "2025-01-01T00:00:00+00:00".to_string(),
+            last_login_at: Some("2025-06-01T12:00:00+00:00".to_string()),
+            profile_config: ProfileConfigResponse {
+                onboarding: OnboardingStateResponse {
+                    ai_services_completed_at: Some("2025-03-15T10:00:00+00:00".to_string()),
+                },
+            },
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+
+        assert_eq!(json["id"], "user-1");
+        assert_eq!(json["email"], "test@example.com");
+        assert_eq!(json["display_name"], "Alice");
+        assert_eq!(json["avatar_url"], "https://example.com/avatar.png");
+        assert_eq!(json["email_verified"], true);
+        assert_eq!(json["mfa_enabled"], false);
+        assert_eq!(json["is_admin"], true);
+        assert_eq!(json["is_operator"], false);
+        assert_eq!(json["role"], "admin");
+        assert_eq!(json["is_active"], true);
+        assert_eq!(json["social_provider"], "google");
+        assert_eq!(json["created_at"], "2025-01-01T00:00:00+00:00");
+        assert_eq!(json["last_login_at"], "2025-06-01T12:00:00+00:00");
+        assert_eq!(
+            json["profile_config"]["onboarding"]["ai_services_completed_at"],
+            "2025-03-15T10:00:00+00:00"
+        );
+    }
+
+    #[test]
+    fn user_profile_response_serialization_minimal() {
+        let resp = UserProfileResponse {
+            id: "user-2".to_string(),
+            email: "minimal@example.com".to_string(),
+            display_name: None,
+            avatar_url: None,
+            email_verified: false,
+            mfa_enabled: false,
+            is_admin: false,
+            is_operator: false,
+            role: "user".to_string(),
+            is_active: true,
+            social_provider: None,
+            created_at: "2025-06-01T00:00:00+00:00".to_string(),
+            last_login_at: None,
+            profile_config: ProfileConfigResponse {
+                onboarding: OnboardingStateResponse {
+                    ai_services_completed_at: None,
+                },
+            },
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+
+        assert!(json["display_name"].is_null());
+        assert!(json["avatar_url"].is_null());
+        assert!(json["social_provider"].is_null());
+        assert!(json["last_login_at"].is_null());
+        assert!(json["profile_config"]["onboarding"]["ai_services_completed_at"].is_null());
+        assert_eq!(json["role"], "user");
+    }
+
+    // --- Serialization tests: OnboardingStateResponse ---
+
+    #[test]
+    fn onboarding_state_response_serialization_with_timestamp() {
+        let resp = OnboardingStateResponse {
+            ai_services_completed_at: Some("2025-05-20T08:30:00+00:00".to_string()),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(
+            json["ai_services_completed_at"],
+            "2025-05-20T08:30:00+00:00"
+        );
+    }
+
+    #[test]
+    fn onboarding_state_response_serialization_without_timestamp() {
+        let resp = OnboardingStateResponse {
+            ai_services_completed_at: None,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert!(json["ai_services_completed_at"].is_null());
+    }
+
+    // --- Serialization tests: ProfileConfigResponse ---
+
+    #[test]
+    fn profile_config_response_serialization() {
+        let resp = ProfileConfigResponse {
+            onboarding: OnboardingStateResponse {
+                ai_services_completed_at: Some("2025-01-01T00:00:00+00:00".to_string()),
+            },
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert!(json["onboarding"].is_object());
+        assert_eq!(
+            json["onboarding"]["ai_services_completed_at"],
+            "2025-01-01T00:00:00+00:00"
+        );
+    }
+
+    // --- Serialization tests: UpdateProfileResponse ---
+
+    #[test]
+    fn update_profile_response_serialization_full() {
+        let resp = UpdateProfileResponse {
+            id: "user-1".to_string(),
+            email: "updated@example.com".to_string(),
+            display_name: Some("Bob".to_string()),
+            avatar_url: Some("https://cdn.example.com/bob.jpg".to_string()),
+            message: "Profile updated successfully".to_string(),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+
+        assert_eq!(json["id"], "user-1");
+        assert_eq!(json["email"], "updated@example.com");
+        assert_eq!(json["display_name"], "Bob");
+        assert_eq!(json["avatar_url"], "https://cdn.example.com/bob.jpg");
+        assert_eq!(json["message"], "Profile updated successfully");
+    }
+
+    #[test]
+    fn update_profile_response_serialization_with_nulls() {
+        let resp = UpdateProfileResponse {
+            id: "user-2".to_string(),
+            email: "test@example.com".to_string(),
+            display_name: None,
+            avatar_url: None,
+            message: "Profile updated successfully".to_string(),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+
+        assert!(json["display_name"].is_null());
+        assert!(json["avatar_url"].is_null());
+    }
+
+    // --- Serialization tests: DeleteAccountResponse ---
+
+    #[test]
+    fn delete_account_response_serialization() {
+        let resp = DeleteAccountResponse {
+            status: "DELETED".to_string(),
+            deleted_at: "2025-06-15T14:00:00+00:00".to_string(),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+
+        assert_eq!(json["status"], "DELETED");
+        assert_eq!(json["deleted_at"], "2025-06-15T14:00:00+00:00");
+    }
+
+    // --- Deserialization tests: UpdateProfileRequest ---
+
+    #[test]
+    fn update_profile_request_deserialization_all_fields() {
+        let json = serde_json::json!({
+            "display_name": "New Name",
+            "avatar_url": "https://example.com/new-avatar.png"
+        });
+        let req: UpdateProfileRequest = serde_json::from_value(json).unwrap();
+
+        assert_eq!(req.display_name.as_deref(), Some("New Name"));
+        assert_eq!(
+            req.avatar_url.as_deref(),
+            Some("https://example.com/new-avatar.png")
+        );
+    }
+
+    #[test]
+    fn update_profile_request_deserialization_empty_body() {
+        let json = serde_json::json!({});
+        let req: UpdateProfileRequest = serde_json::from_value(json).unwrap();
+
+        assert!(req.display_name.is_none());
+        assert!(req.avatar_url.is_none());
+    }
+
+    #[test]
+    fn update_profile_request_deserialization_partial() {
+        let json = serde_json::json!({
+            "display_name": "Only Name"
+        });
+        let req: UpdateProfileRequest = serde_json::from_value(json).unwrap();
+
+        assert_eq!(req.display_name.as_deref(), Some("Only Name"));
+        assert!(req.avatar_url.is_none());
+    }
+
+    // --- Deserialization tests: CompleteOnboardingRequest ---
+
+    #[test]
+    fn complete_onboarding_request_deserialization() {
+        let json = serde_json::json!({ "key": "ai_services" });
+        let req: CompleteOnboardingRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.key, "ai_services");
+    }
+
+    #[test]
+    fn complete_onboarding_request_deserialization_unknown_key_accepted() {
+        // Deserialization accepts any string; validation happens in handler
+        let json = serde_json::json!({ "key": "unknown_flow" });
+        let req: CompleteOnboardingRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.key, "unknown_flow");
+    }
+
+    // --- Structural tests: response field coverage ---
+
+    #[test]
+    fn user_profile_response_has_all_expected_json_keys() {
+        let resp = UserProfileResponse {
+            id: "u1".to_string(),
+            email: "e@e.com".to_string(),
+            display_name: None,
+            avatar_url: None,
+            email_verified: false,
+            mfa_enabled: false,
+            is_admin: false,
+            is_operator: false,
+            role: "user".to_string(),
+            is_active: true,
+            social_provider: None,
+            created_at: "2025-01-01T00:00:00+00:00".to_string(),
+            last_login_at: None,
+            profile_config: ProfileConfigResponse {
+                onboarding: OnboardingStateResponse {
+                    ai_services_completed_at: None,
+                },
+            },
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        let obj = json.as_object().unwrap();
+
+        let expected_keys = vec![
+            "id",
+            "email",
+            "display_name",
+            "avatar_url",
+            "email_verified",
+            "mfa_enabled",
+            "is_admin",
+            "is_operator",
+            "role",
+            "is_active",
+            "social_provider",
+            "created_at",
+            "last_login_at",
+            "profile_config",
+        ];
+        for key in &expected_keys {
+            assert!(obj.contains_key(*key), "Missing expected key: {}", key);
+        }
+        assert_eq!(obj.len(), expected_keys.len());
+    }
 }

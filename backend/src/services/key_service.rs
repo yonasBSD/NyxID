@@ -14,6 +14,7 @@ use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService}
 
 /// Result returned when a new API key is created.
 /// The `full_key` is shown once and never stored.
+#[derive(Debug)]
 pub struct CreatedApiKey {
     pub id: String,
     pub name: String,
@@ -535,4 +536,594 @@ pub async fn validate_api_key(
         .await?;
 
     Ok((user_id, key))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::connect_test_database;
+
+    // ---------------------------------------------------------------
+    // Pure function tests (no MongoDB needed)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn validate_platform_accepts_none() {
+        assert!(validate_platform(None).is_ok());
+    }
+
+    #[test]
+    fn validate_platform_accepts_all_valid_values() {
+        for p in &["claude-code", "cursor", "codex", "openclaw", "generic"] {
+            assert!(validate_platform(Some(p)).is_ok(), "should accept {p}");
+        }
+    }
+
+    #[test]
+    fn validate_platform_rejects_invalid() {
+        let result = validate_platform(Some("unknown-platform"));
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), AppError::ValidationError(_)));
+    }
+
+    #[test]
+    fn validate_platform_rejects_empty_string() {
+        let result = validate_platform(Some(""));
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), AppError::ValidationError(_)));
+    }
+
+    #[test]
+    fn validate_scopes_accepts_single_valid() {
+        assert!(validate_api_key_scopes("read").is_ok());
+    }
+
+    #[test]
+    fn validate_scopes_accepts_multiple_valid() {
+        assert!(validate_api_key_scopes("read write proxy").is_ok());
+    }
+
+    #[test]
+    fn validate_scopes_accepts_all_valid_scopes() {
+        assert!(
+            validate_api_key_scopes(
+                "read write admin openid profile email services:read services:write proxy"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_scopes_rejects_empty() {
+        let result = validate_api_key_scopes("");
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), AppError::ValidationError(_)));
+    }
+
+    #[test]
+    fn validate_scopes_rejects_invalid_scope() {
+        let result = validate_api_key_scopes("read bogus write");
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), AppError::ValidationError(_)));
+    }
+
+    #[test]
+    fn is_scoped_key_both_true_returns_false() {
+        assert!(!is_scoped_key(true, true));
+    }
+
+    #[test]
+    fn is_scoped_key_services_false_returns_true() {
+        assert!(is_scoped_key(false, true));
+    }
+
+    #[test]
+    fn is_scoped_key_nodes_false_returns_true() {
+        assert!(is_scoped_key(true, false));
+    }
+
+    #[test]
+    fn is_scoped_key_both_false_returns_true() {
+        assert!(is_scoped_key(false, false));
+    }
+
+    #[test]
+    fn generate_scoped_api_key_format() {
+        let (prefix, full_key, hash) = generate_scoped_api_key();
+        assert!(
+            prefix.starts_with("nyxid_ag_"),
+            "prefix should start with nyxid_ag_, got: {prefix}"
+        );
+        assert!(
+            full_key.starts_with("nyxid_ag_"),
+            "full_key should start with nyxid_ag_, got: {full_key}"
+        );
+        assert_eq!(hash.len(), 64, "hash should be 64 hex chars");
+        assert!(
+            hex::decode(&hash).is_ok(),
+            "hash should be valid hex: {hash}"
+        );
+    }
+
+    #[test]
+    fn generate_scoped_api_key_unique() {
+        let (_, key_a, hash_a) = generate_scoped_api_key();
+        let (_, key_b, hash_b) = generate_scoped_api_key();
+        assert_ne!(key_a, key_b, "two generated keys should differ");
+        assert_ne!(hash_a, hash_b, "two generated hashes should differ");
+    }
+
+    #[test]
+    fn generate_scoped_api_key_prefix_is_subset_of_full_key() {
+        let (prefix, full_key, _) = generate_scoped_api_key();
+        assert!(
+            full_key.starts_with(&prefix),
+            "full_key should start with prefix"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Integration tests (require MongoDB)
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn create_api_key_rejects_empty_name() {
+        let Some(db) = connect_test_database("key_svc_create_empty").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let result = create_api_key(
+            &db, &user_id, "", "read", None, None, None, None, None, None, None, None, None, None,
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn create_api_key_rejects_too_long_name() {
+        let Some(db) = connect_test_database("key_svc_create_long").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let long_name = "a".repeat(201);
+        let result = create_api_key(
+            &db, &user_id, &long_name, "read", None, None, None, None, None, None, None, None,
+            None, None,
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn create_api_key_rejects_invalid_scope() {
+        let Some(db) = connect_test_database("key_svc_create_scope").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let result = create_api_key(
+            &db,
+            &user_id,
+            "test",
+            "invalid_scope",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn create_api_key_happy_path() {
+        let Some(db) = connect_test_database("key_svc_create_ok").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let created = create_api_key(
+            &db,
+            &user_id,
+            "my-key",
+            "read write",
+            None,
+            Some("test key"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("claude-code"),
+            None,
+        )
+        .await
+        .expect("should create key");
+        assert_eq!(created.name, "my-key");
+        assert_eq!(created.scopes, "read write");
+        assert_eq!(created.description.as_deref(), Some("test key"));
+        assert_eq!(created.platform.as_deref(), Some("claude-code"));
+        assert!(created.allow_all_services);
+        assert!(created.allow_all_nodes);
+        assert!(!created.full_key.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_api_keys_empty() {
+        let Some(db) = connect_test_database("key_svc_list_empty").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let keys = list_api_keys(&db, &user_id).await.expect("should list");
+        assert!(keys.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_api_keys_returns_created_keys() {
+        let Some(db) = connect_test_database("key_svc_list").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        create_api_key(
+            &db, &user_id, "key-1", "read", None, None, None, None, None, None, None, None, None,
+            None,
+        )
+        .await
+        .expect("create key-1");
+        create_api_key(
+            &db, &user_id, "key-2", "write", None, None, None, None, None, None, None, None, None,
+            None,
+        )
+        .await
+        .expect("create key-2");
+        let keys = list_api_keys(&db, &user_id).await.expect("should list");
+        assert_eq!(keys.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn get_api_key_not_found() {
+        let Some(db) = connect_test_database("key_svc_get_nf").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let result = get_api_key(&db, &user_id, "nonexistent-id").await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn get_api_key_happy_path() {
+        let Some(db) = connect_test_database("key_svc_get_ok").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let created = create_api_key(
+            &db,
+            &user_id,
+            "look-me-up",
+            "proxy",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create key");
+        let fetched = get_api_key(&db, &user_id, &created.id)
+            .await
+            .expect("should find");
+        assert_eq!(fetched.name, "look-me-up");
+        assert_eq!(fetched.scopes, "proxy");
+    }
+
+    #[tokio::test]
+    async fn delete_api_key_deactivates() {
+        let Some(db) = connect_test_database("key_svc_del").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let created = create_api_key(
+            &db,
+            &user_id,
+            "to-delete",
+            "read",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create key");
+        delete_api_key(&db, &user_id, &created.id)
+            .await
+            .expect("should deactivate");
+        let result = get_api_key(&db, &user_id, &created.id).await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn delete_api_key_not_found() {
+        let Some(db) = connect_test_database("key_svc_del_nf").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let result = delete_api_key(&db, &user_id, "ghost-id").await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn rotate_api_key_preserves_fields() {
+        let Some(db) = connect_test_database("key_svc_rotate").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let original = create_api_key(
+            &db,
+            &user_id,
+            "rotate-me",
+            "read write",
+            None,
+            Some("rotatable"),
+            None,
+            None,
+            None,
+            None,
+            Some(50),
+            Some(100),
+            Some("codex"),
+            None,
+        )
+        .await
+        .expect("create key");
+        let rotated = rotate_api_key(&db, &user_id, &original.id)
+            .await
+            .expect("should rotate");
+        assert_ne!(rotated.id, original.id);
+        assert_ne!(rotated.full_key, original.full_key);
+        assert_eq!(rotated.name, "rotate-me");
+        assert_eq!(rotated.scopes, "read write");
+        assert_eq!(rotated.description.as_deref(), Some("rotatable"));
+        assert_eq!(rotated.platform.as_deref(), Some("codex"));
+        assert_eq!(rotated.rate_limit_per_second, Some(50));
+        assert_eq!(rotated.rate_limit_burst, Some(100));
+        // Old key should be deactivated
+        let result = get_api_key(&db, &user_id, &original.id).await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn validate_api_key_happy_path() {
+        let Some(db) = connect_test_database("key_svc_val_ok").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let created = create_api_key(
+            &db,
+            &user_id,
+            "validate-me",
+            "read",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create key");
+        let (returned_uid, key) = validate_api_key(&db, &created.full_key)
+            .await
+            .expect("should validate");
+        assert_eq!(returned_uid, user_id);
+        assert_eq!(key.name, "validate-me");
+    }
+
+    #[tokio::test]
+    async fn validate_api_key_invalid_key_errors() {
+        let Some(db) = connect_test_database("key_svc_val_bad").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let result = validate_api_key(&db, "totally-bogus-key").await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), AppError::Unauthorized(_)));
+    }
+
+    #[tokio::test]
+    async fn validate_api_key_expired_key_errors() {
+        let Some(db) = connect_test_database("key_svc_val_exp").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let past = Utc::now() - chrono::Duration::hours(1);
+        let created = create_api_key(
+            &db,
+            &user_id,
+            "expired",
+            "read",
+            Some(past),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create key");
+        let result = validate_api_key(&db, &created.full_key).await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), AppError::Unauthorized(_)));
+    }
+
+    #[tokio::test]
+    async fn update_api_key_scope_name() {
+        let Some(db) = connect_test_database("key_svc_upd_name").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let created = create_api_key(
+            &db, &user_id, "old-name", "read", None, None, None, None, None, None, None, None,
+            None, None,
+        )
+        .await
+        .expect("create key");
+        let updated = update_api_key_scope(
+            &db,
+            &user_id,
+            &created.id,
+            Some("new-name"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("should update");
+        assert_eq!(updated.name, "new-name");
+    }
+
+    #[tokio::test]
+    async fn update_api_key_scope_platform() {
+        let Some(db) = connect_test_database("key_svc_upd_plat").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let created = create_api_key(
+            &db,
+            &user_id,
+            "plat-test",
+            "read",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create key");
+        let updated = update_api_key_scope(
+            &db,
+            &user_id,
+            &created.id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Some("cursor")),
+            None,
+        )
+        .await
+        .expect("should update");
+        assert_eq!(updated.platform.as_deref(), Some("cursor"));
+    }
+
+    #[tokio::test]
+    async fn update_api_key_scope_clear_rate_limit() {
+        let Some(db) = connect_test_database("key_svc_upd_rl").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let created = create_api_key(
+            &db,
+            &user_id,
+            "rl-test",
+            "read",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(10),
+            Some(20),
+            None,
+            None,
+        )
+        .await
+        .expect("create key");
+        assert_eq!(created.rate_limit_per_second, Some(10));
+        let updated = update_api_key_scope(
+            &db,
+            &user_id,
+            &created.id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(None), // clear rate_limit_per_second
+            Some(None), // clear rate_limit_burst
+            None,
+            None,
+        )
+        .await
+        .expect("should update");
+        assert_eq!(updated.rate_limit_per_second, None);
+        assert_eq!(updated.rate_limit_burst, None);
+    }
 }

@@ -1150,4 +1150,320 @@ mod tests {
 
         responder.await.expect("responder task");
     }
+
+    // -----------------------------------------------------------------------
+    // decode_base64_payload extended tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn decode_base64_payload_none_returns_empty_vec() {
+        let result = decode_base64_payload(None, "test_type", "req-1");
+        assert_eq!(result, Some(Vec::new()));
+    }
+
+    #[test]
+    fn decode_base64_payload_empty_string() {
+        let result = decode_base64_payload(Some(""), "test_type", "req-1");
+        assert_eq!(result, Some(Vec::new()));
+    }
+
+    #[test]
+    fn decode_base64_payload_binary_data() {
+        let binary_data: Vec<u8> = vec![0x00, 0x01, 0x02, 0xFF, 0xFE];
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&binary_data);
+        let result = decode_base64_payload(Some(&encoded), "proxy_response", "req-2");
+        assert_eq!(result, Some(binary_data));
+    }
+
+    #[test]
+    fn decode_base64_payload_large_payload() {
+        let data = vec![0xAB_u8; 10_000];
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
+        let result = decode_base64_payload(Some(&encoded), "proxy_response", "req-3");
+        assert_eq!(result.as_ref().map(|v| v.len()), Some(10_000));
+    }
+
+    #[test]
+    fn decode_base64_payload_whitespace_is_invalid() {
+        // base64 with embedded spaces is technically invalid for STANDARD engine
+        let result = decode_base64_payload(Some("aGVs bG8="), "test", "req-4");
+        assert_eq!(result, None);
+    }
+
+    // -----------------------------------------------------------------------
+    // decode_binary_stream_frame extended tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn decode_binary_stream_frame_empty_payload_after_id() {
+        let frame = b"123e4567-e89b-12d3-a456-426614174000";
+        let (request_id, payload) = decode_binary_stream_frame(frame).expect("exact 36 bytes");
+        assert_eq!(request_id, "123e4567-e89b-12d3-a456-426614174000");
+        assert!(payload.is_empty());
+    }
+
+    #[test]
+    fn decode_binary_stream_frame_empty_input() {
+        assert_eq!(
+            decode_binary_stream_frame(b"").unwrap_err(),
+            "binary frame too short for request_id prefix"
+        );
+    }
+
+    #[test]
+    fn decode_binary_stream_frame_exactly_35_bytes() {
+        let data = b"12345678901234567890123456789012345";
+        assert_eq!(data.len(), 35);
+        assert_eq!(
+            decode_binary_stream_frame(data).unwrap_err(),
+            "binary frame too short for request_id prefix"
+        );
+    }
+
+    #[test]
+    fn decode_binary_stream_frame_exactly_36_bytes() {
+        let data = b"123456789012345678901234567890123456";
+        assert_eq!(data.len(), 36);
+        let (request_id, payload) = decode_binary_stream_frame(data).unwrap();
+        assert_eq!(request_id, "123456789012345678901234567890123456");
+        assert!(payload.is_empty());
+    }
+
+    #[test]
+    fn decode_binary_stream_frame_invalid_utf8_prefix() {
+        let mut data = vec![0xFF; 36];
+        data.extend_from_slice(b"payload");
+        assert_eq!(
+            decode_binary_stream_frame(&data).unwrap_err(),
+            "binary frame has invalid UTF-8 request_id prefix"
+        );
+    }
+
+    #[test]
+    fn decode_binary_stream_frame_large_payload() {
+        let mut frame = b"abcdefgh-ijkl-mnop-qrst-uvwxyz012345".to_vec();
+        assert_eq!(frame.len(), 36);
+        let payload_data = vec![0xDE_u8; 100_000];
+        frame.extend_from_slice(&payload_data);
+
+        let (request_id, payload) = decode_binary_stream_frame(&frame).unwrap();
+        assert_eq!(request_id, "abcdefgh-ijkl-mnop-qrst-uvwxyz012345");
+        assert_eq!(payload.len(), 100_000);
+        assert!(payload.iter().all(|&b| b == 0xDE));
+    }
+
+    // -----------------------------------------------------------------------
+    // ws_extract_ip tests
+    // -----------------------------------------------------------------------
+
+    use super::ws_extract_ip;
+    use axum::http::HeaderMap;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+
+    #[test]
+    fn ws_extract_ip_prefers_forwarded_for_over_real_ip_and_peer() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "1.2.3.4, 5.6.7.8".parse().unwrap());
+        headers.insert("x-real-ip", "9.9.9.9".parse().unwrap());
+        let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080);
+        assert_eq!(
+            ws_extract_ip(&headers, Some(peer)).as_deref(),
+            Some("1.2.3.4")
+        );
+    }
+
+    #[test]
+    fn ws_extract_ip_falls_back_to_real_ip() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-real-ip", "192.168.1.1".parse().unwrap());
+        let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080);
+        assert_eq!(
+            ws_extract_ip(&headers, Some(peer)).as_deref(),
+            Some("192.168.1.1")
+        );
+    }
+
+    #[test]
+    fn ws_extract_ip_falls_back_to_peer_addr() {
+        let headers = HeaderMap::new();
+        let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(172, 16, 0, 5)), 9090);
+        assert_eq!(
+            ws_extract_ip(&headers, Some(peer)).as_deref(),
+            Some("172.16.0.5")
+        );
+    }
+
+    #[test]
+    fn ws_extract_ip_returns_none_without_anything() {
+        let headers = HeaderMap::new();
+        assert!(ws_extract_ip(&headers, None).is_none());
+    }
+
+    #[test]
+    fn ws_extract_ip_ignores_empty_forwarded_for() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "".parse().unwrap());
+        headers.insert("x-real-ip", "8.8.8.8".parse().unwrap());
+        assert_eq!(ws_extract_ip(&headers, None).as_deref(), Some("8.8.8.8"));
+    }
+
+    #[test]
+    fn ws_extract_ip_ignores_empty_real_ip_falls_to_peer() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-real-ip", "  ".parse().unwrap());
+        let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 3000);
+        assert_eq!(
+            ws_extract_ip(&headers, Some(peer)).as_deref(),
+            Some("127.0.0.1")
+        );
+    }
+
+    #[test]
+    fn ws_extract_ip_with_ipv6_peer() {
+        let headers = HeaderMap::new();
+        let peer = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 443);
+        assert_eq!(ws_extract_ip(&headers, Some(peer)).as_deref(), Some("::1"));
+    }
+
+    #[test]
+    fn ws_extract_ip_single_forwarded_for_entry() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "203.0.113.50".parse().unwrap());
+        assert_eq!(
+            ws_extract_ip(&headers, None).as_deref(),
+            Some("203.0.113.50")
+        );
+    }
+
+    #[test]
+    fn ws_extract_ip_trims_real_ip_whitespace() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-real-ip", "  10.0.0.1  ".parse().unwrap());
+        assert_eq!(ws_extract_ip(&headers, None).as_deref(), Some("10.0.0.1"));
+    }
+
+    // -----------------------------------------------------------------------
+    // NodeMessage deserialization tests
+    // -----------------------------------------------------------------------
+
+    use super::NodeMessage;
+
+    #[test]
+    fn node_message_deserialize_heartbeat_pong() {
+        let json = r#"{"type": "heartbeat_pong", "timestamp": "2025-01-01T00:00:00Z"}"#;
+        let msg: NodeMessage = serde_json::from_str(json).unwrap();
+        assert!(matches!(msg, NodeMessage::HeartbeatPong { .. }));
+    }
+
+    #[test]
+    fn node_message_deserialize_heartbeat_pong_without_timestamp() {
+        let json = r#"{"type": "heartbeat_pong"}"#;
+        let msg: NodeMessage = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            msg,
+            NodeMessage::HeartbeatPong { timestamp: None }
+        ));
+    }
+
+    #[test]
+    fn node_message_deserialize_register() {
+        let json = r#"{"type": "register", "token": "nyx_nreg_abc123"}"#;
+        let msg: NodeMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            NodeMessage::Register { token, metadata } => {
+                assert_eq!(token, "nyx_nreg_abc123");
+                assert!(metadata.is_none());
+            }
+            _ => panic!("expected Register variant"),
+        }
+    }
+
+    #[test]
+    fn node_message_deserialize_auth() {
+        let json = r#"{"type": "auth", "node_id": "n-1", "token": "nyx_nauth_xyz"}"#;
+        let msg: NodeMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            NodeMessage::Auth { node_id, token } => {
+                assert_eq!(node_id, "n-1");
+                assert_eq!(token, "nyx_nauth_xyz");
+            }
+            _ => panic!("expected Auth variant"),
+        }
+    }
+
+    #[test]
+    fn node_message_deserialize_status_update_without_capabilities() {
+        let json = r#"{"type": "status_update"}"#;
+        let msg: NodeMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            NodeMessage::StatusUpdate { capabilities, .. } => {
+                assert!(capabilities.is_none());
+            }
+            _ => panic!("expected StatusUpdate variant"),
+        }
+    }
+
+    #[test]
+    fn node_message_deserialize_credential_update_ack_minimal() {
+        let json = r#"{"type": "credential_update_ack"}"#;
+        let msg: NodeMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            NodeMessage::CredentialUpdateAck {
+                request_id,
+                service_slug,
+                status,
+                error,
+            } => {
+                assert!(request_id.is_none());
+                assert!(service_slug.is_none());
+                assert!(status.is_none());
+                assert!(error.is_none());
+            }
+            _ => panic!("expected CredentialUpdateAck"),
+        }
+    }
+
+    #[test]
+    fn node_message_deserialize_credential_update_ack_full() {
+        let json = r#"{
+            "type": "credential_update_ack",
+            "request_id": "req-42",
+            "service_slug": "openai",
+            "status": "ok",
+            "error": null
+        }"#;
+        let msg: NodeMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            NodeMessage::CredentialUpdateAck {
+                request_id,
+                service_slug,
+                status,
+                error,
+            } => {
+                assert_eq!(request_id.as_deref(), Some("req-42"));
+                assert_eq!(service_slug.as_deref(), Some("openai"));
+                assert_eq!(status.as_deref(), Some("ok"));
+                assert!(error.is_none());
+            }
+            _ => panic!("expected CredentialUpdateAck"),
+        }
+    }
+
+    #[test]
+    fn node_message_deserialize_unknown_type_fails() {
+        let json = r#"{"type": "nonexistent_type"}"#;
+        let result = serde_json::from_str::<NodeMessage>(json);
+        assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // WS_WRITER_CHANNEL_SIZE constant test
+    // -----------------------------------------------------------------------
+
+    use super::WS_WRITER_CHANNEL_SIZE;
+
+    #[test]
+    fn ws_writer_channel_size_is_256() {
+        assert_eq!(WS_WRITER_CHANNEL_SIZE, 256);
+    }
 }

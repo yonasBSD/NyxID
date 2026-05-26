@@ -71,3 +71,41 @@ pub async fn refresh_delegation_token(
         scope: result.scope,
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delegation_refresh_response_serializes_all_fields() {
+        let resp = DelegationRefreshResponse {
+            access_token: "eyJhbGciOi...".to_string(),
+            token_type: "Bearer".to_string(),
+            expires_in: 300,
+            scope: "llm:proxy".to_string(),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["access_token"], "eyJhbGciOi...");
+        assert_eq!(json["token_type"], "Bearer");
+        assert_eq!(json["expires_in"], 300);
+        assert_eq!(json["scope"], "llm:proxy");
+    }
+
+    #[test]
+    fn delegation_refresh_response_field_names_match_oauth_convention() {
+        let resp = DelegationRefreshResponse {
+            access_token: "token".to_string(),
+            token_type: "Bearer".to_string(),
+            expires_in: 900,
+            scope: "openid".to_string(),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        // Verify field names use snake_case as expected by OAuth specs
+        let obj = json.as_object().unwrap();
+        assert!(obj.contains_key("access_token"));
+        assert!(obj.contains_key("token_type"));
+        assert!(obj.contains_key("expires_in"));
+        assert!(obj.contains_key("scope"));
+        assert_eq!(obj.len(), 4);
+    }
+}

@@ -737,4 +737,587 @@ mod tests {
         assert!(!user.role_ids.contains(&role_ids.admin));
         assert!(user.role_ids.contains(&role_ids.operator));
     }
+
+    #[test]
+    fn permissions_vec_converts_str_slices() {
+        let perms = permissions_vec(&["read", "write", "admin"]);
+        assert_eq!(
+            perms,
+            vec!["read".to_string(), "write".to_string(), "admin".to_string()]
+        );
+    }
+
+    #[test]
+    fn permissions_vec_empty_input() {
+        let perms = permissions_vec(&[]);
+        assert!(perms.is_empty());
+    }
+
+    #[test]
+    fn push_unique_adds_new_value() {
+        let mut values = vec!["a".to_string()];
+        push_unique(&mut values, "b".to_string());
+        assert_eq!(values, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn push_unique_skips_duplicate() {
+        let mut values = vec!["a".to_string(), "b".to_string()];
+        push_unique(&mut values, "a".to_string());
+        assert_eq!(values.len(), 2);
+    }
+
+    #[test]
+    fn add_platform_role_id_admin_adds_admin_id() {
+        let platform_ids = PlatformRoleIds {
+            admin: "admin-role-id".to_string(),
+            operator: "operator-role-id".to_string(),
+        };
+        let mut ids = vec![];
+        add_platform_role_id(&mut ids, PlatformRole::Admin, &platform_ids);
+        assert_eq!(ids, vec!["admin-role-id".to_string()]);
+    }
+
+    #[test]
+    fn add_platform_role_id_operator_adds_operator_id() {
+        let platform_ids = PlatformRoleIds {
+            admin: "admin-role-id".to_string(),
+            operator: "operator-role-id".to_string(),
+        };
+        let mut ids = vec![];
+        add_platform_role_id(&mut ids, PlatformRole::Operator, &platform_ids);
+        assert_eq!(ids, vec!["operator-role-id".to_string()]);
+    }
+
+    #[test]
+    fn add_platform_role_id_user_adds_nothing() {
+        let platform_ids = PlatformRoleIds {
+            admin: "admin-role-id".to_string(),
+            operator: "operator-role-id".to_string(),
+        };
+        let mut ids = vec![];
+        add_platform_role_id(&mut ids, PlatformRole::User, &platform_ids);
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn add_platform_role_id_does_not_duplicate() {
+        let platform_ids = PlatformRoleIds {
+            admin: "admin-role-id".to_string(),
+            operator: "operator-role-id".to_string(),
+        };
+        let mut ids = vec!["admin-role-id".to_string()];
+        add_platform_role_id(&mut ids, PlatformRole::Admin, &platform_ids);
+        assert_eq!(ids.len(), 1);
+    }
+
+    #[test]
+    fn set_platform_role_update_admin_sets_flags_correctly() {
+        let platform_ids = PlatformRoleIds {
+            admin: "aid".to_string(),
+            operator: "oid".to_string(),
+        };
+        let now = bson::DateTime::from_chrono(Utc::now());
+        let pipeline = set_platform_role_update(PlatformRole::Admin, &platform_ids, now);
+        assert_eq!(pipeline.len(), 1);
+        let set_stage = pipeline[0].get_document("$set").expect("$set key");
+        assert!(set_stage.get_bool("is_admin").unwrap());
+        assert!(!set_stage.get_bool("is_operator").unwrap());
+    }
+
+    #[test]
+    fn set_platform_role_update_operator_sets_flags_correctly() {
+        let platform_ids = PlatformRoleIds {
+            admin: "aid".to_string(),
+            operator: "oid".to_string(),
+        };
+        let now = bson::DateTime::from_chrono(Utc::now());
+        let pipeline = set_platform_role_update(PlatformRole::Operator, &platform_ids, now);
+        let set_stage = pipeline[0].get_document("$set").expect("$set key");
+        assert!(!set_stage.get_bool("is_admin").unwrap());
+        assert!(set_stage.get_bool("is_operator").unwrap());
+    }
+
+    #[test]
+    fn set_platform_role_update_user_clears_both_flags() {
+        let platform_ids = PlatformRoleIds {
+            admin: "aid".to_string(),
+            operator: "oid".to_string(),
+        };
+        let now = bson::DateTime::from_chrono(Utc::now());
+        let pipeline = set_platform_role_update(PlatformRole::User, &platform_ids, now);
+        let set_stage = pipeline[0].get_document("$set").expect("$set key");
+        assert!(!set_stage.get_bool("is_admin").unwrap());
+        assert!(!set_stage.get_bool("is_operator").unwrap());
+    }
+
+    #[tokio::test]
+    async fn create_role_happy_path() {
+        let Some(db) = connect_test_database("role_create_ok").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+
+        let role = create_role(
+            &db,
+            "Tester",
+            "tester",
+            Some("Test role"),
+            &["read".to_string()],
+            false,
+            None,
+        )
+        .await
+        .expect("create role");
+
+        assert_eq!(role.name, "Tester");
+        assert_eq!(role.slug, "tester");
+        assert_eq!(role.description.as_deref(), Some("Test role"));
+        assert_eq!(role.permissions, vec!["read".to_string()]);
+        assert!(!role.is_default);
+        assert!(!role.is_system);
+        assert!(role.client_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn create_role_duplicate_slug_error() {
+        let Some(db) = connect_test_database("role_create_dup").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+
+        create_role(&db, "First", "dup-slug", None, &[], false, None)
+            .await
+            .expect("first create");
+
+        let err = create_role(&db, "Second", "dup-slug", None, &[], false, None)
+            .await
+            .expect_err("duplicate slug must fail");
+        assert!(matches!(err, AppError::DuplicateSlug(_)));
+    }
+
+    #[tokio::test]
+    async fn create_role_invalid_slug_error() {
+        let Some(db) = connect_test_database("role_create_slug").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+
+        let err = create_role(&db, "Bad", "UPPER-CASE!", None, &[], false, None)
+            .await
+            .expect_err("invalid slug must fail");
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn get_role_not_found() {
+        let Some(db) = connect_test_database("role_get_nf").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+
+        let err = get_role(&db, "nonexistent-id")
+            .await
+            .expect_err("must fail");
+        assert!(matches!(err, AppError::RoleNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn get_role_happy_path() {
+        let Some(db) = connect_test_database("role_get_ok").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+
+        let created = create_role(&db, "Fetcher", "fetcher", None, &[], false, None)
+            .await
+            .expect("create");
+        let fetched = get_role(&db, &created.id).await.expect("get");
+        assert_eq!(fetched.slug, "fetcher");
+    }
+
+    #[tokio::test]
+    async fn update_role_system_role_protection() {
+        let Some(db) = connect_test_database("role_upd_sys").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+        seed_system_roles(&db).await.expect("seed");
+
+        let admin = db
+            .collection::<Role>(ROLES)
+            .find_one(doc! { "slug": PLATFORM_ADMIN_ROLE_SLUG })
+            .await
+            .expect("query")
+            .expect("admin role");
+
+        let err = update_role(&db, &admin.id, Some("New Name"), None, None, None, None)
+            .await
+            .expect_err("system role update must fail");
+        assert!(matches!(err, AppError::SystemRoleProtected(_)));
+    }
+
+    #[tokio::test]
+    async fn update_role_slug_uniqueness() {
+        let Some(db) = connect_test_database("role_upd_slug").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+
+        create_role(&db, "A", "slug-a", None, &[], false, None)
+            .await
+            .expect("create A");
+        let b = create_role(&db, "B", "slug-b", None, &[], false, None)
+            .await
+            .expect("create B");
+
+        let err = update_role(&db, &b.id, None, Some("slug-a"), None, None, None)
+            .await
+            .expect_err("duplicate slug");
+        assert!(matches!(err, AppError::DuplicateSlug(_)));
+    }
+
+    #[tokio::test]
+    async fn update_role_name_and_permissions() {
+        let Some(db) = connect_test_database("role_upd_np").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+
+        let role = create_role(&db, "Old", "updatable", None, &[], false, None)
+            .await
+            .expect("create");
+
+        let updated = update_role(
+            &db,
+            &role.id,
+            Some("New"),
+            None,
+            Some("desc"),
+            Some(&["write".to_string()]),
+            Some(true),
+        )
+        .await
+        .expect("update");
+
+        assert_eq!(updated.name, "New");
+        assert_eq!(updated.description.as_deref(), Some("desc"));
+        assert_eq!(updated.permissions, vec!["write".to_string()]);
+        assert!(updated.is_default);
+    }
+
+    #[tokio::test]
+    async fn delete_role_cannot_delete_system_role() {
+        let Some(db) = connect_test_database("role_del_sys").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+        seed_system_roles(&db).await.expect("seed");
+
+        let admin = db
+            .collection::<Role>(ROLES)
+            .find_one(doc! { "slug": PLATFORM_ADMIN_ROLE_SLUG })
+            .await
+            .expect("query")
+            .expect("admin role");
+
+        let err = delete_role(&db, &admin.id)
+            .await
+            .expect_err("delete system role must fail");
+        assert!(matches!(err, AppError::SystemRoleProtected(_)));
+    }
+
+    #[tokio::test]
+    async fn delete_role_removes_from_users_and_groups() {
+        let Some(db) = connect_test_database("role_del_clean").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+
+        let role = create_role(&db, "Temp", "temp-role", None, &[], false, None)
+            .await
+            .expect("create role");
+
+        let user_id = Uuid::new_v4().to_string();
+        let mut user = test_user(&user_id, UserType::Person);
+        user.role_ids = vec![role.id.clone()];
+        db.collection::<User>(USERS)
+            .insert_one(&user)
+            .await
+            .expect("insert user");
+
+        let group = Group {
+            id: Uuid::new_v4().to_string(),
+            name: "Test Group".to_string(),
+            slug: "test-group".to_string(),
+            description: None,
+            role_ids: vec![role.id.clone()],
+            parent_group_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        db.collection::<Group>(GROUPS)
+            .insert_one(&group)
+            .await
+            .expect("insert group");
+
+        delete_role(&db, &role.id).await.expect("delete");
+
+        let updated_user = db
+            .collection::<User>(USERS)
+            .find_one(doc! { "_id": &user_id })
+            .await
+            .expect("query user")
+            .expect("user exists");
+        assert!(!updated_user.role_ids.contains(&role.id));
+
+        let updated_group = db
+            .collection::<Group>(GROUPS)
+            .find_one(doc! { "_id": &group.id })
+            .await
+            .expect("query group")
+            .expect("group exists");
+        assert!(!updated_group.role_ids.contains(&role.id));
+
+        let gone = get_role(&db, &role.id).await;
+        assert!(matches!(gone, Err(AppError::RoleNotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn assign_role_to_user_happy_path() {
+        let Some(db) = connect_test_database("role_assign_ok").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+
+        let role = create_role(&db, "Assignable", "assignable", None, &[], false, None)
+            .await
+            .expect("create");
+
+        let user_id = Uuid::new_v4().to_string();
+        let user = test_user(&user_id, UserType::Person);
+        db.collection::<User>(USERS)
+            .insert_one(&user)
+            .await
+            .expect("insert user");
+
+        assign_role_to_user(&db, &user_id, &role.id)
+            .await
+            .expect("assign");
+
+        let updated = db
+            .collection::<User>(USERS)
+            .find_one(doc! { "_id": &user_id })
+            .await
+            .expect("query")
+            .expect("user");
+        assert!(updated.role_ids.contains(&role.id));
+    }
+
+    #[tokio::test]
+    async fn assign_role_to_user_role_not_found() {
+        let Some(db) = connect_test_database("role_assign_rnf").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+
+        let user_id = Uuid::new_v4().to_string();
+        let user = test_user(&user_id, UserType::Person);
+        db.collection::<User>(USERS)
+            .insert_one(&user)
+            .await
+            .expect("insert user");
+
+        let err = assign_role_to_user(&db, &user_id, "nonexistent-role")
+            .await
+            .expect_err("must fail");
+        assert!(matches!(err, AppError::RoleNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn assign_role_to_user_user_not_found() {
+        let Some(db) = connect_test_database("role_assign_unf").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+
+        let role = create_role(&db, "Role", "role-unf", None, &[], false, None)
+            .await
+            .expect("create");
+
+        let err = assign_role_to_user(&db, "nonexistent-user", &role.id)
+            .await
+            .expect_err("must fail");
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn assign_role_to_user_already_assigned() {
+        let Some(db) = connect_test_database("role_assign_dup").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+
+        let role = create_role(&db, "DupRole", "dup-role", None, &[], false, None)
+            .await
+            .expect("create");
+
+        let user_id = Uuid::new_v4().to_string();
+        let user = test_user(&user_id, UserType::Person);
+        db.collection::<User>(USERS)
+            .insert_one(&user)
+            .await
+            .expect("insert user");
+
+        assign_role_to_user(&db, &user_id, &role.id)
+            .await
+            .expect("first assign");
+
+        let err = assign_role_to_user(&db, &user_id, &role.id)
+            .await
+            .expect_err("second assign must fail");
+        assert!(matches!(err, AppError::RoleAlreadyAssigned));
+    }
+
+    #[tokio::test]
+    async fn revoke_role_from_user_happy_path() {
+        let Some(db) = connect_test_database("role_revoke_ok").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+
+        let role = create_role(&db, "Revokable", "revokable", None, &[], false, None)
+            .await
+            .expect("create");
+
+        let user_id = Uuid::new_v4().to_string();
+        let user = test_user(&user_id, UserType::Person);
+        db.collection::<User>(USERS)
+            .insert_one(&user)
+            .await
+            .expect("insert");
+
+        assign_role_to_user(&db, &user_id, &role.id)
+            .await
+            .expect("assign");
+        revoke_role_from_user(&db, &user_id, &role.id)
+            .await
+            .expect("revoke");
+
+        let updated = db
+            .collection::<User>(USERS)
+            .find_one(doc! { "_id": &user_id })
+            .await
+            .expect("query")
+            .expect("user");
+        assert!(!updated.role_ids.contains(&role.id));
+    }
+
+    #[tokio::test]
+    async fn get_user_roles_returns_roles() {
+        let Some(db) = connect_test_database("role_get_user").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+
+        let role = create_role(
+            &db,
+            "UserRole",
+            "user-role",
+            None,
+            &["r".to_string()],
+            false,
+            None,
+        )
+        .await
+        .expect("create");
+
+        let user_id = Uuid::new_v4().to_string();
+        let user = test_user(&user_id, UserType::Person);
+        db.collection::<User>(USERS)
+            .insert_one(&user)
+            .await
+            .expect("insert");
+
+        assign_role_to_user(&db, &user_id, &role.id)
+            .await
+            .expect("assign");
+
+        let roles = get_user_roles(&db, &user_id).await.expect("get roles");
+        assert_eq!(roles.len(), 1);
+        assert_eq!(roles[0].slug, "user-role");
+    }
+
+    #[tokio::test]
+    async fn get_user_roles_empty_when_none() {
+        let Some(db) = connect_test_database("role_get_empty").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+
+        let user_id = Uuid::new_v4().to_string();
+        let user = test_user(&user_id, UserType::Person);
+        db.collection::<User>(USERS)
+            .insert_one(&user)
+            .await
+            .expect("insert");
+
+        let roles = get_user_roles(&db, &user_id).await.expect("get roles");
+        assert!(roles.is_empty());
+    }
+
+    #[tokio::test]
+    async fn bulk_assign_role_assigns_to_multiple_users() {
+        let Some(db) = connect_test_database("role_bulk_ok").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+
+        let role = create_role(&db, "Bulk", "bulk-role", None, &[], false, None)
+            .await
+            .expect("create");
+
+        let mut user_ids = Vec::new();
+        for _ in 0..3 {
+            let uid = Uuid::new_v4().to_string();
+            let user = test_user(&uid, UserType::Person);
+            db.collection::<User>(USERS)
+                .insert_one(&user)
+                .await
+                .expect("insert");
+            user_ids.push(uid);
+        }
+
+        let result = bulk_assign_role(&db, &role.id, Some(&user_ids))
+            .await
+            .expect("bulk assign");
+        assert_eq!(result.assigned_count, 3);
+        assert_eq!(result.already_assigned_count, 0);
+
+        let result2 = bulk_assign_role(&db, &role.id, Some(&user_ids))
+            .await
+            .expect("bulk assign again");
+        assert_eq!(result2.assigned_count, 0);
+        assert_eq!(result2.already_assigned_count, 3);
+    }
+
+    #[tokio::test]
+    async fn get_default_role_ids_returns_defaults() {
+        let Some(db) = connect_test_database("role_defaults").await else {
+            eprintln!("skipping: no local MongoDB");
+            return;
+        };
+        seed_system_roles(&db).await.expect("seed");
+
+        let default_ids = get_default_role_ids(&db).await.expect("get defaults");
+        assert!(!default_ids.is_empty());
+
+        let user_role = db
+            .collection::<Role>(ROLES)
+            .find_one(doc! { "slug": PLATFORM_USER_ROLE_SLUG })
+            .await
+            .expect("query")
+            .expect("user role");
+        assert!(default_ids.contains(&user_role.id));
+    }
 }
