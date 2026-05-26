@@ -2160,4 +2160,918 @@ mod tests {
         let in_arr = id_clause.get_array("$in").unwrap();
         assert_eq!(in_arr.len(), 0);
     }
+
+    // ================================================================
+    // Integration tests (require running MongoDB)
+    // ================================================================
+
+    use crate::models::user::UserType;
+    use crate::test_utils::{connect_test_database, test_user};
+
+    /// Helper to insert an ApprovalRequest directly into the DB.
+    async fn insert_request(db: &mongodb::Database, req: &ApprovalRequest) {
+        db.collection::<ApprovalRequest>(REQUESTS)
+            .insert_one(req)
+            .await
+            .expect("insert approval request");
+    }
+
+    /// Helper to insert an ApprovalGrant directly into the DB.
+    async fn insert_grant(db: &mongodb::Database, grant: &ApprovalGrant) {
+        db.collection::<ApprovalGrant>(GRANTS)
+            .insert_one(grant)
+            .await
+            .expect("insert approval grant");
+    }
+
+    /// Helper to insert a NotificationChannel directly into the DB.
+    async fn insert_channel(db: &mongodb::Database, channel: &NotificationChannel) {
+        db.collection::<NotificationChannel>(CHANNELS)
+            .insert_one(channel)
+            .await
+            .expect("insert notification channel");
+    }
+
+    /// Helper to insert a ServiceApprovalConfig directly into the DB.
+    async fn insert_config(db: &mongodb::Database, config: &ServiceApprovalConfig) {
+        db.collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
+            .insert_one(config)
+            .await
+            .expect("insert service approval config");
+    }
+
+    fn make_channel(user_id: &str, approval_required: bool) -> NotificationChannel {
+        let now = Utc::now();
+        NotificationChannel {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: user_id.to_string(),
+            telegram_chat_id: None,
+            telegram_username: None,
+            telegram_enabled: false,
+            telegram_link_code: None,
+            telegram_link_code_expires_at: None,
+            approval_timeout_secs: 30,
+            grant_expiry_days: 30,
+            approval_required,
+            push_enabled: false,
+            push_devices: vec![],
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn make_service_config(
+        user_id: &str,
+        service_id: &str,
+        approval_required: bool,
+        mode: ApprovalMode,
+    ) -> ServiceApprovalConfig {
+        let now = Utc::now();
+        ServiceApprovalConfig {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: user_id.to_string(),
+            service_id: service_id.to_string(),
+            service_name: "Test Service".to_string(),
+            approval_required,
+            approval_mode: mode,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn make_grant(
+        user_id: &str,
+        service_id: &str,
+        requester_type: &str,
+        requester_id: &str,
+        revoked: bool,
+        expires_in_days: i64,
+    ) -> ApprovalGrant {
+        let now = Utc::now();
+        ApprovalGrant {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: user_id.to_string(),
+            service_id: service_id.to_string(),
+            service_name: "Test Service".to_string(),
+            requester_type: requester_type.to_string(),
+            requester_id: requester_id.to_string(),
+            requester_label: None,
+            approval_request_id: uuid::Uuid::new_v4().to_string(),
+            granted_at: now,
+            expires_at: now + chrono::Duration::days(expires_in_days),
+            revoked,
+            org_scoped: false,
+        }
+    }
+
+    fn make_pending_request_with_user(
+        user_id: &str,
+        service_id: &str,
+        mode: ApprovalMode,
+    ) -> ApprovalRequest {
+        let now = Utc::now();
+        ApprovalRequest {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: user_id.to_string(),
+            service_id: service_id.to_string(),
+            service_name: "Test Service".to_string(),
+            service_slug: "test-svc".to_string(),
+            requester_type: "service_account".to_string(),
+            requester_id: "requester-1".to_string(),
+            requester_label: None,
+            operation_summary: "proxy:POST /test".to_string(),
+            action_description: None,
+            tool_name: None,
+            tool_call_id: None,
+            tool_arguments: None,
+            is_destructive: None,
+            approval_mode: mode,
+            status: "pending".to_string(),
+            idempotency_key: uuid::Uuid::new_v4().to_string(),
+            notification_channel: None,
+            telegram_message_id: None,
+            telegram_chat_id: None,
+            expires_at: now + chrono::Duration::seconds(300),
+            decided_at: None,
+            decision_channel: None,
+            decision_idempotency_key: None,
+            notify_user_ids: vec![user_id.to_string()],
+            from_org_policy: false,
+            created_at: now,
+        }
+    }
+
+    // --- resolve_approval_mode ---
+
+    #[tokio::test]
+    async fn resolve_approval_mode_returns_default_when_no_config() {
+        let Some(db) = connect_test_database("appr_svc_resolve_mode_default").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+
+        let mode = resolve_approval_mode(&db, &user_id, &service_id)
+            .await
+            .unwrap();
+        assert_eq!(mode, ApprovalMode::default());
+    }
+
+    #[tokio::test]
+    async fn resolve_approval_mode_returns_per_service_config() {
+        let Some(db) = connect_test_database("appr_svc_resolve_mode_cfg").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+
+        let config = make_service_config(&user_id, &service_id, true, ApprovalMode::Grant);
+        insert_config(&db, &config).await;
+
+        let mode = resolve_approval_mode(&db, &user_id, &service_id)
+            .await
+            .unwrap();
+        assert_eq!(mode, ApprovalMode::Grant);
+    }
+
+    // --- user_requires_approval ---
+
+    #[tokio::test]
+    async fn user_requires_approval_false_when_no_channel() {
+        let Some(db) = connect_test_database("appr_svc_user_req_no_ch").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let result = user_requires_approval(&db, &user_id).await.unwrap();
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn user_requires_approval_reads_channel_flag() {
+        let Some(db) = connect_test_database("appr_svc_user_req_ch").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let channel = make_channel(&user_id, true);
+        insert_channel(&db, &channel).await;
+
+        let result = user_requires_approval(&db, &user_id).await.unwrap();
+        assert!(result);
+    }
+
+    // --- check_approval ---
+
+    #[tokio::test]
+    async fn check_approval_returns_false_when_no_grants() {
+        let Some(db) = connect_test_database("appr_svc_chk_no_grants").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let result = check_approval(&db, &user_id, "svc-1", "sa", "req-1", false)
+            .await
+            .unwrap();
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn check_approval_returns_true_for_valid_grant() {
+        let Some(db) = connect_test_database("appr_svc_chk_valid_grant").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+
+        let grant = make_grant(&user_id, &service_id, "sa", "req-1", false, 30);
+        insert_grant(&db, &grant).await;
+
+        let result = check_approval(&db, &user_id, &service_id, "sa", "req-1", false)
+            .await
+            .unwrap();
+        assert!(result);
+    }
+
+    #[tokio::test]
+    async fn check_approval_returns_false_for_revoked_grant() {
+        let Some(db) = connect_test_database("appr_svc_chk_revoked").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+
+        let grant = make_grant(&user_id, &service_id, "sa", "req-1", true, 30);
+        insert_grant(&db, &grant).await;
+
+        let result = check_approval(&db, &user_id, &service_id, "sa", "req-1", false)
+            .await
+            .unwrap();
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn check_approval_returns_false_for_expired_grant() {
+        let Some(db) = connect_test_database("appr_svc_chk_expired").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+
+        // Already expired (negative days)
+        let grant = make_grant(&user_id, &service_id, "sa", "req-1", false, -1);
+        insert_grant(&db, &grant).await;
+
+        let result = check_approval(&db, &user_id, &service_id, "sa", "req-1", false)
+            .await
+            .unwrap();
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn check_approval_returns_false_for_wrong_requester() {
+        let Some(db) = connect_test_database("appr_svc_chk_wrong_req").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+
+        let grant = make_grant(&user_id, &service_id, "sa", "req-1", false, 30);
+        insert_grant(&db, &grant).await;
+
+        // Different requester_id
+        let result = check_approval(&db, &user_id, &service_id, "sa", "req-DIFFERENT", false)
+            .await
+            .unwrap();
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn check_approval_org_scoped_grant_matches_any_requester() {
+        let Some(db) = connect_test_database("appr_svc_chk_org_scoped").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+
+        let mut grant = make_grant(&user_id, &service_id, "sa", "req-1", false, 30);
+        grant.org_scoped = true;
+        insert_grant(&db, &grant).await;
+
+        // Different requester, but org_scoped=true check matches
+        let result = check_approval(&db, &user_id, &service_id, "sa", "req-DIFFERENT", true)
+            .await
+            .unwrap();
+        assert!(result);
+    }
+
+    // --- get_request ---
+
+    #[tokio::test]
+    async fn get_request_returns_existing_request() {
+        let Some(db) = connect_test_database("appr_svc_get_req_exists").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let req = make_pending_request_with_user(&user_id, "svc-1", ApprovalMode::PerRequest);
+        insert_request(&db, &req).await;
+
+        let result = get_request(&db, &req.id).await.unwrap();
+        assert_eq!(result.id, req.id);
+        assert_eq!(result.user_id, user_id);
+        assert_eq!(result.status, "pending");
+    }
+
+    #[tokio::test]
+    async fn get_request_returns_not_found_for_missing_id() {
+        let Some(db) = connect_test_database("appr_svc_get_req_missing").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+
+        let result = get_request(&db, "nonexistent-id").await;
+        assert!(matches!(result, Err(AppError::NotFound(_))));
+    }
+
+    // --- list_requests ---
+
+    #[tokio::test]
+    async fn list_requests_returns_user_requests_sorted_by_created_at() {
+        let Some(db) = connect_test_database("appr_svc_list_req_sort").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let other_user_id = uuid::Uuid::new_v4().to_string();
+
+        // Insert 3 requests for user, 1 for another user
+        for i in 0..3 {
+            let mut req =
+                make_pending_request_with_user(&user_id, "svc-1", ApprovalMode::PerRequest);
+            req.created_at = Utc::now() - chrono::Duration::minutes(i);
+            insert_request(&db, &req).await;
+        }
+        let other_req =
+            make_pending_request_with_user(&other_user_id, "svc-1", ApprovalMode::PerRequest);
+        insert_request(&db, &other_req).await;
+
+        let (requests, total) = list_requests(&db, &user_id, &[], &[], 1, 10).await.unwrap();
+        assert_eq!(total, 3);
+        assert_eq!(requests.len(), 3);
+        // All should belong to user_id
+        assert!(requests.iter().all(|r| r.user_id == user_id));
+    }
+
+    #[tokio::test]
+    async fn list_requests_filters_by_status() {
+        let Some(db) = connect_test_database("appr_svc_list_req_filter").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let pending_req =
+            make_pending_request_with_user(&user_id, "svc-1", ApprovalMode::PerRequest);
+        insert_request(&db, &pending_req).await;
+
+        let mut approved_req =
+            make_pending_request_with_user(&user_id, "svc-2", ApprovalMode::PerRequest);
+        approved_req.status = "approved".to_string();
+        insert_request(&db, &approved_req).await;
+
+        let (requests, total) = list_requests(&db, &user_id, &[], &["pending"], 1, 10)
+            .await
+            .unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].status, "pending");
+    }
+
+    #[tokio::test]
+    async fn list_requests_pagination_works() {
+        let Some(db) = connect_test_database("appr_svc_list_req_page").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        for _ in 0..5 {
+            let req = make_pending_request_with_user(&user_id, "svc-1", ApprovalMode::PerRequest);
+            insert_request(&db, &req).await;
+        }
+
+        let (page1, total) = list_requests(&db, &user_id, &[], &[], 1, 2).await.unwrap();
+        assert_eq!(total, 5);
+        assert_eq!(page1.len(), 2);
+
+        let (page2, _) = list_requests(&db, &user_id, &[], &[], 2, 2).await.unwrap();
+        assert_eq!(page2.len(), 2);
+
+        let (page3, _) = list_requests(&db, &user_id, &[], &[], 3, 2).await.unwrap();
+        assert_eq!(page3.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn list_requests_multi_status_filter() {
+        let Some(db) = connect_test_database("appr_svc_list_req_multi_st").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let pending_req =
+            make_pending_request_with_user(&user_id, "svc-1", ApprovalMode::PerRequest);
+        insert_request(&db, &pending_req).await;
+
+        let mut approved_req =
+            make_pending_request_with_user(&user_id, "svc-2", ApprovalMode::PerRequest);
+        approved_req.status = "approved".to_string();
+        insert_request(&db, &approved_req).await;
+
+        let mut rejected_req =
+            make_pending_request_with_user(&user_id, "svc-3", ApprovalMode::PerRequest);
+        rejected_req.status = "rejected".to_string();
+        insert_request(&db, &rejected_req).await;
+
+        // Filter for approved and rejected
+        let (requests, total) = list_requests(&db, &user_id, &[], &["approved", "rejected"], 1, 10)
+            .await
+            .unwrap();
+        assert_eq!(total, 2);
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests
+                .iter()
+                .all(|r| r.status == "approved" || r.status == "rejected")
+        );
+    }
+
+    // --- revoke_grant ---
+
+    #[tokio::test]
+    async fn revoke_grant_marks_grant_as_revoked() {
+        let Some(db) = connect_test_database("appr_svc_revoke_grant").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+
+        let grant = make_grant(&user_id, &service_id, "sa", "req-1", false, 30);
+        insert_grant(&db, &grant).await;
+
+        revoke_grant(&db, &user_id, &grant.id).await.unwrap();
+
+        // Verify the grant is revoked in DB
+        let revoked = db
+            .collection::<ApprovalGrant>(GRANTS)
+            .find_one(doc! { "_id": &grant.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(revoked.revoked);
+    }
+
+    #[tokio::test]
+    async fn revoke_grant_returns_not_found_for_wrong_user() {
+        let Some(db) = connect_test_database("appr_svc_revoke_wrong_user").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+
+        let grant = make_grant(&user_id, &service_id, "sa", "req-1", false, 30);
+        insert_grant(&db, &grant).await;
+
+        let result = revoke_grant(&db, "other-user", &grant.id).await;
+        assert!(matches!(result, Err(AppError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn revoke_grant_returns_not_found_for_nonexistent_grant() {
+        let Some(db) = connect_test_database("appr_svc_revoke_missing").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+
+        let result = revoke_grant(&db, "user-1", "nonexistent-grant").await;
+        assert!(matches!(result, Err(AppError::NotFound(_))));
+    }
+
+    // --- revoke_all_grants ---
+
+    #[tokio::test]
+    async fn revoke_all_grants_revokes_all_for_user() {
+        let Some(db) = connect_test_database("appr_svc_revoke_all").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+
+        let g1 = make_grant(&user_id, &service_id, "sa", "req-1", false, 30);
+        let g2 = make_grant(&user_id, &service_id, "sa", "req-2", false, 30);
+        insert_grant(&db, &g1).await;
+        insert_grant(&db, &g2).await;
+
+        let count = revoke_all_grants(&db, &user_id).await.unwrap();
+        assert_eq!(count, 2);
+
+        // Verify both grants are revoked
+        let result = check_approval(&db, &user_id, &service_id, "sa", "req-1", false)
+            .await
+            .unwrap();
+        assert!(!result);
+    }
+
+    // --- list_service_approval_configs ---
+
+    #[tokio::test]
+    async fn list_service_approval_configs_returns_all_for_user() {
+        let Some(db) = connect_test_database("appr_svc_list_cfg").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let other_user_id = uuid::Uuid::new_v4().to_string();
+
+        let c1 = make_service_config(&user_id, "svc-1", true, ApprovalMode::Grant);
+        let c2 = make_service_config(&user_id, "svc-2", false, ApprovalMode::PerRequest);
+        let c3 = make_service_config(&other_user_id, "svc-1", true, ApprovalMode::Grant);
+        insert_config(&db, &c1).await;
+        insert_config(&db, &c2).await;
+        insert_config(&db, &c3).await;
+
+        let configs = list_service_approval_configs(&db, &user_id).await.unwrap();
+        assert_eq!(configs.len(), 2);
+        assert!(configs.iter().all(|c| c.user_id == user_id));
+    }
+
+    // --- set_service_approval_config ---
+
+    #[tokio::test]
+    async fn set_service_approval_config_creates_new_config() {
+        let Some(db) = connect_test_database("appr_svc_set_cfg_new").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+
+        let config = set_service_approval_config(
+            &db,
+            &user_id,
+            &service_id,
+            "Test Service",
+            Some(true),
+            Some(&ApprovalMode::Grant),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(config.user_id, user_id);
+        assert_eq!(config.service_id, service_id);
+        assert!(config.approval_required);
+        assert_eq!(config.approval_mode, ApprovalMode::Grant);
+    }
+
+    #[tokio::test]
+    async fn set_service_approval_config_updates_existing() {
+        let Some(db) = connect_test_database("appr_svc_set_cfg_upd").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+
+        // Create first
+        set_service_approval_config(
+            &db,
+            &user_id,
+            &service_id,
+            "Test Service",
+            Some(true),
+            Some(&ApprovalMode::Grant),
+        )
+        .await
+        .unwrap();
+
+        // Update
+        let updated = set_service_approval_config(
+            &db,
+            &user_id,
+            &service_id,
+            "Test Service",
+            Some(false),
+            Some(&ApprovalMode::PerRequest),
+        )
+        .await
+        .unwrap();
+
+        assert!(!updated.approval_required);
+        assert_eq!(updated.approval_mode, ApprovalMode::PerRequest);
+    }
+
+    #[tokio::test]
+    async fn set_service_approval_config_to_per_request_revokes_grants() {
+        let Some(db) = connect_test_database("appr_svc_set_cfg_revoke").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+
+        // Create a grant
+        let grant = make_grant(&user_id, &service_id, "sa", "req-1", false, 30);
+        insert_grant(&db, &grant).await;
+
+        // Switch to per_request -- should revoke grants
+        set_service_approval_config(
+            &db,
+            &user_id,
+            &service_id,
+            "Test Service",
+            Some(true),
+            Some(&ApprovalMode::PerRequest),
+        )
+        .await
+        .unwrap();
+
+        let still_valid = check_approval(&db, &user_id, &service_id, "sa", "req-1", false)
+            .await
+            .unwrap();
+        assert!(!still_valid);
+    }
+
+    // --- delete_service_approval_config ---
+
+    #[tokio::test]
+    async fn delete_service_approval_config_removes_config() {
+        let Some(db) = connect_test_database("appr_svc_del_cfg").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+
+        let config = make_service_config(&user_id, &service_id, true, ApprovalMode::Grant);
+        insert_config(&db, &config).await;
+
+        delete_service_approval_config(&db, &user_id, &service_id)
+            .await
+            .unwrap();
+
+        // Verify it's gone
+        let configs = list_service_approval_configs(&db, &user_id).await.unwrap();
+        assert!(configs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_service_approval_config_returns_not_found() {
+        let Some(db) = connect_test_database("appr_svc_del_cfg_missing").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+
+        let result = delete_service_approval_config(&db, "user-1", "nonexistent-svc").await;
+        assert!(matches!(result, Err(AppError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn delete_service_approval_config_revokes_grants() {
+        let Some(db) = connect_test_database("appr_svc_del_cfg_revoke").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+
+        let config = make_service_config(&user_id, &service_id, true, ApprovalMode::Grant);
+        insert_config(&db, &config).await;
+
+        let grant = make_grant(&user_id, &service_id, "sa", "req-1", false, 30);
+        insert_grant(&db, &grant).await;
+
+        delete_service_approval_config(&db, &user_id, &service_id)
+            .await
+            .unwrap();
+
+        let still_valid = check_approval(&db, &user_id, &service_id, "sa", "req-1", false)
+            .await
+            .unwrap();
+        assert!(!still_valid);
+    }
+
+    // --- resolve_org_aware_approval ---
+
+    #[tokio::test]
+    async fn resolve_org_aware_approval_falls_back_to_actor_when_no_org_config() {
+        let Some(db) = connect_test_database("appr_svc_org_aware_fallback").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        let org_user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+
+        // Create an org user (so the code knows the owner is an org)
+        let org_user = test_user(&org_user_id, UserType::Org);
+        db.collection::<User>(USERS)
+            .insert_one(&org_user)
+            .await
+            .unwrap();
+
+        // No org config, actor has a per-service config
+        let actor_config = make_service_config(&actor_id, &service_id, true, ApprovalMode::Grant);
+        insert_config(&db, &actor_config).await;
+
+        let resolution = resolve_org_aware_approval(&db, &actor_id, &org_user_id, &service_id)
+            .await
+            .unwrap();
+        assert!(resolution.required);
+        assert_eq!(resolution.mode, ApprovalMode::Grant);
+        assert_eq!(resolution.primary_owner_user_id, actor_id);
+        assert!(!resolution.from_org_policy);
+    }
+
+    #[tokio::test]
+    async fn resolve_org_aware_approval_uses_org_config_when_present() {
+        let Some(db) = connect_test_database("appr_svc_org_aware_org_cfg").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        let org_user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+
+        // Create an org user
+        let org_user = test_user(&org_user_id, UserType::Org);
+        db.collection::<User>(USERS)
+            .insert_one(&org_user)
+            .await
+            .unwrap();
+
+        // Org has a per-service config
+        let org_config = make_service_config(&org_user_id, &service_id, true, ApprovalMode::Grant);
+        insert_config(&db, &org_config).await;
+
+        let resolution = resolve_org_aware_approval(&db, &actor_id, &org_user_id, &service_id)
+            .await
+            .unwrap();
+        assert!(resolution.required);
+        assert_eq!(resolution.mode, ApprovalMode::Grant);
+        assert_eq!(resolution.primary_owner_user_id, org_user_id);
+        assert!(resolution.from_org_policy);
+    }
+
+    #[tokio::test]
+    async fn resolve_org_aware_approval_actor_policy_when_owner_is_person() {
+        let Some(db) = connect_test_database("appr_svc_org_aware_person").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+
+        // Create a person user (not an org)
+        let person_user = test_user(&actor_id, UserType::Person);
+        db.collection::<User>(USERS)
+            .insert_one(&person_user)
+            .await
+            .unwrap();
+
+        // Actor has global approval enabled via notification channel
+        let channel = make_channel(&actor_id, true);
+        insert_channel(&db, &channel).await;
+
+        let resolution = resolve_org_aware_approval(&db, &actor_id, &actor_id, &service_id)
+            .await
+            .unwrap();
+        assert!(resolution.required);
+        assert_eq!(resolution.mode, ApprovalMode::default());
+        assert_eq!(resolution.primary_owner_user_id, actor_id);
+        assert!(!resolution.from_org_policy);
+    }
+
+    // --- list_grants ---
+
+    #[tokio::test]
+    async fn list_grants_returns_active_grants_for_grant_mode_services() {
+        let Some(db) = connect_test_database("appr_svc_list_grants").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+
+        // Set up grant mode config
+        let config = make_service_config(&user_id, &service_id, true, ApprovalMode::Grant);
+        insert_config(&db, &config).await;
+
+        // Insert a valid grant
+        let grant = make_grant(&user_id, &service_id, "sa", "req-1", false, 30);
+        insert_grant(&db, &grant).await;
+
+        let (grants, total) = list_grants(&db, &user_id, &[], 1, 10).await.unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].id, grant.id);
+    }
+
+    #[tokio::test]
+    async fn list_grants_excludes_per_request_mode_services() {
+        let Some(db) = connect_test_database("appr_svc_list_grants_pr").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+
+        // Service is in per_request mode (not grant)
+        let config = make_service_config(&user_id, &service_id, true, ApprovalMode::PerRequest);
+        insert_config(&db, &config).await;
+
+        // Insert a grant (lingering from before mode switch)
+        let grant = make_grant(&user_id, &service_id, "sa", "req-1", false, 30);
+        insert_grant(&db, &grant).await;
+
+        let (grants, total) = list_grants(&db, &user_id, &[], 1, 10).await.unwrap();
+        assert_eq!(total, 0);
+        assert!(grants.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_grants_excludes_revoked_and_expired() {
+        let Some(db) = connect_test_database("appr_svc_list_grants_exc").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+
+        let config = make_service_config(&user_id, &service_id, true, ApprovalMode::Grant);
+        insert_config(&db, &config).await;
+
+        // Revoked grant
+        let revoked = make_grant(&user_id, &service_id, "sa", "req-1", true, 30);
+        insert_grant(&db, &revoked).await;
+
+        // Expired grant
+        let expired = make_grant(&user_id, &service_id, "sa", "req-2", false, -1);
+        insert_grant(&db, &expired).await;
+
+        // Active grant
+        let active = make_grant(&user_id, &service_id, "sa", "req-3", false, 30);
+        insert_grant(&db, &active).await;
+
+        let (grants, total) = list_grants(&db, &user_id, &[], 1, 10).await.unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(grants[0].id, active.id);
+    }
+
+    // --- expire_pending_requests ---
+
+    #[tokio::test]
+    async fn expire_pending_requests_expires_stale_requests() {
+        let Some(db) = connect_test_database("appr_svc_expire_pending").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let config = crate::test_utils::test_app_config();
+        let http_client = reqwest::Client::new();
+
+        // Insert a request that expired 10 seconds ago
+        let mut req = make_pending_request_with_user(&user_id, "svc-1", ApprovalMode::PerRequest);
+        req.expires_at = Utc::now() - chrono::Duration::seconds(10);
+        insert_request(&db, &req).await;
+
+        // Insert a request that has not expired yet
+        let req2 = make_pending_request_with_user(&user_id, "svc-2", ApprovalMode::PerRequest);
+        insert_request(&db, &req2).await;
+
+        let count = expire_pending_requests(&db, &config, &http_client, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+
+        // Verify the first request is expired
+        let expired = get_request(&db, &req.id).await.unwrap();
+        assert_eq!(expired.status, "expired");
+
+        // Verify the second is still pending
+        let still_pending = get_request(&db, &req2.id).await.unwrap();
+        assert_eq!(still_pending.status, "pending");
+    }
 }

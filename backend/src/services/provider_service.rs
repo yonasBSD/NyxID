@@ -4657,4 +4657,1586 @@ mod tests {
             );
         }
     }
+
+    // ── update_provider integration tests ──────────────────────────
+
+    #[tokio::test]
+    async fn update_provider_name_and_description() {
+        let Some(db) = connect_test_database("prov_svc_upd_name").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let slug = format!("upd-name-{}", Uuid::new_v4());
+        let created = super::create_provider(
+            &db,
+            &enc,
+            "Original",
+            &slug,
+            "api_key",
+            "admin",
+            "client_secret_post",
+            None,
+            None,
+            None,
+            None,
+            Some("old desc"),
+            None,
+            None,
+            "test",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let updated = super::update_provider(
+            &db,
+            &enc,
+            &created.id,
+            super::ProviderUpdateInput {
+                name: Some("Renamed".to_string()),
+                description: Some("new desc".to_string()),
+                is_active: None,
+                authorization_url: None,
+                token_url: None,
+                revocation_url: None,
+                default_scopes: None,
+                client_id: None,
+                client_secret: None,
+                supports_pkce: None,
+                device_code_url: None,
+                device_token_url: None,
+                device_verification_url: None,
+                hosted_callback_url: None,
+                api_key_instructions: None,
+                api_key_url: None,
+                icon_url: None,
+                documentation_url: None,
+                credential_mode: None,
+                token_endpoint_auth_method: None,
+                extra_auth_params: None,
+                device_code_format: None,
+                client_id_param_name: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(updated.name, "Renamed");
+        assert_eq!(updated.description.as_deref(), Some("new desc"));
+        assert_eq!(updated.slug, slug, "slug must not change");
+        assert!(updated.updated_at > created.updated_at);
+    }
+
+    #[tokio::test]
+    async fn update_provider_deactivates() {
+        let Some(db) = connect_test_database("prov_svc_upd_deact").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let slug = format!("deact-{}", Uuid::new_v4());
+        let created = super::create_provider(
+            &db,
+            &enc,
+            "Active",
+            &slug,
+            "api_key",
+            "admin",
+            "client_secret_post",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "test",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(created.is_active);
+
+        let updated = super::update_provider(
+            &db,
+            &enc,
+            &created.id,
+            super::ProviderUpdateInput {
+                name: None,
+                description: None,
+                is_active: Some(false),
+                authorization_url: None,
+                token_url: None,
+                revocation_url: None,
+                default_scopes: None,
+                client_id: None,
+                client_secret: None,
+                supports_pkce: None,
+                device_code_url: None,
+                device_token_url: None,
+                device_verification_url: None,
+                hosted_callback_url: None,
+                api_key_instructions: None,
+                api_key_url: None,
+                icon_url: None,
+                documentation_url: None,
+                credential_mode: None,
+                token_endpoint_auth_method: None,
+                extra_auth_params: None,
+                device_code_format: None,
+                client_id_param_name: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!updated.is_active);
+    }
+
+    #[tokio::test]
+    async fn update_provider_returns_not_found_for_missing() {
+        let Some(db) = connect_test_database("prov_svc_upd_nf").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let err = super::update_provider(
+            &db,
+            &enc,
+            "nonexistent-id",
+            super::ProviderUpdateInput {
+                name: Some("X".to_string()),
+                description: None,
+                is_active: None,
+                authorization_url: None,
+                token_url: None,
+                revocation_url: None,
+                default_scopes: None,
+                client_id: None,
+                client_secret: None,
+                supports_pkce: None,
+                device_code_url: None,
+                device_token_url: None,
+                device_verification_url: None,
+                hosted_callback_url: None,
+                api_key_instructions: None,
+                api_key_url: None,
+                icon_url: None,
+                documentation_url: None,
+                credential_mode: None,
+                token_endpoint_auth_method: None,
+                extra_auth_params: None,
+                device_code_format: None,
+                client_id_param_name: None,
+            },
+        )
+        .await
+        .expect_err("should not find");
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn update_provider_rejects_invalid_credential_mode() {
+        let Some(db) = connect_test_database("prov_svc_upd_bad_mode").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let slug = format!("upd-bm-{}", Uuid::new_v4());
+        let created = super::create_provider(
+            &db,
+            &enc,
+            "Mode",
+            &slug,
+            "oauth2",
+            "admin",
+            "client_secret_post",
+            Some(super::OAuthProviderInput {
+                authorization_url: "https://auth.example.com/auth".to_string(),
+                token_url: "https://auth.example.com/token".to_string(),
+                revocation_url: None,
+                default_scopes: None,
+                client_id: None,
+                client_secret: None,
+                supports_pkce: false,
+            }),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "test",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let err = super::update_provider(
+            &db,
+            &enc,
+            &created.id,
+            super::ProviderUpdateInput {
+                name: None,
+                description: None,
+                is_active: None,
+                authorization_url: None,
+                token_url: None,
+                revocation_url: None,
+                default_scopes: None,
+                client_id: None,
+                client_secret: None,
+                supports_pkce: None,
+                device_code_url: None,
+                device_token_url: None,
+                device_verification_url: None,
+                hosted_callback_url: None,
+                api_key_instructions: None,
+                api_key_url: None,
+                icon_url: None,
+                documentation_url: None,
+                credential_mode: Some("invalid_mode".to_string()),
+                token_endpoint_auth_method: None,
+                extra_auth_params: None,
+                device_code_format: None,
+                client_id_param_name: None,
+            },
+        )
+        .await
+        .expect_err("invalid credential_mode");
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn update_provider_rejects_non_admin_mode_for_api_key_type() {
+        let Some(db) = connect_test_database("prov_svc_upd_ak_mode").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let slug = format!("upd-ak-{}", Uuid::new_v4());
+        let created = super::create_provider(
+            &db,
+            &enc,
+            "AK",
+            &slug,
+            "api_key",
+            "admin",
+            "client_secret_post",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "test",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let err = super::update_provider(
+            &db,
+            &enc,
+            &created.id,
+            super::ProviderUpdateInput {
+                name: None,
+                description: None,
+                is_active: None,
+                authorization_url: None,
+                token_url: None,
+                revocation_url: None,
+                default_scopes: None,
+                client_id: None,
+                client_secret: None,
+                supports_pkce: None,
+                device_code_url: None,
+                device_token_url: None,
+                device_verification_url: None,
+                hosted_callback_url: None,
+                api_key_instructions: None,
+                api_key_url: None,
+                icon_url: None,
+                documentation_url: None,
+                credential_mode: Some("user".to_string()),
+                token_endpoint_auth_method: None,
+                extra_auth_params: None,
+                device_code_format: None,
+                client_id_param_name: None,
+            },
+        )
+        .await
+        .expect_err("api_key must remain admin");
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn update_provider_rejects_non_admin_mode_for_telegram_widget_type() {
+        let Some(db) = connect_test_database("prov_svc_upd_tw_mode").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        // Insert a telegram_widget provider directly since create_provider needs
+        // a TelegramWidgetProviderInput with bot credentials.
+        let mut tw = make_test_provider(&format!("tw-{}", Uuid::new_v4()), "telegram_widget");
+        tw.credential_mode = "admin".to_string();
+        db.collection::<ProviderConfig>(COLLECTION_NAME)
+            .insert_one(&tw)
+            .await
+            .unwrap();
+
+        let err = super::update_provider(
+            &db,
+            &enc,
+            &tw.id,
+            super::ProviderUpdateInput {
+                name: None,
+                description: None,
+                is_active: None,
+                authorization_url: None,
+                token_url: None,
+                revocation_url: None,
+                default_scopes: None,
+                client_id: None,
+                client_secret: None,
+                supports_pkce: None,
+                device_code_url: None,
+                device_token_url: None,
+                device_verification_url: None,
+                hosted_callback_url: None,
+                api_key_instructions: None,
+                api_key_url: None,
+                icon_url: None,
+                documentation_url: None,
+                credential_mode: Some("user".to_string()),
+                token_endpoint_auth_method: None,
+                extra_auth_params: None,
+                device_code_format: None,
+                client_id_param_name: None,
+            },
+        )
+        .await
+        .expect_err("telegram_widget must be admin");
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn update_provider_rejects_invalid_token_endpoint_auth_method() {
+        let Some(db) = connect_test_database("prov_svc_upd_bad_auth").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let slug = format!("upd-ba-{}", Uuid::new_v4());
+        let created = super::create_provider(
+            &db,
+            &enc,
+            "AuthM",
+            &slug,
+            "api_key",
+            "admin",
+            "client_secret_post",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "test",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let err = super::update_provider(
+            &db,
+            &enc,
+            &created.id,
+            super::ProviderUpdateInput {
+                name: None,
+                description: None,
+                is_active: None,
+                authorization_url: None,
+                token_url: None,
+                revocation_url: None,
+                default_scopes: None,
+                client_id: None,
+                client_secret: None,
+                supports_pkce: None,
+                device_code_url: None,
+                device_token_url: None,
+                device_verification_url: None,
+                hosted_callback_url: None,
+                api_key_instructions: None,
+                api_key_url: None,
+                icon_url: None,
+                documentation_url: None,
+                credential_mode: None,
+                token_endpoint_auth_method: Some("bearer_magic".to_string()),
+                extra_auth_params: None,
+                device_code_format: None,
+                client_id_param_name: None,
+            },
+        )
+        .await
+        .expect_err("invalid auth method");
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn update_provider_rejects_invalid_device_code_format() {
+        let Some(db) = connect_test_database("prov_svc_upd_bad_dcf").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let slug = format!("upd-dcf-{}", Uuid::new_v4());
+        let created = super::create_provider(
+            &db,
+            &enc,
+            "DCF",
+            &slug,
+            "api_key",
+            "admin",
+            "client_secret_post",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "test",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let err = super::update_provider(
+            &db,
+            &enc,
+            &created.id,
+            super::ProviderUpdateInput {
+                name: None,
+                description: None,
+                is_active: None,
+                authorization_url: None,
+                token_url: None,
+                revocation_url: None,
+                default_scopes: None,
+                client_id: None,
+                client_secret: None,
+                supports_pkce: None,
+                device_code_url: None,
+                device_token_url: None,
+                device_verification_url: None,
+                hosted_callback_url: None,
+                api_key_instructions: None,
+                api_key_url: None,
+                icon_url: None,
+                documentation_url: None,
+                credential_mode: None,
+                token_endpoint_auth_method: None,
+                extra_auth_params: None,
+                device_code_format: Some("magic".to_string()),
+                client_id_param_name: None,
+            },
+        )
+        .await
+        .expect_err("invalid device_code_format");
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn update_provider_encrypts_client_id_and_secret() {
+        let Some(db) = connect_test_database("prov_svc_upd_enc").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let slug = format!("upd-enc-{}", Uuid::new_v4());
+        let created = super::create_provider(
+            &db,
+            &enc,
+            "Enc",
+            &slug,
+            "oauth2",
+            "admin",
+            "client_secret_post",
+            Some(super::OAuthProviderInput {
+                authorization_url: "https://auth.example.com/auth".to_string(),
+                token_url: "https://auth.example.com/token".to_string(),
+                revocation_url: None,
+                default_scopes: None,
+                client_id: None,
+                client_secret: None,
+                supports_pkce: false,
+            }),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "test",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(created.client_id_encrypted.is_none());
+
+        let updated = super::update_provider(
+            &db,
+            &enc,
+            &created.id,
+            super::ProviderUpdateInput {
+                name: None,
+                description: None,
+                is_active: None,
+                authorization_url: None,
+                token_url: None,
+                revocation_url: None,
+                default_scopes: None,
+                client_id: Some("my-client-id".to_string()),
+                client_secret: Some("my-secret".to_string()),
+                supports_pkce: None,
+                device_code_url: None,
+                device_token_url: None,
+                device_verification_url: None,
+                hosted_callback_url: None,
+                api_key_instructions: None,
+                api_key_url: None,
+                icon_url: None,
+                documentation_url: None,
+                credential_mode: None,
+                token_endpoint_auth_method: None,
+                extra_auth_params: None,
+                device_code_format: None,
+                client_id_param_name: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            updated.client_id_encrypted.is_some(),
+            "client_id should be encrypted after update"
+        );
+        assert!(
+            updated.client_secret_encrypted.is_some(),
+            "client_secret should be encrypted after update"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_provider_updates_oauth_urls() {
+        let Some(db) = connect_test_database("prov_svc_upd_urls").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let slug = format!("upd-urls-{}", Uuid::new_v4());
+        let created = super::create_provider(
+            &db,
+            &enc,
+            "URLs",
+            &slug,
+            "oauth2",
+            "user",
+            "client_secret_post",
+            Some(super::OAuthProviderInput {
+                authorization_url: "https://old.example.com/auth".to_string(),
+                token_url: "https://old.example.com/token".to_string(),
+                revocation_url: None,
+                default_scopes: None,
+                client_id: None,
+                client_secret: None,
+                supports_pkce: false,
+            }),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "test",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let updated = super::update_provider(
+            &db,
+            &enc,
+            &created.id,
+            super::ProviderUpdateInput {
+                name: None,
+                description: None,
+                is_active: None,
+                authorization_url: Some("https://new.example.com/auth".to_string()),
+                token_url: Some("https://new.example.com/token".to_string()),
+                revocation_url: Some("https://new.example.com/revoke".to_string()),
+                default_scopes: Some(vec!["email".to_string()]),
+                client_id: None,
+                client_secret: None,
+                supports_pkce: Some(true),
+                device_code_url: Some("https://new.example.com/device".to_string()),
+                device_token_url: Some("https://new.example.com/devtoken".to_string()),
+                device_verification_url: Some("https://new.example.com/verify".to_string()),
+                hosted_callback_url: Some("https://new.example.com/callback".to_string()),
+                api_key_instructions: Some("new instructions".to_string()),
+                api_key_url: Some("https://new.example.com/keys".to_string()),
+                icon_url: Some("https://new.example.com/icon.png".to_string()),
+                documentation_url: Some("https://new.example.com/docs".to_string()),
+                credential_mode: Some("both".to_string()),
+                token_endpoint_auth_method: Some("client_secret_basic".to_string()),
+                extra_auth_params: Some(std::collections::HashMap::from([(
+                    "prompt".to_string(),
+                    "consent".to_string(),
+                )])),
+                device_code_format: None,
+                client_id_param_name: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            updated.authorization_url.as_deref(),
+            Some("https://new.example.com/auth")
+        );
+        assert_eq!(
+            updated.token_url.as_deref(),
+            Some("https://new.example.com/token")
+        );
+        assert_eq!(
+            updated.revocation_url.as_deref(),
+            Some("https://new.example.com/revoke")
+        );
+        assert_eq!(updated.default_scopes, Some(vec!["email".to_string()]));
+        assert!(updated.supports_pkce);
+        assert_eq!(
+            updated.device_code_url.as_deref(),
+            Some("https://new.example.com/device")
+        );
+        assert_eq!(
+            updated.device_token_url.as_deref(),
+            Some("https://new.example.com/devtoken")
+        );
+        assert_eq!(
+            updated.device_verification_url.as_deref(),
+            Some("https://new.example.com/verify")
+        );
+        assert_eq!(
+            updated.hosted_callback_url.as_deref(),
+            Some("https://new.example.com/callback")
+        );
+        assert_eq!(
+            updated.api_key_instructions.as_deref(),
+            Some("new instructions")
+        );
+        assert_eq!(
+            updated.api_key_url.as_deref(),
+            Some("https://new.example.com/keys")
+        );
+        assert_eq!(
+            updated.icon_url.as_deref(),
+            Some("https://new.example.com/icon.png")
+        );
+        assert_eq!(
+            updated.documentation_url.as_deref(),
+            Some("https://new.example.com/docs")
+        );
+        assert_eq!(updated.credential_mode, "both");
+        assert_eq!(updated.token_endpoint_auth_method, "client_secret_basic");
+        assert!(updated.extra_auth_params.is_some());
+    }
+
+    // ── create_provider with device_code config ────────────────────
+
+    #[tokio::test]
+    async fn create_provider_device_code_stores_fields() {
+        let Some(db) = connect_test_database("prov_svc_dc_create").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let slug = format!("dc-{}", Uuid::new_v4());
+        let created = super::create_provider(
+            &db,
+            &enc,
+            "DevCode",
+            &slug,
+            "device_code",
+            "admin",
+            "client_secret_post",
+            None,
+            None,
+            Some(super::DeviceCodeProviderInput {
+                authorization_url: "https://auth.example.com/authorize".to_string(),
+                token_url: "https://auth.example.com/token".to_string(),
+                device_code_url: "https://auth.example.com/device/code".to_string(),
+                device_token_url: "https://auth.example.com/device/token".to_string(),
+                device_verification_url: Some("https://auth.example.com/device/verify".to_string()),
+                hosted_callback_url: Some("https://auth.example.com/callback".to_string()),
+                default_scopes: Some(vec!["openid".to_string()]),
+                client_id: Some("dc-client-id".to_string()),
+                client_secret: Some("dc-secret".to_string()),
+                supports_pkce: true,
+            }),
+            None,
+            Some("A device code provider"),
+            None,
+            None,
+            "test",
+            None,
+            Some("openai"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(created.provider_type, "device_code");
+        assert_eq!(
+            created.authorization_url.as_deref(),
+            Some("https://auth.example.com/authorize")
+        );
+        assert_eq!(
+            created.token_url.as_deref(),
+            Some("https://auth.example.com/token")
+        );
+        assert_eq!(
+            created.device_code_url.as_deref(),
+            Some("https://auth.example.com/device/code")
+        );
+        assert_eq!(
+            created.device_token_url.as_deref(),
+            Some("https://auth.example.com/device/token")
+        );
+        assert_eq!(
+            created.device_verification_url.as_deref(),
+            Some("https://auth.example.com/device/verify")
+        );
+        assert_eq!(
+            created.hosted_callback_url.as_deref(),
+            Some("https://auth.example.com/callback")
+        );
+        assert_eq!(created.default_scopes, Some(vec!["openid".to_string()]));
+        assert!(created.client_id_encrypted.is_some());
+        assert!(created.client_secret_encrypted.is_some());
+        assert!(created.supports_pkce);
+        assert_eq!(created.device_code_format, "openai");
+    }
+
+    // ── create_provider with telegram_widget config ────────────────
+
+    #[tokio::test]
+    async fn create_provider_telegram_widget_encrypts_bot_token() {
+        let Some(db) = connect_test_database("prov_svc_tw_create").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let slug = format!("tw-{}", Uuid::new_v4());
+        let created = super::create_provider(
+            &db,
+            &enc,
+            "Telegram",
+            &slug,
+            "telegram_widget",
+            "admin",
+            "client_secret_post",
+            None,
+            None,
+            None,
+            Some(super::TelegramWidgetProviderInput {
+                bot_token: "123456789:ABCdefGHI_jklMNOpqrSTUvwx".to_string(),
+                bot_username: "@NyxTestBot".to_string(),
+            }),
+            None,
+            None,
+            None,
+            "test",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(created.provider_type, "telegram_widget");
+        assert!(
+            created.client_secret_encrypted.is_some(),
+            "bot token should be encrypted"
+        );
+        assert_eq!(
+            created.client_id_param_name.as_deref(),
+            Some("NyxTestBot"),
+            "bot username should be normalized (@ stripped)"
+        );
+    }
+
+    // ── create_provider with extra_auth_params ─────────────────────
+
+    #[tokio::test]
+    async fn create_provider_stores_extra_auth_params() {
+        let Some(db) = connect_test_database("prov_svc_extra_params").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let slug = format!("eap-{}", Uuid::new_v4());
+        let extra = std::collections::HashMap::from([
+            ("access_type".to_string(), "offline".to_string()),
+            ("prompt".to_string(), "consent".to_string()),
+        ]);
+        let created = super::create_provider(
+            &db,
+            &enc,
+            "Extra",
+            &slug,
+            "oauth2",
+            "user",
+            "client_secret_post",
+            Some(super::OAuthProviderInput {
+                authorization_url: "https://auth.example.com/auth".to_string(),
+                token_url: "https://auth.example.com/token".to_string(),
+                revocation_url: None,
+                default_scopes: None,
+                client_id: None,
+                client_secret: None,
+                supports_pkce: false,
+            }),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "test",
+            Some(extra.clone()),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(created.extra_auth_params, Some(extra));
+    }
+
+    // ── create_provider with client_id_param_name ──────────────────
+
+    #[tokio::test]
+    async fn create_provider_stores_client_id_param_name() {
+        let Some(db) = connect_test_database("prov_svc_cidpn").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let slug = format!("cidpn-{}", Uuid::new_v4());
+        let created = super::create_provider(
+            &db,
+            &enc,
+            "TikTok-ish",
+            &slug,
+            "oauth2",
+            "user",
+            "client_secret_post",
+            Some(super::OAuthProviderInput {
+                authorization_url: "https://tiktok.example.com/auth".to_string(),
+                token_url: "https://tiktok.example.com/token".to_string(),
+                revocation_url: None,
+                default_scopes: None,
+                client_id: None,
+                client_secret: None,
+                supports_pkce: false,
+            }),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "test",
+            None,
+            None,
+            Some("client_key"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(created.client_id_param_name.as_deref(), Some("client_key"));
+    }
+
+    // ── seed_default_providers idempotency ─────────────────────────
+
+    #[tokio::test]
+    async fn seed_default_providers_is_idempotent() {
+        let Some(db) = connect_test_database("prov_svc_seed_idem").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        // First call seeds providers
+        super::seed_default_providers(&db, &enc).await.unwrap();
+        let count_1 = db
+            .collection::<ProviderConfig>(COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap();
+        assert!(count_1 > 0, "should have seeded at least one provider");
+
+        // Second call should be a no-op
+        super::seed_default_providers(&db, &enc).await.unwrap();
+        let count_2 = db
+            .collection::<ProviderConfig>(COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap();
+        assert_eq!(count_1, count_2, "idempotent: count must not change");
+    }
+
+    #[tokio::test]
+    async fn seed_default_providers_creates_known_slugs() {
+        let Some(db) = connect_test_database("prov_svc_seed_slugs").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        super::seed_default_providers(&db, &enc).await.unwrap();
+
+        let expected_slugs = [
+            "openai",
+            "openai-codex",
+            "anthropic",
+            "google-ai",
+            "mistral",
+            "cohere",
+            "deepseek",
+            "twitter",
+            "google",
+            "github",
+            "github-pat",
+        ];
+        for slug in expected_slugs {
+            let found = db
+                .collection::<ProviderConfig>(COLLECTION_NAME)
+                .find_one(doc! { "slug": slug })
+                .await
+                .unwrap();
+            assert!(found.is_some(), "expected seeded provider slug: {slug}");
+        }
+    }
+
+    // ── seed_default_services idempotency ──────────────────────────
+
+    #[tokio::test]
+    async fn seed_default_services_is_idempotent() {
+        let Some(db) = connect_test_database("prov_svc_svc_idem").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        // Seed providers first (services depend on them)
+        super::seed_default_providers(&db, &enc).await.unwrap();
+
+        super::seed_default_services(&db, &enc).await.unwrap();
+        let service_col = db.collection::<super::DownstreamService>(super::DOWNSTREAM_SERVICES);
+        let count_1 = service_col.count_documents(doc! {}).await.unwrap();
+        assert!(count_1 > 0, "should have seeded at least one service");
+
+        super::seed_default_services(&db, &enc).await.unwrap();
+        let count_2 = service_col.count_documents(doc! {}).await.unwrap();
+        assert_eq!(count_1, count_2, "idempotent: count must not change");
+    }
+
+    #[tokio::test]
+    async fn seed_default_services_creates_known_slugs() {
+        let Some(db) = connect_test_database("prov_svc_svc_slugs").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        super::seed_default_providers(&db, &enc).await.unwrap();
+        super::seed_default_services(&db, &enc).await.unwrap();
+
+        let service_col = db.collection::<super::DownstreamService>(super::DOWNSTREAM_SERVICES);
+        let expected = ["llm-openai", "llm-anthropic", "llm-google-ai", "api-github"];
+        for slug in expected {
+            let found = service_col.find_one(doc! { "slug": slug }).await.unwrap();
+            assert!(found.is_some(), "expected seeded service slug: {slug}");
+        }
+    }
+
+    // ── delete_provider cascade tests ──────────────────────────────
+
+    #[tokio::test]
+    async fn delete_provider_revokes_user_tokens_and_deletes_credentials() {
+        let Some(db) = connect_test_database("prov_svc_del_cascade").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let slug = format!("del-casc-{}", Uuid::new_v4());
+        let created = super::create_provider(
+            &db,
+            &enc,
+            "Cascade",
+            &slug,
+            "api_key",
+            "admin",
+            "client_secret_post",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "test",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Insert a mock user_provider_token and user_provider_credentials
+        let token_col = db.collection::<mongodb::bson::Document>("user_provider_tokens");
+        token_col
+            .insert_one(doc! {
+                "_id": Uuid::new_v4().to_string(),
+                "user_id": "test-user",
+                "provider_config_id": &created.id,
+                "status": "active",
+            })
+            .await
+            .unwrap();
+
+        let cred_col = db.collection::<mongodb::bson::Document>("user_provider_credentials");
+        cred_col
+            .insert_one(doc! {
+                "_id": Uuid::new_v4().to_string(),
+                "user_id": "test-user",
+                "provider_config_id": &created.id,
+            })
+            .await
+            .unwrap();
+
+        super::delete_provider(&db, &created.id).await.unwrap();
+
+        // Check provider is deactivated
+        let provider = db
+            .collection::<ProviderConfig>(COLLECTION_NAME)
+            .find_one(doc! { "_id": &created.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!provider.is_active);
+
+        // Check token was revoked
+        let token = token_col
+            .find_one(doc! { "provider_config_id": &created.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(token.get_str("status").unwrap(), "revoked");
+
+        // Check credentials were deleted
+        let cred_count = cred_col
+            .count_documents(doc! { "provider_config_id": &created.id })
+            .await
+            .unwrap();
+        assert_eq!(cred_count, 0, "credentials should be deleted");
+    }
+
+    // ── list_providers sorting ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn list_providers_returns_sorted_by_name() {
+        let Some(db) = connect_test_database("prov_svc_list_sort").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+
+        // Create providers with names that sort in a known order
+        for name in ["Zebra", "Apple", "Mango"] {
+            let slug = format!("sort-{}-{}", name.to_lowercase(), Uuid::new_v4());
+            super::create_provider(
+                &db,
+                &enc,
+                name,
+                &slug,
+                "api_key",
+                "admin",
+                "client_secret_post",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                "test",
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        }
+
+        let all = super::list_providers(&db).await.unwrap();
+        let names: Vec<&str> = all.iter().map(|p| p.name.as_str()).collect();
+        let mut sorted_names = names.clone();
+        sorted_names.sort();
+        assert_eq!(
+            names, sorted_names,
+            "list_providers must return sorted by name"
+        );
+    }
+
+    // ── update_provider with extra_auth_params ─────────────────────
+
+    #[tokio::test]
+    async fn update_provider_sets_extra_auth_params() {
+        let Some(db) = connect_test_database("prov_svc_upd_eap").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let slug = format!("upd-eap-{}", Uuid::new_v4());
+        let created = super::create_provider(
+            &db,
+            &enc,
+            "EAP",
+            &slug,
+            "api_key",
+            "admin",
+            "client_secret_post",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "test",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(created.extra_auth_params.is_none());
+
+        let params = std::collections::HashMap::from([("nonce".to_string(), "abc".to_string())]);
+        let updated = super::update_provider(
+            &db,
+            &enc,
+            &created.id,
+            super::ProviderUpdateInput {
+                name: None,
+                description: None,
+                is_active: None,
+                authorization_url: None,
+                token_url: None,
+                revocation_url: None,
+                default_scopes: None,
+                client_id: None,
+                client_secret: None,
+                supports_pkce: None,
+                device_code_url: None,
+                device_token_url: None,
+                device_verification_url: None,
+                hosted_callback_url: None,
+                api_key_instructions: None,
+                api_key_url: None,
+                icon_url: None,
+                documentation_url: None,
+                credential_mode: None,
+                token_endpoint_auth_method: None,
+                extra_auth_params: Some(params.clone()),
+                device_code_format: None,
+                client_id_param_name: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.extra_auth_params, Some(params));
+    }
+
+    // ── update_provider valid credential_mode transitions ──────────
+
+    #[tokio::test]
+    async fn update_provider_allows_valid_credential_mode_changes() {
+        let Some(db) = connect_test_database("prov_svc_upd_valid_cm").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let slug = format!("vcm-{}", Uuid::new_v4());
+        let created = super::create_provider(
+            &db,
+            &enc,
+            "CM",
+            &slug,
+            "oauth2",
+            "admin",
+            "client_secret_post",
+            Some(super::OAuthProviderInput {
+                authorization_url: "https://auth.example.com/auth".to_string(),
+                token_url: "https://auth.example.com/token".to_string(),
+                revocation_url: None,
+                default_scopes: None,
+                client_id: None,
+                client_secret: None,
+                supports_pkce: false,
+            }),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "test",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(created.credential_mode, "admin");
+
+        // admin -> user
+        let updated = super::update_provider(
+            &db,
+            &enc,
+            &created.id,
+            super::ProviderUpdateInput {
+                name: None,
+                description: None,
+                is_active: None,
+                authorization_url: None,
+                token_url: None,
+                revocation_url: None,
+                default_scopes: None,
+                client_id: None,
+                client_secret: None,
+                supports_pkce: None,
+                device_code_url: None,
+                device_token_url: None,
+                device_verification_url: None,
+                hosted_callback_url: None,
+                api_key_instructions: None,
+                api_key_url: None,
+                icon_url: None,
+                documentation_url: None,
+                credential_mode: Some("user".to_string()),
+                token_endpoint_auth_method: None,
+                extra_auth_params: None,
+                device_code_format: None,
+                client_id_param_name: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.credential_mode, "user");
+
+        // user -> both
+        let updated2 = super::update_provider(
+            &db,
+            &enc,
+            &created.id,
+            super::ProviderUpdateInput {
+                name: None,
+                description: None,
+                is_active: None,
+                authorization_url: None,
+                token_url: None,
+                revocation_url: None,
+                default_scopes: None,
+                client_id: None,
+                client_secret: None,
+                supports_pkce: None,
+                device_code_url: None,
+                device_token_url: None,
+                device_verification_url: None,
+                hosted_callback_url: None,
+                api_key_instructions: None,
+                api_key_url: None,
+                icon_url: None,
+                documentation_url: None,
+                credential_mode: Some("both".to_string()),
+                token_endpoint_auth_method: None,
+                extra_auth_params: None,
+                device_code_format: None,
+                client_id_param_name: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated2.credential_mode, "both");
+    }
+
+    // ── update_provider valid device_code_format ───────────────────
+
+    #[tokio::test]
+    async fn update_provider_accepts_valid_device_code_formats() {
+        let Some(db) = connect_test_database("prov_svc_upd_dcf_ok").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let slug = format!("dcf-ok-{}", Uuid::new_v4());
+        let created = super::create_provider(
+            &db,
+            &enc,
+            "DCF",
+            &slug,
+            "api_key",
+            "admin",
+            "client_secret_post",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "test",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(created.device_code_format, "rfc8628");
+
+        for format in ["openai", "rfc8628"] {
+            let updated = super::update_provider(
+                &db,
+                &enc,
+                &created.id,
+                super::ProviderUpdateInput {
+                    name: None,
+                    description: None,
+                    is_active: None,
+                    authorization_url: None,
+                    token_url: None,
+                    revocation_url: None,
+                    default_scopes: None,
+                    client_id: None,
+                    client_secret: None,
+                    supports_pkce: None,
+                    device_code_url: None,
+                    device_token_url: None,
+                    device_verification_url: None,
+                    hosted_callback_url: None,
+                    api_key_instructions: None,
+                    api_key_url: None,
+                    icon_url: None,
+                    documentation_url: None,
+                    credential_mode: None,
+                    token_endpoint_auth_method: None,
+                    extra_auth_params: None,
+                    device_code_format: Some(format.to_string()),
+                    client_id_param_name: None,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(updated.device_code_format, format);
+        }
+    }
+
+    // ── normalize_telegram_bot_username edge cases ──────────────────
+
+    #[test]
+    fn normalize_telegram_bot_username_rejects_at_only() {
+        let err = normalize_telegram_bot_username("@")
+            .expect_err("@ only should be rejected (empty after trim)");
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[test]
+    fn normalize_telegram_bot_username_accepts_max_length() {
+        // 32 chars: start with letter, end with bot
+        let username = format!("A{}bot", "a".repeat(28));
+        assert_eq!(username.len(), 32);
+        let result = normalize_telegram_bot_username(&username).unwrap();
+        assert_eq!(result, username);
+    }
+
+    #[test]
+    fn normalize_telegram_bot_username_accepts_underscores() {
+        let result = normalize_telegram_bot_username("my_cool_bot").unwrap();
+        assert_eq!(result, "my_cool_bot");
+    }
+
+    #[test]
+    fn normalize_telegram_bot_username_rejects_hyphen() {
+        let err =
+            normalize_telegram_bot_username("my-cool-bot").expect_err("hyphens should be rejected");
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    // ── make_test_provider helper checks ───────────────────────────
+
+    #[test]
+    fn make_test_provider_has_expected_defaults() {
+        let p = make_test_provider("test-slug", "api_key");
+        assert_eq!(p.slug, "test-slug");
+        assert_eq!(p.provider_type, "api_key");
+        assert!(p.is_active);
+        assert_eq!(p.credential_mode, "admin");
+        assert_eq!(p.created_by, "system");
+    }
+
+    // ── seed_default_services creates requirements ─────────────────
+
+    #[tokio::test]
+    async fn seed_default_services_creates_provider_requirements() {
+        let Some(db) = connect_test_database("prov_svc_svc_reqs").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        super::seed_default_providers(&db, &enc).await.unwrap();
+        super::seed_default_services(&db, &enc).await.unwrap();
+
+        let req_col = db.collection::<super::ServiceProviderRequirement>(super::REQUIREMENTS);
+        let count = req_col.count_documents(doc! {}).await.unwrap();
+        assert!(count > 0, "should have created at least one requirement");
+
+        // Verify a specific requirement (openai -> llm-openai)
+        let service_col = db.collection::<super::DownstreamService>(super::DOWNSTREAM_SERVICES);
+        if let Some(openai_svc) = service_col
+            .find_one(doc! { "slug": "llm-openai" })
+            .await
+            .unwrap()
+        {
+            let req = req_col
+                .find_one(doc! { "service_id": &openai_svc.id })
+                .await
+                .unwrap();
+            assert!(
+                req.is_some(),
+                "llm-openai should have a provider requirement"
+            );
+            let req = req.unwrap();
+            assert_eq!(req.injection_method, "bearer");
+        }
+    }
+
+    // ── update_provider valid token_endpoint_auth_method ───────────
+
+    #[tokio::test]
+    async fn update_provider_accepts_valid_token_auth_methods() {
+        let Some(db) = connect_test_database("prov_svc_upd_tam").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let slug = format!("tam-{}", Uuid::new_v4());
+        let created = super::create_provider(
+            &db,
+            &enc,
+            "TAM",
+            &slug,
+            "api_key",
+            "admin",
+            "client_secret_post",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "test",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(created.token_endpoint_auth_method, "client_secret_post");
+
+        let updated = super::update_provider(
+            &db,
+            &enc,
+            &created.id,
+            super::ProviderUpdateInput {
+                name: None,
+                description: None,
+                is_active: None,
+                authorization_url: None,
+                token_url: None,
+                revocation_url: None,
+                default_scopes: None,
+                client_id: None,
+                client_secret: None,
+                supports_pkce: None,
+                device_code_url: None,
+                device_token_url: None,
+                device_verification_url: None,
+                hosted_callback_url: None,
+                api_key_instructions: None,
+                api_key_url: None,
+                icon_url: None,
+                documentation_url: None,
+                credential_mode: None,
+                token_endpoint_auth_method: Some("client_secret_basic".to_string()),
+                extra_auth_params: None,
+                device_code_format: None,
+                client_id_param_name: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.token_endpoint_auth_method, "client_secret_basic");
+    }
+
+    // ── Direct-auth seeds skip provider requirements ───────────────
+
+    #[test]
+    fn direct_auth_seeds_have_service_auth_method() {
+        let direct_auth_slugs = [
+            "api-github-pat",
+            "api-telegram-bot",
+            "api-discord-bot",
+            "api-lark-bot",
+            "api-feishu-bot",
+            "aws-cost-explorer",
+        ];
+        for slug in direct_auth_slugs {
+            let seed = DEFAULT_SERVICE_SEEDS
+                .iter()
+                .find(|s| s.service_slug == slug);
+            if let Some(seed) = seed {
+                assert!(
+                    seed.service_auth_method.is_some(),
+                    "direct-auth seed '{slug}' must have a service_auth_method"
+                );
+            }
+        }
+    }
 }
