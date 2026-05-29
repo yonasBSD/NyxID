@@ -387,6 +387,23 @@ TELEGRAM_WEBHOOK_URL=                   # e.g. https://auth.nyxid.dev/api/v1/web
 TELEGRAM_BOT_USERNAME=                  # Bot username without @
 APPROVAL_EXPIRY_INTERVAL_SECS=5         # Interval between expiry sweeps
 
+# OAuth token refresh (optional)
+OAUTH_REFRESH_SWEEP_INTERVAL_SECS=600  # Interval between proactive OAuth refresh sweeps
+                                        # (default 600 = 10 min). 0 disables the sweep
+                                        # (lazy proxy-time refresh still applies). The sweep
+                                        # refreshes multi-connection OAuth access tokens
+                                        # (Google / Lark / GitHub BYO etc.) that expire within
+                                        # OAUTH_REFRESH_SWEEP_WINDOW_SECS so a token stays warm
+                                        # even for services that aren't proxied often, and a
+                                        # dead refresh token surfaces as status="failed"
+                                        # promptly. It does NOT extend refresh-token lifetime:
+                                        # a Google app left in "Testing" status still expires
+                                        # refresh tokens after 7 days (publish the app to fix).
+OAUTH_REFRESH_SWEEP_WINDOW_SECS=900    # How far ahead (seconds) the sweep looks for expiring
+                                        # tokens (default 900 = 15 min). Keep larger than the
+                                        # proxy-time 5-min buffer so the sweep wins for idle
+                                        # services.
+
 # Mobile Push Notifications (optional)
 FCM_SERVICE_ACCOUNT_PATH=               # Path to Firebase service account JSON
 APNS_KEY_PATH=                          # Path to APNs .p8 private key
