@@ -2276,6 +2276,94 @@ pub async fn refresh_user_api_key_in_place(
     Ok(refreshed)
 }
 
+/// Tally of a single proactive refresh sweep, returned for logging/tests.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct RefreshSweepReport {
+    /// Candidate keys that matched the expiring-soon query.
+    pub considered: usize,
+    /// Keys whose access token was refreshed successfully.
+    pub refreshed: usize,
+    /// Keys whose refresh attempt failed (already marked failed in place
+    /// by `refresh_user_api_key_in_place`; counted here for visibility).
+    pub failed: usize,
+}
+
+/// Proactively refresh multi-connection OAuth access tokens that expire
+/// within `window`. Runs on a timer from `main.rs` so a token stays warm
+/// even for services that aren't proxied frequently, and so a dead
+/// refresh token (e.g. a revoked Google grant) surfaces as `status:
+/// "failed"` promptly instead of on the next user proxy attempt.
+///
+/// Scope is intentionally limited to rows that:
+///   - are `credential_type == "oauth2"` and `status == "active"`
+///   - carry both a `refresh_token` and a `connection_id` (the
+///     multi-connection path `refresh_user_api_key_in_place` handles;
+///     legacy `connection_id: null` rows still refresh lazily at proxy
+///     time and are left alone here to avoid the provider-token sync
+///     dance)
+///   - have an `expires_at` at or before `now + window`
+///
+/// This does NOT extend refresh-token lifetime: a Google app left in
+/// "Testing" publishing status still expires its refresh tokens after 7
+/// days, and a connection authorized before refresh tokens were issued
+/// has nothing to refresh. Both cases land as `status: "failed"` here.
+pub async fn refresh_expiring_oauth_keys(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    window: Duration,
+) -> AppResult<RefreshSweepReport> {
+    let deadline = Utc::now() + window;
+    let candidates: Vec<UserApiKey> = db
+        .collection::<UserApiKey>(USER_API_KEYS)
+        .find(doc! {
+            "credential_type": "oauth2",
+            "status": "active",
+            "connection_id": { "$ne": null },
+            "refresh_token_encrypted": { "$ne": null },
+            "expires_at": { "$ne": null, "$lte": bson::DateTime::from_chrono(deadline) },
+        })
+        .await?
+        .try_collect()
+        .await?;
+
+    let mut report = RefreshSweepReport {
+        considered: candidates.len(),
+        ..Default::default()
+    };
+
+    for key in &candidates {
+        match refresh_user_api_key_in_place(db, encryption_keys, key).await {
+            Ok(_) => report.refreshed += 1,
+            Err(error) => {
+                // `refresh_user_api_key_in_place` already persists a
+                // `status: "failed"` + audit event for provider-side
+                // (4xx/Lark-code) failures. Internal errors (decrypt,
+                // network) leave the row active so a later sweep or
+                // proxy-time refresh can retry. Either way, don't let one
+                // bad key abort the rest of the sweep.
+                report.failed += 1;
+                tracing::warn!(
+                    user_id = %key.user_id,
+                    connection_id = ?key.connection_id,
+                    error = %error,
+                    "proactive OAuth refresh failed for key; continuing sweep"
+                );
+            }
+        }
+    }
+
+    if report.considered > 0 {
+        tracing::info!(
+            considered = report.considered,
+            refreshed = report.refreshed,
+            failed = report.failed,
+            "proactive OAuth refresh sweep complete"
+        );
+    }
+
+    Ok(report)
+}
+
 /// Get a user's decrypted token for a provider, with lazy refresh for OAuth tokens.
 pub async fn get_active_token(
     db: &mongodb::Database,
@@ -4395,5 +4483,235 @@ mod tests {
         .unwrap();
         assert_eq!(first.id, second.id);
         assert_eq!(second.label.as_deref(), Some("Updated"));
+    }
+
+    /// Insert a UserApiKey with arbitrary `expires_at`, `connection_id`,
+    /// and `credential_type` so the sweep query can be exercised against
+    /// matching and non-matching rows.
+    #[allow(clippy::too_many_arguments)]
+    async fn insert_oauth_key_with(
+        db: &mongodb::Database,
+        encryption_keys: &crate::crypto::aes::EncryptionKeys,
+        provider_config_id: &str,
+        credential_type: &str,
+        status: &str,
+        connection_id: Option<String>,
+        expires_at: Option<chrono::DateTime<Utc>>,
+        with_refresh_token: bool,
+    ) -> UserApiKey {
+        let now = Utc::now();
+        let refresh_enc = if with_refresh_token {
+            Some(encryption_keys.encrypt(b"stored-refresh").await.unwrap())
+        } else {
+            None
+        };
+        let key = UserApiKey {
+            id: Uuid::new_v4().to_string(),
+            user_id: Uuid::new_v4().to_string(),
+            label: "sweep-key".to_string(),
+            credential_type: credential_type.to_string(),
+            credential_encrypted: None,
+            access_token_encrypted: Some(encryption_keys.encrypt(b"stale").await.unwrap()),
+            refresh_token_encrypted: refresh_enc,
+            token_scopes: None,
+            expires_at,
+            provider_config_id: Some(provider_config_id.to_string()),
+            connection_id,
+            user_oauth_client_id_encrypted: None,
+            user_oauth_client_secret_encrypted: None,
+            status: status.to_string(),
+            last_used_at: None,
+            error_message: None,
+            source: Some("user_created".to_string()),
+            source_id: None,
+            created_at: now,
+            updated_at: now,
+        };
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(&key)
+            .await
+            .unwrap();
+        key
+    }
+
+    #[tokio::test]
+    async fn refresh_sweep_refreshes_only_expiring_matching_keys() {
+        let Some(db) = connect_test_database("refresh_sweep_matches").await else {
+            eprintln!("skipping refresh sweep test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let (token_url, _server) = spawn_token_server(
+            serde_json::json!({
+                "access_token": "fresh-access-token",
+                "expires_in": 3600,
+            }),
+            axum::http::StatusCode::OK,
+        )
+        .await;
+
+        let provider_id = Uuid::new_v4().to_string();
+        let admin_cid_enc = encryption_keys.encrypt(b"admin-client-id").await.unwrap();
+        let provider = make_test_provider(&provider_id, &token_url, Some(admin_cid_enc), None);
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+
+        let now = Utc::now();
+        // Matches: expires in 5 min, well inside a 15-min window.
+        let expiring = insert_oauth_key_with(
+            &db,
+            &encryption_keys,
+            &provider_id,
+            "oauth2",
+            "active",
+            Some(Uuid::new_v4().to_string()),
+            Some(now + Duration::minutes(5)),
+            true,
+        )
+        .await;
+        // Skipped: expires in 2 hours, outside the window.
+        let far_future = insert_oauth_key_with(
+            &db,
+            &encryption_keys,
+            &provider_id,
+            "oauth2",
+            "active",
+            Some(Uuid::new_v4().to_string()),
+            Some(now + Duration::hours(2)),
+            true,
+        )
+        .await;
+        // Skipped: legacy row with no connection_id (lazy path handles it).
+        let legacy = insert_oauth_key_with(
+            &db,
+            &encryption_keys,
+            &provider_id,
+            "oauth2",
+            "active",
+            None,
+            Some(now - Duration::minutes(1)),
+            true,
+        )
+        .await;
+        // Skipped: non-oauth2 credential.
+        let api_key_row = insert_oauth_key_with(
+            &db,
+            &encryption_keys,
+            &provider_id,
+            "api_key",
+            "active",
+            Some(Uuid::new_v4().to_string()),
+            Some(now - Duration::minutes(1)),
+            true,
+        )
+        .await;
+
+        let report =
+            super::refresh_expiring_oauth_keys(&db, &encryption_keys, Duration::minutes(15))
+                .await
+                .expect("sweep should succeed");
+        assert_eq!(
+            report.considered, 1,
+            "only the in-window oauth2 key with a connection_id should be considered"
+        );
+        assert_eq!(report.refreshed, 1);
+        assert_eq!(report.failed, 0);
+
+        // The expiring key's access token was rotated.
+        let updated = db
+            .collection::<UserApiKey>(USER_API_KEYS)
+            .find_one(doc! { "_id": &expiring.id })
+            .await
+            .unwrap()
+            .unwrap();
+        let bytes = encryption_keys
+            .decrypt(updated.access_token_encrypted.as_ref().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(String::from_utf8(bytes).unwrap(), "fresh-access-token");
+
+        // The other three were left untouched (still "stale").
+        for id in [&far_future.id, &legacy.id, &api_key_row.id] {
+            let row = db
+                .collection::<UserApiKey>(USER_API_KEYS)
+                .find_one(doc! { "_id": id })
+                .await
+                .unwrap()
+                .unwrap();
+            let bytes = encryption_keys
+                .decrypt(row.access_token_encrypted.as_ref().unwrap())
+                .await
+                .unwrap();
+            assert_eq!(String::from_utf8(bytes).unwrap(), "stale");
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_sweep_counts_failures_and_continues() {
+        let Some(db) = connect_test_database("refresh_sweep_failures").await else {
+            eprintln!("skipping refresh sweep test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        // Provider returns 401 → every refresh fails.
+        let (token_url, _server) = spawn_token_server(
+            serde_json::json!({"error": "invalid_grant"}),
+            axum::http::StatusCode::UNAUTHORIZED,
+        )
+        .await;
+
+        let provider_id = Uuid::new_v4().to_string();
+        let admin_cid_enc = encryption_keys.encrypt(b"admin-client-id").await.unwrap();
+        let provider = make_test_provider(&provider_id, &token_url, Some(admin_cid_enc), None);
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+
+        let now = Utc::now();
+        let key_a = insert_oauth_key_with(
+            &db,
+            &encryption_keys,
+            &provider_id,
+            "oauth2",
+            "active",
+            Some(Uuid::new_v4().to_string()),
+            Some(now - Duration::minutes(1)),
+            true,
+        )
+        .await;
+        let key_b = insert_oauth_key_with(
+            &db,
+            &encryption_keys,
+            &provider_id,
+            "oauth2",
+            "active",
+            Some(Uuid::new_v4().to_string()),
+            Some(now - Duration::minutes(1)),
+            true,
+        )
+        .await;
+
+        let report =
+            super::refresh_expiring_oauth_keys(&db, &encryption_keys, Duration::minutes(15))
+                .await
+                .expect("sweep itself should not error even when keys fail");
+        assert_eq!(report.considered, 2);
+        assert_eq!(report.refreshed, 0);
+        assert_eq!(report.failed, 2, "both keys should be counted as failed");
+
+        // Both keys persisted as failed (so they won't be retried forever
+        // and the user can see they need to re-auth).
+        for id in [&key_a.id, &key_b.id] {
+            let row = db
+                .collection::<UserApiKey>(USER_API_KEYS)
+                .find_one(doc! { "_id": id })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.status, "failed");
+        }
     }
 }
