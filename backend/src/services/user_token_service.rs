@@ -2079,6 +2079,31 @@ pub async fn refresh_user_api_key_in_place(
     if !response.status().is_success() {
         let now = Utc::now();
         let status = response.status();
+
+        // Transient vs terminal classification (OAuth 2.0 §5.2 error
+        // semantics): a 5xx from the IdP or a 429 rate-limit means the
+        // refresh token is still valid — the token endpoint is just
+        // unavailable right now. Marking the credential `failed` here
+        // would force the user to re-authorize over a momentary blip.
+        // The proactive refresh sweep makes this worse: it touches many
+        // keys on a timer, so a brief provider outage overlapping a sweep
+        // tick could mark a whole cohort `failed` at once. Leave the row
+        // `active` and return a transient error so the next sweep tick or
+        // proxy request retries (the sweep interval is itself the backoff).
+        // Only 4xx client errors (invalid_grant / invalid_client) below
+        // are treated as terminal and written `status: "failed"`.
+        if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            tracing::warn!(
+                api_key_id = %api_key.id,
+                connection_id = ?api_key.connection_id,
+                %status,
+                "Token refresh hit a transient IdP error; leaving key active for retry"
+            );
+            return Err(AppError::Internal(format!(
+                "Token refresh transiently failed with status {status}; left active for retry"
+            )));
+        }
+
         let body = response.text().await.unwrap_or_default();
         // Chinese error strings from Lark / Feishu (the providers most
         // likely to hit this branch) are multi-byte UTF-8 — a naive
@@ -2307,6 +2332,18 @@ pub struct RefreshSweepReport {
 /// "Testing" publishing status still expires its refresh tokens after 7
 /// days, and a connection authorized before refresh tokens were issued
 /// has nothing to refresh. Both cases land as `status: "failed"` here.
+///
+/// Concurrency: `refresh_user_api_key_in_place` is not lock-serialized
+/// against the proxy-time lazy-refresh path (it documents "callers should
+/// not invoke concurrently for the same key"). The expiry-window filter
+/// makes a collision unlikely — a key the proxy just refreshed has a
+/// ~1h expiry and won't match the window — and for non-rotating providers
+/// (Google, LinkedIn) a duplicate refresh is merely a wasted call. If a
+/// rotating-refresh-token provider (Auth0 / Okta / GitHub App style) is
+/// ever added as a BYO catalog entry, a per-credential single-flight lock
+/// shared with the proxy path should be introduced first to avoid a
+/// reuse-detection `invalid_grant` from a sweep+proxy race. Tracked as a
+/// follow-up; not a concern for the current Google / Lark use cases.
 pub async fn refresh_expiring_oauth_keys(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
@@ -3480,6 +3517,52 @@ mod tests {
                 .error_message
                 .as_deref()
                 .is_some_and(|m| m.contains("401"))
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_user_api_key_in_place_leaves_key_active_on_5xx() {
+        // A transient IdP 5xx must NOT mark the credential terminally
+        // failed — the refresh token is still valid and the next attempt
+        // should retry. Otherwise a momentary provider outage (amplified
+        // by the proactive sweep) would force the user to re-authorize.
+        let Some(db) = connect_test_database("refresh_in_place_5xx_transient").await else {
+            eprintln!("skipping refresh_user_api_key_in_place test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let (token_url, _server) = spawn_token_server(
+            serde_json::json!({"error": "temporarily_unavailable"}),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        )
+        .await;
+
+        let provider_id = Uuid::new_v4().to_string();
+        let admin_cid_enc = encryption_keys.encrypt(b"admin-client-id").await.unwrap();
+        let provider = make_test_provider(&provider_id, &token_url, Some(admin_cid_enc), None);
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+
+        let key =
+            insert_pending_user_api_key(&db, &encryption_keys, &provider_id, None, None).await;
+
+        let err = super::refresh_user_api_key_in_place(&db, &encryption_keys, &key)
+            .await
+            .expect_err("expected transient Err on 5xx");
+        assert!(matches!(err, AppError::Internal(_)));
+
+        // Key must remain "active" (not "failed") so a later retry recovers.
+        let updated = db
+            .collection::<UserApiKey>(USER_API_KEYS)
+            .find_one(doc! { "_id": &key.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            updated.status, "active",
+            "a transient 5xx must not terminally fail the credential"
         );
     }
 
