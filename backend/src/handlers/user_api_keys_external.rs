@@ -13,7 +13,8 @@ use crate::errors::{AppError, AppResult};
 use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
 use crate::mw::auth::AuthUser;
 use crate::services::{
-    credential_push_service, org_service, user_api_key_service, user_service_service,
+    credential_push_service, gcp_sa_service, org_service, user_api_key_service,
+    user_service_service,
 };
 
 /// Look up the external API key without an ownership filter and check
@@ -95,6 +96,133 @@ pub struct ExternalApiKeyResponse {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ExternalApiKeyListResponse {
     pub api_keys: Vec<ExternalApiKeyResponse>,
+}
+
+/// Register a Google Cloud service-account JSON key as a proxy
+/// credential. NyxID mints short-lived access tokens from it via
+/// JWT-bearer (no `invalid_rapt`, no human reauth — unlike user OAuth for
+/// Cloud Platform scopes).
+#[derive(Deserialize, ToSchema)]
+pub struct CreateGcpServiceAccountRequest {
+    /// Display label; defaults to the service-account `client_email`.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Raw contents of the Google service-account JSON key file.
+    pub key_json: String,
+    /// OAuth scope(s) to request when minting (space-separated). Defaults
+    /// to `https://www.googleapis.com/auth/cloud-platform`.
+    #[serde(default)]
+    pub scopes: Option<String>,
+    /// Existing service slugs to (re)bind to this credential, e.g.
+    /// `google-bigquery`, `google-cloud-billing`. Each is switched to
+    /// `auth_method: "bearer"` against the new key.
+    #[serde(default)]
+    pub service_slugs: Vec<String>,
+}
+
+impl std::fmt::Debug for CreateGcpServiceAccountRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The key file embeds a private key — never log it.
+        f.debug_struct("CreateGcpServiceAccountRequest")
+            .field("label", &self.label)
+            .field("key_json", &"[REDACTED]")
+            .field("scopes", &self.scopes)
+            .field("service_slugs", &self.service_slugs)
+            .finish()
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/api-keys/external/gcp-service-account",
+    request_body = CreateGcpServiceAccountRequest,
+    responses(
+        (status = 201, description = "Created GCP service-account credential", body = ExternalApiKeyResponse),
+        (status = 400, description = "Invalid service account key", body = crate::errors::ErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse)
+    ),
+    tag = "External API Keys"
+)]
+/// POST /api/v1/api-keys/external/gcp-service-account
+pub async fn create_gcp_service_account_key(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<CreateGcpServiceAccountRequest>,
+) -> AppResult<(StatusCode, Json<ExternalApiKeyResponse>)> {
+    let user_id = auth_user.user_id.to_string();
+
+    // Validate JSON shape and derive a default label up front.
+    let parsed: serde_json::Value = serde_json::from_str(&body.key_json)
+        .map_err(|_| AppError::ValidationError("key_json is not valid JSON".to_string()))?;
+    let client_email = parsed
+        .get("client_email")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let has_private_key = parsed
+        .get("private_key")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty());
+    if client_email.is_empty() || !has_private_key {
+        return Err(AppError::ValidationError(
+            "key_json must be a Google service account key file with client_email and private_key"
+                .to_string(),
+        ));
+    }
+
+    let scope = body
+        .scopes
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(gcp_sa_service::DEFAULT_GCP_SA_SCOPE);
+
+    // Mint once to validate the key actually works before storing it —
+    // catches a disabled / deleted service account or a malformed key
+    // immediately instead of on the user's first proxy request.
+    let minted = gcp_sa_service::mint_access_token(&body.key_json, scope)
+        .await
+        .map_err(|e| {
+            AppError::ValidationError(format!(
+                "Could not mint a token from this service account: {e}"
+            ))
+        })?;
+    let expires_at = chrono::Utc::now() + chrono::Duration::seconds(minted.expires_in_secs);
+
+    let label = body
+        .label
+        .filter(|l| !l.is_empty())
+        .unwrap_or_else(|| client_email.to_string());
+
+    let key = user_api_key_service::create_api_key(
+        &state.db,
+        &state.encryption_keys,
+        &user_id,
+        user_api_key_service::CreateApiKeyParams {
+            label: &label,
+            credential_type: "gcp_service_account",
+            credential: &body.key_json,
+            access_token: Some(&minted.access_token),
+            refresh_token: None,
+            token_scopes: Some(scope),
+            expires_at: Some(expires_at),
+            provider_config_id: None,
+            connection_id: None,
+            oauth_client_id: None,
+            oauth_client_secret: None,
+            status: "active",
+            source: Some("user_created"),
+            source_id: None,
+        },
+    )
+    .await?;
+
+    // Optional: re-point existing services (e.g. google-bigquery,
+    // google-cloud-billing) at this credential.
+    for slug in &body.service_slugs {
+        user_service_service::rebind_user_service_api_key(&state.db, &user_id, slug, &key.id)
+            .await?;
+    }
+
+    Ok((StatusCode::CREATED, Json(external_api_key_response(key))))
 }
 
 #[utoipa::path(
@@ -749,5 +877,97 @@ mod tests {
             err,
             AppError::Conflict(message) if message == "API key is in use by active services"
         ));
+    }
+
+    #[tokio::test]
+    async fn test_create_gcp_service_account_stores_and_rebinds() {
+        use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+
+        let Some(db) = connect_test_database("h_ext_gcp_sa_create").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let state = test_app_state(db.clone());
+
+        let (token_uri, _handle) = spawn_mock_token_server(
+            serde_json::json!({ "access_token": "ya29.minted", "expires_in": 3600 }),
+            axum::http::StatusCode::OK,
+        )
+        .await;
+
+        // A pre-existing service for the rebind target.
+        let svc = test_user_service(
+            &uuid::Uuid::new_v4().to_string(),
+            &user_id,
+            "google-bigquery",
+            &uuid::Uuid::new_v4().to_string(),
+            None,
+            None,
+        );
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(&svc)
+            .await
+            .unwrap();
+
+        let body = CreateGcpServiceAccountRequest {
+            label: Some("GCP Cost Reader".to_string()),
+            key_json: test_gcp_sa_json(&token_uri),
+            scopes: None,
+            service_slugs: vec!["google-bigquery".to_string()],
+        };
+
+        let (status, Json(resp)) =
+            create_gcp_service_account_key(State(state), test_auth_user(&user_id), Json(body))
+                .await
+                .unwrap();
+
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(resp.credential_type, "gcp_service_account");
+        assert_eq!(resp.status, "active");
+
+        // The durable SA key and the minted token are both stored.
+        let stored = db
+            .collection::<UserApiKey>(USER_API_KEYS)
+            .find_one(doc! { "_id": &resp.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.credential_encrypted.is_some());
+        assert!(stored.access_token_encrypted.is_some());
+        assert_eq!(
+            stored.token_scopes.as_deref(),
+            Some("https://www.googleapis.com/auth/cloud-platform")
+        );
+
+        // The named service was re-pointed onto the new key as bearer.
+        let rebound = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! { "slug": "google-bigquery", "user_id": &user_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rebound.api_key_id.as_deref(), Some(resp.id.as_str()));
+        assert_eq!(rebound.auth_method, "bearer");
+    }
+
+    #[tokio::test]
+    async fn test_create_gcp_service_account_rejects_invalid_json() {
+        let Some(db) = connect_test_database("h_ext_gcp_sa_badjson").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let state = test_app_state(db);
+
+        let body = CreateGcpServiceAccountRequest {
+            label: None,
+            key_json: "not json".to_string(),
+            scopes: None,
+            service_slugs: vec![],
+        };
+
+        let result =
+            create_gcp_service_account_key(State(state), test_auth_user(&user_id), Json(body))
+                .await;
+        assert!(matches!(result, Err(AppError::ValidationError(_))));
     }
 }
