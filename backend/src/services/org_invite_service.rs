@@ -413,7 +413,9 @@ mod tests {
         insert_user(&db, &member_id, UserType::Person).await;
         insert_user(&db, &second_member_id, UserType::Person).await;
 
-        let unknown = redeem_invite(&db, "ORGINV-NOTFOUND", &member_id)
+        // A freshly generated invite code that was never persisted -> unknown.
+        let missing_nonce = generate_nonce();
+        let unknown = redeem_invite(&db, &missing_nonce, &member_id)
             .await
             .expect_err("unknown invite rejected");
         assert!(
