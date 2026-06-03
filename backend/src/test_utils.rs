@@ -27,9 +27,21 @@ const TEST_DB_NAME_PREFIX: &str = "nyxid_test_";
 const TEST_DB_UUID_LEN: usize = 36;
 const MAX_TEST_DB_PREFIX_LEN: usize = 63 - TEST_DB_NAME_PREFIX.len() - 1 - TEST_DB_UUID_LEN;
 
-/// Connect to a fresh per-test MongoDB database. Tries a local docker-compose
-/// mongod on 27018 first, then a local CI-style mongod on 27017. Returns
-/// `None` if neither is reachable so integration tests can skip cleanly.
+/// Connect to a fresh per-test MongoDB database.
+///
+/// Probes the dev docker-compose mongod on `127.0.0.1:27018` first (published by
+/// `docker-compose.override.yml`), then the CI-style mongod on `127.0.0.1:27017`
+/// (the GitHub Actions service container). Each candidate is gated by a fast TCP
+/// reachability check, so a port with no listener — e.g. 27018 in CI, or both
+/// ports when no mongod is running locally — is skipped in milliseconds instead
+/// of stalling on the driver's server-selection timeout. Without that pre-check
+/// the dead 27018 probe cost ~10s of server selection on *every* DB-backed test
+/// in CI (where only 27017 exists), which dominated the suite's wall-clock.
+/// Returns `None` when neither is reachable so integration tests skip cleanly.
+///
+/// Deliberately NOT cached: a per-test client is required for correct llvm-cov
+/// coverage measurement — a shared client broke under the runtime-per-test
+/// harness (see #864). The TCP pre-check keeps per-test connects cheap.
 pub(crate) async fn connect_test_database(prefix: &str) -> Option<mongodb::Database> {
     let client = probe_test_mongo_client().await?;
     let db_name = format!(
@@ -41,21 +53,56 @@ pub(crate) async fn connect_test_database(prefix: &str) -> Option<mongodb::Datab
     Some(client.database(&db_name))
 }
 
+/// Returns `true` when a TCP connection to `addr` succeeds quickly. A closed
+/// local port returns `ECONNREFUSED` almost immediately, so this rejects a dead
+/// probe candidate in ~milliseconds rather than paying the mongo server-selection
+/// timeout. The timeout is only an upper bound for the pathological case of a
+/// port that neither accepts nor refuses (not expected on loopback).
+async fn test_mongo_port_reachable(addr: &str) -> bool {
+    matches!(
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            tokio::net::TcpStream::connect(addr),
+        )
+        .await,
+        Ok(Ok(_))
+    )
+}
+
 async fn probe_test_mongo_client() -> Option<mongodb::Client> {
     let db_name = format!("nyxid_test_probe_{}", uuid::Uuid::new_v4());
+    // (tcp address, client URI). 27018 is the dev docker-compose port; 27017 is
+    // the CI service-container port. Probe order is no longer load-bearing — the
+    // TCP pre-check below skips whichever candidate has no listener.
     let candidates = [
-        format!(
-            "mongodb://nyxid:nyxid_dev_password@127.0.0.1:27018/{db_name}?authSource=admin&directConnection=true"
+        (
+            "127.0.0.1:27018",
+            format!(
+                "mongodb://nyxid:nyxid_dev_password@127.0.0.1:27018/{db_name}?authSource=admin&directConnection=true"
+            ),
         ),
-        format!("mongodb://127.0.0.1:27017/{db_name}?directConnection=true"),
+        (
+            "127.0.0.1:27017",
+            format!("mongodb://127.0.0.1:27017/{db_name}?directConnection=true"),
+        ),
     ];
 
-    for uri in candidates {
+    for (addr, uri) in candidates {
+        // Fast-fail a port with no listener instead of blocking on server
+        // selection before falling over to the next candidate.
+        if !test_mongo_port_reachable(addr).await {
+            continue;
+        }
+
         let Ok(mut options) = mongodb::options::ClientOptions::parse(&uri).await else {
             continue;
         };
-        options.server_selection_timeout = Some(Duration::from_secs(10));
-        options.connect_timeout = Some(Duration::from_secs(5));
+        // The TCP pre-check already confirmed a listener, so a healthy mongod is
+        // selected well within these bounds; they only cap the rare case where a
+        // port accepts TCP but never answers (down from 10s/5s, which the dead
+        // 27018 probe used to pay in full on every CI test).
+        options.server_selection_timeout = Some(Duration::from_secs(2));
+        options.connect_timeout = Some(Duration::from_secs(2));
         options.max_pool_size = Some(1);
         let Ok(client) = mongodb::Client::with_options(options) else {
             continue;
@@ -498,5 +545,35 @@ pub(crate) fn test_user_service(
         source_app_id: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    /// Guards the per-test mongo probe against the CI slowdown regression: a
+    /// candidate port with no listener must fail over in ~milliseconds, not stall
+    /// on the driver's server-selection timeout. (In CI only 27017 is published,
+    /// so the 27018 candidate is dead — without the TCP pre-check every DB test
+    /// paid ~10s here.) Uses a freshly-closed ephemeral port so the assertion is
+    /// deterministic and needs no running mongod.
+    #[tokio::test]
+    async fn closed_port_probe_fails_fast() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("local addr").to_string();
+        drop(listener); // port now has no listener -> connect refused immediately
+
+        let start = Instant::now();
+        let reachable = test_mongo_port_reachable(&addr).await;
+        let elapsed = start.elapsed();
+
+        assert!(!reachable, "a closed port must be reported unreachable");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "closed-port probe must fail fast (got {elapsed:?}); a dead candidate \
+             must not block on the mongo server-selection timeout"
+        );
     }
 }
