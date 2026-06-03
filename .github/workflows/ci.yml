@@ -168,11 +168,13 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Rust: backend build + test
-  # Handler + service tests call `connect_test_database` which probes a local
-  # MongoDB on 27017 (no auth) then 27018 (auth, used by the dev docker-compose
-  # override) and skips when neither is reachable. The service container below
-  # satisfies the 27017 probe so those tests actually run instead of silently
-  # skipping.
+  # Handler + service tests call `connect_test_database`, which probes the dev
+  # docker-compose mongod on 27018 first, then this CI service container on 27017,
+  # and skips when neither is reachable. A fast TCP pre-check in the harness skips
+  # the absent 27018 port (no dev override in CI) in milliseconds instead of
+  # stalling ~10s on the mongo server-selection timeout per test. The 27017
+  # service container below satisfies the probe so those tests actually run
+  # instead of silently skipping.
   # ---------------------------------------------------------------------------
   backend-test:
     name: Backend Test
