@@ -23,30 +23,40 @@ use crate::services::node_ws_manager::NodeWsManager;
 use crate::services::provider_token_exchange_service::TokenExchangeCache;
 use crate::services::ssh_service::SshSessionManager;
 
-/// Connect to a fresh per-test MongoDB database. Tries a plain local mongod
-/// docker-compose override on 27018 first, then a plain local mongod
-/// (standard port, no auth — matches CI's service container). Returns `None`
-/// if neither is reachable
-/// so integration tests can skip cleanly in environments without a running
-/// MongoDB.
-///
-/// The probe uses short server-selection / connect timeouts so a missing
-/// MongoDB fails the test quickly instead of the driver's
-/// 30s default per URI (which previously made absence-of-mongo look like
-/// a ~60s-per-test hang in CI before the tests eventually skipped).
+const TEST_DB_NAME_PREFIX: &str = "nyxid_test_";
+const TEST_DB_UUID_LEN: usize = 36;
+const MAX_TEST_DB_PREFIX_LEN: usize = 63 - TEST_DB_NAME_PREFIX.len() - 1 - TEST_DB_UUID_LEN;
+
+/// Connect to a fresh per-test MongoDB database. Tries a local docker-compose
+/// mongod on 27018 first, then a local CI-style mongod on 27017. Returns
+/// `None` if neither is reachable so integration tests can skip cleanly.
 pub(crate) async fn connect_test_database(prefix: &str) -> Option<mongodb::Database> {
-    let db_name = format!("nyxid_test_{prefix}_{}", uuid::Uuid::new_v4());
+    let client = probe_test_mongo_client().await?;
+    let db_name = format!(
+        "{TEST_DB_NAME_PREFIX}{}_{}",
+        sanitize_test_db_prefix(prefix),
+        uuid::Uuid::new_v4()
+    );
+
+    Some(client.database(&db_name))
+}
+
+async fn probe_test_mongo_client() -> Option<mongodb::Client> {
+    let db_name = format!("nyxid_test_probe_{}", uuid::Uuid::new_v4());
     let candidates = [
-        format!("mongodb://nyxid:nyxid_dev_password@127.0.0.1:27018/{db_name}?authSource=admin"),
-        format!("mongodb://127.0.0.1:27017/{db_name}"),
+        format!(
+            "mongodb://nyxid:nyxid_dev_password@127.0.0.1:27018/{db_name}?authSource=admin&directConnection=true"
+        ),
+        format!("mongodb://127.0.0.1:27017/{db_name}?directConnection=true"),
     ];
 
     for uri in candidates {
         let Ok(mut options) = mongodb::options::ClientOptions::parse(&uri).await else {
             continue;
         };
-        options.server_selection_timeout = Some(Duration::from_secs(5));
-        options.connect_timeout = Some(Duration::from_secs(2));
+        options.server_selection_timeout = Some(Duration::from_secs(10));
+        options.connect_timeout = Some(Duration::from_secs(5));
+        options.max_pool_size = Some(1);
         let Ok(client) = mongodb::Client::with_options(options) else {
             continue;
         };
@@ -67,11 +77,31 @@ pub(crate) async fn connect_test_database(prefix: &str) -> Option<mongodb::Datab
                 probe.delete_one(doc! { "_id": "probe" }),
             )
             .await;
-            return Some(db);
+            return Some(client);
         }
     }
 
     None
+}
+
+fn sanitize_test_db_prefix(prefix: &str) -> String {
+    let sanitized: String = prefix
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .take(MAX_TEST_DB_PREFIX_LEN)
+        .collect();
+
+    if sanitized.is_empty() {
+        "db".to_string()
+    } else {
+        sanitized
+    }
 }
 
 /// Build an `AppConfig` suitable for unit tests that need access to the
@@ -219,6 +249,11 @@ fn generate_test_jwt_keys() -> JwtKeys {
 /// Build a minimal `AppState` for handler tests.
 pub(crate) fn test_app_state(db: mongodb::Database) -> AppState {
     let config = test_app_config();
+    test_app_state_with_config(db, config)
+}
+
+/// Build an `AppState` with a caller-provided config for pure handler tests.
+pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfig) -> AppState {
     let http_client = reqwest::Client::new();
     let jwt_keys = cached_test_jwt_keys();
 
@@ -269,6 +304,14 @@ pub(crate) fn test_app_state(db: mongodb::Database) -> AppState {
         ),
         telemetry: None,
     }
+}
+
+/// Build an `AppState` for tests that never perform MongoDB operations.
+pub(crate) async fn test_app_state_no_db() -> AppState {
+    let client = mongodb::Client::with_uri_str("mongodb://localhost:27017")
+        .await
+        .expect("build inert test MongoDB client");
+    test_app_state(client.database("nyxid_unit_unused"))
 }
 
 /// Build a permissive session-auth `AuthUser` for handler tests.
