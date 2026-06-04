@@ -22,7 +22,7 @@ use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{AuthMethod, AuthUser};
 use crate::services::{
     approval_service, audit_service, node_routing_service, node_service, notification_service,
-    ssh_service, user_service_service,
+    operation_descriptor, ssh_service, user_service_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -912,6 +912,19 @@ pub(crate) async fn authorize_ssh_access(
     auth_user: &AuthUser,
     service_id: &str,
 ) -> AppResult<()> {
+    let operation = operation_descriptor::build_ssh_descriptor(
+        operation_descriptor::SshOperationKind::Tunnel,
+        None,
+    );
+    authorize_ssh_access_for_operation(state, auth_user, service_id, &operation).await
+}
+
+pub(crate) async fn authorize_ssh_access_for_operation(
+    state: &AppState,
+    auth_user: &AuthUser,
+    service_id: &str,
+    operation: &operation_descriptor::OperationDescriptor,
+) -> AppResult<()> {
     let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
     let service = fetch_service(state, service_id).await?;
     if !service.is_active {
@@ -952,105 +965,78 @@ pub(crate) async fn authorize_ssh_access(
             &approval_owner_user_id
         }
     };
-    let approval_resolution = approval_service::resolve_org_aware_approval(
+    let approval_outcome = approval_service::evaluate_and_check(
         &state.db,
         &approval_owner_user_id,
         owner_for_resolution,
         service_id,
+        operation,
+        auth_user.approval_requester_type(),
+        &auth_user.approval_requester_id(),
+        auth_user.auth_method == AuthMethod::Session,
     )
     .await?;
 
-    if approval_resolution.required && auth_user.auth_method != AuthMethod::Session {
-        let requester_type = auth_user.approval_requester_type().ok_or_else(|| {
-            AppError::Forbidden("Session auth does not require approval".to_string())
-        })?;
-
-        let primary_owner = &approval_resolution.primary_owner_user_id;
-
-        // In grant mode, check for existing grant first.
-        // In per_request mode, skip grant check -- every request needs fresh approval.
-        let has_grant = if approval_resolution.mode
-            == crate::models::service_approval_config::ApprovalMode::Grant
-        {
-            // Org-policy grants are org-scoped (see ChronoAIProject/NyxID#364)
-            // -- pass the flag through so a grant minted by one member's call
-            // is reused when any other member of the same org opens a tunnel.
-            approval_service::check_approval(
-                &state.db,
-                primary_owner,
-                service_id,
-                requester_type,
-                &auth_user.approval_requester_id(),
-                approval_resolution.from_org_policy,
-            )
-            .await?
-        } else {
-            false
-        };
-
-        if !has_grant {
-            // Org policy with no admins MUST fail closed -- otherwise the
-            // requesting member would end up in `notify_user_ids` and could
-            // self-approve their own org-gated request.
-            let notify_user_ids: Vec<String> = if approval_resolution.from_org_policy {
-                let mut admins =
-                    crate::services::org_service::list_admin_user_ids(&state.db, primary_owner)
-                        .await?;
-                admins.sort();
-                admins.dedup();
-                if admins.is_empty() {
-                    return Err(AppError::OrgApprovalNoAdmin(format!(
-                        "Org {primary_owner} has an approval policy on this service but no active admins to decide. Add an admin to the org and retry."
-                    )));
-                }
-                admins
-            } else {
-                vec![approval_owner_user_id.clone()]
-            };
-
-            let timeout_recipient = notify_user_ids.first().cloned().ok_or_else(|| {
-                AppError::Internal("approval recipient list unexpectedly empty".to_string())
-            })?;
-            let channel =
-                notification_service::get_or_create_channel(&state.db, &timeout_recipient).await?;
-            let timeout_secs = channel.approval_timeout_secs;
-            let approval_service_slug =
-                resolve_ssh_approval_service_slug(&state.db, owner_for_resolution, &service)
-                    .await?;
-            let approval_request = approval_service::create_approval_request(
-                &state.db,
-                &state.config,
-                &state.http_client,
-                state.fcm_auth.as_deref(),
-                state.apns_auth.as_deref(),
-                primary_owner,
-                service_id,
-                &service.name,
-                &approval_service_slug,
-                requester_type,
-                &auth_user.approval_requester_id(),
-                None,
-                "ssh:tunnel",
-                None,
-                approval_resolution.mode.clone(),
-                timeout_secs,
-                notify_user_ids,
-                approval_resolution.from_org_policy,
-            )
-            .await?;
-
-            let req_id = approval_request.id.clone();
-            approval_service::wait_for_decision(&state.db, &approval_request.id, timeout_secs)
-                .await
-                .map_err(|error| {
-                    approval_service::map_wait_for_decision_error(
-                        error,
-                        &req_id,
-                        &state.config.frontend_url,
-                    )
-                })?;
+    let pending = match approval_outcome {
+        approval_service::ApprovalOutcome::Allowed { .. } => return Ok(()),
+        approval_service::ApprovalOutcome::Denied => {
+            return Err(AppError::Forbidden(
+                "Operation denied by approval policy".to_string(),
+            ));
         }
-    }
+        approval_service::ApprovalOutcome::NeedsApproval(pending) => pending,
+    };
+
+    let notify_user_ids = approval_service::approval_notification_recipients(
+        &state.db,
+        &approval_owner_user_id,
+        &pending,
+    )
+    .await?;
+
+    let timeout_recipient = notify_user_ids.first().cloned().ok_or_else(|| {
+        AppError::Internal("approval recipient list unexpectedly empty".to_string())
+    })?;
+    let channel =
+        notification_service::get_or_create_channel(&state.db, &timeout_recipient).await?;
+    let timeout_secs = channel.approval_timeout_secs;
+    let approval_service_slug =
+        resolve_ssh_approval_service_slug(&state.db, owner_for_resolution, &service).await?;
+    let request_operation = approval_service::ApprovalRequestOperation::from_descriptor(
+        operation,
+        pending.resolution.grant_scope.clone(),
+    );
+    let approval_request = approval_service::create_approval_request(
+        &state.db,
+        &state.config,
+        &state.http_client,
+        state.fcm_auth.as_deref(),
+        state.apns_auth.as_deref(),
+        &pending.primary_owner_user_id,
+        service_id,
+        &service.name,
+        &approval_service_slug,
+        &pending.requester_type,
+        &pending.requester_id,
+        None,
+        request_operation,
+        pending.resolution.mode.clone(),
+        timeout_secs,
+        notify_user_ids,
+        pending.resolution.from_org_policy,
+    )
+    .await?;
+
+    let req_id = approval_request.id.clone();
+    approval_service::wait_for_decision(&state.db, &approval_request.id, timeout_secs)
+        .await
+        .map_err(|error| {
+            approval_service::map_wait_for_decision_error(
+                error,
+                &req_id,
+                &state.config.frontend_url,
+            )
+        })?;
 
     Ok(())
 }
