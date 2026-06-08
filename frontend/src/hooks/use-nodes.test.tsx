@@ -14,12 +14,20 @@ import {
   useMyNodeBindings,
   useNode,
   useNodeAdmins,
+  useNodePendingCredentialPubkey,
   useNodePendingCredentials,
   useNodes,
+  usePostNodePendingCredentialCiphertext,
+  usePostFanOutCiphertexts,
   usePushNodeCredential,
+  usePushNodeCredentialFanOut,
+  useFanOutPendingCredential,
+  useFanOutPendingCredentialPubkeys,
+  useRetryFailedFanOutNodes,
   useRotateNodeToken,
   useTransferNode,
 } from "./use-nodes";
+import type { CiphertextEnvelope } from "@/lib/crypto";
 
 const { mockDelete, mockGet, mockPost } = vi.hoisted(() => ({
   mockDelete: vi.fn(),
@@ -127,6 +135,72 @@ describe("node queries", () => {
     expect(mockGet).toHaveBeenCalledWith("/nodes/node-1/credentials/pending");
     expect(on.result.current.data).toEqual([{ id: "pc-1" }]);
   });
+
+  it("useNodePendingCredentials includes history in both URL and cache key", async () => {
+    mockGet.mockResolvedValue({ pending_credentials: [{ id: "pc-old" }] });
+    const { result, rerender } = renderHook(
+      ({ includeHistory }: { readonly includeHistory: boolean }) =>
+        useNodePendingCredentials("node-1", true, includeHistory),
+      {
+        initialProps: { includeHistory: false },
+        wrapper: createWrapper(),
+      },
+    );
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(mockGet).toHaveBeenCalledWith("/nodes/node-1/credentials/pending");
+
+    rerender({ includeHistory: true });
+    await waitFor(() =>
+      expect(mockGet).toHaveBeenCalledWith(
+        "/nodes/node-1/credentials/pending?include_history=true",
+      ),
+    );
+    expect(mockGet).toHaveBeenCalledWith(
+      "/nodes/node-1/credentials/pending?include_history=true",
+    );
+  });
+
+  it("useNodePendingCredentialPubkey GETs the pending pubkey endpoint", async () => {
+    mockGet.mockResolvedValue({
+      pending_id: "pc-1",
+      node_id: "node-1",
+      service_slug: "openai",
+      version: "v1",
+      node_pubkey: "abc",
+    });
+
+    const { result } = renderHook(
+      () => useNodePendingCredentialPubkey("node-1", "pc-1"),
+      { wrapper: createWrapper() },
+    );
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(mockGet).toHaveBeenCalledWith(
+      "/nodes/node-1/credentials/pending/pc-1",
+    );
+    expect(result.current.data?.node_pubkey).toBe("abc");
+  });
+
+  it("fan-out status and pubkey queries use fanout-only cache keys and paths", async () => {
+    mockGet.mockResolvedValue({ fanout_id: "fo-1", targets: [] });
+    const status = renderHook(() => useFanOutPendingCredential("fo-1"), {
+      wrapper: createWrapper(),
+    });
+    await waitFor(() => expect(status.result.current.isSuccess).toBe(true));
+    expect(mockGet).toHaveBeenCalledWith(
+      "/nodes/credentials/pending/fo-1/fan-out",
+    );
+
+    mockGet.mockResolvedValue({ fanout_id: "fo-1", targets: [] });
+    const pubkeys = renderHook(() => useFanOutPendingCredentialPubkeys("fo-1"), {
+      wrapper: createWrapper(),
+    });
+    await waitFor(() => expect(pubkeys.result.current.isSuccess).toBe(true));
+    expect(mockGet).toHaveBeenCalledWith(
+      "/nodes/credentials/pending/fo-1/fan-out/pubkeys",
+    );
+  });
 });
 
 describe("node mutations", () => {
@@ -186,6 +260,100 @@ describe("node mutations", () => {
     expect(mockPost).toHaveBeenCalledWith("/nodes/node-1/credentials/push", {
       service_slug: "openai",
     });
+  });
+
+  it("usePushNodeCredentialFanOut POSTs metadata only", async () => {
+    mockPost.mockResolvedValue({ fanout_id: "fo-1", targets: [] });
+    const { result } = renderHook(() => usePushNodeCredentialFanOut(), {
+      wrapper: createWrapper(),
+    });
+    await result.current.mutateAsync({
+      owner_user_id: "owner-1",
+      service_id: "svc-1",
+      service_slug: "openai",
+      injection_method: "header",
+      field_name: "Authorization",
+      remote_crypto: true,
+    });
+    expect(mockPost).toHaveBeenCalledWith("/nodes/credentials/push/fan-out", {
+      owner_user_id: "owner-1",
+      service_id: "svc-1",
+      service_slug: "openai",
+      injection_method: "header",
+      field_name: "Authorization",
+      remote_crypto: true,
+    });
+  });
+
+  it("usePostNodePendingCredentialCiphertext POSTs only the ciphertext envelope", async () => {
+    mockPost.mockResolvedValue({
+      delivery_status: "sent",
+      remote_state: "ciphertext_received",
+    });
+    const envelope: CiphertextEnvelope = {
+      version: "v1",
+      admin_pubkey: "admin-key",
+      nonce: "nonce",
+      ciphertext: "ciphertext",
+    };
+    const { result } = renderHook(
+      () => usePostNodePendingCredentialCiphertext("node-1", "pc-1"),
+      { wrapper: createWrapper() },
+    );
+
+    await result.current.mutateAsync(envelope);
+
+    expect(mockPost).toHaveBeenCalledWith(
+      "/nodes/node-1/credentials/pending/pc-1/ciphertext",
+      envelope,
+    );
+    const body = mockPost.mock.calls[0]![1] as Record<string, unknown>;
+    for (const forbidden of ["secret", "credential", "token", "value"]) {
+      expect(body).not.toHaveProperty(forbidden);
+    }
+  });
+
+  it("usePostFanOutCiphertexts and retry use safe paths and no plaintext keys", async () => {
+    mockPost.mockResolvedValue({
+      fanout_id: "fo-1",
+      fan_out_revision: 2,
+      remote_state: "ciphertext_received",
+      targets: [],
+    });
+    const envelope: CiphertextEnvelope = {
+      version: "v1",
+      admin_pubkey: "admin-key",
+      nonce: "nonce",
+      ciphertext: "ciphertext",
+    };
+    const { result } = renderHook(() => usePostFanOutCiphertexts("fo-1"), {
+      wrapper: createWrapper(),
+    });
+    await result.current.mutateAsync({
+      fan_out_revision: 1,
+      items: [{ node_id: "node-1", generation: 0, ...envelope }],
+    });
+    expect(mockPost).toHaveBeenCalledWith(
+      "/nodes/credentials/pending/fo-1/fan-out/ciphertexts",
+      {
+        fan_out_revision: 1,
+        items: [{ node_id: "node-1", generation: 0, ...envelope }],
+      },
+    );
+
+    const retry = renderHook(() => useRetryFailedFanOutNodes("fo-1"), {
+      wrapper: createWrapper(),
+    });
+    await retry.result.current.mutateAsync({ fan_out_revision: 2 });
+    expect(mockPost).toHaveBeenCalledWith(
+      "/nodes/credentials/pending/fo-1/fan-out/retry-failed",
+      { fan_out_revision: 2 },
+    );
+
+    const calls = JSON.stringify(mockPost.mock.calls);
+    for (const forbidden of ["plaintext", "secret-value", "raw-secret"]) {
+      expect(calls).not.toContain(forbidden);
+    }
   });
 
   it("useCancelNodePendingCredential DELETEs the pending credential by id", async () => {

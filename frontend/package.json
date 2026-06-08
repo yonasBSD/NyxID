@@ -8,7 +8,8 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && vite build && vite build --config vite.credential-accept.config.ts",
+    "build:credential-accept": "vite build --config vite.credential-accept.config.ts",
     "build:wizard": "tsc -b && vite build --config vite.wizard.config.ts && node scripts/install-wizard-bundle.mjs",
     "lint": "eslint .",
     "preview": "vite preview",
@@ -18,6 +19,9 @@
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",
+    "@noble/ciphers": "^2.2.0",
+    "@noble/curves": "^2.2.0",
+    "@noble/hashes": "^2.2.0",
     "@radix-ui/react-avatar": "^1.1.11",
     "@radix-ui/react-checkbox": "^1.3.3",
     "@radix-ui/react-dialog": "^1.1.15",

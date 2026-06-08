@@ -16,6 +16,10 @@ export interface NodeMetricsInfo {
   readonly last_success_at: string | null;
 }
 
+export interface NodeCapabilitiesInfo {
+  readonly remote_credential_crypto_v1?: boolean;
+}
+
 export interface NodeOwnerInfo {
   readonly kind: "user" | "org";
   readonly id: string;
@@ -39,6 +43,7 @@ export interface NodeInfo {
   readonly connected_at: string | null;
   readonly metadata: NodeMetadata | null;
   readonly metrics: NodeMetricsInfo | null;
+  readonly capabilities?: NodeCapabilitiesInfo | null;
   readonly binding_count: number;
   readonly created_at: string;
 }
@@ -77,6 +82,16 @@ export type NodePendingCredentialInjectionMethod =
   | "query-param"
   | "path-prefix";
 
+export type NodePendingCredentialRemoteState =
+  | "pubkey_posted"
+  | "ciphertext_received"
+  | "ciphertext_queued"
+  | "consumed"
+  | "partial_decrypted"
+  | "decrypt_failed"
+  | "expired"
+  | "declined";
+
 export interface NodePendingCredentialInfo {
   readonly id: string;
   readonly node_id: string;
@@ -91,11 +106,74 @@ export interface NodePendingCredentialInfo {
   readonly expires_at: string;
   readonly consumed_at?: string;
   readonly declined_at?: string;
+  readonly remote_state?: NodePendingCredentialRemoteState | null;
   readonly is_active: boolean;
 }
 
 export interface NodePendingCredentialsResponse {
   readonly pending_credentials: readonly NodePendingCredentialInfo[];
+}
+
+export interface NodePendingCredentialPubkeyResponse {
+  readonly pending_id: string;
+  readonly node_id: string;
+  readonly service_slug: string;
+  readonly version: "v1";
+  readonly node_pubkey: string;
+  readonly remote_state?: NodePendingCredentialRemoteState | null;
+  readonly integrity_verification_opt_out: boolean;
+}
+
+export interface NodePendingCredentialCiphertextResponse {
+  readonly delivery_status: "sent" | "queued";
+  readonly remote_state: NodePendingCredentialRemoteState;
+  readonly error_code?: number;
+}
+
+export interface FanOutTargetInfo {
+  readonly node_id: string;
+  readonly generation: number;
+  readonly remote_state?: NodePendingCredentialRemoteState | null;
+  readonly delivery_status?: "sent" | "queued" | null;
+  readonly error_code?: number | null;
+  readonly error_kind?: string | null;
+}
+
+export interface FanOutPendingCredentialResponse {
+  readonly fanout_id: string;
+  readonly fan_out_revision: number;
+  readonly target_count: number;
+  readonly service_slug: string;
+  readonly injection_method: NodePendingCredentialInjectionMethod;
+  readonly field_name: string;
+  readonly target_url?: string | null;
+  readonly label?: string | null;
+  readonly remote_state?: NodePendingCredentialRemoteState | null;
+  readonly targets: readonly FanOutTargetInfo[];
+}
+
+export interface FanOutPendingCredentialPubkeyTarget {
+  readonly node_id: string;
+  readonly generation: number;
+  readonly version: "v1";
+  readonly node_pubkey?: string | null;
+  readonly remote_state?: NodePendingCredentialRemoteState | null;
+  readonly error_code?: number | null;
+}
+
+export interface FanOutPendingCredentialPubkeysResponse {
+  readonly fanout_id: string;
+  readonly fan_out_revision: number;
+  readonly target_count: number;
+  readonly integrity_verification_opt_out: boolean;
+  readonly targets: readonly FanOutPendingCredentialPubkeyTarget[];
+}
+
+export interface FanOutPendingCredentialCiphertextResponse {
+  readonly fanout_id: string;
+  readonly fan_out_revision: number;
+  readonly remote_state: NodePendingCredentialRemoteState;
+  readonly targets: readonly FanOutTargetInfo[];
 }
 
 export interface AdminNodeInfo {

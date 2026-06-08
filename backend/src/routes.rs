@@ -538,12 +538,45 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
             post(handlers::node_admin::push_pending_credential),
         )
         .route(
+            "/credentials/push/fan-out",
+            post(handlers::node_admin::push_pending_credential_fan_out),
+        )
+        .route(
+            "/credentials/pending/{fanout_id}/fan-out",
+            get(handlers::node_admin::get_fan_out_pending_credential),
+        )
+        .route(
+            "/credentials/pending/{fanout_id}/fan-out/pubkeys",
+            get(handlers::node_admin::get_fan_out_pending_credential_pubkeys),
+        )
+        .route(
+            "/credentials/pending/{fanout_id}/fan-out/ciphertexts",
+            post(handlers::node_admin::post_fan_out_pending_credential_ciphertexts).layer(
+                DefaultBodyLimit::max(
+                    crate::services::node_pending_credential_service::MAX_FAN_OUT_HTTP_BODY_BYTES,
+                ),
+            ),
+        )
+        .route(
+            "/credentials/pending/{fanout_id}/fan-out/retry-failed",
+            post(handlers::node_admin::retry_failed_fan_out_pending_credential),
+        )
+        .route(
             "/{node_id}/credentials/pending",
             get(handlers::node_admin::list_pending_credentials),
         )
         .route(
             "/{node_id}/credentials/pending/{pending_id}",
-            delete(handlers::node_admin::cancel_pending_credential),
+            get(handlers::node_admin::get_pending_credential_pubkey)
+                .delete(handlers::node_admin::cancel_pending_credential),
+        )
+        .route(
+            "/{node_id}/credentials/pending/{pending_id}/remote-crypto",
+            post(handlers::node_admin::init_pending_credential_remote_crypto),
+        )
+        .route(
+            "/{node_id}/credentials/pending/{pending_id}/ciphertext",
+            post(handlers::node_admin::post_pending_credential_ciphertext),
         )
         .route("/{node_id}/admins", get(handlers::node_admin::list_admins))
         .route(
@@ -929,6 +962,18 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
         .route("/health", get(handlers::health::health_check))
         .route("/llms.txt", get(handlers::llms_txt::llms_txt))
         .route("/llms-full.txt", get(handlers::llms_txt::llms_full_txt))
+        .route(
+            "/nodes/{node_id}/credentials/pending/{pending_id}/accept",
+            get(handlers::credential_accept::accept_page),
+        )
+        .route(
+            "/nodes/credentials/pending/{pending_id}/fan-out/accept",
+            get(handlers::credential_accept::fan_out_accept_page),
+        )
+        .route(
+            "/credential-accept/assets/{*file}",
+            get(handlers::credential_accept::asset),
+        )
         .nest("/api/v1/webhooks", webhook_routes)
         // Channel bot webhook routes -- unauthenticated (per-bot signature verified)
         .route(
