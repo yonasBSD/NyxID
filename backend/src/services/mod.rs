@@ -1,6 +1,7 @@
 pub mod action_description;
 pub mod admin_user_service;
 pub mod agent_binding_service;
+pub mod anonymous_endpoint_service;
 pub mod api_docs_service;
 pub mod approval_policy;
 pub mod approval_service;
@@ -60,6 +61,7 @@ pub mod org_slug;
 pub mod par_service;
 pub mod provider_service;
 pub mod provider_token_exchange_service;
+pub mod proxy_discovery_service;
 pub mod proxy_service;
 pub mod push_service;
 pub mod rbac_helpers;

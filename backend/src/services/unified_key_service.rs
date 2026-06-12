@@ -1117,6 +1117,7 @@ pub async fn create_key(
             ws_frame_injections: Vec::new(),
             developer_app_ids: None,
             token_exchange_config: None,
+            anonymous_endpoints: Vec::new(),
             created_at: now,
             updated_at: now,
         };
@@ -3252,6 +3253,7 @@ mod tests {
             ws_frame_injections: Vec::new(),
             developer_app_ids: None,
             token_exchange_config: None,
+            anonymous_endpoints: Vec::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -4642,6 +4644,30 @@ mod tests {
         assert!(!identity.identity_include_user_id);
         assert!(!identity.identity_include_email);
         assert!(!identity.identity_include_name);
+    }
+
+    #[test]
+    fn identity_config_from_downstream_service_preserves_aevatar_contract() {
+        let mut service = sample_catalog_service();
+        service.slug = "aevatar".to_string();
+        service.identity_propagation_mode = "jwt".to_string();
+        service.identity_include_user_id = true;
+        service.identity_include_email = true;
+        service.identity_include_name = false;
+        service.identity_jwt_audience = None;
+        service.forward_access_token = false;
+        service.inject_delegation_token = false;
+        service.delegation_token_scope = "llm:proxy".to_string();
+
+        let identity = identity_config_from_downstream_service(&service);
+        assert_eq!(identity.identity_propagation_mode, "jwt");
+        assert!(identity.identity_include_user_id);
+        assert!(identity.identity_include_email);
+        assert!(!identity.identity_include_name);
+        assert_eq!(identity.identity_jwt_audience, None);
+        assert!(!identity.forward_access_token);
+        assert!(!identity.inject_delegation_token);
+        assert_eq!(identity.delegation_token_scope, "llm:proxy");
     }
 
     // ─── validate_token_exchange_catalog_credential ──────────────────

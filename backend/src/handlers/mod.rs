@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod admin_anonymous_endpoints;
 pub mod admin_groups;
 pub mod admin_helpers;
 pub mod admin_nodes;
@@ -50,6 +51,8 @@ pub mod org_role_scopes;
 pub mod orgs;
 pub mod providers;
 pub mod proxy;
+pub mod public_mcp;
+pub mod public_proxy;
 pub mod runtime_config;
 pub mod service_requirements;
 pub mod services;

@@ -299,6 +299,8 @@ pub enum AppError {
     #[error("Invite code has already been redeemed")]
     InviteCodeAlreadyRedeemed,
 
+    #[error("Anonymous endpoint incompatible with service identity exposure: {0}")]
+    AnonymousIncompatibleService(String),
     #[error("Oracle pool not found: {0}")]
     OraclePoolNotFound(String),
 
@@ -419,6 +421,7 @@ impl AppError {
             | Self::InviteCodeExhausted
             | Self::InviteCodeDeactivated
             | Self::InviteCodeAlreadyRedeemed => StatusCode::BAD_REQUEST,
+            Self::AnonymousIncompatibleService(_) => StatusCode::BAD_REQUEST,
             Self::OraclePoolNotFound(_) => StatusCode::NOT_FOUND,
             Self::OraclePoolSlugTaken(_) => StatusCode::CONFLICT,
             Self::OraclePoolInactive(_) => StatusCode::SERVICE_UNAVAILABLE,
@@ -526,6 +529,7 @@ impl AppError {
             Self::InviteCodeExhausted => 8201,
             Self::InviteCodeDeactivated => 8202,
             Self::InviteCodeAlreadyRedeemed => 8203,
+            Self::AnonymousIncompatibleService(_) => 11100,
             Self::OraclePoolNotFound(_) => 11000,
             Self::OraclePoolSlugTaken(_) => 11001,
             Self::OraclePoolInactive(_) => 11002,
@@ -665,6 +669,7 @@ impl AppError {
             Self::InviteCodeExhausted => "invite_code_exhausted",
             Self::InviteCodeDeactivated => "invite_code_deactivated",
             Self::InviteCodeAlreadyRedeemed => "invite_code_already_redeemed",
+            Self::AnonymousIncompatibleService(_) => "anonymous_incompatible_service",
             Self::OraclePoolNotFound(_) => "oracle_pool_not_found",
             Self::OraclePoolSlugTaken(_) => "oracle_pool_slug_taken",
             Self::OraclePoolInactive(_) => "oracle_pool_inactive",
