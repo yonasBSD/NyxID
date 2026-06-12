@@ -345,7 +345,7 @@ mod tests {
 
     /// Creating an *enabled* anonymous rule on an identity-propagating
     /// service is fail-closed: it must be rejected with
-    /// `AnonymousIncompatibleService` (HTTP 400 / code 11001) and nothing
+    /// `AnonymousIncompatibleService` (HTTP 400 / code 11100) and nothing
     /// must be persisted.
     #[tokio::test]
     async fn create_enabled_rule_on_identity_service_is_rejected() {
@@ -376,7 +376,7 @@ mod tests {
             matches!(err, AppError::AnonymousIncompatibleService(_)),
             "expected AnonymousIncompatibleService, got {err:?}"
         );
-        assert_eq!(err.error_code(), 11001);
+        assert_eq!(err.error_code(), 11100);
 
         // Fail-closed: rejected write must not persist a rule.
         let persisted = load_service(&db, &service_id).await;
@@ -491,7 +491,7 @@ mod tests {
         .expect_err("enabling a draft on an identity service must be rejected");
 
         assert!(matches!(err, AppError::AnonymousIncompatibleService(_)));
-        assert_eq!(err.error_code(), 11001);
+        assert_eq!(err.error_code(), 11100);
 
         // Fail-closed: the rule remains disabled in storage.
         let persisted = load_service(&db, &service_id).await;
