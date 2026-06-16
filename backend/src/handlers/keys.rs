@@ -981,7 +981,7 @@ pub async fn list_keys(
 ) -> AppResult<Json<KeyListResponse>> {
     let user_id_str = auth_user.user_id.to_string();
 
-    // Lazily auto-provision no-auth catalog services for the user
+    // Lazily auto-provision platform-managed catalog services for the user.
     unified_key_service::auto_provision_no_auth_services(&state.db, &user_id_str).await?;
 
     let views =
