@@ -13,6 +13,7 @@ import {
   maskIdentifier,
   onboardDeviceFormSchema,
   type OnboardDeviceFormData,
+  type OnboardDeviceFormValues,
   type OnboardDeviceRequest,
   type OnboardDeviceResponse,
 } from "@/schemas/devices";
@@ -67,7 +68,7 @@ export function DevicesOnboardPage() {
   const qrDataUrl = qrCodeQuery.data ?? null;
 
   const adminOrgs = (orgs ?? []).filter((org) => org.your_role === "admin");
-  const form = useForm<OnboardDeviceFormData, unknown, OnboardDeviceRequest>({
+  const form = useForm<OnboardDeviceFormData, unknown, OnboardDeviceFormValues>({
     resolver: zodResolver(onboardDeviceFormSchema),
     defaultValues: {
       org_id: null,
@@ -107,12 +108,24 @@ export function DevicesOnboardPage() {
     }
   }, [form, grantableServices]);
 
-  async function handleOnboard(values: OnboardDeviceRequest) {
+  async function handleOnboard(values: OnboardDeviceFormValues) {
     form.clearErrors("root");
+    const request: OnboardDeviceRequest = {
+      org_id: values.org_id,
+      label: values.label,
+      default_services: values.default_services,
+    };
     try {
-      const response = await onboardDevice.mutateAsync(values);
-      setOnboardedDevice(response);
-      toast.success("Device onboarded");
+      const response = await onboardDevice.mutateAsync(request);
+      setOnboardedDevice({
+        ...response,
+        qr_payload: buildFullProvisioningPayload(
+          response.qr_payload,
+          values.wifi_ssid,
+          values.wifi_password,
+        ),
+      });
+      toast.success("Provisioning QR generated");
     } catch (error) {
       form.setError("root", { message: deviceOnboardErrorMessage(error) });
     }
@@ -155,8 +168,8 @@ export function DevicesOnboardPage() {
             <CardHeader>
               <CardTitle>QR provisioning</CardTitle>
               <CardDescription>
-                The QR includes WiFi and scoped NyxID credentials for the device
-                camera to scan.
+                NyxID creates a short-lived bootstrap token. WiFi details are
+                added to the QR in this browser.
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -346,8 +359,9 @@ export function DevicesOnboardPage() {
                   />
 
                   <p className="rounded-lg border border-border bg-muted/25 px-3 py-2 text-[12px] leading-relaxed text-muted-foreground">
-                    Your WiFi password is sent to the server only to embed in
-                    the QR code. It is not stored.
+                    Your WiFi password stays in this browser. NyxID receives
+                    only the owner, label, and optional service grants needed to
+                    create a short-lived bootstrap token.
                   </p>
 
                   <div className="flex justify-end">
@@ -395,7 +409,7 @@ function OnboardSuccess({
           <div className="min-w-0">
             <CardTitle>Device onboarded</CardTitle>
             <CardDescription>
-              Scan this QR from the headless device camera.
+              Scan this QR from the headless device camera before it expires.
             </CardDescription>
           </div>
         </div>
@@ -418,10 +432,10 @@ function OnboardSuccess({
         <dl className="grid gap-3 text-[13px] sm:grid-cols-2">
           <DetailRow label="Device" value={device.label} />
           <DetailRow
-            label="API key"
-            value={maskIdentifier(device.api_key_id)}
+            label="Bootstrap"
+            value={maskIdentifier(device.bootstrap_id)}
           />
-          <DetailRow label="Node" value={maskIdentifier(device.node_id)} />
+          <DetailRow label="Expires" value={formatExpiry(device.expires_at)} />
         </dl>
 
         <div className="flex justify-end">
@@ -466,6 +480,24 @@ function toggleStringArray(values: readonly string[], value: string): string[] {
   return values.includes(value)
     ? values.filter((item) => item !== value)
     : [...values, value];
+}
+
+function buildFullProvisioningPayload(
+  bootstrapPayload: string,
+  wifiSsid: string,
+  wifiPassword: string,
+): string {
+  const source = new URL(bootstrapPayload);
+  const params = new URLSearchParams(source.search);
+  params.set("ssid", wifiSsid);
+  params.set("psw", wifiPassword);
+  return `nyxprov://full?${params.toString()}`;
+}
+
+function formatExpiry(value: string): string {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleString();
 }
 
 function deviceOnboardErrorMessage(error: unknown): string {

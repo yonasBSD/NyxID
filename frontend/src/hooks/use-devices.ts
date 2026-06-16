@@ -31,8 +31,6 @@ export function useApproveDevice() {
 }
 
 export function useOnboardDevice() {
-  const queryClient = useQueryClient();
-
   return useMutation({
     mutationFn: async (
       body: OnboardDeviceRequest,
@@ -42,11 +40,6 @@ export function useOnboardDevice() {
         body,
       );
       return onboardDeviceResponseSchema.parse(response);
-    },
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["api-keys"] });
-      void queryClient.invalidateQueries({ queryKey: ["keys"] });
-      void queryClient.invalidateQueries({ queryKey: ["nodes"] });
     },
   });
 }

@@ -21,7 +21,8 @@ use crate::services::audit_service;
 use crate::services::device_code_service::{
     DeviceCodeApprove, DeviceCodeApproveInput, DeviceCodeInitiate, DeviceCodeInitiateInput,
     DeviceCodeLockoutNotification, DeviceCodePoll, DeviceCodePollInput, DeviceOnboard,
-    DeviceOnboardInput, approve, claim_lockout_notification, initiate, onboard, poll,
+    DeviceOnboardInput, DeviceOnboardRedeem, DeviceOnboardRedeemInput, approve,
+    claim_lockout_notification, initiate, onboard, poll, redeem_onboard,
 };
 use crate::services::notification_service;
 use crate::services::notification_service::{
@@ -59,10 +60,13 @@ pub struct OnboardDeviceRequest {
     #[serde(default)]
     pub org_id: Option<String>,
     pub label: String,
-    pub wifi_ssid: String,
-    pub wifi_password: String,
     #[serde(default)]
     pub default_services: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+pub struct RedeemOnboardDeviceRequest {
+    pub bootstrap_token: String,
 }
 
 impl fmt::Debug for RequestDeviceCodeRequest {
@@ -101,9 +105,15 @@ impl fmt::Debug for OnboardDeviceRequest {
         f.debug_struct("OnboardDeviceRequest")
             .field("org_id", &self.org_id)
             .field("label", &self.label)
-            .field("wifi_ssid", &self.wifi_ssid)
-            .field("wifi_password", &RedactedLen(self.wifi_password.len()))
             .field("default_services", &self.default_services)
+            .finish()
+    }
+}
+
+impl fmt::Debug for RedeemOnboardDeviceRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RedeemOnboardDeviceRequest")
+            .field("bootstrap_token", &RedactedLen(self.bootstrap_token.len()))
             .finish()
     }
 }
@@ -191,18 +201,13 @@ pub async fn onboard_device(
     let actor_user_id = auth_user.user_id.to_string();
     let org_id = normalize_org_id(req.org_id)?;
     let label = normalize_onboard_label(&req.label)?;
-    let wifi_ssid = normalize_wifi_ssid(&req.wifi_ssid)?;
-    let wifi_password = normalize_wifi_password(&req.wifi_password)?;
 
     let response = onboard(
         &state.db,
-        &state.encryption_keys,
         &actor_user_id,
         DeviceOnboardInput {
             org_id: org_id.clone(),
             label,
-            wifi_ssid,
-            wifi_password,
             default_services: req.default_services,
             base_url: state.config.base_url.clone(),
         },
@@ -214,12 +219,28 @@ pub async fn onboard_device(
         &auth_user,
         "device_onboard_created",
         Some(json!({
-            "node_id": response.node_id.clone(),
-            "api_key_id": response.api_key_id.clone(),
+            "bootstrap_id": response.bootstrap_id.clone(),
             "label": response.label.clone(),
             "org_id": org_id,
+            "expires_at": response.expires_at.to_rfc3339(),
         })),
     );
+
+    Ok(Json(response))
+}
+
+pub async fn redeem_onboard_device(
+    State(state): State<AppState>,
+    Json(req): Json<RedeemOnboardDeviceRequest>,
+) -> AppResult<Json<DeviceOnboardRedeem>> {
+    let response = redeem_onboard(
+        &state.db,
+        &state.encryption_keys,
+        DeviceOnboardRedeemInput {
+            bootstrap_token: req.bootstrap_token,
+        },
+    )
+    .await?;
 
     Ok(Json(response))
 }
@@ -658,25 +679,6 @@ fn normalize_onboard_label(value: &str) -> AppResult<String> {
     Ok(trimmed.to_string())
 }
 
-fn normalize_wifi_ssid(value: &str) -> AppResult<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() || trimmed.len() > 32 {
-        return Err(AppError::BadRequest(
-            "wifi_ssid must be between 1 and 32 characters".to_string(),
-        ));
-    }
-    Ok(trimmed.to_string())
-}
-
-fn normalize_wifi_password(value: &str) -> AppResult<String> {
-    if value.len() < 8 || value.len() > 63 {
-        return Err(AppError::BadRequest(
-            "wifi_password must be between 8 and 63 characters".to_string(),
-        ));
-    }
-    Ok(value.to_string())
-}
-
 fn normalize_org_id(value: Option<String>) -> AppResult<Option<String>> {
     let Some(value) = value else {
         return Ok(None);
@@ -894,16 +896,10 @@ mod tests {
     }
 
     #[test]
-    fn normalize_onboard_fields_trim_and_enforce_wifi_bounds() {
+    fn normalize_onboard_label_trims_and_enforces_bounds() {
         assert_eq!(normalize_onboard_label(" Kitchen ").unwrap(), "Kitchen");
-        assert_eq!(normalize_wifi_ssid(" Home ").unwrap(), "Home");
-        assert_eq!(normalize_wifi_password("hunter22").unwrap(), "hunter22");
         assert!(normalize_onboard_label("").is_err());
         assert!(normalize_onboard_label(&"x".repeat(129)).is_err());
-        assert!(normalize_wifi_ssid("").is_err());
-        assert!(normalize_wifi_ssid(&"x".repeat(33)).is_err());
-        assert!(normalize_wifi_password("short").is_err());
-        assert!(normalize_wifi_password(&"x".repeat(64)).is_err());
     }
 
     #[tokio::test]
@@ -923,8 +919,6 @@ mod tests {
             Json(OnboardDeviceRequest {
                 org_id: None,
                 label: "Kitchen Camera".to_string(),
-                wifi_ssid: "MyHomeNetwork".to_string(),
-                wifi_password: "hunter22".to_string(),
                 default_services: None,
             }),
         )
@@ -932,18 +926,19 @@ mod tests {
         .expect("onboard");
 
         assert_eq!(response.label, "Kitchen Camera");
-        assert!(response.qr_payload.contains("nyxid_ag_"));
-        assert!(response.qr_payload.contains("psw=hunter22"));
+        assert!(response.qr_payload.starts_with("nyxprov://bootstrap?"));
+        assert!(response.qr_payload.contains("token=nyx_obt_"));
+        assert!(!response.qr_payload.contains("nyxid_ag_"));
+        assert!(!response.qr_payload.contains("psw="));
+        assert_eq!(response.expires_in, 900);
 
         let audit = wait_for_onboard_audit(&db, &actor_user_id, &mut audit_rx).await;
         let event = audit.event_data.expect("device_onboard_created event data");
-        assert_eq!(event["node_id"], response.node_id);
-        assert_eq!(event["api_key_id"], response.api_key_id);
+        assert_eq!(event["bootstrap_id"], response.bootstrap_id);
         assert_eq!(event["label"], "Kitchen Camera");
         let serialized = serde_json::to_string(&event).expect("event json");
-        assert!(!serialized.contains("hunter22"));
+        assert!(!serialized.contains("token"));
         assert!(!serialized.contains("nyxid_ag_"));
-        assert!(!serialized.contains("MyHomeNetwork"));
     }
 
     #[test]

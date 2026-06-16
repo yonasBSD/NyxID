@@ -60,8 +60,6 @@ struct ApproveDeviceResponse {
 #[derive(Serialize)]
 struct OnboardDeviceRequest {
     label: String,
-    wifi_ssid: String,
-    wifi_password: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     org_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -71,9 +69,10 @@ struct OnboardDeviceRequest {
 #[derive(Deserialize, Serialize)]
 struct OnboardDeviceResponse {
     qr_payload: String,
-    node_id: String,
-    api_key_id: String,
+    bootstrap_id: String,
     label: String,
+    expires_in: i64,
+    expires_at: String,
 }
 
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -119,8 +118,6 @@ impl fmt::Debug for OnboardDeviceRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OnboardDeviceRequest")
             .field("label", &self.label)
-            .field("wifi_ssid", &self.wifi_ssid)
-            .field("wifi_password", &RedactedLen(self.wifi_password.len()))
             .field("org_id", &self.org_id)
             .field("default_services", &self.default_services)
             .finish()
@@ -131,9 +128,10 @@ impl fmt::Debug for OnboardDeviceResponse {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OnboardDeviceResponse")
             .field("qr_payload", &RedactedLen(self.qr_payload.len()))
-            .field("node_id", &self.node_id)
-            .field("api_key_id", &RedactedLen(self.api_key_id.len()))
+            .field("bootstrap_id", &RedactedLen(self.bootstrap_id.len()))
             .field("label", &self.label)
+            .field("expires_in", &self.expires_in)
+            .field("expires_at", &self.expires_at)
             .finish()
     }
 }
@@ -228,17 +226,20 @@ pub async fn onboard_cmd(args: OnboardDeviceArgs) -> Result<()> {
 
     let request = OnboardDeviceRequest {
         label: normalize_onboard_label(&args.label)?,
-        wifi_ssid: normalize_wifi_ssid(&args.ssid)?,
-        wifi_password: normalize_wifi_password(wifi_password.as_str())?,
         org_id,
         default_services: normalize_default_services(args.service)?,
     };
     let response: OnboardDeviceResponse = api.post("/devices/onboard", &request).await?;
+    let qr_payload = build_full_provisioning_payload(
+        &response.qr_payload,
+        &normalize_wifi_ssid(&args.ssid)?,
+        &normalize_wifi_password(wifi_password.as_str())?,
+    );
 
-    println!("{}", response.qr_payload);
-    eprintln!("Device onboarded: {}", response.label);
-    eprintln!("Node ID: {}", response.node_id);
-    eprintln!("API key ID: {}", response.api_key_id);
+    println!("{qr_payload}");
+    eprintln!("Provisioning QR generated: {}", response.label);
+    eprintln!("Bootstrap ID: {}", response.bootstrap_id);
+    eprintln!("Expires at: {}", response.expires_at);
 
     Ok(())
 }
@@ -374,6 +375,25 @@ fn normalize_wifi_password(value: &str) -> Result<String> {
         bail!("WiFi password must be between 8 and 63 characters");
     }
     Ok(value.to_string())
+}
+
+fn build_full_provisioning_payload(
+    bootstrap_payload: &str,
+    wifi_ssid: &str,
+    wifi_password: &str,
+) -> String {
+    let query = bootstrap_payload
+        .strip_prefix("nyxprov://bootstrap?")
+        .unwrap_or_default();
+    let mut params = url::form_urlencoded::parse(query.as_bytes())
+        .into_owned()
+        .collect::<Vec<_>>();
+    params.push(("ssid".to_string(), wifi_ssid.to_string()));
+    params.push(("psw".to_string(), wifi_password.to_string()));
+    let encoded = url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(params)
+        .finish();
+    format!("nyxprov://full?{encoded}")
 }
 
 fn normalize_default_services(values: Vec<String>) -> Result<Option<Vec<String>>> {
@@ -523,6 +543,20 @@ mod tests {
         assert!(normalize_wifi_ssid(&"x".repeat(33)).is_err());
         assert!(normalize_wifi_password("short").is_err());
         assert!(normalize_wifi_password(&"x".repeat(64)).is_err());
+    }
+
+    #[test]
+    fn build_full_provisioning_payload_adds_wifi_to_bootstrap_locally() {
+        let payload = build_full_provisioning_payload(
+            "nyxprov://bootstrap?token=nyx_obt_secret&id=boot-1&url=https%3A%2F%2Fapi.example.com&exp=900",
+            "Home & Lab",
+            "p@ss word/1",
+        );
+
+        assert_eq!(
+            payload,
+            "nyxprov://full?token=nyx_obt_secret&id=boot-1&url=https%3A%2F%2Fapi.example.com&exp=900&ssid=Home+%26+Lab&psw=p%40ss+word%2F1"
+        );
     }
 
     #[test]

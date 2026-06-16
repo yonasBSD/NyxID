@@ -116,13 +116,21 @@ export const onboardDeviceFormSchema = z.object({
   default_services: z.array(z.string()).optional(),
 });
 export type OnboardDeviceFormData = z.input<typeof onboardDeviceFormSchema>;
-export type OnboardDeviceRequest = z.output<typeof onboardDeviceFormSchema>;
+export type OnboardDeviceFormValues = z.output<typeof onboardDeviceFormSchema>;
+
+export const onboardDeviceRequestSchema = z.object({
+  org_id: orgIdSchema,
+  label: onboardLabelSchema,
+  default_services: z.array(z.string()).optional(),
+});
+export type OnboardDeviceRequest = z.output<typeof onboardDeviceRequestSchema>;
 
 export const onboardDeviceResponseSchema = z.object({
   qr_payload: z.string().min(1),
-  node_id: z.string(),
-  api_key_id: z.string(),
+  bootstrap_id: z.string(),
   label: z.string(),
+  expires_in: z.number().int().positive(),
+  expires_at: z.string().min(1),
 });
 export type OnboardDeviceResponse = z.infer<typeof onboardDeviceResponseSchema>;
 

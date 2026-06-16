@@ -425,9 +425,18 @@ const devicesBindRoute = createRoute({
 });
 
 const devicesOnboardRoute = createRoute({
-  path: "/settings/devices/onboard",
+  path: "/devices/onboard",
   getParentRoute: () => dashboardLayout,
   component: DevicesOnboardPage,
+});
+
+const settingsDevicesOnboardRoute = createRoute({
+  path: "/settings/devices/onboard",
+  getParentRoute: () => dashboardLayout,
+  beforeLoad: () => {
+    throw redirect({ to: "/devices/onboard" });
+  },
+  component: () => null,
 });
 
 const guideRoute = createRoute({
@@ -742,6 +751,7 @@ const routeTree = rootRoute.addChildren([
     settingsRoute,
     devicesBindRoute,
     devicesOnboardRoute,
+    settingsDevicesOnboardRoute,
     consentsRoute,
     authorizationsRedirectRoute,
     guideRoute,

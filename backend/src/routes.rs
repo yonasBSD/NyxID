@@ -850,13 +850,16 @@ pub fn build_router(
     let device_code_public_routes = Router::new()
         .route("/request", post(handlers::devices::request_device_code))
         .route("/poll", post(handlers::devices::poll_device_code));
+    let device_onboard_public_routes =
+        Router::new().route("/redeem", post(handlers::devices::redeem_onboard_device));
 
     let api_v1_public = Router::new()
         .route(
             "/runtime-config",
             get(handlers::runtime_config::get_runtime_config),
         )
-        .nest("/devices/code", device_code_public_routes);
+        .nest("/devices/code", device_code_public_routes)
+        .nest("/devices/onboard", device_onboard_public_routes);
 
     // Routes that ALLOW delegated tokens (proxy, LLM gateway, delegation refresh)
     // Also accessible by service accounts.

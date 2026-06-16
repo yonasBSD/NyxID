@@ -72,10 +72,12 @@ beforeEach(() => {
   state.services = [];
   state.servicesLoading = false;
   mockOnboardMutateAsync.mockResolvedValue({
-    qr_payload: "nyxprov://full?ssid=Home&key=nyxid_ag_secret",
-    node_id: "4df27e8f-8cb5-47b7-8d29-e6529f2c1c40",
-    api_key_id: "7ef9c1a4-8df9-43af-9f92-98a6c9a7f45d",
+    qr_payload:
+      "nyxprov://bootstrap?token=nyx_obt_secret&id=boot-1&url=https%3A%2F%2Fapi.example.com&exp=900",
+    bootstrap_id: "boot-1",
     label: "Kitchen Camera",
+    expires_in: 900,
+    expires_at: "2026-06-16T12:15:00Z",
   });
   mockQrToDataUrl.mockResolvedValue("data:image/png;base64,qr");
 });
@@ -102,16 +104,20 @@ describe("DevicesOnboardPage", () => {
     expect(mockOnboardMutateAsync).toHaveBeenCalledWith(
       expect.objectContaining({
         label: "Kitchen Camera",
-        wifi_ssid: "HomeNetwork",
-        wifi_password: "hunter22",
         default_services: ["svc-personal"],
       }),
     );
+    expect(mockOnboardMutateAsync).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        wifi_ssid: expect.any(String),
+        wifi_password: expect.any(String),
+      }),
+    );
     expect(mockQrToDataUrl).toHaveBeenCalledWith(
-      "nyxprov://full?ssid=Home&key=nyxid_ag_secret",
+      "nyxprov://full?token=nyx_obt_secret&id=boot-1&url=https%3A%2F%2Fapi.example.com&exp=900&ssid=HomeNetwork&psw=hunter22",
       expect.objectContaining({ width: 360 }),
     );
-    expect(mockToastSuccess).toHaveBeenCalledWith("Device onboarded");
+    expect(mockToastSuccess).toHaveBeenCalledWith("Provisioning QR generated");
   });
 
   it("filters grantable services by the selected org owner and prunes stale selections", async () => {
