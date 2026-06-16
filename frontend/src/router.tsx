@@ -540,8 +540,8 @@ const keysRoute = createRoute({
   // generic catalog grid. `action` is whitelisted for the same
   // reason — the dashboard deep-links `/keys?action=add-service`,
   // `/keys?action=create-key`, and `/keys?action=setup-agent` to auto-open
-  // the add/setup dialogs. `service` preselects a service in the guided
-  // Agent Isolation flow.
+  // the existing add/create dialogs. `service` preselects a least-privilege
+  // service scope in the Agent Key create dialog.
   validateSearch: (
     search: Record<string, unknown>,
   ): { tab?: string; slug?: string; action?: string; service?: string } => ({

@@ -38,7 +38,6 @@ import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
 import { ApiKeyTable } from "@/components/dashboard/api-key-table";
 import { ApiKeyCreateDialog } from "@/components/dashboard/api-key-create-dialog";
 import { ApiKeyUsageDashboard } from "@/components/dashboard/api-key-usage-dashboard";
-import { AgentIsolationSetupDialog } from "@/components/dashboard/agent-isolation-setup-dialog";
 import { RoleBadge } from "@/components/orgs/role-badge";
 import { OrgAvatar } from "@/components/orgs/org-avatar";
 import type { KeyInfo } from "@/types/keys";
@@ -683,11 +682,15 @@ function NyxIdApiKeysTab({
   createKeyOpen,
   onCreateKeyOpenChange,
   onSetupAgent,
+  createKeySetupMode,
+  initialSetupServiceId,
   viewMode,
 }: {
   readonly createKeyOpen?: boolean;
   readonly onCreateKeyOpenChange?: (open: boolean) => void;
   readonly onSetupAgent: () => void;
+  readonly createKeySetupMode: boolean;
+  readonly initialSetupServiceId: string | null;
   readonly viewMode: ViewMode;
 }) {
   return (
@@ -727,6 +730,8 @@ function NyxIdApiKeysTab({
         externalOpen={createKeyOpen}
         onExternalOpenChange={onCreateKeyOpenChange}
         hideTrigger
+        setupMode={createKeySetupMode}
+        initialServiceId={initialSetupServiceId}
       />
     </div>
   );
@@ -781,8 +786,8 @@ export function KeysPage() {
 
   const [addServiceOpen, setAddServiceOpen] = useState(false);
   const [createKeyOpen, setCreateKeyOpen] = useState(false);
-  const [agentSetupOpen, setAgentSetupOpen] = useState(false);
-  const [agentSetupServiceId, setAgentSetupServiceId] = useState<string | null>(null);
+  const [createKeySetupMode, setCreateKeySetupMode] = useState(false);
+  const [initialSetupServiceId, setInitialSetupServiceId] = useState<string | null>(null);
   const [showAutoConnected, setShowAutoConnected] = useState(false);
   const [servicesViewMode, setServicesViewMode] = useViewMode("keys-services");
   const [agentKeysViewMode, setAgentKeysViewMode] = useViewMode("keys-agent");
@@ -816,10 +821,13 @@ export function KeysPage() {
     if (action === "add-service") {
       setAddServiceOpen(true);
     } else if (action === "create-key") {
+      setCreateKeySetupMode(false);
+      setInitialSetupServiceId(null);
       setCreateKeyOpen(true);
     } else if (action === "setup-agent") {
-      setAgentSetupServiceId(search.service ?? null);
-      setAgentSetupOpen(true);
+      setCreateKeySetupMode(true);
+      setInitialSetupServiceId(search.service ?? null);
+      setCreateKeyOpen(true);
     }
     void navigate({
       to: "/keys",
@@ -849,14 +857,8 @@ export function KeysPage() {
   function handleCreateKeyOpenChange(next: boolean) {
     setCreateKeyOpen(next);
     if (!next) {
-      appliedActionRef.current = null;
-    }
-  }
-
-  function handleAgentSetupOpenChange(next: boolean) {
-    setAgentSetupOpen(next);
-    if (!next) {
-      setAgentSetupServiceId(null);
+      setCreateKeySetupMode(false);
+      setInitialSetupServiceId(null);
       appliedActionRef.current = null;
     }
   }
@@ -918,9 +920,12 @@ export function KeysPage() {
             createKeyOpen={createKeyOpen}
             onCreateKeyOpenChange={handleCreateKeyOpenChange}
             onSetupAgent={() => {
-              setAgentSetupServiceId(null);
-              setAgentSetupOpen(true);
+              setCreateKeySetupMode(true);
+              setInitialSetupServiceId(null);
+              setCreateKeyOpen(true);
             }}
+            createKeySetupMode={createKeySetupMode}
+            initialSetupServiceId={initialSetupServiceId}
             viewMode={agentKeysViewMode}
           />
         </TabsContent>
@@ -931,11 +936,6 @@ export function KeysPage() {
         onOpenChange={handleAddServiceOpenChange}
         prefillSlug={pendingPrefillSlug ?? undefined}
         reconnectKey={reconnectKey}
-      />
-      <AgentIsolationSetupDialog
-        open={agentSetupOpen}
-        onOpenChange={handleAgentSetupOpenChange}
-        initialServiceId={agentSetupServiceId}
       />
     </div>
   );

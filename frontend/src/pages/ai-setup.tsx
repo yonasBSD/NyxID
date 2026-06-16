@@ -309,9 +309,9 @@ export function AiSetupPage() {
                 Isolate this AI agent before handing it credentials
               </h3>
               <p className="max-w-2xl text-xs text-muted-foreground">
-                Use the Agent Isolation setup flow to create a scoped Agent Key,
-                choose allowed services, add credential bindings only when
-                needed, and copy a verification command.
+                Create a scoped Agent Key, choose allowed services, add
+                credential bindings only when needed, then verify proxy access
+                from the Agent Key detail page.
               </p>
             </div>
           </div>
