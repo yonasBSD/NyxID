@@ -52,6 +52,12 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+} from "@/components/ui/tabs";
+import {
   Globe,
   KeyRound,
   Server,
@@ -533,7 +539,6 @@ function ServiceSection({
   credentialStatus,
   hasCredential,
   serviceId,
-  customUserAgent,
   nodeId,
   nodeStatus,
   readOnly = false,
@@ -551,14 +556,11 @@ function ServiceSection({
    *  credential-readiness check entirely. */
   readonly hasCredential: boolean;
   readonly serviceId: string;
-  readonly customUserAgent?: string | null;
   readonly nodeId?: string | null;
   readonly nodeStatus?: string | null;
   readonly readOnly?: boolean;
 }) {
   const updateService = useUpdateUserService();
-  const [editingUa, setEditingUa] = useState(false);
-  const [uaDraft, setUaDraft] = useState(customUserAgent ?? "");
 
   const isNodeBound = nodeId !== undefined && nodeId !== null && nodeId !== "";
 
@@ -632,29 +634,6 @@ function ServiceSection({
     );
   }
 
-  function saveUserAgent() {
-    updateService.mutate(
-      { serviceId, custom_user_agent: uaDraft.trim() || "" },
-      {
-        onSuccess: () => {
-          setEditingUa(false);
-          toast.success(
-            uaDraft.trim()
-              ? "Custom User-Agent saved"
-              : "Custom User-Agent cleared",
-          );
-        },
-        onError: (err) => {
-          const message =
-            err instanceof ApiError
-              ? err.message
-              : "Failed to update User-Agent";
-          toast.error(message);
-        },
-      },
-    );
-  }
-
   return (
     <Card className="h-full">
       <CardHeader className="pb-3">
@@ -716,7 +695,7 @@ function ServiceSection({
           </p>
         )}
 
-        <div className="grid grid-cols-2 gap-2 text-xs text-muted-foreground">
+        <div className="grid gap-2 text-xs text-muted-foreground sm:grid-cols-2">
           <div>
             <span className="font-medium text-foreground">Auth method:</span>{" "}
             {authMethod}
@@ -726,7 +705,59 @@ function ServiceSection({
             {authKeyName}
           </div>
         </div>
+      </CardContent>
+    </Card>
+  );
+}
 
+function UserAgentOverrideSection({
+  serviceId,
+  customUserAgent,
+  readOnly = false,
+}: {
+  readonly serviceId: string;
+  readonly customUserAgent?: string | null;
+  readonly readOnly?: boolean;
+}) {
+  const updateService = useUpdateUserService();
+  const [editingUa, setEditingUa] = useState(false);
+  const [uaDraft, setUaDraft] = useState(customUserAgent ?? "");
+
+  function saveUserAgent() {
+    updateService.mutate(
+      { serviceId, custom_user_agent: uaDraft.trim() || "" },
+      {
+        onSuccess: () => {
+          setEditingUa(false);
+          toast.success(
+            uaDraft.trim()
+              ? "Custom User-Agent saved"
+              : "Custom User-Agent cleared",
+          );
+        },
+        onError: (err) => {
+          const message =
+            err instanceof ApiError
+              ? err.message
+              : "Failed to update User-Agent";
+          toast.error(message);
+        },
+      },
+    );
+  }
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center gap-2">
+          <Server className="h-4 w-4 text-primary" />
+          <CardTitle className="text-[15px]">User-Agent override</CardTitle>
+        </div>
+        <CardDescription>
+          Optional outgoing User-Agent override for proxied HTTP requests.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
         <div className="space-y-1">
           <Label className="text-xs text-muted-foreground">User-Agent</Label>
           {editingUa ? (
@@ -926,7 +957,7 @@ function SshConnectionSection({
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="grid grid-cols-2 gap-4 text-[12px]">
+        <div className="grid gap-4 text-[12px] sm:grid-cols-2">
           <div>
             <span className="text-xs font-medium text-muted-foreground">
               Host
@@ -1003,6 +1034,34 @@ function SshConnectionSection({
             <li>Restart sshd</li>
           </ol>
         </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function SshConnectionInstructionsCard({
+  serviceId,
+  serviceSlug,
+  sshConfig,
+}: {
+  readonly serviceId: string;
+  readonly serviceSlug: string;
+  readonly sshConfig: SshServiceConfig;
+}) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Connection Instructions</CardTitle>
+        <CardDescription>
+          How to connect to this SSH service
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <SshServiceInstructions
+          serviceId={serviceId}
+          serviceSlug={serviceSlug}
+          sshConfig={sshConfig}
+        />
       </CardContent>
     </Card>
   );
@@ -1963,7 +2022,7 @@ export function KeyDetailPage() {
               <CardDescription>{autoConnectedDescription}</CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
-              <div className="grid grid-cols-2 gap-4 text-[12px]">
+              <div className="grid gap-4 text-[12px] sm:grid-cols-2">
                 <div>
                   <span className="text-xs font-medium text-muted-foreground">
                     Endpoint
@@ -2003,59 +2062,53 @@ export function KeyDetailPage() {
             </CardContent>
           </Card>
 
+          {!isSsh && (
+            <ApiUsageSection
+              slug={keyInfo.slug}
+              authMethod={keyInfo.auth_method}
+              endpointUrl={keyInfo.endpoint_url}
+              catalogServiceSlug={keyInfo.catalog_service_slug}
+              label={keyInfo.label}
+              catalogEntry={catalogEntry}
+            />
+          )}
+
           {/* Auto-connected keys still have catalog-level default headers
               applied at proxy time (NyxID#356). Surface them read-only so
-              users can see why those headers reach the downstream — without
-              this, the panel only renders for user-managed keys and the
-              auto-connected case appears to have no defaults. */}
+              users can see why those headers reach the downstream. Keep this
+              behind disclosure so verification stays before inherited HTTP
+              mechanics. */}
           {!isSsh && catalogHeaders && catalogHeaders.length > 0 && (
-            <DefaultHeadersSection
-              serviceId={keyInfo.id}
-              userHeaders={[]}
-              catalogHeaders={catalogHeaders}
-              readOnly
-            />
+            <details className="rounded-xl border border-border/50 bg-card p-4">
+              <summary className="cursor-pointer text-sm font-medium text-foreground">
+                Advanced: inherited request headers
+              </summary>
+              <div className="mt-4">
+                <DefaultHeadersSection
+                  serviceId={keyInfo.id}
+                  userHeaders={[]}
+                  catalogHeaders={catalogHeaders}
+                  readOnly
+                />
+              </div>
+            </details>
           )}
         </>
       ) : (
-        <div className="space-y-4">
-          {/* Row 1: Endpoint + OpenAPI Spec (or just Endpoint for SSH) */}
-          {isSsh ? (
-            <EndpointSection
-              endpointUrl={keyInfo.endpoint_url}
-              endpointId={keyInfo.endpoint_id}
-              nodeRouted={keyInfo.node_id !== null}
-              readOnly={readOnly}
-            />
-          ) : (
-            <div className="grid gap-4 md:grid-cols-2">
+        <Tabs defaultValue="overview" className="space-y-4">
+          <TabsList className="w-full max-w-full">
+            <TabsTrigger value="overview">Overview</TabsTrigger>
+            <TabsTrigger value="advanced">Advanced</TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="overview" className="space-y-4">
+            <div className="grid gap-4 lg:grid-cols-2">
               <EndpointSection
                 endpointUrl={keyInfo.endpoint_url}
                 endpointId={keyInfo.endpoint_id}
                 nodeRouted={keyInfo.node_id !== null}
                 readOnly={readOnly}
               />
-              <OpenApiSpecSection
-                endpointId={keyInfo.endpoint_id}
-                specUrl={keyInfo.openapi_spec_url ?? null}
-                readOnly={readOnly}
-              />
-            </div>
-          )}
-
-          {/* Row 2: Credential + Service (or SSH Connection) */}
-          {keyInfo.service_type === "ssh" &&
-          keyInfo.ssh_host &&
-          keyInfo.ssh_port !== null ? (
-            <SshConnectionSection
-              sshHost={keyInfo.ssh_host}
-              sshPort={keyInfo.ssh_port}
-              caPublicKey={keyInfo.ssh_ca_public_key}
-              principals={keyInfo.ssh_allowed_principals}
-              certTtlMinutes={keyInfo.ssh_certificate_ttl_minutes}
-            />
-          ) : (
-            <div className="grid gap-4 md:grid-cols-2">
               {keyInfo.api_key_id && (
                 <ApiKeySection
                   apiKeyId={keyInfo.api_key_id}
@@ -2075,107 +2128,108 @@ export function KeyDetailPage() {
                 credentialStatus={keyInfo.status}
                 hasCredential={keyInfo.api_key_id !== null && keyInfo.api_key_id !== undefined}
                 serviceId={keyInfo.id}
-                customUserAgent={keyInfo.custom_user_agent}
                 nodeId={keyInfo.node_id}
                 nodeStatus={keyInfo.node_status}
                 readOnly={readOnly}
               />
             </div>
-          )}
 
-          {/* Routing */}
-          <RoutingSection
-            nodeId={keyInfo.node_id}
-            serviceId={keyInfo.id}
-            readOnly={readOnly}
-          />
+            {!isSsh && (
+              <ApiUsageSection
+                slug={keyInfo.slug}
+                authMethod={keyInfo.auth_method}
+                endpointUrl={keyInfo.endpoint_url}
+                catalogServiceSlug={keyInfo.catalog_service_slug}
+                label={keyInfo.label}
+                catalogEntry={catalogEntry}
+              />
+            )}
 
-          {/* Default Headers (non-SSH) */}
-          {!isSsh && (
-            <DefaultHeadersSection
+            {sshConfig && sshServiceId && (
+              <SshConnectionInstructionsCard
+                serviceId={sshServiceId}
+                serviceSlug={keyInfo.slug}
+                sshConfig={sshConfig}
+              />
+            )}
+
+            {keyInfo.permission_setup_url && (
+              <LarkPermissionSetupCard
+                url={keyInfo.permission_setup_url}
+                scopes={keyInfo.permission_setup_scopes ?? []}
+              />
+            )}
+          </TabsContent>
+
+          <TabsContent value="advanced" className="space-y-4">
+            <RoutingSection
+              nodeId={keyInfo.node_id}
               serviceId={keyInfo.id}
-              userHeaders={
-                keyInfo.default_request_headers
-                  ? [...keyInfo.default_request_headers]
-                  : []
-              }
-              catalogHeaders={catalogHeaders}
               readOnly={readOnly}
             />
-          )}
 
-          {/* WS Frame Injections (non-SSH, non-readOnly) */}
-          {!isSsh && !readOnly && (
-            <WsFrameInjectionsSection
-              serviceId={keyInfo.id}
-              rules={
-                keyInfo.ws_frame_injections
-                  ? [...keyInfo.ws_frame_injections]
-                  : []
-              }
-            />
-          )}
+            {!isSsh && (
+              <>
+                <div className="grid gap-4 lg:grid-cols-2">
+                  <OpenApiSpecSection
+                    endpointId={keyInfo.endpoint_id}
+                    specUrl={keyInfo.openapi_spec_url ?? null}
+                    readOnly={readOnly}
+                  />
+                  <UserAgentOverrideSection
+                    serviceId={keyInfo.id}
+                    customUserAgent={keyInfo.custom_user_agent}
+                    readOnly={readOnly}
+                  />
+                </div>
 
-          {/* Lark Permission Setup */}
-          {keyInfo.permission_setup_url && (
-            <LarkPermissionSetupCard
-              url={keyInfo.permission_setup_url}
-              scopes={keyInfo.permission_setup_scopes ?? []}
-            />
-          )}
+                <DefaultHeadersSection
+                  serviceId={keyInfo.id}
+                  userHeaders={
+                    keyInfo.default_request_headers
+                      ? [...keyInfo.default_request_headers]
+                      : []
+                  }
+                  catalogHeaders={catalogHeaders}
+                  readOnly={readOnly}
+                />
 
-          {/* Node Setup Helper */}
-          {keyInfo.node_id && !isSsh && (
-            <NodeSetupHelper
-              slug={keyInfo.slug}
-              endpointUrl={keyInfo.endpoint_url}
-              authMethod={keyInfo.auth_method}
-              authKeyName={keyInfo.auth_key_name}
-              catalogServiceName={keyInfo.catalog_service_name}
-            />
-          )}
+                {!readOnly && (
+                  <WsFrameInjectionsSection
+                    serviceId={keyInfo.id}
+                    rules={
+                      keyInfo.ws_frame_injections
+                        ? [...keyInfo.ws_frame_injections]
+                        : []
+                    }
+                  />
+                )}
 
-          {/* API Usage */}
-          {!isSsh && (
-            <ApiUsageSection
-              slug={keyInfo.slug}
-              authMethod={keyInfo.auth_method}
-              endpointUrl={keyInfo.endpoint_url}
-              catalogServiceSlug={keyInfo.catalog_service_slug}
-              label={keyInfo.label}
-              catalogEntry={catalogEntry}
-            />
-          )}
-        </div>
-      )}
+                {keyInfo.node_id && (
+                  <NodeSetupHelper
+                    slug={keyInfo.slug}
+                    endpointUrl={keyInfo.endpoint_url}
+                    authMethod={keyInfo.auth_method}
+                    authKeyName={keyInfo.auth_key_name}
+                    catalogServiceName={keyInfo.catalog_service_name}
+                  />
+                )}
+              </>
+            )}
 
-      {keyInfo.auto_connected && (
-        <ApiUsageSection
-          slug={keyInfo.slug}
-          authMethod={keyInfo.auth_method}
-          endpointUrl={keyInfo.endpoint_url}
-          catalogServiceSlug={keyInfo.catalog_service_slug}
-          label={keyInfo.label}
-          catalogEntry={catalogEntry}
-        />
-      )}
-
-      {sshConfig && sshServiceId && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Connection Instructions</CardTitle>
-            <CardDescription>
-              How to connect to this SSH service
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <SshServiceInstructions
-              serviceId={sshServiceId}
-              serviceSlug={keyInfo.slug}
-              sshConfig={sshConfig}
-            />
-          </CardContent>
-        </Card>
+            {keyInfo.service_type === "ssh" &&
+            keyInfo.ssh_host &&
+            keyInfo.ssh_port !== null && (
+              <SshConnectionSection
+                sshHost={keyInfo.ssh_host}
+                sshPort={keyInfo.ssh_port}
+                caPublicKey={keyInfo.ssh_ca_public_key}
+                principals={keyInfo.ssh_allowed_principals}
+                certTtlMinutes={keyInfo.ssh_certificate_ttl_minutes}
+              />
+            )}
+          </TabsContent>
+        </Tabs>
       )}
 
       <DeleteKeyDialog
