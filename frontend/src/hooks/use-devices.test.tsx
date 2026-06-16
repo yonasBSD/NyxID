@@ -2,14 +2,19 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderHook, waitFor } from "@testing-library/react";
 import type { PropsWithChildren } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { useApproveDevice, useOnboardDevice } from "./use-devices";
+import {
+  useApproveDevice,
+  useOnboardDevice,
+  useRevokeOnboardDevice,
+} from "./use-devices";
 
-const { mockPost } = vi.hoisted(() => ({
+const { mockDelete, mockPost } = vi.hoisted(() => ({
+  mockDelete: vi.fn(),
   mockPost: vi.fn(),
 }));
 
 vi.mock("@/lib/api-client", () => ({
-  api: { post: mockPost },
+  api: { delete: mockDelete, post: mockPost },
 }));
 
 function wrapperFactory() {
@@ -128,5 +133,17 @@ describe("useOnboardDevice", () => {
     });
 
     expect(invalidateSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("useRevokeOnboardDevice", () => {
+  it("deletes the onboard bootstrap resource", async () => {
+    mockDelete.mockResolvedValue(undefined);
+    const { wrapper } = wrapperFactory();
+    const { result } = renderHook(() => useRevokeOnboardDevice(), { wrapper });
+
+    await result.current.mutateAsync("boot-1");
+
+    expect(mockDelete).toHaveBeenCalledWith("/devices/onboard/boot-1");
   });
 });

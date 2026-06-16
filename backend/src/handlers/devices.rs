@@ -2,8 +2,8 @@ use std::net::SocketAddr;
 
 use axum::{
     Json,
-    extract::{ConnectInfo, State},
-    http::HeaderMap,
+    extract::{ConnectInfo, Path, State},
+    http::{HeaderMap, StatusCode},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde::Deserialize;
@@ -22,7 +22,7 @@ use crate::services::device_code_service::{
     DeviceCodeApprove, DeviceCodeApproveInput, DeviceCodeInitiate, DeviceCodeInitiateInput,
     DeviceCodeLockoutNotification, DeviceCodePoll, DeviceCodePollInput, DeviceOnboard,
     DeviceOnboardInput, DeviceOnboardRedeem, DeviceOnboardRedeemInput, approve,
-    claim_lockout_notification, initiate, onboard, poll, redeem_onboard,
+    claim_lockout_notification, initiate, onboard, poll, redeem_onboard, revoke_onboard,
 };
 use crate::services::notification_service;
 use crate::services::notification_service::{
@@ -243,6 +243,26 @@ pub async fn redeem_onboard_device(
     .await?;
 
     Ok(Json(response))
+}
+
+pub async fn revoke_onboard_device(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(bootstrap_id): Path<String>,
+) -> AppResult<StatusCode> {
+    let actor_user_id = auth_user.user_id.to_string();
+    revoke_onboard(&state.db, &actor_user_id, &bootstrap_id).await?;
+
+    log_device_audit_for_user(
+        state.db.clone(),
+        &auth_user,
+        "device_onboard_revoked",
+        Some(json!({
+            "bootstrap_id": bootstrap_id,
+        })),
+    );
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn approve_device_code_with_notification_dispatcher<F>(
@@ -941,6 +961,43 @@ mod tests {
         assert!(!serialized.contains("nyxid_ag_"));
     }
 
+    #[tokio::test]
+    async fn revoke_onboard_handler_deletes_bootstrap_and_audits_without_secret() {
+        let Some(db) = connect_test_database("device_onboard_handler_revoke").await else {
+            return;
+        };
+        crate::db::ensure_indexes(&db).await.expect("indexes");
+        let state = test_app_state(db.clone());
+        let actor_user_id = uuid::Uuid::new_v4().to_string();
+        let auth_user = test_auth_user(&actor_user_id);
+        let mut audit_rx = subscribe_device_audit_inserted();
+
+        let Json(response) = onboard_device(
+            State(state.clone()),
+            auth_user.clone(),
+            Json(OnboardDeviceRequest {
+                org_id: None,
+                label: "Kitchen Camera".to_string(),
+                default_services: None,
+            }),
+        )
+        .await
+        .expect("onboard");
+
+        let status =
+            revoke_onboard_device(State(state), auth_user, Path(response.bootstrap_id.clone()))
+                .await
+                .expect("revoke");
+
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let audit = wait_for_revoke_audit(&db, &actor_user_id, &mut audit_rx).await;
+        let event = audit.event_data.expect("device_onboard_revoked event data");
+        assert_eq!(event["bootstrap_id"], response.bootstrap_id);
+        let serialized = serde_json::to_string(&event).expect("event json");
+        assert!(!serialized.contains("token"));
+        assert!(!serialized.contains("nyx_obt_"));
+    }
+
     #[test]
     fn normalize_org_id_accepts_uuid_and_rejects_names() {
         let id = uuid::Uuid::new_v4().to_string();
@@ -985,6 +1042,14 @@ mod tests {
         audit_rx: &mut tokio::sync::broadcast::Receiver<DeviceAuditInserted>,
     ) -> AuditLog {
         wait_for_device_audit(db, user_id, "device_onboard_created", audit_rx).await
+    }
+
+    async fn wait_for_revoke_audit(
+        db: &mongodb::Database,
+        user_id: &str,
+        audit_rx: &mut tokio::sync::broadcast::Receiver<DeviceAuditInserted>,
+    ) -> AuditLog {
+        wait_for_device_audit(db, user_id, "device_onboard_revoked", audit_rx).await
     }
 
     async fn wait_for_device_audit(

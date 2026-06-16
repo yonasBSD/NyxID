@@ -2,10 +2,10 @@ import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { CheckCircle2, Printer, QrCode } from "lucide-react";
+import { CheckCircle2, Printer, QrCode, XCircle } from "lucide-react";
 import QRCode from "qrcode";
 import { toast } from "sonner";
-import { useOnboardDevice } from "@/hooks/use-devices";
+import { useOnboardDevice, useRevokeOnboardDevice } from "@/hooks/use-devices";
 import { useKeys } from "@/hooks/use-keys";
 import { useOrgs } from "@/hooks/use-orgs";
 import { ApiError } from "@/lib/api-client";
@@ -49,6 +49,7 @@ const PERSONAL_OWNER_VALUE = "__personal__";
 
 export function DevicesOnboardPage() {
   const onboardDevice = useOnboardDevice();
+  const revokeOnboardDevice = useRevokeOnboardDevice();
   const { data: orgs, isLoading: isOrgsLoading } = useOrgs();
   const { data: services, isLoading: isServicesLoading } = useKeys();
   const [onboardedDevice, setOnboardedDevice] =
@@ -131,6 +132,17 @@ export function DevicesOnboardPage() {
     }
   }
 
+  async function handleRevokeOnboard() {
+    if (!onboardedDevice) return;
+    try {
+      await revokeOnboardDevice.mutateAsync(onboardedDevice.bootstrap_id);
+      setOnboardedDevice(null);
+      toast.success("Provisioning QR revoked");
+    } catch (error) {
+      toast.error(deviceOnboardRevokeErrorMessage(error));
+    }
+  }
+
   return (
     <>
       {onboardedDevice && qrDataUrl ? (
@@ -161,7 +173,9 @@ export function DevicesOnboardPage() {
           device={onboardedDevice}
           qrError={qrCodeQuery.isError}
           qrDataUrl={qrDataUrl}
+          isRevoking={revokeOnboardDevice.isPending}
           onPrint={() => window.print()}
+          onRevoke={handleRevokeOnboard}
         />
         ) : (
           <Card className="rounded-lg">
@@ -392,12 +406,16 @@ function OnboardSuccess({
   device,
   qrError,
   qrDataUrl,
+  isRevoking,
   onPrint,
+  onRevoke,
 }: {
   readonly device: OnboardDeviceResponse;
   readonly qrError: boolean;
   readonly qrDataUrl: string | null;
+  readonly isRevoking: boolean;
   readonly onPrint: () => void;
+  readonly onRevoke: () => void;
 }) {
   return (
     <Card className="rounded-lg">
@@ -438,7 +456,20 @@ function OnboardSuccess({
           <DetailRow label="Expires" value={formatExpiry(device.expires_at)} />
         </dl>
 
-        <div className="flex justify-end">
+        <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+          <Button
+            className="h-11 w-full text-sm sm:w-auto"
+            disabled={isRevoking}
+            isLoading={isRevoking}
+            onClick={onRevoke}
+            type="button"
+            variant="destructive"
+          >
+            <ButtonIcon variant="destructive">
+              <XCircle />
+            </ButtonIcon>
+            Revoke QR
+          </Button>
           <Button
             className="h-11 w-full text-sm sm:w-auto"
             disabled={!qrDataUrl}
@@ -513,4 +544,14 @@ function deviceOnboardErrorMessage(error: unknown): string {
   }
 
   return error.message || "Device onboarding failed. Try again.";
+}
+
+function deviceOnboardRevokeErrorMessage(error: unknown): string {
+  if (!(error instanceof ApiError)) {
+    return "Device QR revocation failed. Try again.";
+  }
+  if (error.status === 404 || error.status === 410) {
+    return "This provisioning QR is no longer active.";
+  }
+  return error.message || "Device QR revocation failed. Try again.";
 }

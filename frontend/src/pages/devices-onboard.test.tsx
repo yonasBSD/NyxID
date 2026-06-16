@@ -8,10 +8,19 @@ import type { OrgListItem } from "@/schemas/orgs";
 import type { KeyInfo } from "@/types/keys";
 import { DevicesOnboardPage } from "./devices-onboard";
 
-const { mockOnboardMutateAsync, mockQrToDataUrl, mockToastSuccess, state } =
+const {
+  mockOnboardMutateAsync,
+  mockQrToDataUrl,
+  mockRevokeMutateAsync,
+  mockToastError,
+  mockToastSuccess,
+  state,
+} =
   vi.hoisted(() => ({
     mockOnboardMutateAsync: vi.fn(),
     mockQrToDataUrl: vi.fn(),
+    mockRevokeMutateAsync: vi.fn(),
+    mockToastError: vi.fn(),
     mockToastSuccess: vi.fn(),
     state: {
       orgs: [] as OrgListItem[],
@@ -24,6 +33,10 @@ const { mockOnboardMutateAsync, mockQrToDataUrl, mockToastSuccess, state } =
 vi.mock("@/hooks/use-devices", () => ({
   useOnboardDevice: () => ({
     mutateAsync: mockOnboardMutateAsync,
+    isPending: false,
+  }),
+  useRevokeOnboardDevice: () => ({
+    mutateAsync: mockRevokeMutateAsync,
     isPending: false,
   }),
 }));
@@ -47,7 +60,7 @@ vi.mock("qrcode", () => ({
 }));
 
 vi.mock("sonner", () => ({
-  toast: { success: mockToastSuccess },
+  toast: { error: mockToastError, success: mockToastSuccess },
 }));
 
 beforeAll(() => {
@@ -79,6 +92,7 @@ beforeEach(() => {
     expires_in: 900,
     expires_at: "2026-06-16T12:15:00Z",
   });
+  mockRevokeMutateAsync.mockResolvedValue(undefined);
   mockQrToDataUrl.mockResolvedValue("data:image/png;base64,qr");
 });
 
@@ -118,6 +132,20 @@ describe("DevicesOnboardPage", () => {
       expect.objectContaining({ width: 360 }),
     );
     expect(mockToastSuccess).toHaveBeenCalledWith("Provisioning QR generated");
+  });
+
+  it("revokes the active bootstrap QR", async () => {
+    const user = userEvent.setup();
+    renderWithClient(<DevicesOnboardPage />);
+
+    await fillOnboardForm(user);
+    await user.click(screen.getByRole("button", { name: /generate qr/i }));
+    await screen.findByText("Device onboarded");
+    await user.click(screen.getByRole("button", { name: /revoke qr/i }));
+
+    expect(mockRevokeMutateAsync).toHaveBeenCalledWith("boot-1");
+    expect(mockToastSuccess).toHaveBeenCalledWith("Provisioning QR revoked");
+    expect(screen.getByRole("button", { name: /generate qr/i })).toBeInTheDocument();
   });
 
   it("filters grantable services by the selected org owner and prunes stale selections", async () => {

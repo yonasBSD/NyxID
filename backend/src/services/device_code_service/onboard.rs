@@ -215,6 +215,40 @@ pub async fn redeem_onboard(
     })
 }
 
+/// Revoke an unredeemed QR bootstrap token owned by the actor or an org they
+/// can administer.
+pub async fn revoke_onboard(
+    db: &Database,
+    actor_user_id: &str,
+    bootstrap_id: &str,
+) -> AppResult<()> {
+    let collection = db.collection::<DeviceOnboardCredential>(DEVICE_ONBOARD_CREDENTIALS);
+    let credential = collection
+        .find_one(doc! { "_id": bootstrap_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Device onboard bootstrap not found".to_string()))?;
+    let owner_access =
+        org_service::resolve_owner_access(db, actor_user_id, &credential.owner_user_id).await?;
+    if !owner_access.can_write() {
+        return Err(AppError::NotFound(
+            "Device onboard bootstrap not found".to_string(),
+        ));
+    }
+
+    let result = collection
+        .delete_one(doc! {
+            "_id": bootstrap_id,
+            "used": false,
+            "expires_at": { "$gt": bson::DateTime::from_chrono(Utc::now()) },
+        })
+        .await?;
+    if result.deleted_count == 0 {
+        return Err(AppError::DeviceCodeExpired);
+    }
+
+    Ok(())
+}
+
 fn validate_onboard_input(mut input: DeviceOnboardInput) -> AppResult<DeviceOnboardInput> {
     input.label = input.label.trim().to_string();
     input.base_url = input.base_url.trim().trim_end_matches('/').to_string();
@@ -497,6 +531,86 @@ mod tests {
         .await
         .expect_err("bootstrap is single-use");
         assert!(matches!(replay, AppError::DeviceCodeExpired));
+    }
+
+    #[tokio::test]
+    async fn revoke_onboard_deletes_unredeemed_bootstrap_and_blocks_redeem() {
+        let Some(db) = connect_test_database("device_onboard_revoke").await else {
+            return;
+        };
+        crate::db::ensure_indexes(&db).await.expect("indexes");
+        let actor_user_id = Uuid::new_v4().to_string();
+        let bootstrap = onboard(
+            &db,
+            &actor_user_id,
+            DeviceOnboardInput {
+                org_id: None,
+                label: "Lab Camera".to_string(),
+                default_services: None,
+                base_url: "https://api.example.com".to_string(),
+            },
+        )
+        .await
+        .expect("onboard");
+        let token = parsed_qr_query(&bootstrap.qr_payload)
+            .remove("token")
+            .expect("token");
+
+        revoke_onboard(&db, &actor_user_id, &bootstrap.bootstrap_id)
+            .await
+            .expect("revoke");
+
+        let stored = db
+            .collection::<DeviceOnboardCredential>(DEVICE_ONBOARD_CREDENTIALS)
+            .find_one(doc! { "_id": &bootstrap.bootstrap_id })
+            .await
+            .unwrap();
+        assert!(stored.is_none());
+        let redeem = redeem_onboard(
+            &db,
+            &test_encryption_keys(),
+            DeviceOnboardRedeemInput {
+                bootstrap_token: token,
+            },
+        )
+        .await
+        .expect_err("revoked bootstrap must not redeem");
+        assert!(matches!(redeem, AppError::DeviceCodeExpired));
+        assert_no_durable_credentials(&db).await;
+    }
+
+    #[tokio::test]
+    async fn revoke_onboard_requires_owner_write_access() {
+        let Some(db) = connect_test_database("device_onboard_revoke_acl").await else {
+            return;
+        };
+        crate::db::ensure_indexes(&db).await.expect("indexes");
+        let actor_user_id = Uuid::new_v4().to_string();
+        let other_user_id = Uuid::new_v4().to_string();
+        let bootstrap = onboard(
+            &db,
+            &actor_user_id,
+            DeviceOnboardInput {
+                org_id: None,
+                label: "Lab Camera".to_string(),
+                default_services: None,
+                base_url: "https://api.example.com".to_string(),
+            },
+        )
+        .await
+        .expect("onboard");
+
+        let error = revoke_onboard(&db, &other_user_id, &bootstrap.bootstrap_id)
+            .await
+            .expect_err("other user cannot revoke");
+
+        assert!(matches!(error, AppError::NotFound(_)));
+        let stored = db
+            .collection::<DeviceOnboardCredential>(DEVICE_ONBOARD_CREDENTIALS)
+            .find_one(doc! { "_id": &bootstrap.bootstrap_id })
+            .await
+            .unwrap();
+        assert!(stored.is_some());
     }
 
     #[tokio::test]

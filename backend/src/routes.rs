@@ -953,6 +953,10 @@ pub fn build_router(
             post(handlers::devices::approve_device_code),
         )
         .route("/devices/onboard", post(handlers::devices::onboard_device))
+        .route(
+            "/devices/onboard/{bootstrap_id}",
+            delete(handlers::devices::revoke_onboard_device),
+        )
         .nest("/users", user_routes)
         .nest("/api-keys", api_key_routes)
         .nest("/services", service_routes)

@@ -43,3 +43,13 @@ export function useOnboardDevice() {
     },
   });
 }
+
+export function useRevokeOnboardDevice() {
+  return useMutation({
+    mutationFn: async (bootstrapId: string): Promise<void> => {
+      await api.delete<void>(
+        `/devices/onboard/${encodeURIComponent(bootstrapId)}`,
+      );
+    },
+  });
+}
