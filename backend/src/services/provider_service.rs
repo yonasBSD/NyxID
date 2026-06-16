@@ -481,6 +481,28 @@ pub async fn seed_default_providers(
         );
     }
 
+    // Migration: ensure the existing Twitter provider's default_scopes include `media.write`.
+    // The seed already lists it, but the seed only runs for a not-yet-existing provider, so an
+    // already-seeded provider (from before media.write was added) never gets it — and the CLI
+    // pair wizard exposes no scope input to add it after connecting. Without media.write,
+    // `POST /2/media/upload` returns 403. `$ne` makes this a no-op once present; `$addToSet`
+    // appends without disturbing existing scopes.
+    let twitter_media_write_migration = collection
+        .update_one(
+            doc! { "slug": "twitter", "default_scopes": { "$ne": "media.write" } },
+            doc! {
+                "$addToSet": { "default_scopes": "media.write" },
+                "$set": { "updated_at": bson::DateTime::from_chrono(Utc::now()) },
+            },
+        )
+        .await?;
+    if twitter_media_write_migration.modified_count > 0 {
+        tracing::info!(
+            slug = "twitter",
+            "Migrated existing Twitter provider default_scopes to include media.write"
+        );
+    }
+
     let social_user_mode_migration = collection
         .update_many(
             doc! {
