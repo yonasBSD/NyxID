@@ -8,10 +8,19 @@ import type { OrgListItem } from "@/schemas/orgs";
 import type { KeyInfo } from "@/types/keys";
 import { DevicesOnboardPage } from "./devices-onboard";
 
-const { mockOnboardMutateAsync, mockQrToDataUrl, mockToastSuccess, state } =
+const {
+  mockOnboardMutateAsync,
+  mockQrToDataUrl,
+  mockRevokeMutateAsync,
+  mockToastError,
+  mockToastSuccess,
+  state,
+} =
   vi.hoisted(() => ({
     mockOnboardMutateAsync: vi.fn(),
     mockQrToDataUrl: vi.fn(),
+    mockRevokeMutateAsync: vi.fn(),
+    mockToastError: vi.fn(),
     mockToastSuccess: vi.fn(),
     state: {
       orgs: [] as OrgListItem[],
@@ -24,6 +33,10 @@ const { mockOnboardMutateAsync, mockQrToDataUrl, mockToastSuccess, state } =
 vi.mock("@/hooks/use-devices", () => ({
   useOnboardDevice: () => ({
     mutateAsync: mockOnboardMutateAsync,
+    isPending: false,
+  }),
+  useRevokeOnboardDevice: () => ({
+    mutateAsync: mockRevokeMutateAsync,
     isPending: false,
   }),
 }));
@@ -47,7 +60,7 @@ vi.mock("qrcode", () => ({
 }));
 
 vi.mock("sonner", () => ({
-  toast: { success: mockToastSuccess },
+  toast: { error: mockToastError, success: mockToastSuccess },
 }));
 
 beforeAll(() => {
@@ -72,11 +85,14 @@ beforeEach(() => {
   state.services = [];
   state.servicesLoading = false;
   mockOnboardMutateAsync.mockResolvedValue({
-    qr_payload: "nyxprov://full?ssid=Home&key=nyxid_ag_secret",
-    node_id: "4df27e8f-8cb5-47b7-8d29-e6529f2c1c40",
-    api_key_id: "7ef9c1a4-8df9-43af-9f92-98a6c9a7f45d",
+    qr_payload:
+      "nyxprov://bootstrap?token=nyx_obt_secret&id=boot-1&url=https%3A%2F%2Fapi.example.com&exp=900",
+    bootstrap_id: "boot-1",
     label: "Kitchen Camera",
+    expires_in: 900,
+    expires_at: "2026-06-16T12:15:00Z",
   });
+  mockRevokeMutateAsync.mockResolvedValue(undefined);
   mockQrToDataUrl.mockResolvedValue("data:image/png;base64,qr");
 });
 
@@ -102,16 +118,34 @@ describe("DevicesOnboardPage", () => {
     expect(mockOnboardMutateAsync).toHaveBeenCalledWith(
       expect.objectContaining({
         label: "Kitchen Camera",
-        wifi_ssid: "HomeNetwork",
-        wifi_password: "hunter22",
         default_services: ["svc-personal"],
       }),
     );
+    expect(mockOnboardMutateAsync).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        wifi_ssid: expect.any(String),
+        wifi_password: expect.any(String),
+      }),
+    );
     expect(mockQrToDataUrl).toHaveBeenCalledWith(
-      "nyxprov://full?ssid=Home&key=nyxid_ag_secret",
+      "nyxprov://full?token=nyx_obt_secret&id=boot-1&url=https%3A%2F%2Fapi.example.com&exp=900&ssid=HomeNetwork&psw=hunter22",
       expect.objectContaining({ width: 360 }),
     );
-    expect(mockToastSuccess).toHaveBeenCalledWith("Device onboarded");
+    expect(mockToastSuccess).toHaveBeenCalledWith("Provisioning QR generated");
+  });
+
+  it("revokes the active bootstrap QR", async () => {
+    const user = userEvent.setup();
+    renderWithClient(<DevicesOnboardPage />);
+
+    await fillOnboardForm(user);
+    await user.click(screen.getByRole("button", { name: /generate qr/i }));
+    await screen.findByText("Device onboarded");
+    await user.click(screen.getByRole("button", { name: /revoke qr/i }));
+
+    expect(mockRevokeMutateAsync).toHaveBeenCalledWith("boot-1");
+    expect(mockToastSuccess).toHaveBeenCalledWith("Provisioning QR revoked");
+    expect(screen.getByRole("button", { name: /generate qr/i })).toBeInTheDocument();
   });
 
   it("filters grantable services by the selected org owner and prunes stale selections", async () => {

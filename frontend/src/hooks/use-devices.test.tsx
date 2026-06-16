@@ -2,14 +2,19 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderHook, waitFor } from "@testing-library/react";
 import type { PropsWithChildren } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { useApproveDevice, useOnboardDevice } from "./use-devices";
+import {
+  useApproveDevice,
+  useOnboardDevice,
+  useRevokeOnboardDevice,
+} from "./use-devices";
 
-const { mockPost } = vi.hoisted(() => ({
+const { mockDelete, mockPost } = vi.hoisted(() => ({
+  mockDelete: vi.fn(),
   mockPost: vi.fn(),
 }));
 
 vi.mock("@/lib/api-client", () => ({
-  api: { post: mockPost },
+  api: { delete: mockDelete, post: mockPost },
 }));
 
 function wrapperFactory() {
@@ -89,10 +94,11 @@ describe("useApproveDevice", () => {
 describe("useOnboardDevice", () => {
   it("posts the onboard payload to /devices/onboard and parses the response", async () => {
     mockPost.mockResolvedValue({
-      qr_payload: "nyxprov://full?ssid=Home",
-      node_id: "node-1",
-      api_key_id: "api-key-1",
+      qr_payload: "nyxprov://bootstrap?token=nyx_obt_secret",
+      bootstrap_id: "boot-1",
       label: "Kitchen Camera",
+      expires_in: 900,
+      expires_at: "2026-06-16T12:15:00Z",
     });
     const { wrapper } = wrapperFactory();
     const { result } = renderHook(() => useOnboardDevice(), { wrapper });
@@ -100,26 +106,23 @@ describe("useOnboardDevice", () => {
     const response = await result.current.mutateAsync({
       org_id: undefined,
       label: "Kitchen Camera",
-      wifi_ssid: "Home",
-      wifi_password: "hunter22",
       default_services: ["svc-1"],
     });
 
     expect(mockPost).toHaveBeenCalledWith("/devices/onboard", {
       label: "Kitchen Camera",
-      wifi_ssid: "Home",
-      wifi_password: "hunter22",
       default_services: ["svc-1"],
     });
-    expect(response.qr_payload).toBe("nyxprov://full?ssid=Home");
+    expect(response.qr_payload).toBe("nyxprov://bootstrap?token=nyx_obt_secret");
   });
 
-  it("invalidates keys, api-keys, and nodes after onboard succeeds", async () => {
+  it("does not invalidate key or node lists until the device redeems the bootstrap", async () => {
     mockPost.mockResolvedValue({
-      qr_payload: "nyxprov://full?ssid=Home",
-      node_id: "node-1",
-      api_key_id: "api-key-1",
+      qr_payload: "nyxprov://bootstrap?token=nyx_obt_secret",
+      bootstrap_id: "boot-1",
       label: "Kitchen Camera",
+      expires_in: 900,
+      expires_at: "2026-06-16T12:15:00Z",
     });
     const { invalidateSpy, wrapper } = wrapperFactory();
     const { result } = renderHook(() => useOnboardDevice(), { wrapper });
@@ -127,14 +130,20 @@ describe("useOnboardDevice", () => {
     await result.current.mutateAsync({
       org_id: undefined,
       label: "Kitchen Camera",
-      wifi_ssid: "Home",
-      wifi_password: "hunter22",
     });
 
-    await waitFor(() =>
-      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["nodes"] }),
-    );
-    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["api-keys"] });
-    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["keys"] });
+    expect(invalidateSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("useRevokeOnboardDevice", () => {
+  it("deletes the onboard bootstrap resource", async () => {
+    mockDelete.mockResolvedValue(undefined);
+    const { wrapper } = wrapperFactory();
+    const { result } = renderHook(() => useRevokeOnboardDevice(), { wrapper });
+
+    await result.current.mutateAsync("boot-1");
+
+    expect(mockDelete).toHaveBeenCalledWith("/devices/onboard/boot-1");
   });
 });

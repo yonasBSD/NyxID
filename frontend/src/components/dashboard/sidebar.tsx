@@ -26,6 +26,7 @@ import {
   PanelLeftClose,
   PanelLeft,
   Circle,
+  QrCode,
 } from "lucide-react";
 import {
   Popover,
@@ -44,6 +45,7 @@ export const MAIN_NAV = [
   { to: "/keys", icon: Cable, label: "AI Services" },
   { to: "/orgs", icon: Building2, label: "Organizations" },
   { to: "/nodes", icon: HardDrive, label: "Nodes" },
+  { to: "/devices/onboard", icon: QrCode, label: "Device Onboard" },
   { to: "/channel-bots", icon: Radio, label: "Channel Bots" },
   { to: "/settings", icon: Settings, label: "Settings" },
   { to: "/settings/consents", icon: KeyRound, label: "Access & Auth" },

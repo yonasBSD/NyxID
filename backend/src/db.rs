@@ -930,10 +930,12 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     // ── device_onboard_credentials ──
     let device_onboard_credentials =
         db.collection::<mongodb::bson::Document>(DEVICE_ONBOARD_CREDENTIALS);
+    let _ = device_onboard_credentials.drop_index("node_id_1").await;
+    let _ = device_onboard_credentials.drop_index("api_key_id_1").await;
     device_onboard_credentials
         .create_index(
             IndexModel::builder()
-                .keys(doc! { "node_id": 1 })
+                .keys(doc! { "bootstrap_token_hash": 1 })
                 .options(IndexOptions::builder().unique(true).build())
                 .build(),
         )
@@ -941,8 +943,7 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     device_onboard_credentials
         .create_index(
             IndexModel::builder()
-                .keys(doc! { "api_key_id": 1 })
-                .options(IndexOptions::builder().unique(true).build())
+                .keys(doc! { "used": 1, "expires_at": 1 })
                 .build(),
         )
         .await?;
@@ -950,6 +951,48 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .create_index(
             IndexModel::builder()
                 .keys(doc! { "owner_user_id": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+    device_onboard_credentials
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "redeemed_node_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .partial_filter_expression(doc! {
+                            "redeemed_node_id": { "$type": "string" },
+                        })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    device_onboard_credentials
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "redeemed_api_key_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .partial_filter_expression(doc! {
+                            "redeemed_api_key_id": { "$type": "string" },
+                        })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    device_onboard_credentials
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Duration::from_secs(0))
+                        .build(),
+                )
                 .build(),
         )
         .await?;
