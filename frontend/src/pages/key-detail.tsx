@@ -74,6 +74,7 @@ import {
   ExternalLink,
   FileJson,
   Power,
+  Link2,
 } from "lucide-react";
 import { toast } from "sonner";
 import type { SshServiceConfig } from "@/types/api";
@@ -1162,19 +1163,23 @@ function buildCurlExample({
 }
 
 function ApiUsageSection({
+  serviceId,
   slug,
   authMethod,
   endpointUrl,
   catalogServiceSlug,
   label,
   catalogEntry,
+  showAgentSetup = true,
 }: {
+  readonly serviceId: string;
   readonly slug: string;
   readonly authMethod: string;
   readonly endpointUrl: string;
   readonly catalogServiceSlug: string | null;
   readonly label: string;
   readonly catalogEntry: CatalogEntry | undefined;
+  readonly showAgentSetup?: boolean;
 }) {
   const proxyUrl = `${window.location.origin}/api/v1/proxy/s/${slug}`;
   const catalogSlug = catalogServiceSlug ?? catalogEntry?.slug ?? slug;
@@ -1248,9 +1253,22 @@ function ApiUsageSection({
   return (
     <Card className="min-w-0 md:col-span-2">
       <CardHeader className="pb-3">
-        <div className="flex items-center gap-2">
-          <Code className="h-4 w-4 text-primary" />
-          <CardTitle className="text-[15px]">API Usage</CardTitle>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="flex items-center gap-2">
+            <Code className="h-4 w-4 text-primary" />
+            <CardTitle className="text-[15px]">API Usage</CardTitle>
+          </div>
+          {showAgentSetup && (
+            <Button variant="outline" asChild>
+              <Link
+                to="/keys"
+                search={{ tab: "nyxid", action: "setup-agent", service: serviceId }}
+              >
+                <ButtonIcon><Link2 className="h-3 w-3" /></ButtonIcon>
+                Set Up Agent
+              </Link>
+            </Button>
+          )}
         </div>
         <CardDescription>
           How to connect to this service through NyxID proxy
@@ -2064,12 +2082,14 @@ export function KeyDetailPage() {
 
           {!isSsh && (
             <ApiUsageSection
+              serviceId={keyInfo.id}
               slug={keyInfo.slug}
               authMethod={keyInfo.auth_method}
               endpointUrl={keyInfo.endpoint_url}
               catalogServiceSlug={keyInfo.catalog_service_slug}
               label={keyInfo.label}
               catalogEntry={catalogEntry}
+              showAgentSetup={!readOnly}
             />
           )}
 
@@ -2136,12 +2156,14 @@ export function KeyDetailPage() {
 
             {!isSsh && (
               <ApiUsageSection
+                serviceId={keyInfo.id}
                 slug={keyInfo.slug}
                 authMethod={keyInfo.auth_method}
                 endpointUrl={keyInfo.endpoint_url}
                 catalogServiceSlug={keyInfo.catalog_service_slug}
                 label={keyInfo.label}
                 catalogEntry={catalogEntry}
+                showAgentSetup={!readOnly}
               />
             )}
 

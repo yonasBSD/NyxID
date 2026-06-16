@@ -27,6 +27,7 @@ import {
   Terminal,
   Zap,
   RefreshCw,
+  Shield,
 } from "lucide-react";
 import { MagicKeyIcon } from "@/components/icons/empty-state";
 import { Switch } from "@/components/ui/switch";
@@ -680,14 +681,43 @@ function ExternalServicesTab({
 function NyxIdApiKeysTab({
   createKeyOpen,
   onCreateKeyOpenChange,
+  onSetupAgent,
+  createKeySetupMode,
+  initialSetupServiceId,
   viewMode,
 }: {
   readonly createKeyOpen?: boolean;
   readonly onCreateKeyOpenChange?: (open: boolean) => void;
+  readonly onSetupAgent: () => void;
+  readonly createKeySetupMode: boolean;
+  readonly initialSetupServiceId: string | null;
   readonly viewMode: ViewMode;
 }) {
   return (
     <div className="space-y-6">
+      <Card>
+        <CardContent className="flex flex-col gap-4 p-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-start gap-3">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-primary/25 bg-primary/10">
+              <Shield className="h-4 w-4 text-primary" />
+            </div>
+            <div className="space-y-1">
+              <h3 className="text-[13px] font-semibold text-foreground">
+                Set up an isolated AI agent
+              </h3>
+              <p className="max-w-2xl text-xs text-muted-foreground">
+                Create or select an Agent Key, choose allowed services, add
+                credential bindings only when needed, then copy a verification
+                command that proves the key is scoped.
+              </p>
+            </div>
+          </div>
+          <Button variant="primary" className="shrink-0" onClick={onSetupAgent}>
+            <ButtonIcon variant="primary"><Terminal className="h-3 w-3" /></ButtonIcon>
+            Start Setup
+          </Button>
+        </CardContent>
+      </Card>
       <div className="space-y-3">
         <div className="flex items-center gap-2">
           <KeySquare className="h-4 w-4 text-muted-foreground" />
@@ -700,6 +730,8 @@ function NyxIdApiKeysTab({
         externalOpen={createKeyOpen}
         onExternalOpenChange={onCreateKeyOpenChange}
         hideTrigger
+        setupMode={createKeySetupMode}
+        initialServiceId={initialSetupServiceId}
       />
     </div>
   );
@@ -748,12 +780,14 @@ function AutoConnectedToggle({
 }
 
 export function KeysPage() {
-  const search: { tab?: string; slug?: string; action?: string } = useSearch({ strict: false });
+  const search: { tab?: string; slug?: string; action?: string; service?: string } = useSearch({ strict: false });
   const navigate = useNavigate();
   const tab = parseTab(search.tab, KEYS_TABS, KEYS_TAB_DEFAULT);
 
   const [addServiceOpen, setAddServiceOpen] = useState(false);
   const [createKeyOpen, setCreateKeyOpen] = useState(false);
+  const [createKeySetupMode, setCreateKeySetupMode] = useState(false);
+  const [initialSetupServiceId, setInitialSetupServiceId] = useState<string | null>(null);
   const [showAutoConnected, setShowAutoConnected] = useState(false);
   const [servicesViewMode, setServicesViewMode] = useViewMode("keys-services");
   const [agentKeysViewMode, setAgentKeysViewMode] = useViewMode("keys-agent");
@@ -787,6 +821,12 @@ export function KeysPage() {
     if (action === "add-service") {
       setAddServiceOpen(true);
     } else if (action === "create-key") {
+      setCreateKeySetupMode(false);
+      setInitialSetupServiceId(null);
+      setCreateKeyOpen(true);
+    } else if (action === "setup-agent") {
+      setCreateKeySetupMode(true);
+      setInitialSetupServiceId(search.service ?? null);
       setCreateKeyOpen(true);
     }
     void navigate({
@@ -795,7 +835,7 @@ export function KeysPage() {
       replace: true,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search.slug, search.action]);
+  }, [search.slug, search.action, search.service]);
 
   // Clear the stashed slug AND reset the once-per-slug guard when
   // the dialog closes. Resetting `appliedSlugRef` lets a subsequent
@@ -817,6 +857,8 @@ export function KeysPage() {
   function handleCreateKeyOpenChange(next: boolean) {
     setCreateKeyOpen(next);
     if (!next) {
+      setCreateKeySetupMode(false);
+      setInitialSetupServiceId(null);
       appliedActionRef.current = null;
     }
   }
@@ -877,6 +919,13 @@ export function KeysPage() {
           <NyxIdApiKeysTab
             createKeyOpen={createKeyOpen}
             onCreateKeyOpenChange={handleCreateKeyOpenChange}
+            onSetupAgent={() => {
+              setCreateKeySetupMode(true);
+              setInitialSetupServiceId(null);
+              setCreateKeyOpen(true);
+            }}
+            createKeySetupMode={createKeySetupMode}
+            initialSetupServiceId={initialSetupServiceId}
             viewMode={agentKeysViewMode}
           />
         </TabsContent>

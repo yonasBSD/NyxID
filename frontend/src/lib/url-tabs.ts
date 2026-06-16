@@ -38,7 +38,7 @@ export const KEYS_TABS = ["services", "nyxid"] as const;
 export type KeysTab = (typeof KEYS_TABS)[number];
 export const KEYS_TAB_DEFAULT: KeysTab = "services";
 
-export const KEYS_ACTIONS = ["add-service", "create-key"] as const;
+export const KEYS_ACTIONS = ["add-service", "create-key", "setup-agent"] as const;
 export type KeysAction = (typeof KEYS_ACTIONS)[number];
 
 export const INVITE_CODES_TABS = ["codes", "users"] as const;
