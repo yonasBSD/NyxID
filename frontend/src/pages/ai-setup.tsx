@@ -20,7 +20,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Separator } from "@/components/ui/separator";
 import { toast } from "sonner";
-import { Copy, Plus } from "lucide-react";
+import { Copy, Plus, Shield } from "lucide-react";
 import { BrainIcon } from "@/components/icons/empty-state";
 import { useDeveloperApps } from "@/hooks/use-developer-apps";
 import { usePublicConfig } from "@/hooks/use-public-config";
@@ -297,6 +297,32 @@ export function AiSetupPage() {
           an app, copy the config, done.
         </p>
       </div>
+
+      <Card>
+        <CardContent className="flex flex-col gap-4 p-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-start gap-3">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-primary/25 bg-primary/10">
+              <Shield className="h-4 w-4 text-primary" />
+            </div>
+            <div className="space-y-1">
+              <h3 className="text-[13px] font-semibold text-foreground">
+                Isolate this AI agent before handing it credentials
+              </h3>
+              <p className="max-w-2xl text-xs text-muted-foreground">
+                Use the Agent Isolation setup flow to create a scoped Agent Key,
+                choose allowed services, add credential bindings only when
+                needed, and copy a verification command.
+              </p>
+            </div>
+          </div>
+          <Button variant="primary" asChild className="shrink-0">
+            <Link to="/keys" search={{ tab: "nyxid", action: "setup-agent" }}>
+              <ButtonIcon variant="primary"><Shield className="h-3 w-3" /></ButtonIcon>
+              Set Up Agent Key
+            </Link>
+          </Button>
+        </CardContent>
+      </Card>
 
       <AiSkillSetupCard baseUrl={baseUrl} dashboardUrl={window.location.origin} />
 

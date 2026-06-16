@@ -538,16 +538,21 @@ const keysRoute = createRoute({
   // or `useSearch()` inside `KeysPage` will never observe it and
   // the auto-open-AddKeyDialog flow silently degrades to the
   // generic catalog grid. `action` is whitelisted for the same
-  // reason — the dashboard deep-links `/keys?action=add-service`
-  // and `/keys?action=create-key` to auto-open the add dialogs.
+  // reason — the dashboard deep-links `/keys?action=add-service`,
+  // `/keys?action=create-key`, and `/keys?action=setup-agent` to auto-open
+  // the add/setup dialogs. `service` preselects a service in the guided
+  // Agent Isolation flow.
   validateSearch: (
     search: Record<string, unknown>,
-  ): { tab?: string; slug?: string; action?: string } => ({
+  ): { tab?: string; slug?: string; action?: string; service?: string } => ({
     ...(typeof search.tab === "string" ? { tab: search.tab } : {}),
     ...(typeof search.slug === "string" && search.slug.length > 0
       ? { slug: search.slug }
       : {}),
     ...(typeof search.action === "string" ? { action: search.action } : {}),
+    ...(typeof search.service === "string" && search.service.length > 0
+      ? { service: search.service }
+      : {}),
   }),
   component: KeysPage,
 });
