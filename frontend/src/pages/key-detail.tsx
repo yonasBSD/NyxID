@@ -2283,14 +2283,17 @@ export function KeyDetailPage() {
               readOnly={readOnly}
             />
 
+            <div className="grid gap-4 lg:grid-cols-2">
+              <AccessPolicySection
+                serviceId={keyInfo.id}
+                adminOnly={keyInfo.admin_only ?? false}
+                readOnly={readOnly}
+              />
+            </div>
+
             {!isSsh && (
               <>
                 <div className="grid gap-4 lg:grid-cols-2">
-                  <AccessPolicySection
-                    serviceId={keyInfo.id}
-                    adminOnly={keyInfo.admin_only ?? false}
-                    readOnly={readOnly}
-                  />
                   <OpenApiSpecSection
                     endpointId={keyInfo.endpoint_id}
                     specUrl={keyInfo.openapi_spec_url ?? null}
