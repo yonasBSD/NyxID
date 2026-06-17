@@ -15,6 +15,7 @@ import { copyToClipboard } from "@/lib/utils";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { OrgScopeSelect } from "@/components/shared/org-scope-select";
 import { OAuthCallbackGuidance } from "@/components/shared/twitter-oauth-guidance";
 import {
@@ -74,6 +75,7 @@ interface FormState {
   readonly sshCertificateAuth: boolean;
   readonly sshPrincipals: string;
   readonly sshCertificateTtlMinutes: string;
+  readonly adminOnly: boolean;
   /** Optional OpenAPI spec URL — enables endpoint discovery for AI tools. */
   readonly openapiSpecUrl: string;
 }
@@ -268,6 +270,7 @@ const INITIAL_FORM: FormState = {
   sshCertificateAuth: true,
   sshPrincipals: "",
   sshCertificateTtlMinutes: "30",
+  adminOnly: false,
   openapiSpecUrl: "",
 };
 
@@ -1998,6 +2001,34 @@ function OwnerPicker({
   );
 }
 
+function AccessPolicyPicker({
+  checked,
+  onChange,
+}: {
+  readonly checked: boolean;
+  readonly onChange: (checked: boolean) => void;
+}) {
+  return (
+    <div className="rounded-lg border border-border bg-muted/30 px-3 py-2">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <Label htmlFor="add-key-admin-only" className="text-xs font-medium">
+            Admin-only execution
+          </Label>
+          <p className="text-[11px] text-muted-foreground">
+            Restrict this org-owned service to organization admins.
+          </p>
+        </div>
+        <Switch
+          id="add-key-admin-only"
+          checked={checked}
+          onCheckedChange={onChange}
+        />
+      </div>
+    </div>
+  );
+}
+
 export function AddKeyDialog({
   open,
   onOpenChange,
@@ -2189,6 +2220,8 @@ export function AddKeyDialog({
     if (!selectedEntry) {
       throw new Error("Catalog entry is required for this flow");
     }
+    const accessParam =
+      targetOrgId && form.adminOnly ? { admin_only: true } : {};
 
     return {
       label: form.label,
@@ -2207,6 +2240,7 @@ export function AddKeyDialog({
         ? { openapi_spec_url: form.openapiSpecUrl.trim() }
         : {}),
       ...(targetOrgId ? { target_org_id: targetOrgId } : {}),
+      ...accessParam,
       // Multi-connection BYO: include the user-typed Custom App
       // credentials in the same `POST /keys` so the new `UserApiKey`
       // carries its own encrypted copy. Either both halves or
@@ -2244,6 +2278,8 @@ export function AddKeyDialog({
   function handleFormSubmit() {
     const specUrl = form.openapiSpecUrl.trim();
     const orgParam = targetOrgId ? { target_org_id: targetOrgId } : {};
+    const accessParam =
+      targetOrgId && form.adminOnly ? { admin_only: true } : {};
     const params = selectedEntry
       ? {
           credential: form.credential,
@@ -2261,6 +2297,7 @@ export function AddKeyDialog({
             : {}),
           ...(specUrl ? { openapi_spec_url: specUrl } : {}),
           ...orgParam,
+          ...accessParam,
         }
       : {
           credential: form.credential,
@@ -2270,6 +2307,7 @@ export function AddKeyDialog({
           auth_key_name: form.authKeyName,
           ...(specUrl ? { openapi_spec_url: specUrl } : {}),
           ...orgParam,
+          ...accessParam,
         };
 
     createKey.mutate(params, {
@@ -2291,6 +2329,8 @@ export function AddKeyDialog({
     // the node agent handles auth locally via `nyxid node credentials setup`.
     const isSshCustom = !selectedEntry && form.serviceType === "ssh";
     const orgParam = targetOrgId ? { target_org_id: targetOrgId } : {};
+    const accessParam =
+      targetOrgId && form.adminOnly ? { admin_only: true } : {};
     const params = selectedEntry
       ? {
           label: form.label,
@@ -2298,6 +2338,7 @@ export function AddKeyDialog({
           node_id: form.nodeId,
           service_type: selectedEntry.service_type,
           ...orgParam,
+          ...accessParam,
         }
       : isSshCustom
         ? {
@@ -2311,6 +2352,7 @@ export function AddKeyDialog({
             ssh_certificate_ttl_minutes:
               Number(form.sshCertificateTtlMinutes) || 30,
             ...orgParam,
+            ...accessParam,
           }
         : {
             label: form.label,
@@ -2323,6 +2365,7 @@ export function AddKeyDialog({
               ? { openapi_spec_url: form.openapiSpecUrl.trim() }
               : {}),
             ...orgParam,
+            ...accessParam,
           };
 
     createKey.mutate(params, {
@@ -2391,6 +2434,12 @@ export function AddKeyDialog({
 
         {step === "catalog" && (
           <OwnerPicker value={targetOrgId} onChange={setTargetOrgId} />
+        )}
+        {step === "catalog" && targetOrgId && (
+          <AccessPolicyPicker
+            checked={form.adminOnly}
+            onChange={(adminOnly) => handleFormChange({ adminOnly })}
+          />
         )}
 
         {step === "catalog" && (

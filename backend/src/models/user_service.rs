@@ -38,6 +38,10 @@ pub struct UserService {
     /// SSH auth mode for SSH services. Non-SSH services keep the default.
     #[serde(default = "default_ssh_auth_mode")]
     pub ssh_auth_mode: SshAuthMode,
+    /// For org-owned services, only org admins may proxy through this service.
+    /// Person-owned services ignore this flag.
+    #[serde(default)]
+    pub admin_only: bool,
     /// True after a node_key service is converted away from node_key while
     /// node-side keys may still exist in an operator's local node store.
     #[serde(default)]
@@ -140,6 +144,7 @@ mod tests {
             node_priority: 0,
             service_type: "http".to_string(),
             ssh_auth_mode: SshAuthMode::ProxyOnly,
+            admin_only: false,
             ssh_node_keys_stale: false,
             identity_propagation_mode: "headers".to_string(),
             identity_include_user_id: true,
@@ -187,6 +192,7 @@ mod tests {
             node_priority: 0,
             service_type: "http".to_string(),
             ssh_auth_mode: SshAuthMode::ProxyOnly,
+            admin_only: false,
             ssh_node_keys_stale: false,
             identity_propagation_mode: "none".to_string(),
             identity_include_user_id: false,
@@ -210,11 +216,13 @@ mod tests {
         doc.remove("node_priority");
         doc.remove("service_type");
         doc.remove("ssh_auth_mode");
+        doc.remove("admin_only");
         doc.remove("ssh_node_keys_stale");
         let restored: UserService = bson::from_document(doc).expect("deserialize");
         assert_eq!(restored.node_priority, 0);
         assert_eq!(restored.service_type, "http");
         assert_eq!(restored.ssh_auth_mode, SshAuthMode::ProxyOnly);
+        assert!(!restored.admin_only);
         assert!(!restored.ssh_node_keys_stale);
     }
 
@@ -233,6 +241,7 @@ mod tests {
             node_priority: 0,
             service_type: "http".to_string(),
             ssh_auth_mode: SshAuthMode::ProxyOnly,
+            admin_only: false,
             ssh_node_keys_stale: false,
             identity_propagation_mode: "both".to_string(),
             identity_include_user_id: true,
@@ -288,6 +297,7 @@ mod tests {
             node_priority: 0,
             service_type: "http".to_string(),
             ssh_auth_mode: SshAuthMode::ProxyOnly,
+            admin_only: false,
             ssh_node_keys_stale: false,
             identity_propagation_mode: "none".to_string(),
             identity_include_user_id: false,

@@ -2559,6 +2559,7 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
             node_priority: 0,
             service_type,
             ssh_auth_mode,
+            admin_only: false,
             ssh_node_keys_stale: false,
             identity_propagation_mode: inherited_identity.identity_propagation_mode,
             identity_include_user_id: inherited_identity.identity_include_user_id,
@@ -2795,6 +2796,7 @@ async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::e
             } else {
                 SshAuthMode::ProxyOnly
             },
+            admin_only: false,
             ssh_node_keys_stale: false,
             identity_propagation_mode: inherited_identity.identity_propagation_mode,
             identity_include_user_id: inherited_identity.identity_include_user_id,
@@ -3049,6 +3051,7 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
             } else {
                 SshAuthMode::ProxyOnly
             },
+            admin_only: false,
             ssh_node_keys_stale: false,
             identity_propagation_mode: inherited_identity.identity_propagation_mode,
             identity_include_user_id: inherited_identity.identity_include_user_id,

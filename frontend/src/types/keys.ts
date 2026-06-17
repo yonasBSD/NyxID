@@ -44,6 +44,7 @@ export interface KeyInfo {
   readonly websocket_supported?: boolean;
   readonly source?: "catalog" | "custom";
   readonly is_active: boolean;
+  readonly admin_only?: boolean;
   readonly custom_user_agent?: string | null;
   /**
    * NyxID#356: per-user default request headers attached to this
@@ -226,6 +227,7 @@ export interface UserServiceInfo {
   readonly node_id: string | null;
   readonly node_priority: number;
   readonly is_active: boolean;
+  readonly admin_only?: boolean;
   readonly ws_frame_injections: readonly WsFrameInjection[];
   readonly ssh_auth_mode?: "cert" | "node_key" | "proxy_only";
   readonly created_at: string;

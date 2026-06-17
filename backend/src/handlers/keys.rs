@@ -234,10 +234,10 @@ async fn resolve_key_read_owner(
                 .map(|u| (u.display_name, u.avatar_url))
                 .unwrap_or((None, None));
             let org_name = org_name.unwrap_or_else(|| "Unnamed Org".to_string());
-            // Members can proxy/use; viewers cannot. (Scope has already been
-            // enforced above via allows_resource; if we got here, this
-            // particular key is within the member's scope.)
-            let allowed = role.can_proxy();
+            // Members can proxy/use unless the service is admin-only; viewers
+            // cannot. Scope has already been enforced above via
+            // allows_resource, so if we got here this key is within scope.
+            let allowed = role.can_proxy() && (!svc.admin_only || role.can_admin());
             CredentialSource::Org {
                 org_user_id: org_user_id.clone(),
                 org_name,
@@ -278,6 +278,9 @@ pub struct CreateKeyRequest {
     pub auth_key_name: Option<String>,
     /// Route through this node agent (optional)
     pub node_id: Option<String>,
+    /// For org-owned services, restrict proxy execution to org admins.
+    /// Person-owned services ignore this flag.
+    pub admin_only: Option<bool>,
     /// SSH host (required for custom SSH services)
     pub ssh_host: Option<String>,
     /// SSH port (default: 22)
@@ -353,6 +356,7 @@ impl std::fmt::Debug for CreateKeyRequest {
             .field("auth_method", &self.auth_method)
             .field("auth_key_name", &self.auth_key_name)
             .field("node_id", &self.node_id)
+            .field("admin_only", &self.admin_only)
             .field("ssh_host", &self.ssh_host)
             .field("ssh_port", &self.ssh_port)
             .field("ssh_certificate_auth", &self.ssh_certificate_auth)
@@ -426,6 +430,7 @@ pub struct KeyResponse {
     pub service_type: String,
     pub ssh_auth_mode: SshAuthMode,
     pub ssh_node_keys_stale: bool,
+    pub admin_only: bool,
     pub is_active: bool,
     pub identity_propagation_mode: String,
     pub identity_include_user_id: bool,
@@ -545,6 +550,8 @@ pub struct UpdateKeyRequest {
     pub credential: Option<String>,
     /// Activate or deactivate
     pub is_active: Option<bool>,
+    /// For org-owned services, restrict proxy execution to org admins.
+    pub admin_only: Option<bool>,
     /// Identity propagation mode: "none" | "headers" | "jwt" | "both"
     pub identity_propagation_mode: Option<String>,
     pub identity_include_user_id: Option<bool>,
@@ -872,6 +879,7 @@ pub async fn create_key(
         identity,
         openapi_input,
         body.ws_frame_injections.as_deref(),
+        body.admin_only.unwrap_or(false),
         oauth_client_credentials,
         state.config.is_production(),
     )
@@ -1755,6 +1763,7 @@ pub async fn update_key(
         || body.auth_key_name.is_some()
         || body.node_id.is_some()
         || body.is_active.is_some()
+        || body.admin_only.is_some()
         || body.custom_user_agent.is_some()
         || body.default_request_headers.is_some()
         || has_identity_update
@@ -1817,6 +1826,7 @@ pub async fn update_key(
             body.custom_user_agent.as_deref(),
             body.default_request_headers.as_ref(),
             None,
+            body.admin_only,
         )
         .await?;
     }
@@ -2115,6 +2125,7 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
         service_type: result.service.service_type.clone(),
         ssh_auth_mode: result.service.ssh_auth_mode,
         ssh_node_keys_stale: result.service.ssh_node_keys_stale,
+        admin_only: result.service.admin_only,
         is_active: result.service.is_active,
         identity_propagation_mode: result.service.identity_propagation_mode.clone(),
         identity_include_user_id: result.service.identity_include_user_id,
@@ -2222,6 +2233,7 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         service_type: view.service_type,
         ssh_auth_mode: view.ssh_auth_mode,
         ssh_node_keys_stale: view.ssh_node_keys_stale,
+        admin_only: view.admin_only,
         is_active: view.is_active,
         identity_propagation_mode: view.identity_propagation_mode,
         identity_include_user_id: view.identity_include_user_id,
@@ -2578,6 +2590,7 @@ mod tests {
             node_id: None,
             credential: None,
             is_active: None,
+            admin_only: None,
             identity_propagation_mode: None,
             identity_include_user_id: None,
             identity_include_email: None,
@@ -3014,6 +3027,7 @@ mod tests {
             auth_method: Some("header".to_string()),
             auth_key_name: Some(String::new()),
             node_id: None,
+            admin_only: None,
             ssh_host: None,
             ssh_port: None,
             ssh_certificate_auth: None,
@@ -3249,6 +3263,7 @@ mod tests {
             auth_method: auth_method.map(str::to_string),
             auth_key_name: None,
             node_id: None,
+            admin_only: None,
             ssh_host: None,
             ssh_port: None,
             ssh_certificate_auth: None,

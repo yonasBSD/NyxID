@@ -695,6 +695,13 @@ pub struct OrgRouting {
     pub membership_id: String,
 }
 
+fn admin_only_allows_role(
+    user_service: &UserService,
+    role: crate::models::org_membership::OrgRole,
+) -> bool {
+    !user_service.admin_only || role.can_admin()
+}
+
 /// Resolve proxy target from the new UserService model.
 ///
 /// Resolution order (critical -- see ChronoAIProject/NyxID#209 Codex review):
@@ -772,6 +779,18 @@ pub async fn resolve_proxy_target_from_user_service(
                 org_user_id = %membership.org_user_id,
                 role = ?membership.role,
                 "Org membership role insufficient for proxy"
+            );
+            continue;
+        }
+
+        if !admin_only_allows_role(&org_us, membership.role) {
+            role_denied = true;
+            tracing::debug!(
+                user_id = %user_id,
+                org_user_id = %membership.org_user_id,
+                user_service_id = %org_us.id,
+                role = ?membership.role,
+                "Org membership role blocked by admin_only service policy"
             );
             continue;
         }
@@ -1123,7 +1142,9 @@ pub async fn resolve_proxy_target_by_user_service_id(
             access.allows_resource(&svc.id)
         }
         crate::services::org_service::OwnerAccess::AsOrgMember { role, .. } => {
-            role.can_proxy() && access.allows_resource(&svc.id)
+            role.can_proxy()
+                && admin_only_allows_role(&svc, *role)
+                && access.allows_resource(&svc.id)
         }
         crate::services::org_service::OwnerAccess::Forbidden => false,
     };
@@ -1232,6 +1253,9 @@ pub async fn find_effective_service_owner(
         if !membership.role.can_proxy() {
             continue;
         }
+        if !admin_only_allows_role(&org_us, membership.role) {
+            continue;
+        }
         let effective_scope =
             crate::services::org_role_scope_service::effective_scope_for_membership(
                 db,
@@ -1280,6 +1304,9 @@ pub async fn find_approval_resolution_hint(
             continue;
         };
         if !membership.role.can_proxy() {
+            continue;
+        }
+        if !admin_only_allows_role(&org_us, membership.role) {
             continue;
         }
         let effective_scope =
@@ -1338,7 +1365,9 @@ pub async fn find_approval_resolution_hint_by_user_service_id(
             access.allows_resource(&svc.id)
         }
         crate::services::org_service::OwnerAccess::AsOrgMember { role, .. } => {
-            role.can_proxy() && access.allows_resource(&svc.id)
+            role.can_proxy()
+                && admin_only_allows_role(&svc, *role)
+                && access.allows_resource(&svc.id)
         }
         crate::services::org_service::OwnerAccess::Forbidden => false,
     };
@@ -2967,6 +2996,120 @@ mod tests {
         assert!(matches!(denied, AppError::OrgRoleInsufficient(_)));
     }
 
+    #[tokio::test]
+    async fn org_admin_only_service_denies_member_and_allows_admin() {
+        let Some(db) = connect_test_database("proxy_org_admin_only").await else {
+            eprintln!("skipping proxy admin-only integration test: no local MongoDB available");
+            return;
+        };
+
+        let member_id = uuid::Uuid::new_v4().to_string();
+        let admin_id = uuid::Uuid::new_v4().to_string();
+        let org_id = uuid::Uuid::new_v4().to_string();
+        let endpoint_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&member_id, UserType::Person),
+                test_user(&admin_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ])
+            .await
+            .unwrap();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(test_user_endpoint(
+                &endpoint_id,
+                &org_id,
+                "Admin Service",
+                "https://admin.example.test",
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        let mut service =
+            test_user_service(&service_id, &org_id, "admin-svc", &endpoint_id, None, None);
+        service.admin_only = true;
+        db.collection::<crate::models::user_service::UserService>(USER_SERVICES)
+            .insert_one(service)
+            .await
+            .unwrap();
+
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_many([
+                test_membership(
+                    &org_id,
+                    &member_id,
+                    OrgRole::Member,
+                    Some(vec![service_id.clone()]),
+                ),
+                test_membership(&org_id, &admin_id, OrgRole::Admin, None),
+            ])
+            .await
+            .unwrap();
+
+        let node_manager = Arc::new(NodeWsManager::new(30, 100));
+        let denied = match resolve_proxy_target_from_user_service(
+            &db,
+            &test_encryption_keys(),
+            &node_manager,
+            &member_id,
+            Some("admin-svc"),
+            None,
+        )
+        .await
+        {
+            Err(err) => err,
+            Ok(_) => panic!("member should be denied by admin_only service policy"),
+        };
+        assert!(matches!(denied, AppError::OrgRoleInsufficient(_)));
+
+        let denied_via_id = match resolve_proxy_target_by_user_service_id(
+            &db,
+            &test_encryption_keys(),
+            &member_id,
+            &service_id,
+            Some("admin-svc"),
+            None,
+        )
+        .await
+        {
+            Err(err) => err,
+            Ok(_) => panic!("member should not bypass admin_only with _nyxid_via"),
+        };
+        assert!(matches!(denied_via_id, AppError::OrgRoleInsufficient(_)));
+
+        let member_owner = find_effective_service_owner(&db, &member_id, Some("admin-svc"), None)
+            .await
+            .expect("member owner lookup should not error");
+        assert!(member_owner.is_none());
+        let member_hint = find_approval_resolution_hint(&db, &member_id, Some("admin-svc"), None)
+            .await
+            .expect("member approval hint should not error");
+        assert!(member_hint.is_none());
+
+        let resolved = resolve_proxy_target_from_user_service(
+            &db,
+            &test_encryption_keys(),
+            &node_manager,
+            &admin_id,
+            Some("admin-svc"),
+            None,
+        )
+        .await
+        .expect("admin should resolve admin-only service")
+        .expect("admin org service resolution");
+        assert_eq!(resolved.user_service_id, service_id);
+        assert_eq!(
+            resolved
+                .org_routing
+                .as_ref()
+                .map(|r| r.org_user_id.as_str()),
+            Some(org_id.as_str())
+        );
+    }
+
     // ---- agent credential override resolution (issue #788) ----
     //
     // `resolve_agent_credential_override` is the proxy hot-path entry point
@@ -4216,6 +4359,7 @@ mod tests {
             node_priority: 0,
             service_type: "http".to_string(),
             ssh_auth_mode: crate::models::ssh_auth_mode::SshAuthMode::ProxyOnly,
+            admin_only: false,
             ssh_node_keys_stale: false,
             identity_propagation_mode: "none".to_string(),
             identity_include_user_id: false,

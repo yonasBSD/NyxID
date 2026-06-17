@@ -107,6 +107,7 @@ struct AddSshBody<'a> {
     ttl: u32,
     via_node: &'a str,
     target_org_id: Option<&'a str>,
+    admin_only: bool,
 }
 
 fn build_add_ssh_body(input: AddSshBody<'_>) -> serde_json::Map<String, Value> {
@@ -130,6 +131,9 @@ fn build_add_ssh_body(input: AddSshBody<'_>) -> serde_json::Map<String, Value> {
     body.insert("node_id".into(), Value::String(input.via_node.to_string()));
     if let Some(org_id) = input.target_org_id {
         body.insert("target_org_id".into(), Value::String(org_id.to_string()));
+    }
+    if input.admin_only {
+        body.insert("admin_only".into(), Value::Bool(true));
     }
     body
 }
@@ -240,6 +244,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             oauth_client_secret_env,
             copy_oauth_client_from,
             org,
+            admin_only,
             openapi_spec_url,
             ws_frame_preset,
             ws_frame_clear,
@@ -306,6 +311,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 openapi_spec_url.is_some(),
                 ws_frame_preset.is_some(),
                 ws_frame_clear,
+                admin_only,
             );
             // `--no-wait` forces the pairing variant even when a local
             // browser is available and wins over `--output json`
@@ -692,6 +698,9 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             if let Some(ref org_id) = org {
                 body.insert("target_org_id".into(), Value::String(org_id.clone()));
             }
+            if admin_only {
+                body.insert("admin_only".into(), Value::Bool(true));
+            }
 
             // Forward three-state openapi_spec_url verbatim. Backend treats
             // absent as "inherit catalog default", empty string as "opt out",
@@ -738,6 +747,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             ttl,
             via_node,
             org,
+            admin_only,
             auth,
         } => {
             let mut api = ApiClient::from_auth_checked(&auth).await?;
@@ -779,6 +789,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 ttl,
                 via_node: &via_node,
                 target_org_id: org.as_deref(),
+                admin_only,
             });
 
             let result: Value = api.post("/keys", &body).await?;
@@ -805,6 +816,9 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                     eprintln!("Node:       {via_node}");
                     if let Some(ref org_id) = org {
                         eprintln!("Org:        {org_id}");
+                    }
+                    if admin_only {
+                        eprintln!("Access:     Admin only");
                     }
                     if node_key {
                         eprintln!();
@@ -915,7 +929,9 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
 
                         let mut table = Table::new();
                         table.load_preset(UTF8_FULL_CONDENSED);
-                        table.set_header(["ID", "Slug", "Label", "Endpoint", "Status", "Node"]);
+                        table.set_header([
+                            "ID", "Slug", "Label", "Endpoint", "Status", "Access", "Node",
+                        ]);
 
                         for svc in items {
                             let id = svc["id"].as_str().or(svc["_id"].as_str()).unwrap_or("-");
@@ -937,8 +953,13 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                             } else {
                                 svc["status"].as_str().unwrap_or("active")
                             };
+                            let access = if svc["admin_only"].as_bool().unwrap_or(false) {
+                                "admin-only"
+                            } else {
+                                "members"
+                            };
                             let node = svc["node_id"].as_str().unwrap_or("--");
-                            table.add_row([id, slug, label, endpoint, status, node]);
+                            table.add_row([id, slug, label, endpoint, status, access, node]);
                         }
                         eprintln!("{table}");
                         for line in format_node_managed_list_hint_lines(items) {
@@ -992,6 +1013,14 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                     eprintln!("Type:       {svc_type}");
                     eprintln!("Status:     {status}");
                     eprintln!("Active:     {is_active}");
+                    eprintln!(
+                        "Access:     {}",
+                        if svc["admin_only"].as_bool().unwrap_or(false) {
+                            "admin-only"
+                        } else {
+                            "members"
+                        }
+                    );
                     eprintln!();
                     eprintln!("Endpoint:   {endpoint}");
                     eprintln!("Auth:       {auth_method} / {auth_key}");
@@ -1199,6 +1228,8 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             no_node,
             active,
             inactive,
+            admin_only,
+            member_access,
             default_header,
             clear_default_headers,
             ws_frame_preset,
@@ -1235,6 +1266,11 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 body.insert("is_active".into(), Value::Bool(true));
             } else if inactive {
                 body.insert("is_active".into(), Value::Bool(false));
+            }
+            if admin_only {
+                body.insert("admin_only".into(), Value::Bool(true));
+            } else if member_access {
+                body.insert("admin_only".into(), Value::Bool(false));
             }
 
             // NyxID#356: default_request_headers.
@@ -2227,6 +2263,7 @@ fn is_explicit_scripted(
     has_openapi_spec_url: bool,
     has_ws_frame_preset: bool,
     ws_frame_clear: bool,
+    admin_only: bool,
 ) -> bool {
     has_credential
         || has_credential_env
@@ -2239,6 +2276,7 @@ fn is_explicit_scripted(
         || has_openapi_spec_url
         || has_ws_frame_preset
         || ws_frame_clear
+        || admin_only
 }
 
 /// Default auth key name for a given auth method. Mirrors the frontend
@@ -2572,6 +2610,7 @@ mod tests {
             false, // has_openapi_spec_url
             false, // has_ws_frame_preset
             false, // ws_frame_clear
+            false, // admin_only
         )
     }
 
@@ -2682,22 +2721,23 @@ mod tests {
     #[test]
     fn issue_414_advanced_flags_keep_scripted() {
         // --scope / --openapi-spec-url / --ws-frame-preset /
-        // --ws-frame-clear are advanced flags we don't want to expose
-        // in the wizard form. They keep their existing scripted
-        // semantics.
-        for (scopes, spec_url, ws_preset, ws_clear) in [
-            (true, false, false, false),
-            (false, true, false, false),
-            (false, false, true, false),
-            (false, false, false, true),
+        // --ws-frame-clear / --admin-only are advanced flags we don't
+        // want to expose in the wizard form. They keep their existing
+        // scripted semantics.
+        for (scopes, spec_url, ws_preset, ws_clear, admin_only) in [
+            (true, false, false, false, false),
+            (false, true, false, false, false),
+            (false, false, true, false, false),
+            (false, false, false, true, false),
+            (false, false, false, false, true),
         ] {
             assert!(
                 is_explicit_scripted(
                     false, false, false, false, false, false, false, false, scopes, spec_url,
-                    ws_preset, ws_clear,
+                    ws_preset, ws_clear, admin_only,
                 ),
                 "expected scripted with scopes={scopes} spec_url={spec_url} \
-                 ws_preset={ws_preset} ws_clear={ws_clear}",
+                 ws_preset={ws_preset} ws_clear={ws_clear} admin_only={admin_only}",
             );
         }
     }
@@ -2833,6 +2873,7 @@ mod tests {
             ttl: 45,
             via_node: "node-123",
             target_org_id: Some("org-user-id"),
+            admin_only: false,
         }));
 
         assert_eq!(
@@ -2863,6 +2904,7 @@ mod tests {
             ttl: 30,
             via_node: "node-123",
             target_org_id: None,
+            admin_only: false,
         }));
 
         assert_eq!(
@@ -3198,6 +3240,8 @@ mod command_tests {
             no_node: false,
             active: false,
             inactive: false,
+            admin_only: false,
+            member_access: false,
             default_header: vec![],
             clear_default_headers: false,
             ws_frame_preset: None,
@@ -3242,6 +3286,7 @@ mod command_tests {
             oauth_client_secret_env: None,
             copy_oauth_client_from: None,
             org: None,
+            admin_only: false,
             openapi_spec_url: None,
             ws_frame_preset: None,
             ws_frame_clear: false,
@@ -3417,6 +3462,8 @@ mod command_tests {
             no_node: false,
             active: true,
             inactive: false,
+            admin_only: false,
+            member_access: false,
             default_header: vec!["x-api-version=v2".to_string()],
             clear_default_headers: false,
             ws_frame_preset: None,
@@ -3450,6 +3497,7 @@ mod command_tests {
             ttl: 30,
             via_node: "11111111-1111-1111-1111-111111111111".to_string(),
             org: None,
+            admin_only: false,
             auth: mock_auth(server.uri()),
         })
         .await
@@ -3487,6 +3535,7 @@ mod branch_tests {
             oauth_client_secret_env: None,
             copy_oauth_client_from: None,
             org: None,
+            admin_only: false,
             openapi_spec_url: None,
             ws_frame_preset: None,
             ws_frame_clear: false,
@@ -3696,6 +3745,8 @@ mod branch_tests {
             no_node: false,
             active: false,
             inactive: false,
+            admin_only: false,
+            member_access: false,
             default_header: vec![],
             clear_default_headers: false,
             ws_frame_preset: None,
@@ -3865,6 +3916,8 @@ mod branch_tests {
             no_node: false,
             active: false,
             inactive: false,
+            admin_only: false,
+            member_access: false,
             default_header: vec![],
             clear_default_headers: true,
             ws_frame_preset: None,
@@ -3896,6 +3949,8 @@ mod branch_tests {
             no_node: true,
             active: false,
             inactive: false,
+            admin_only: false,
+            member_access: false,
             default_header: vec![],
             clear_default_headers: false,
             ws_frame_preset: None,
@@ -3927,6 +3982,8 @@ mod branch_tests {
             no_node: false,
             active: false,
             inactive: true,
+            admin_only: false,
+            member_access: false,
             default_header: vec![],
             clear_default_headers: false,
             ws_frame_preset: None,
@@ -3938,12 +3995,45 @@ mod branch_tests {
     }
 
     #[tokio::test]
+    async fn update_admin_only_flag() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/keys/svc-1"))
+            .and(body_partial_json(serde_json::json!({ "admin_only": true })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": "svc-1" })),
+            )
+            .mount(&server)
+            .await;
+
+        run(ServiceCommands::Update {
+            id: "svc-1".to_string(),
+            label: None,
+            endpoint_url: None,
+            openapi_spec_url: None,
+            node_id: None,
+            no_node: false,
+            active: false,
+            inactive: false,
+            admin_only: true,
+            member_access: false,
+            default_header: vec![],
+            clear_default_headers: false,
+            ws_frame_preset: None,
+            ws_frame_clear: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("admin-only update should succeed");
+    }
+
+    #[tokio::test]
     async fn add_with_org_includes_target_org_id() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/v1/keys"))
             .and(body_partial_json(
-                serde_json::json!({ "target_org_id": NODE_UUID }),
+                serde_json::json!({ "target_org_id": NODE_UUID, "admin_only": true }),
             ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "id": "svc-1", "slug": "my-custom"
@@ -3974,6 +4064,7 @@ mod branch_tests {
             oauth_client_secret_env: None,
             copy_oauth_client_from: None,
             org: Some(NODE_UUID.to_string()),
+            admin_only: true,
             openapi_spec_url: None,
             ws_frame_preset: None,
             ws_frame_clear: false,

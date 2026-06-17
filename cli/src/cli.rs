@@ -744,6 +744,10 @@ pub enum ServiceCommands {
             help = "Organization to act on (UUID, slug, or display name)"
         )]
         org: Option<String>,
+        /// For org-owned services, restrict proxy execution to org admins.
+        /// Personal services ignore this flag.
+        #[arg(long)]
+        admin_only: bool,
         /// Optional OpenAPI spec URL for endpoint discovery. When set, AI
         /// agents (MCP, proxy discovery) surface concrete operations parsed
         /// from this spec instead of a single generic proxy tool. Pass
@@ -805,6 +809,10 @@ pub enum ServiceCommands {
         /// Members of the org will see and use the SSH service through their own NyxID account.
         #[arg(long, value_name = "ID|SLUG|NAME")]
         org: Option<String>,
+        /// For org-owned SSH services, restrict proxy execution to org admins.
+        /// Personal services ignore this flag.
+        #[arg(long)]
+        admin_only: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -893,6 +901,12 @@ pub enum ServiceCommands {
         /// Set service to inactive
         #[arg(long, conflicts_with = "active")]
         inactive: bool,
+        /// Require org-admin role for proxy execution of this service.
+        #[arg(long, conflicts_with = "member_access")]
+        admin_only: bool,
+        /// Allow org members with proxy scope to execute this service.
+        #[arg(long, conflicts_with = "admin_only")]
+        member_access: bool,
         /// Set or replace a default HTTP header injected on every proxied
         /// request. Format: `name=value`, optionally suffixed with
         /// `:overridable` to let a caller-supplied value win. Repeat the
@@ -2090,6 +2104,55 @@ mod tests {
             } => {
                 assert_eq!(slug.as_deref(), Some("llm-openai"));
                 assert_eq!(custom_slug.as_deref(), Some("my-custom-service"));
+            }
+            _ => panic!("unexpected parse result"),
+        }
+    }
+
+    #[test]
+    fn service_admin_only_flags_parse() {
+        let cli = Cli::try_parse_from(["nyxid", "service", "add", "llm-openai", "--admin-only"])
+            .expect("service add should accept --admin-only");
+        match cli.command {
+            Commands::Service {
+                command: ServiceCommands::Add { admin_only, .. },
+            } => assert!(admin_only),
+            _ => panic!("unexpected parse result"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "service",
+            "add-ssh",
+            "--label",
+            "bastion",
+            "--host",
+            "10.0.0.1",
+            "--via-node",
+            "node-1",
+            "--admin-only",
+        ])
+        .expect("service add-ssh should accept --admin-only");
+        match cli.command {
+            Commands::Service {
+                command: ServiceCommands::AddSsh { admin_only, .. },
+            } => assert!(admin_only),
+            _ => panic!("unexpected parse result"),
+        }
+
+        let cli = Cli::try_parse_from(["nyxid", "service", "update", "svc-1", "--member-access"])
+            .expect("service update should accept --member-access");
+        match cli.command {
+            Commands::Service {
+                command:
+                    ServiceCommands::Update {
+                        admin_only,
+                        member_access,
+                        ..
+                    },
+            } => {
+                assert!(!admin_only);
+                assert!(member_access);
             }
             _ => panic!("unexpected parse result"),
         }

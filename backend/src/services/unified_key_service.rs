@@ -427,6 +427,7 @@ pub struct KeyView {
     pub service_type: String,
     pub ssh_auth_mode: SshAuthMode,
     pub ssh_node_keys_stale: bool,
+    pub admin_only: bool,
     pub is_active: bool,
     pub identity_propagation_mode: String,
     pub identity_include_user_id: bool,
@@ -655,6 +656,7 @@ pub async fn create_key(
     identity: Option<user_service_service::IdentityConfig>,
     openapi_spec_url: OpenApiSpecUrlInput<'_>,
     ws_frame_injections: Option<&[WsFrameInjection]>,
+    admin_only: bool,
     oauth_client_credentials: OauthClientCredentialsInput<'_>,
     hosted_mode: bool,
 ) -> AppResult<CreateKeyResult> {
@@ -1013,6 +1015,7 @@ pub async fn create_key(
                 None,
                 &catalog_identity,
                 ws_frame_injections,
+                admin_only,
             )
             .await
             {
@@ -1229,6 +1232,7 @@ pub async fn create_key(
                 None,
                 &user_service_service::IdentityConfig::none(),
                 ws_frame_injections,
+                admin_only,
             )
             .await
             {
@@ -1388,6 +1392,7 @@ pub async fn create_key(
                 None,
                 &custom_identity,
                 ws_frame_injections,
+                admin_only,
             )
             .await
             {
@@ -1658,6 +1663,7 @@ pub async fn auto_provision_no_auth_services(
             *source_app_id,
             &catalog_identity,
             None,
+            false,
         )
         .await
         {
@@ -2986,6 +2992,7 @@ fn build_key_view(
         service_type: svc.service_type.clone(),
         ssh_auth_mode: svc.ssh_auth_mode,
         ssh_node_keys_stale: svc.ssh_node_keys_stale,
+        admin_only: svc.admin_only,
         is_active: svc.is_active,
         identity_propagation_mode: svc.identity_propagation_mode.clone(),
         identity_include_user_id: svc.identity_include_user_id,
@@ -3170,6 +3177,7 @@ mod tests {
             node_priority: 0,
             service_type: "http".to_string(),
             ssh_auth_mode: SshAuthMode::ProxyOnly,
+            admin_only: false,
             ssh_node_keys_stale: false,
             identity_propagation_mode: "none".to_string(),
             identity_include_user_id: false,
@@ -3644,6 +3652,7 @@ mod tests {
                 None,
                 OpenApiSpecUrlInput::Inherit,
                 None,
+                false,
                 OauthClientCredentialsInput::None,
                 false,
             ),
@@ -3664,6 +3673,7 @@ mod tests {
                 None,
                 OpenApiSpecUrlInput::Inherit,
                 None,
+                false,
                 OauthClientCredentialsInput::None,
                 false,
             )
@@ -3716,6 +3726,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -3746,6 +3757,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -3835,6 +3847,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -3889,6 +3902,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -3931,6 +3945,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -4055,6 +4070,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -4115,6 +4131,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -5125,6 +5142,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -5383,6 +5401,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             byo,
             false,
         )
@@ -5885,6 +5904,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -5918,6 +5938,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -5951,6 +5972,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -5991,6 +6013,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -6260,6 +6283,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -6316,6 +6340,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -6351,6 +6376,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -6396,6 +6422,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -6445,6 +6472,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -6494,6 +6522,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -6550,6 +6579,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -6592,6 +6622,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -6632,6 +6663,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Set("https://api.example.com/openapi.json"),
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -6683,6 +6715,7 @@ mod tests {
             Some(identity),
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -6726,6 +6759,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -6749,6 +6783,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -6809,6 +6844,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -6857,6 +6893,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -6906,6 +6943,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -6958,6 +6996,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -6981,6 +7020,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -7246,6 +7286,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -7300,6 +7341,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -7361,6 +7403,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -7411,6 +7454,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -7465,6 +7509,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -7515,6 +7560,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -7558,6 +7604,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -7596,6 +7643,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -7653,6 +7701,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -7701,6 +7750,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Clear,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -7755,6 +7805,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -7804,6 +7855,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -7877,6 +7929,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -7922,6 +7975,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -7960,6 +8014,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -8011,6 +8066,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -8049,6 +8105,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -8087,6 +8144,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -8307,6 +8365,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
@@ -8356,6 +8415,7 @@ mod tests {
             None,
             OpenApiSpecUrlInput::Inherit,
             None,
+            false,
             OauthClientCredentialsInput::None,
             false,
         )
