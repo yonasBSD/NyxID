@@ -73,6 +73,14 @@ pub struct OAuthInitiateQuery {
     /// to append to the provider's `default_scopes` when building the
     /// authorization URL. The upstream provider decides whether to grant them.
     pub scope: Option<String>,
+    /// Optional comma- or space-separated *complete* scope set (NyxID#917).
+    /// When present (even empty), it REPLACES the provider's `default_scopes`
+    /// rather than appending — the scope-picker UI sends the full set the user
+    /// selected, including pre-checked defaults they kept and minus any they
+    /// removed. Mutually exclusive with `scope` in practice; if both are sent,
+    /// `scope_override` wins. Absent for every legacy additive caller, so
+    /// their behavior is unchanged.
+    pub scope_override: Option<String>,
     /// When set, initiate the OAuth flow on behalf of an org. The resulting
     /// `UserProviderToken` is stored under the org's user_id so that every
     /// member of the org can proxy through the resulting credential. The
@@ -94,6 +102,11 @@ pub struct DeviceCodeInitiateQuery {
     /// to append to the provider's `default_scopes` when requesting the
     /// device code.
     pub scope: Option<String>,
+    /// Complete scope set that REPLACES `default_scopes` (NyxID#917). See
+    /// [`OAuthInitiateQuery::scope_override`]. Ignored by `openai`-format
+    /// device-code providers, which reject any `scope` (the guard in
+    /// `ensure_additional_scopes_supported` rejects a non-empty override).
+    pub scope_override: Option<String>,
     /// When set, initiate the device-code flow on behalf of an org. The
     /// resulting token is stored under the org's user_id. The caller must
     /// be an admin of the org. See [`OAuthInitiateQuery::target_org_id`].
@@ -240,7 +253,8 @@ pub async fn connect_api_key(
         body.gateway_url.as_deref(),
     )
     .await?;
-    sync_provider_credentials_to_unified_keys(&state, &user_id_str, &provider_id, true).await?;
+    sync_provider_credentials_to_unified_keys(&state, &user_id_str, &provider_id, true, false)
+        .await?;
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -336,6 +350,13 @@ pub async fn initiate_oauth_connect(
         validate_redirect_path(redirect_path)?;
     }
     let additional_scopes = user_token_service::parse_additional_scopes(query.scope.as_deref())?;
+    // Scope-picker override (NyxID#917): when the query param is present
+    // (even empty), it is the COMPLETE validated scope set and replaces the
+    // additive default-merge in the service. `None` keeps legacy behavior.
+    let scope_override = match query.scope_override.as_deref() {
+        Some(raw) => Some(user_token_service::parse_additional_scopes(Some(raw))?),
+        None => None,
+    };
 
     // Optional org-targeted flow. When set, the admin is initiating OAuth
     // on behalf of the org -- the resulting token lives under the org's
@@ -361,6 +382,7 @@ pub async fn initiate_oauth_connect(
         target_org_user_id.as_deref(),
         query.redirect_path.as_deref(),
         &additional_scopes,
+        scope_override.as_deref(),
         connection_id.as_deref(),
     )
     .await?;
@@ -653,6 +675,10 @@ async fn generic_oauth_callback_impl(
                 &outcome.user_id,
                 provider_id,
                 true,
+                // NyxID#917: fresh OAuth callback — stamp `last_authorized_at`
+                // on legacy keys so the manage-scopes wizard's polling
+                // completion predicate fires instead of timing out at 5 min.
+                true,
             )
             .await
             {
@@ -828,8 +854,14 @@ pub async fn disconnect_provider(
         &provider_id,
     )
     .await?;
-    sync_provider_credentials_to_unified_keys(&state, effective_user_id, &provider_id, false)
-        .await?;
+    sync_provider_credentials_to_unified_keys(
+        &state,
+        effective_user_id,
+        &provider_id,
+        false,
+        false,
+    )
+    .await?;
 
     let mut event_data = serde_json::json!({ "provider_id": &provider_id });
     if effective_user_id != user_id_str {
@@ -872,7 +904,7 @@ pub async fn manual_refresh(
         &provider_id,
     )
     .await?;
-    sync_provider_credentials_to_unified_keys(&state, effective_user_id, &provider_id, true)
+    sync_provider_credentials_to_unified_keys(&state, effective_user_id, &provider_id, true, false)
         .await?;
 
     let mut event_data = serde_json::json!({ "provider_id": &provider_id });
@@ -905,6 +937,12 @@ pub async fn request_device_code(
 ) -> AppResult<Json<DeviceCodeInitiateResponse>> {
     let user_id_str = auth_user.user_id.to_string();
     let additional_scopes = user_token_service::parse_additional_scopes(query.scope.as_deref())?;
+    // Scope-picker override (NyxID#917) — see the matching block in the OAuth
+    // initiate handler. Present (even empty) → replaces default-merge.
+    let scope_override = match query.scope_override.as_deref() {
+        Some(raw) => Some(user_token_service::parse_additional_scopes(Some(raw))?),
+        None => None,
+    };
 
     // See `initiate_oauth_connect` for the org-targeting contract.
     let target_org_user_id =
@@ -926,6 +964,7 @@ pub async fn request_device_code(
         &provider_id,
         target_org_user_id.as_deref(),
         &additional_scopes,
+        scope_override.as_deref(),
         connection_id.as_deref(),
     )
     .await?;
@@ -990,8 +1029,14 @@ pub async fn poll_device_code(
 
     if result.status == "complete" {
         let effective_user_id = result.effective_user_id.as_deref().unwrap_or(&user_id_str);
-        sync_provider_credentials_to_unified_keys(&state, effective_user_id, &provider_id, true)
-            .await?;
+        sync_provider_credentials_to_unified_keys(
+            &state,
+            effective_user_id,
+            &provider_id,
+            true,
+            false,
+        )
+        .await?;
         let mut event_data = serde_json::json!({
             "provider_id": &provider_id,
             "token_type": "device_code",
@@ -1110,8 +1155,24 @@ async fn sync_provider_credentials_to_unified_keys(
     user_id: &str,
     provider_id: &str,
     push_to_nodes: bool,
+    fresh_authorization: bool,
 ) -> AppResult<()> {
-    user_api_key_service::sync_provider_token_to_api_keys(&state.db, user_id, provider_id).await?;
+    // NyxID#917: only the fresh-OAuth-callback path stamps
+    // `last_authorized_at`. The manage-scopes wizard polls for this stamp to
+    // advance as its completion signal; stamping on refresh / disconnect /
+    // manual-credential sync would let the wizard falsely complete on flows
+    // the user didn't initiate.
+    if fresh_authorization {
+        user_api_key_service::sync_provider_token_to_api_keys_after_authorization(
+            &state.db,
+            user_id,
+            provider_id,
+        )
+        .await?;
+    } else {
+        user_api_key_service::sync_provider_token_to_api_keys(&state.db, user_id, provider_id)
+            .await?;
+    }
 
     if push_to_nodes {
         let db = state.db.clone();
@@ -1299,6 +1360,7 @@ mod tests {
             user_oauth_client_secret_encrypted: None,
             status: "pending_auth".to_string(),
             last_used_at: None,
+            last_authorized_at: None,
             error_message: None,
             source: Some("user_created".to_string()),
             source_id: None,

@@ -183,6 +183,20 @@ export interface AiKeyPrefill {
   /** Auth key name (e.g. Authorization, X-API-Key, app_secret).
    *  Defaults are derived per auth_method by the SPA when unset. */
   readonly auth_key_name?: string;
+  /**
+   * Manage-scopes mode (NyxID#917 follow-up): the existing connection's key
+   * id to re-authorize with a new scope set, instead of creating a new
+   * connection. When present, the wizard skips the catalog grid, fetches this
+   * key's current granted scopes, renders the scope picker seeded from them,
+   * and submitting re-auths the SAME connection (reuses its connection_id).
+   */
+  readonly reconnect_key_id?: string;
+  /**
+   * Declarative desired scope set for manage-scopes mode (`--set`). When
+   * present, the wizard pre-seeds the picker with exactly these scopes instead
+   * of the connection's current grant (NyxID#917 follow-up).
+   */
+  readonly scope_override?: readonly string[];
 }
 
 /** Prefill for `nyxid service-account create`. Each field maps to
