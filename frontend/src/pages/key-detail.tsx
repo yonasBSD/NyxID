@@ -36,6 +36,7 @@ import { Button, ButtonIcon } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import {
   Card,
   CardContent,
@@ -1561,6 +1562,70 @@ function LabelEditor({
   );
 }
 
+function AccessPolicySection({
+  serviceId,
+  adminOnly,
+  readOnly = false,
+}: {
+  readonly serviceId: string;
+  readonly adminOnly: boolean;
+  readonly readOnly?: boolean;
+}) {
+  const updateService = useUpdateUserService();
+
+  function updateAccess(next: boolean) {
+    updateService.mutate(
+      { serviceId, admin_only: next },
+      {
+        onSuccess: () => {
+          toast.success(next ? "Service restricted to org admins" : "Member access enabled");
+        },
+        onError: (err) => {
+          const message =
+            err instanceof ApiError
+              ? err.message
+              : "Failed to update access policy";
+          toast.error(message);
+        },
+      },
+    );
+  }
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center gap-2">
+          <ShieldCheck className="h-4 w-4 text-primary" />
+          <CardTitle className="text-[15px]">Access policy</CardTitle>
+        </div>
+        <CardDescription>
+          Org-owned services can require an admin role for proxy execution.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="flex items-center justify-between gap-4 rounded-lg border border-border/50 px-3 py-2">
+          <div className="min-w-0">
+            <Label htmlFor="admin-only-policy" className="text-xs font-medium">
+              Admin-only execution
+            </Label>
+            <p className="text-[11px] text-muted-foreground">
+              {adminOnly
+                ? "Only org admins can proxy this service."
+                : "Org members with service scope can proxy this service."}
+            </p>
+          </div>
+          <Switch
+            id="admin-only-policy"
+            checked={adminOnly}
+            onCheckedChange={updateAccess}
+            disabled={readOnly || updateService.isPending}
+          />
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 function DefaultHeadersSection({
   serviceId,
   userHeaders,
@@ -1986,6 +2051,9 @@ export function KeyDetailPage() {
                     : "Auto-connected"}
                 </Badge>
               )}
+              {keyInfo.admin_only && (
+                <Badge variant="secondary">Admin-only</Badge>
+              )}
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -2218,6 +2286,11 @@ export function KeyDetailPage() {
             {!isSsh && (
               <>
                 <div className="grid gap-4 lg:grid-cols-2">
+                  <AccessPolicySection
+                    serviceId={keyInfo.id}
+                    adminOnly={keyInfo.admin_only ?? false}
+                    readOnly={readOnly}
+                  />
                   <OpenApiSpecSection
                     endpointId={keyInfo.endpoint_id}
                     specUrl={keyInfo.openapi_spec_url ?? null}

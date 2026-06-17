@@ -185,6 +185,9 @@ function KeyCardContent({
           {isReadOnly && !isBlocked && (
             <Badge variant="secondary">View-Only</Badge>
           )}
+          {keyInfo.admin_only && (
+            <Badge variant="secondary">Admin-only</Badge>
+          )}
           <Badge variant={statusVariant(displayStatus)}>
             {displayStatusLabel}
           </Badge>
@@ -367,6 +370,7 @@ function ServiceTableRow({
             {isOrgInherited && <Badge variant="info">Org</Badge>}
             {isBlocked && <Badge variant="secondary">Read-Only</Badge>}
             {isReadOnly && !isBlocked && <Badge variant="secondary">View-Only</Badge>}
+            {keyInfo.admin_only && <Badge variant="secondary">Admin-only</Badge>}
             <Badge variant={statusVariant(displayStatus)}>
               {displayStatusLabel}
             </Badge>

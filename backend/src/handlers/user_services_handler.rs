@@ -57,6 +57,7 @@ pub struct UpdateUserServiceRequest {
     pub node_id: Option<String>,
     pub node_priority: Option<i32>,
     pub is_active: Option<bool>,
+    pub admin_only: Option<bool>,
     /// Identity propagation mode: "none" | "headers" | "jwt" | "both"
     pub identity_propagation_mode: Option<String>,
     pub identity_include_user_id: Option<bool>,
@@ -104,6 +105,7 @@ pub struct UserServiceResponse {
     pub node_priority: i32,
     pub ssh_auth_mode: SshAuthMode,
     pub ssh_node_keys_stale: bool,
+    pub admin_only: bool,
     pub is_active: bool,
     pub identity_propagation_mode: String,
     pub identity_include_user_id: bool,
@@ -326,6 +328,7 @@ pub async fn update_user_service(
         body.custom_user_agent.as_deref(),
         body.default_request_headers.as_ref(),
         body.ws_frame_injections.as_deref(),
+        body.admin_only,
     )
     .await?;
 
@@ -493,6 +496,7 @@ fn user_service_with_source_response(item: UserServiceWithSource) -> UserService
         node_priority: svc.node_priority,
         ssh_auth_mode: svc.ssh_auth_mode,
         ssh_node_keys_stale: svc.ssh_node_keys_stale,
+        admin_only: svc.admin_only,
         is_active: svc.is_active,
         identity_propagation_mode: svc.identity_propagation_mode,
         identity_include_user_id: svc.identity_include_user_id,
@@ -774,6 +778,7 @@ mod tests {
         assert!(json.get("slug").is_some());
         assert!(json.get("endpoint_id").is_some());
         assert!(json.get("auth_method").is_some());
+        assert_eq!(json["admin_only"], false);
         assert!(json.get("is_active").is_some());
         assert!(json.get("credential_source").is_some());
     }
