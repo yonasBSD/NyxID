@@ -59,6 +59,34 @@ interface FlowProps {
   readonly credentialMode?: string;
   /** Admin-provided docs URL rendered in the OAuth-credentials step. */
   readonly documentationUrl?: string;
+  /**
+   * Complete upstream scope set selected in the scope picker (NyxID#917).
+   * When defined (even empty), forwarded as the `scope_override` query param,
+   * which REPLACES the provider's default scopes server-side rather than
+   * appending — letting the user drop a default. `undefined` when the
+   * provider doesn't accept scopes (e.g. `openai`-format device code), in
+   * which case no scope param is sent at all.
+   */
+  readonly scopeOverride?: readonly string[];
+  /**
+   * Manage-scopes mode (NyxID#917 follow-up): re-authorize this EXISTING
+   * connection (its key id) with `scopeOverride`, instead of creating a new
+   * placeholder. The flow skips placeholder creation + the reserve latch,
+   * reuses the connection's id (so its `connection_id` is preserved), and —
+   * because the connection is already `active` — completes when its granted
+   * scopes change rather than on `status === "active"`. The existing
+   * connection is never deleted on cancel/unmount.
+   */
+  readonly reconnectKeyId?: string;
+  /**
+   * The connection's `last_authorized_at` at the moment the manage-scopes flow
+   * started (may be null for a connection that predates the field). Completion
+   * baseline: re-auth is "done" once `last_authorized_at` advances past this —
+   * the callback always stamps it, so this fires even when the granted scopes
+   * are unchanged (provider ignored a removal, same-set re-auth). Per Codex
+   * review. Only meaningful with `reconnectKeyId`.
+   */
+  readonly baselineAuthorizedAt?: string | null;
   readonly onSuccess: (result: AiKeyPairingSuccess) => void;
   /**
    * Called when the user bails before success so the parent can reset
@@ -90,6 +118,11 @@ interface ActiveKeyResponse {
   readonly slug: string;
   readonly label: string;
   readonly status: string;
+  /** Scopes currently granted on the connection (NyxID#917). */
+  readonly granted_scopes?: readonly string[] | null;
+  /** Last fresh-authorization timestamp (NyxID#917) — manage-scopes completion
+   *  signal. */
+  readonly last_authorized_at?: string | null;
 }
 
 interface InitiateOAuthResponse {
@@ -527,9 +560,16 @@ export function OAuthFlow({
   pairingId,
   credentialMode,
   documentationUrl,
+  scopeOverride,
+  reconnectKeyId,
+  baselineAuthorizedAt,
   onSuccess,
   onCancel,
 }: FlowProps) {
+  // Manage-scopes mode: re-auth an existing connection rather than minting a
+  // placeholder. The credential sub-step is skipped (the connection already
+  // carries its BYO creds), so we go straight to "starting".
+  const isReconnect = Boolean(reconnectKeyId);
   // Distinct phase for the user-OAuth-app credential sub-step. When
   // `credentialMode` allows user credentials we first GET the existing
   // metadata; if already set we skip straight to the OAuth redirect,
@@ -541,7 +581,11 @@ export function OAuthFlow({
     | "waiting"
     | "done"
     | "error"
-  >(needsUserOAuthCredentials(credentialMode) ? "checking-credentials" : "starting");
+  >(
+    !isReconnect && needsUserOAuthCredentials(credentialMode)
+      ? "checking-credentials"
+      : "starting",
+  );
   const [error, setError] = useState<string | null>(null);
   const [authUrl, setAuthUrl] = useState<string | null>(null);
   const [clientId, setClientId] = useState("");
@@ -550,7 +594,10 @@ export function OAuthFlow({
   const [existingConnections, setExistingConnections] = useState<
     Array<{ id: string; slug: string; oauthClientId: string }>
   >([]);
-  const keyIdRef = useRef<string | null>(null);
+  // Manage-scopes mode preseeds this with the existing connection id, so the
+  // "reuse placeholder" branch below skips createPlaceholderKey + the reserve
+  // latch and re-auths the connection in place.
+  const keyIdRef = useRef<string | null>(reconnectKeyId ?? null);
   const cancelledRef = useRef(false);
   // Set to `true` once THIS tab has successfully latched
   // `reservePairingAction` on the server. Used to gate the rewind
@@ -599,6 +646,10 @@ export function OAuthFlow({
   useEffect(() => {
     function handleBeforeUnload() {
       if (successRef.current) return;
+      // Manage-scopes mode: the "key" is a real existing connection, not a
+      // disposable placeholder. Never DELETE it or fire a spurious /complete
+      // on unload — leaving mid-re-auth just keeps the current scopes.
+      if (isReconnect) return;
       const stale = keyIdRef.current;
       if (stale) {
         // Placeholder has already resolved (keyId is populated).
@@ -628,6 +679,9 @@ export function OAuthFlow({
     return () => {
       window.removeEventListener("beforeunload", handleBeforeUnload);
       if (successRef.current) return;
+      // Manage-scopes mode never created server-side state to release, and
+      // must not touch the existing connection.
+      if (isReconnect) return;
       // SPA navigation cleanup. Pass refs (not snapshots) so the
       // helper can await any in-flight `createPlaceholderKey`
       // before reading keyId / create-sent — a late 4xx or a
@@ -642,7 +696,7 @@ export function OAuthFlow({
         placeholderCreateInFlightRef,
       );
     };
-  }, [pairingId, slug, label]);
+  }, [pairingId, slug, label, isReconnect]);
 
   /**
    * Release whatever server-side state this sub-flow may have
@@ -668,6 +722,9 @@ export function OAuthFlow({
   async function releaseServerState(): Promise<
     "active" | "released" | "uncertain"
   > {
+    // Manage-scopes mode created no placeholder and holds no reservation, and
+    // must never delete the existing connection. Nothing to release.
+    if (isReconnect) return "uncertain";
     // Wait for any in-flight `createPlaceholderKey` to settle
     // FIRST — a clean 4xx will reset `placeholderCreateSentRef`
     // to `false`, which is the signal that rewind is safe. Doing
@@ -766,6 +823,9 @@ export function OAuthFlow({
   // it lands we err on the side of correctness (re-paste) over
   // convenience (silent breakage).
   useEffect(() => {
+    // Manage-scopes mode re-auths an existing connection that already carries
+    // its BYO credentials — skip the credential sub-step entirely.
+    if (isReconnect) return;
     if (!needsUserOAuthCredentials(credentialMode)) return;
     setPhase("needs-credentials");
     // Fetch existing active keys to offer "copy from" when the user
@@ -905,10 +965,19 @@ export function OAuthFlow({
         // UserApiKey (rather than the legacy user_provider_tokens path).
         // Harmless for legacy keys: the backend just falls back to the
         // legacy write path when the key carries no connection_id.
+        const initiateQuery = new URLSearchParams({
+          redirect_path: `/keys/${placeholder.id}`,
+          key_id: placeholder.id,
+        });
+        // Scope picker selection (NyxID#917). Sent as `scope_override` (the
+        // complete set, replacing the provider defaults) whenever defined —
+        // including an empty array, which the backend treats as "user cleared
+        // all scopes". Matches the dashboard's `useInitiateOAuth`.
+        if (scopeOverride !== undefined) {
+          initiateQuery.set("scope_override", scopeOverride.join(","));
+        }
         const initiate = await api.get<InitiateOAuthResponse>(
-          `/providers/${encodeURIComponent(providerId)}/connect/oauth?redirect_path=${encodeURIComponent(
-            `/keys/${placeholder.id}`,
-          )}&key_id=${encodeURIComponent(placeholder.id)}`,
+          `/providers/${encodeURIComponent(providerId)}/connect/oauth?${initiateQuery.toString()}`,
         );
         if (cancel) return;
         if (!initiate.authorization_url) {
@@ -981,12 +1050,31 @@ export function OAuthFlow({
   }, []);
 
   async function pollUntilActive(keyId: string) {
+    // Manage-scopes mode: the connection is ALREADY `active`, so completion
+    // can't be "status === active" (that's true on the first poll, before the
+    // user re-consents). Wait for `last_authorized_at` to advance past the
+    // baseline captured when the flow started. The callback stamps it on every
+    // fresh authorization, so this fires even when the granted scopes don't
+    // change (provider ignored a removal, same-set re-auth) — the granted-
+    // scope-diff signal would hang forever in those cases (Codex review P1).
+    const baselineAuth = baselineAuthorizedAt ?? null;
     await pollOAuthKeyUntilActive({
       keyId,
       getKey: (id) =>
         api.get<ActiveKeyResponse>(`/keys/${encodeURIComponent(id)}`),
       completeWithKey,
       isCancelled: () => cancelledRef.current,
+      ...(isReconnect
+        ? {
+            isComplete: (key: {
+              readonly status: string;
+              readonly last_authorized_at?: string | null;
+            }) =>
+              key.status === "active" &&
+              !!key.last_authorized_at &&
+              key.last_authorized_at !== baselineAuth,
+          }
+        : {}),
       onTerminalFailure: () => {
         setPhase("error");
         setError(
@@ -1207,6 +1295,7 @@ export function DeviceCodeFlow({
   targetOrgId,
   endpointUrl,
   pairingId,
+  scopeOverride,
   onSuccess,
   onCancel,
 }: FlowProps) {
@@ -1464,9 +1553,19 @@ export function DeviceCodeFlow({
       // device-code OAuth state so completion writes the token directly
       // onto this UserApiKey. Omitted when no placeholder id is known;
       // the backend falls back to the legacy write path either way.
+      const initQuery = new URLSearchParams();
+      if (keyId) initQuery.set("key_id", keyId);
+      // Scope picker selection (NyxID#917). Sent as `scope_override` whenever
+      // defined. The confirm panel passes `undefined` for
+      // `device_code_format === "openai"` providers, which reject a `scope`
+      // parameter outright — so nothing is sent for them.
+      if (scopeOverride !== undefined) {
+        initQuery.set("scope_override", scopeOverride.join(","));
+      }
+      const initQueryString = initQuery.toString();
       const init = await api.post<DeviceCodeInitiateResponse>(
         `/providers/${encodeURIComponent(providerId)}/connect/device-code/initiate${
-          keyId ? `?key_id=${encodeURIComponent(keyId)}` : ""
+          initQueryString ? `?${initQueryString}` : ""
         }`,
         {},
       );

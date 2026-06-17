@@ -464,6 +464,16 @@ pub struct KeyView {
     /// re-typing the credential. `None` otherwise. The client_secret is
     /// never surfaced (write-only across the API).
     pub oauth_client_id: Option<String>,
+    /// Scopes currently granted on this OAuth connection, parsed from the
+    /// backing `UserApiKey.token_scopes`. Lets the connect UIs pre-select and
+    /// lock the existing grant when adding scopes to an existing connection
+    /// (append-only edit, NyxID#917 follow-up). `None` for non-OAuth keys or
+    /// connections that never completed authorization.
+    pub granted_scopes: Option<Vec<String>>,
+    /// RFC3339 timestamp of the last fresh OAuth authorization on this
+    /// connection (NyxID#917). Completion signal for the manage-scopes re-auth
+    /// flow — advances when a new token lands, even if scopes don't change.
+    pub last_authorized_at: Option<String>,
     pub expires_at: Option<String>,
     pub last_used_at: Option<String>,
     pub error_message: Option<String>,
@@ -3000,6 +3010,21 @@ fn build_key_view(
         // `EncryptionKeys` operations are async and `build_key_view`
         // is intentionally sync.
         oauth_client_id: None,
+        // Granted scopes for append-only scope editing (NyxID#917 follow-up).
+        // `token_scopes` is stored space-joined; split into a list. Empty /
+        // whitespace-only yields None so the UI treats it as "no recorded
+        // grant" and falls back to provider defaults.
+        granted_scopes: ak.and_then(|k| {
+            k.token_scopes.as_deref().and_then(|s| {
+                let scopes: Vec<String> = s.split_whitespace().map(str::to_string).collect();
+                if scopes.is_empty() {
+                    None
+                } else {
+                    Some(scopes)
+                }
+            })
+        }),
+        last_authorized_at: ak.and_then(|k| k.last_authorized_at.map(|dt| dt.to_rfc3339())),
         expires_at: ak.and_then(|k| k.expires_at.map(|dt| dt.to_rfc3339())),
         last_used_at: ak.and_then(|k| k.last_used_at.map(|dt| dt.to_rfc3339())),
         error_message: ak.and_then(|k| k.error_message.clone()),
@@ -3122,6 +3147,7 @@ mod tests {
             user_oauth_client_secret_encrypted: None,
             status: "active".to_string(),
             last_used_at: None,
+            last_authorized_at: None,
             error_message: None,
             source: None,
             source_id: None,
@@ -4891,6 +4917,62 @@ mod tests {
         assert!(view.source_app_name.is_none());
     }
 
+    #[test]
+    fn build_key_view_parses_granted_scopes_from_token_scopes() {
+        let service = sample_service("bearer");
+        let endpoint = sample_endpoint();
+        let mut ak = sample_api_key("oauth2");
+        ak.token_scopes = Some("tweet.read  tweet.write users.read".to_string());
+
+        let view = build_key_view(
+            &service,
+            &endpoint,
+            Some(&ak),
+            &HashMap::new(),
+            &HashMap::new(),
+            crate::services::user_service_service::CredentialSource::Personal,
+        );
+
+        assert_eq!(
+            view.granted_scopes,
+            Some(vec![
+                "tweet.read".to_string(),
+                "tweet.write".to_string(),
+                "users.read".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn build_key_view_granted_scopes_none_when_absent_or_blank() {
+        let service = sample_service("bearer");
+        let endpoint = sample_endpoint();
+
+        // No api key at all.
+        let v1 = build_key_view(
+            &service,
+            &endpoint,
+            None,
+            &HashMap::new(),
+            &HashMap::new(),
+            crate::services::user_service_service::CredentialSource::Personal,
+        );
+        assert!(v1.granted_scopes.is_none());
+
+        // Whitespace-only token_scopes collapses to None (not Some(vec![])).
+        let mut ak = sample_api_key("oauth2");
+        ak.token_scopes = Some("   ".to_string());
+        let v2 = build_key_view(
+            &service,
+            &endpoint,
+            Some(&ak),
+            &HashMap::new(),
+            &HashMap::new(),
+            crate::services::user_service_service::CredentialSource::Personal,
+        );
+        assert!(v2.granted_scopes.is_none());
+    }
+
     /// Visibility eligibility matrix (documents the logic, not an integration test)
     #[test]
     fn visibility_eligibility_rules() {
@@ -5620,6 +5702,7 @@ mod tests {
                 user_oauth_client_secret_encrypted: None,
                 status: "active".to_string(),
                 last_used_at: None,
+                last_authorized_at: None,
                 error_message: None,
                 source: Some("user_created".to_string()),
                 source_id: None,

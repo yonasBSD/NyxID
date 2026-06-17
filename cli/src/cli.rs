@@ -836,6 +836,27 @@ pub enum ServiceCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
+    /// Manage OAuth scopes on an existing connection (re-authorize with a new
+    /// scope set). Opens the browser wizard seeded with the connection's
+    /// current scopes; the upstream provider re-consents.
+    Scopes {
+        /// Service id or slug of the existing OAuth connection
+        id: String,
+        /// Desired scope set, declared up front (repeatable, comma- or
+        /// space-separated). Pre-seeds the wizard picker with exactly these
+        /// scopes so the whole change is driven from one command — ideal for
+        /// AI/CLI use. Omit to open the picker seeded with the connection's
+        /// current scopes. The upstream provider still re-consents in the
+        /// browser. Example: --set "tweet.read,media.write"
+        #[arg(long = "set", value_name = "SCOPES")]
+        set_scopes: Vec<String>,
+        /// Remote-pair mode: print the URL + code and exit without polling
+        /// (resume with `nyxid pairing resume <PAIRING_ID>`).
+        #[arg(long)]
+        no_wait: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// Delete a service
     Delete {
         /// Service ID

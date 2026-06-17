@@ -16,11 +16,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 //     point — regression guard for the existing `service add <slug>`
 //     flow.
 
-const { mockGet, mockPost, mockUseOrgs } = vi.hoisted(() => ({
-  mockGet: vi.fn(),
-  mockPost: vi.fn(),
-  mockUseOrgs: vi.fn(),
-}));
+const { mockGet, mockPost, mockUseOrgs, mockOAuthFlow, mockDeviceCodeFlow } =
+  vi.hoisted(() => ({
+    mockGet: vi.fn(),
+    mockPost: vi.fn(),
+    mockUseOrgs: vi.fn(),
+    mockOAuthFlow: vi.fn(),
+    mockDeviceCodeFlow: vi.fn(),
+  }));
 
 vi.mock("@/lib/api-client", () => ({
   api: {
@@ -81,11 +84,19 @@ vi.mock("./catalog-grid", () => ({
   CatalogGrid: () => <div data-testid="catalog-grid">CATALOG_GRID_MARKER</div>,
 }));
 
-// auth-flows pulls in OAuth / device-code subflows that aren't part of
-// our path. Stub them out so they don't try to render.
+// auth-flows pulls in OAuth / device-code subflows whose internals
+// aren't under test here. Stub them with prop recorders so the
+// additional-scopes handoff (issue #917) can be asserted without
+// running the real placeholder/polling machinery.
 vi.mock("./auth-flows", () => ({
-  OAuthFlow: () => null,
-  DeviceCodeFlow: () => null,
+  OAuthFlow: (props: Record<string, unknown>) => {
+    mockOAuthFlow(props);
+    return <div data-testid="oauth-flow">OAUTH_FLOW_MARKER</div>;
+  },
+  DeviceCodeFlow: (props: Record<string, unknown>) => {
+    mockDeviceCodeFlow(props);
+    return <div data-testid="device-code-flow">DEVICE_CODE_FLOW_MARKER</div>;
+  },
 }));
 
 function createWrapper() {
@@ -670,5 +681,412 @@ describe("AiKeyConfirm — catalog services routed via node", () => {
     expect(
       screen.getByRole("button", { name: /Connect via node/i }),
     ).toBeDisabled();
+  });
+});
+
+// NyxID#917 follow-up — the pair wizard renders the shared scope picker for
+// OAuth / device-code providers (defaults pre-selected as pills + a custom
+// "Add" field), gated identically (`device_code_format !== "openai"`), and
+// hands the COMPLETE selection to the auth sub-flow as `scopeOverride`.
+describe("AiKeyConfirm — upstream scope picker (issue #917)", () => {
+  const oauthEntry = {
+    slug: "social-twitter",
+    name: "Twitter / X",
+    base_url: "https://api.twitter.com",
+    auth_method: "bearer",
+    provider_type: "oauth2",
+    provider_config_id: "prov-twitter",
+    service_type: "rest",
+    requires_credential: true,
+    requires_gateway_url: false,
+    default_scopes: ["tweet.read", "users.read"],
+    scope_catalog: [
+      { scope: "tweet.read", label: "Read posts", description: "Read posts." },
+      { scope: "media.write", label: "Upload media", description: "Upload media.", sensitive: true },
+    ],
+  };
+  const deviceCodeEntry = {
+    slug: "vcs-github",
+    name: "GitHub",
+    base_url: "https://api.github.com",
+    auth_method: "bearer",
+    provider_type: "device_code",
+    provider_config_id: "prov-github",
+    device_code_format: "oauth2",
+    service_type: "rest",
+    requires_credential: true,
+    requires_gateway_url: false,
+    default_scopes: ["read:user"],
+    scope_catalog: [
+      { scope: "read:user", label: "Read profile", description: "Read profile." },
+      { scope: "repo", label: "Repositories", description: "Full repo access.", sensitive: true },
+    ],
+  };
+  const openaiDeviceCodeEntry = {
+    ...deviceCodeEntry,
+    slug: "llm-codex",
+    name: "Codex",
+    provider_config_id: "prov-codex",
+    device_code_format: "openai",
+    scope_catalog: null,
+  };
+  const apiKeyEntry = {
+    slug: "llm-openai",
+    name: "OpenAI",
+    base_url: "https://api.openai.com",
+    auth_method: "bearer",
+    service_type: "rest",
+    requires_credential: true,
+    requires_gateway_url: false,
+  };
+
+  beforeEach(() => {
+    mockGet.mockReset();
+    mockPost.mockReset();
+    mockOAuthFlow.mockReset();
+    mockDeviceCodeFlow.mockReset();
+    baseProps.onSuccess = vi.fn();
+    baseProps.onSlugPicked = vi.fn();
+  });
+
+  it("pre-selects defaults and forwards the picker selection (incl. a toggled-on scope) to OAuth", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue(oauthEntry);
+
+    render(
+      <AiKeyConfirm {...baseProps} prefill={{ slug: "social-twitter" }} />,
+      { wrapper: createWrapper() },
+    );
+
+    // Defaults render as pills; "Upload media" (media.write) starts off.
+    const mediaPill = await screen.findByRole("button", {
+      name: /Upload media/i,
+    });
+    await user.click(mediaPill); // toggle it on
+    await user.click(
+      screen.getByRole("button", { name: /Continue with provider sign-in/i }),
+    );
+
+    await waitFor(() => {
+      expect(mockOAuthFlow).toHaveBeenCalled();
+    });
+    const props = mockOAuthFlow.mock.calls.at(-1)?.[0] as {
+      readonly providerId: string;
+      readonly scopeOverride: readonly string[];
+    };
+    expect(props.providerId).toBe("prov-twitter");
+    // Defaults stay selected; the toggled-on catalog scope is added.
+    expect([...props.scopeOverride].sort()).toEqual(
+      ["media.write", "tweet.read", "users.read"].sort(),
+    );
+  });
+
+  it("adds a custom scope via the Add field and forwards it to OAuth", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue(oauthEntry);
+
+    render(
+      <AiKeyConfirm {...baseProps} prefill={{ slug: "social-twitter" }} />,
+      { wrapper: createWrapper() },
+    );
+
+    const custom = await screen.findByPlaceholderText(/media\.write/i);
+    await user.type(custom, "dm.read");
+    await user.click(screen.getByRole("button", { name: /^Add$/i }));
+    await user.click(
+      screen.getByRole("button", { name: /Continue with provider sign-in/i }),
+    );
+
+    await waitFor(() => {
+      expect(mockOAuthFlow).toHaveBeenCalled();
+    });
+    const props = mockOAuthFlow.mock.calls.at(-1)?.[0] as {
+      readonly scopeOverride: readonly string[];
+    };
+    expect(props.scopeOverride).toContain("dm.read");
+    expect(props.scopeOverride).toContain("tweet.read");
+  });
+
+  it("forwards the picker selection to the device-code sub-flow", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue(deviceCodeEntry);
+
+    render(<AiKeyConfirm {...baseProps} prefill={{ slug: "vcs-github" }} />, {
+      wrapper: createWrapper(),
+    });
+
+    await screen.findByRole("button", { name: /Repositories/i });
+    await user.click(screen.getByRole("button", { name: /Get device code/i }));
+
+    await waitFor(() => {
+      expect(mockDeviceCodeFlow).toHaveBeenCalled();
+    });
+    const props = mockDeviceCodeFlow.mock.calls.at(-1)?.[0] as {
+      readonly providerId: string;
+      readonly scopeOverride: readonly string[];
+    };
+    expect(props.providerId).toBe("prov-github");
+    expect(props.scopeOverride).toEqual(["read:user"]); // default pre-selected
+  });
+
+  it("hides the picker for openai-format device-code providers and passes no override", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue(openaiDeviceCodeEntry);
+
+    render(<AiKeyConfirm {...baseProps} prefill={{ slug: "llm-codex" }} />, {
+      wrapper: createWrapper(),
+    });
+
+    await screen.findByRole("button", { name: /Get device code/i });
+    expect(screen.queryByRole("button", { name: /^Add$/i })).not.toBeInTheDocument();
+    // Parity with the dashboard: explain WHY there's no picker.
+    expect(
+      screen.getByText(/does not accept additional scopes/i),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Get device code/i }));
+
+    await waitFor(() => {
+      expect(mockDeviceCodeFlow).toHaveBeenCalled();
+    });
+    const props = mockDeviceCodeFlow.mock.calls.at(-1)?.[0] as {
+      readonly scopeOverride: readonly string[] | undefined;
+    };
+    expect(props.scopeOverride).toBeUndefined();
+  });
+
+  it("does not render the scope picker for plain api-key providers", async () => {
+    mockGet.mockResolvedValue(apiKeyEntry);
+
+    render(<AiKeyConfirm {...baseProps} prefill={{ slug: "llm-openai" }} />, {
+      wrapper: createWrapper(),
+    });
+
+    await screen.findByLabelText(/API key/i);
+    expect(screen.queryByRole("button", { name: /^Add$/i })).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/does not accept additional scopes/i),
+    ).not.toBeInTheDocument();
+  });
+});
+
+describe("AiKeyConfirm — manage-scopes (NyxID#917 codex follow-up)", () => {
+  // Codex's tech-lead consult: assert that when an existing connection has
+  // no recorded grant (granted_scopes=[]) — common for legacy keys or
+  // providers that didn't return `scope` in their token response — the
+  // wizard sends `scopeOverride: undefined` so the backend uses catalog
+  // defaults, instead of sending [] which the backend treats as
+  // "drop all defaults" → silent zero-scope re-auth.
+  const oauthCatalogEntry = {
+    slug: "social-twitter",
+    name: "Twitter / X",
+    base_url: "https://api.twitter.com",
+    auth_method: "bearer",
+    provider_type: "oauth2",
+    provider_config_id: "prov-twitter",
+    service_type: "rest",
+    requires_credential: true,
+    requires_gateway_url: false,
+    default_scopes: ["tweet.read", "users.read"],
+    scope_catalog: [
+      { scope: "tweet.read", label: "Read posts", description: "Read posts." },
+      { scope: "users.read", label: "Read profile", description: "Read profile." },
+      { scope: "media.write", label: "Upload media", description: "Upload media.", sensitive: true },
+    ],
+  };
+
+  function mockManageScopesEndpoints(opts: {
+    grantedScopes: readonly string[] | null;
+  }) {
+    mockGet.mockImplementation((url: string) => {
+      if (url.startsWith("/keys/")) {
+        return Promise.resolve({
+          id: "key-legacy-abc",
+          label: "My Twitter",
+          slug: "social-twitter",
+          catalog_service_slug: "social-twitter",
+          credential_type: "oauth2",
+          granted_scopes: opts.grantedScopes,
+          last_authorized_at: null,
+        });
+      }
+      if (url.startsWith("/catalog/")) {
+        return Promise.resolve(oauthCatalogEntry);
+      }
+      return Promise.reject(new Error(`unexpected GET ${url}`));
+    });
+  }
+
+  beforeEach(() => {
+    mockGet.mockReset();
+    mockPost.mockReset();
+    mockOAuthFlow.mockReset();
+    baseProps.onSuccess = vi.fn();
+  });
+
+  it("sends scopeOverride=undefined on re-auth when the existing connection has no recorded grant", async () => {
+    // Setup: legacy key with granted_scopes = [] (no recorded grant). The
+    // picker seeds from catalog defaults for display, but until the user
+    // edits, no override is transmitted.
+    const user = userEvent.setup();
+    mockManageScopesEndpoints({ grantedScopes: [] });
+
+    render(
+      <AiKeyConfirm
+        {...baseProps}
+        prefill={{ reconnect_key_id: "key-legacy-abc" }}
+      />,
+      { wrapper: createWrapper() },
+    );
+
+    // Wait for the ManageScopesPanel to mount.
+    await screen.findByRole("heading", { name: /Manage permissions/i });
+    await user.click(
+      screen.getByRole("button", { name: /Re-authorize with these permissions/i }),
+    );
+
+    await waitFor(() => {
+      expect(mockOAuthFlow).toHaveBeenCalled();
+    });
+    const props = mockOAuthFlow.mock.calls.at(-1)?.[0] as {
+      readonly scopeOverride: readonly string[] | undefined;
+      readonly reconnectKeyId: string;
+    };
+    expect(props.reconnectKeyId).toBe("key-legacy-abc");
+    expect(props.scopeOverride).toBeUndefined();
+  });
+
+  it("forwards an explicit empty array when the user actively clears all picker scopes", async () => {
+    // Setup: existing connection HAS a recorded grant. User deliberately
+    // toggles every default pill OFF (intent to revoke all scopes). The
+    // wizard must respect that — scopeOverride: [] is the user's stated
+    // intent here, distinct from the legacy-empty-grant case above.
+    const user = userEvent.setup();
+    mockManageScopesEndpoints({ grantedScopes: ["tweet.read", "users.read"] });
+
+    render(
+      <AiKeyConfirm
+        {...baseProps}
+        prefill={{ reconnect_key_id: "key-legacy-abc" }}
+      />,
+      { wrapper: createWrapper() },
+    );
+
+    await screen.findByRole("heading", { name: /Manage permissions/i });
+    // Toggle off both granted defaults.
+    await user.click(await screen.findByRole("button", { name: /Read posts/i }));
+    await user.click(await screen.findByRole("button", { name: /Read profile/i }));
+    await user.click(
+      screen.getByRole("button", { name: /Re-authorize with these permissions/i }),
+    );
+
+    await waitFor(() => {
+      expect(mockOAuthFlow).toHaveBeenCalled();
+    });
+    const props = mockOAuthFlow.mock.calls.at(-1)?.[0] as {
+      readonly scopeOverride: readonly string[] | undefined;
+    };
+    expect(props.scopeOverride).toBeDefined();
+    expect([...(props.scopeOverride ?? [])]).toEqual([]);
+  });
+});
+
+// NyxID#917 follow-up — manage-scopes mode: `nyxid service scopes <slug> --set`
+// sends prefill.reconnect_key_id + prefill.scope_override. The panel must fetch
+// the connection, render the picker seeded with EXACTLY the --set scopes, and
+// hand them to OAuthFlow as scopeOverride + reconnectKeyId.
+describe("AiKeyConfirm — manage-scopes mode (issue #917 CLI --set)", () => {
+  const twitterEntry = {
+    slug: "api-twitter",
+    name: "Twitter / X API",
+    base_url: "https://api.twitter.com",
+    auth_method: "bearer",
+    provider_type: "oauth2",
+    provider_config_id: "prov-twitter",
+    credential_mode: "user",
+    service_type: "rest",
+    requires_credential: true,
+    requires_gateway_url: false,
+    default_scopes: ["tweet.read", "tweet.write", "users.read", "offline.access"],
+    scope_catalog: [
+      { scope: "tweet.read", label: "Read posts", description: "Read posts." },
+      { scope: "media.write", label: "Upload media", description: "Upload media.", sensitive: true },
+    ],
+    scope_removal: "auto",
+  };
+  const existingKey = {
+    id: "svc-1",
+    slug: "api-twitter",
+    label: "X Demo",
+    status: "active",
+    catalog_service_slug: "api-twitter",
+    granted_scopes: ["tweet.read", "tweet.write", "users.read", "offline.access"],
+    last_authorized_at: "2026-06-16T00:00:00Z",
+  };
+
+  beforeEach(() => {
+    mockGet.mockReset();
+    mockPost.mockReset();
+    mockOAuthFlow.mockReset();
+    mockGet.mockImplementation(async (path: string) => {
+      if (path === "/keys/svc-1") return existingKey;
+      if (path === "/catalog/api-twitter") return twitterEntry;
+      throw new Error(`unexpected GET ${path}`);
+    });
+    baseProps.onSuccess = vi.fn();
+  });
+
+  it("seeds the picker from --set scope_override and hands it to OAuthFlow", async () => {
+    const user = userEvent.setup();
+    render(
+      <AiKeyConfirm
+        {...baseProps}
+        prefill={{
+          reconnect_key_id: "svc-1",
+          scope_override: ["tweet.read", "media.write"],
+        }}
+      />,
+      { wrapper: createWrapper() },
+    );
+
+    const reauth = await screen.findByRole("button", {
+      name: /Re-authorize with these permissions/i,
+    });
+    // Exactly the --set scopes are pre-selected — NOT the connection's 4
+    // current scopes.
+    expect(
+      screen.getByRole("button", { name: /Read posts/i }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(
+      screen.getByRole("button", { name: /Upload media/i }),
+    ).toHaveAttribute("aria-pressed", "true");
+
+    await user.click(reauth);
+    expect(mockOAuthFlow).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerId: "prov-twitter",
+        reconnectKeyId: "svc-1",
+        scopeOverride: ["tweet.read", "media.write"],
+        baselineAuthorizedAt: "2026-06-16T00:00:00Z",
+      }),
+    );
+  });
+
+  it("without --set, seeds from the connection's current grant", async () => {
+    render(
+      <AiKeyConfirm {...baseProps} prefill={{ reconnect_key_id: "svc-1" }} />,
+      { wrapper: createWrapper() },
+    );
+    await screen.findByRole("button", {
+      name: /Re-authorize with these permissions/i,
+    });
+    // Connection's granted "Read posts" is selected; "Upload media" (not
+    // granted) is not.
+    expect(
+      screen.getByRole("button", { name: /Read posts/i }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(
+      screen.getByRole("button", { name: /Upload media/i }),
+    ).toHaveAttribute("aria-pressed", "false");
   });
 });

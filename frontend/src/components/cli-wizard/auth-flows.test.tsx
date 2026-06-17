@@ -182,6 +182,66 @@ describe("cli wizard auth flows", () => {
     expect(onTimeout).not.toHaveBeenCalled();
   });
 
+  // Manage-scopes mode (NyxID#917): the connection is already `active`, so
+  // completion is a CHANGE in `last_authorized_at`, not `status === active`.
+  // This is the Codex-review fix — the earlier granted-scopes-diff signal hung
+  // forever when a real re-auth left the scopes unchanged. The predicate below
+  // mirrors OAuthFlow's reconnect isComplete.
+  const reconnectIsComplete =
+    (baseline: string | null) =>
+    (k: { status: string; last_authorized_at?: string | null }) =>
+      k.status === "active" &&
+      !!k.last_authorized_at &&
+      k.last_authorized_at !== baseline;
+
+  it("waits for last_authorized_at to advance, not status==active", async () => {
+    const baseline = "2026-06-16T00:00:00Z";
+    const getKey = vi
+      .fn()
+      // already active with the SAME timestamp → user hasn't re-consented yet
+      .mockResolvedValueOnce({ status: "active", last_authorized_at: baseline })
+      // fresh authorization stamped a new timestamp → complete
+      .mockResolvedValueOnce({ status: "active", last_authorized_at: "2026-06-16T00:05:00Z" });
+    const completeWithKey = vi.fn().mockResolvedValue(undefined);
+    await pollOAuthKeyUntilActive({
+      keyId: "key-1",
+      getKey,
+      completeWithKey,
+      isCancelled: () => false,
+      onTerminalFailure: vi.fn(),
+      onTimeout: vi.fn(),
+      sleepMs: vi.fn().mockResolvedValue(undefined),
+      isComplete: reconnectIsComplete(baseline),
+    });
+    expect(getKey).toHaveBeenCalledTimes(2);
+    expect(completeWithKey).toHaveBeenCalledWith("key-1");
+  });
+
+  it("completes a re-auth even when granted scopes are UNCHANGED (Codex P1 regression)", async () => {
+    const baseline = "2026-06-16T00:00:00Z";
+    // Scopes identical before and after; only last_authorized_at moves. The
+    // old scope-diff signal would never complete here.
+    const getKey = vi.fn().mockResolvedValue({
+      status: "active",
+      granted_scopes: ["tweet.read", "tweet.write"],
+      last_authorized_at: "2026-06-16T00:09:00Z",
+    });
+    const completeWithKey = vi.fn().mockResolvedValue(undefined);
+    const onTimeout = vi.fn();
+    await pollOAuthKeyUntilActive({
+      keyId: "key-1",
+      getKey,
+      completeWithKey,
+      isCancelled: () => false,
+      onTerminalFailure: vi.fn(),
+      onTimeout,
+      sleepMs: vi.fn().mockResolvedValue(undefined),
+      isComplete: reconnectIsComplete(baseline),
+    });
+    expect(completeWithKey).toHaveBeenCalledWith("key-1");
+    expect(onTimeout).not.toHaveBeenCalled();
+  });
+
   // Issue #653 stale-tab path: a 404 means the placeholder no longer
   // exists (abandoned by another tab, hard-deleted, never persisted).
   // Treat as terminal so the wizard exits with a clear message instead
@@ -499,5 +559,147 @@ describe("OAuthFlow error phase", () => {
 
     // Cancel button stays available so the user can exit cleanly.
     expect(screen.getByRole("button", { name: /^Cancel$/ })).toBeTruthy();
+  });
+});
+
+// NyxID#917 — the pair wizard forwards the scope-picker selection as the
+// `scope_override` query param (the COMPLETE set, replacing the provider's
+// default scopes) on the OAuth / device-code initiate request. `undefined`
+// means the provider doesn't accept scopes, so no scope param is sent.
+describe("upstream scope override forwarding (issue #917)", () => {
+  beforeEach(() => {
+    resetFlowMocks();
+  });
+
+  /** Wire mocks so the flow reaches the initiate request instead of
+   *  short-circuiting on an already-active placeholder. */
+  function arrangePendingPlaceholder() {
+    mockPost.mockImplementation(async (path: string) => {
+      if (path === "/keys") {
+        return {
+          id: "key-1",
+          status: "pending_auth",
+          slug: "llm-openai",
+          label: "OpenAI",
+        };
+      }
+      if (path.includes("/connect/device-code/initiate")) {
+        return {
+          user_code: "ABCD-1234",
+          verification_uri: "https://example.com/device",
+          state: "state-1",
+          interval: 5,
+          expires_in: 900,
+        };
+      }
+      throw new Error(`unexpected POST ${path}`);
+    });
+    mockGet.mockImplementation(async (path: string) => {
+      if (path.startsWith("/providers/") && path.includes("/connect/oauth?")) {
+        return { authorization_url: "https://example.com/oauth" };
+      }
+      if (path === "/keys/key-1") {
+        return {
+          id: "key-1",
+          status: "pending_auth",
+          slug: "llm-openai",
+          label: "OpenAI",
+        };
+      }
+      throw new Error(`unexpected GET ${path}`);
+    });
+  }
+
+  it("sends scope_override (complete set) on the OAuth initiate URL", async () => {
+    arrangePendingPlaceholder();
+
+    renderOAuthFlow({
+      scopeOverride: ["media.write", "tweet.read"],
+    });
+
+    await waitFor(() => {
+      const initiateCall = mockGet.mock.calls.find(([path]) =>
+        (path as string).includes("/connect/oauth?"),
+      );
+      expect(initiateCall).toBeTruthy();
+      const url = initiateCall?.[0] as string;
+      const query = new URLSearchParams(url.split("?")[1]);
+      expect(query.get("scope_override")).toBe("media.write,tweet.read");
+      // Additive `scope` is not used by the picker path.
+      expect(query.get("scope")).toBeNull();
+      // Existing params survive the rewrite to URLSearchParams.
+      expect(query.get("key_id")).toBe("key-1");
+      expect(query.get("redirect_path")).toBe("/keys/key-1");
+    });
+  });
+
+  it("sends an empty scope_override when the user cleared every scope", async () => {
+    arrangePendingPlaceholder();
+
+    renderOAuthFlow({ scopeOverride: [] });
+
+    await waitFor(() => {
+      const initiateCall = mockGet.mock.calls.find(([path]) =>
+        (path as string).includes("/connect/oauth?"),
+      );
+      expect(initiateCall).toBeTruthy();
+      const url = initiateCall?.[0] as string;
+      const query = new URLSearchParams(url.split("?")[1]);
+      // Present-but-empty: the backend reads this as "drop all scopes".
+      expect(query.get("scope_override")).toBe("");
+    });
+  });
+
+  it("omits scope params from the OAuth initiate URL when scopeOverride is undefined", async () => {
+    arrangePendingPlaceholder();
+
+    renderOAuthFlow();
+
+    await waitFor(() => {
+      const initiateCall = mockGet.mock.calls.find(([path]) =>
+        (path as string).includes("/connect/oauth?"),
+      );
+      expect(initiateCall).toBeTruthy();
+      const url = initiateCall?.[0] as string;
+      const query = new URLSearchParams(url.split("?")[1]);
+      expect(query.get("scope_override")).toBeNull();
+      expect(query.get("scope")).toBeNull();
+    });
+  });
+
+  it("sends scope_override on the device-code initiate URL", async () => {
+    arrangePendingPlaceholder();
+
+    renderDeviceCodeFlow({
+      scopeOverride: ["repo", "read:org"],
+    });
+
+    await waitFor(() => {
+      const initiateCall = mockPost.mock.calls.find(([path]) =>
+        (path as string).includes("/connect/device-code/initiate"),
+      );
+      expect(initiateCall).toBeTruthy();
+      const url = initiateCall?.[0] as string;
+      const query = new URLSearchParams(url.split("?")[1]);
+      expect(query.get("scope_override")).toBe("repo,read:org");
+      expect(query.get("key_id")).toBe("key-1");
+    });
+  });
+
+  it("omits scope params from the device-code initiate URL when scopeOverride is undefined", async () => {
+    arrangePendingPlaceholder();
+
+    renderDeviceCodeFlow();
+
+    await waitFor(() => {
+      const initiateCall = mockPost.mock.calls.find(([path]) =>
+        (path as string).includes("/connect/device-code/initiate"),
+      );
+      expect(initiateCall).toBeTruthy();
+      const url = initiateCall?.[0] as string;
+      const query = new URLSearchParams(url.split("?")[1]);
+      expect(query.get("scope_override")).toBeNull();
+      expect(query.get("scope")).toBeNull();
+    });
   });
 });

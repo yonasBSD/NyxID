@@ -84,6 +84,12 @@ const aiKeyPrefillShape = {
   custom_slug: z.string().optional(),
   auth_method: z.string().optional(),
   auth_key_name: z.string().optional(),
+  // Manage-scopes mode (NyxID#917 follow-up): existing connection key id to
+  // re-authorize with a new scope set. Set by `nyxid service scopes <slug>`.
+  reconnect_key_id: z.string().optional(),
+  // Declarative desired scope set (`--set`): pre-seeds the manage-scopes
+  // picker with exactly these scopes.
+  scope_override: z.array(z.string()).optional(),
 } as const
 
 export const aiKeyPrefillSchema = z.object(aiKeyPrefillShape)

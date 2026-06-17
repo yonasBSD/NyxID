@@ -17,6 +17,7 @@ frontend/src/components/cli-wizard/upstream-error-banner.tsx
 frontend/src/components/cli-wizard/wizard-footer.tsx
 frontend/src/components/shared/org-scope-select.tsx
 frontend/src/components/shared/twitter-oauth-guidance.tsx
+frontend/src/components/shared/upstream-scope-picker.tsx
 frontend/src/components/ui/button.tsx
 frontend/src/components/ui/checkbox.tsx
 frontend/src/components/ui/input.tsx
@@ -32,6 +33,7 @@ frontend/src/hooks/use-runtime-config.ts
 frontend/src/hooks/use-theme.ts
 frontend/src/lib/api-client.ts
 frontend/src/lib/navigation.ts
+frontend/src/lib/parse-additional-scopes.ts
 frontend/src/lib/telemetry.ts
 frontend/src/lib/utils.ts
 frontend/src/pages/cli-pair/reserve-action.ts

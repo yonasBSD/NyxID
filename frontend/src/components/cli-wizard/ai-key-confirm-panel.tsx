@@ -18,6 +18,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { OrgScopeSelect } from "@/components/shared/org-scope-select";
 import { useOrgs } from "@/hooks/use-orgs";
 import { ApiError, api } from "@/lib/api-client";
+import { UpstreamScopePicker } from "@/components/shared/upstream-scope-picker";
+import type { ScopeCatalogEntry } from "@/types/keys";
 import { Building2, ExternalLink } from "lucide-react";
 import type { AiKeyPrefill } from "@/pages/cli-pair/types";
 import { DeviceCodeFlow, OAuthFlow } from "./auth-flows";
@@ -75,6 +77,20 @@ interface CatalogEntryShape {
   readonly credential_mode?: string;
   /** Admin-provided docs URL shown inside the user-OAuth-app step. */
   readonly documentation_url?: string;
+  /**
+   * Device-code wire format (`oauth2`, `openai`, ...). `openai`-format
+   * providers (Codex) reject a `scope` parameter — scopes are baked
+   * into the upstream client registration — so the additional-scopes
+   * input is hidden for them (NyxID#917, mirrors `add-key-dialog`).
+   */
+  readonly device_code_format?: string | null;
+  /** Provider default scopes — pre-selected in the scope picker (NyxID#917). */
+  readonly default_scopes?: readonly string[] | null;
+  /** Curated selectable scope menu for this provider (NyxID#917). */
+  readonly scope_catalog?: readonly ScopeCatalogEntry[] | null;
+  /** Per-provider scope-removal capability (NyxID#917). `unsupported` →
+   *  granted scopes stay locked in manage-scopes mode (e.g. GitHub). */
+  readonly scope_removal?: "auto" | "manual" | "unsupported" | null;
   /**
    * Multi-field credential schema. When present and non-empty, this
    * catalog entry uses the `token_exchange` flow — render one form
@@ -218,6 +234,21 @@ export function AiKeyConfirm({
     return `Couldn't load catalog entry "${trimmedSlug}".`;
   })();
 
+  // Manage-scopes mode (NyxID#917 follow-up): `nyxid service scopes <slug>`
+  // sends `reconnect_key_id`. Re-authorize that existing connection with a new
+  // scope set instead of the add-a-service flow. Checked after this
+  // component's hooks so hook order stays stable (rules-of-hooks).
+  if (prefill.reconnect_key_id) {
+    return (
+      <ManageScopesPanel
+        keyId={prefill.reconnect_key_id}
+        initialScopeOverride={prefill.scope_override ?? null}
+        pairingId={pairingId}
+        onSuccess={onSuccess}
+      />
+    );
+  }
+
   // When no slug is picked yet, we're effectively on "Step 1 · pick a
   // service" (the catalog grid below). Once the user clicks a card we
   // transition to "Step 2 · enter credential" via the per-entry form.
@@ -284,6 +315,191 @@ export function AiKeyConfirm({
           onSuccess={onSuccess}
         />
       ) : null}
+    </div>
+  );
+}
+
+// ── manage-scopes (re-auth existing connection) ────────────────────
+
+/** Shape of `GET /keys/{id}` we read for manage-scopes mode. */
+interface ExistingKeyShape {
+  readonly id: string;
+  readonly slug: string;
+  readonly label: string;
+  readonly status: string;
+  readonly catalog_service_slug?: string | null;
+  readonly granted_scopes?: readonly string[] | null;
+  /** Fresh-authorization timestamp (NyxID#917) — manage-scopes completion
+   *  baseline handed to OAuthFlow. */
+  readonly last_authorized_at?: string | null;
+}
+
+/**
+ * Manage-scopes mode (NyxID#917 follow-up): re-authorize an EXISTING
+ * connection with a new scope set. Reached from `nyxid service scopes <slug>`
+ * via `prefill.reconnect_key_id`. Fetches the connection + its catalog entry,
+ * renders the picker seeded from the current grant (capability-gated), and
+ * hands off to `OAuthFlow` in reconnect mode (reuses the connection_id; the
+ * old token stays live until the new one lands).
+ */
+function ManageScopesPanel({
+  keyId,
+  initialScopeOverride,
+  pairingId,
+  onSuccess,
+}: {
+  readonly keyId: string;
+  /** Declarative desired set from `service scopes --set`. When provided, the
+   *  picker is pre-seeded with exactly these scopes (NyxID#917). */
+  readonly initialScopeOverride?: readonly string[] | null;
+  readonly pairingId: string;
+  readonly onSuccess: (result: AiKeyPairingSuccess) => void;
+}) {
+  const {
+    data: key,
+    isLoading: keyLoading,
+    error: keyError,
+  } = useQuery({
+    queryKey: ["cli-pair", "manage-scopes", "key", keyId],
+    queryFn: () =>
+      api.get<ExistingKeyShape>(`/keys/${encodeURIComponent(keyId)}`),
+  });
+
+  const catalogSlug = key?.catalog_service_slug ?? key?.slug ?? "";
+  const {
+    data: entry,
+    isLoading: entryLoading,
+    error: entryError,
+  } = useQuery({
+    queryKey: ["cli-pair", "manage-scopes", "catalog", catalogSlug],
+    queryFn: () =>
+      api.get<CatalogEntryShape>(
+        `/catalog/${encodeURIComponent(catalogSlug)}`,
+      ),
+    enabled: Boolean(catalogSlug),
+  });
+
+  const granted = key?.granted_scopes ?? [];
+  const defaultScopes = entry?.default_scopes ?? [];
+  // Effect-free seeding: the selection defaults to the connection's current
+  // grant until the user edits it (then `override` takes over). When the
+  // connection has no recorded grant (legacy keys, or providers that didn't
+  // return `scope` in their token response), seed the picker from the
+  // catalog defaults so the user sees a sensible starting set rather than
+  // an empty list. NyxID#917: a present-but-empty `scope_override` is
+  // interpreted by the backend as "drop all defaults", so we send
+  // `scopeOverride={undefined}` until either (a) the user actually edits
+  // the picker or (b) we know the real current grant — otherwise legacy
+  // keys would silently re-auth with zero scopes.
+  // A CLI-declared desired set (`service scopes --set`) takes precedence as
+  // both the picker seed and the sent override, so an agent drives the whole
+  // change from one command (NyxID#917). Empty/absent falls back to the grant.
+  const cliSet =
+    initialScopeOverride && initialScopeOverride.length > 0
+      ? initialScopeOverride
+      : null;
+  const seedScopes = cliSet ?? (granted.length > 0 ? granted : defaultScopes);
+  const [override, setOverride] = useState<readonly string[] | null>(null);
+  const selectedScopes = override ?? seedScopes;
+  const scopeOverride =
+    override !== null
+      ? override
+      : (cliSet ?? (granted.length > 0 ? granted : undefined));
+  const setSelectedScopes = setOverride;
+
+  const [authFlowActive, setAuthFlowActive] = useState(false);
+
+  const errMsg = (() => {
+    const e = keyError ?? entryError;
+    if (!e) return null;
+    if (e instanceof ApiError) return e.message;
+    return "Couldn't load this connection.";
+  })();
+
+  if (keyLoading || (catalogSlug && entryLoading)) {
+    return <Skeleton className="h-24 w-full" />;
+  }
+  if (errMsg) {
+    return <ErrorLine message={errMsg} />;
+  }
+  if (!key || !entry) {
+    return <ErrorLine message="Connection not found." />;
+  }
+
+  const isOAuth = (entry.provider_type ?? "").toLowerCase() === "oauth2";
+  // Scoped management only applies to OAuth providers. (The only device-code
+  // provider, openai-codex, has fixed scopes — nothing to manage.)
+  if (!isOAuth || !entry.provider_config_id) {
+    return (
+      <div className="flex flex-col gap-1">
+        <h2 className="font-serif text-[28px] font-normal">Manage permissions</h2>
+        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[12px]">
+          {entry.name} doesn't support managing scopes here — its permissions
+          are fixed by the provider.
+        </p>
+      </div>
+    );
+  }
+
+  // `unsupported` providers (e.g. GitHub) can't narrow a grant by re-auth, so
+  // lock the granted scopes (add-only).
+  const lockedScopes =
+    entry.scope_removal === "unsupported" ? granted : [];
+
+  if (authFlowActive) {
+    return (
+      <OAuthFlow
+        providerId={entry.provider_config_id}
+        slug={key.slug}
+        label={key.label}
+        pairingId={pairingId}
+        credentialMode={entry.credential_mode}
+        documentationUrl={entry.documentation_url}
+        scopeOverride={scopeOverride}
+        reconnectKeyId={keyId}
+        baselineAuthorizedAt={key.last_authorized_at ?? null}
+        onSuccess={onSuccess}
+        onCancel={() => {
+          setAuthFlowActive(false);
+        }}
+      />
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-1">
+        <h2 className="font-serif text-[28px] font-normal">Manage permissions</h2>
+        <p className="text-[12px] text-muted-foreground">
+          Adjust what {key.label} can do, then re-authorize at the provider.
+          Your CLI is waiting for you to finish here.
+        </p>
+      </div>
+
+      <div className="flex items-start gap-3 rounded-lg border bg-muted/30 p-3">
+        {entry.icon_url ? (
+          <img src={entry.icon_url} alt="" className="h-8 w-8 rounded" loading="lazy" />
+        ) : null}
+        <div className="flex flex-col gap-0.5">
+          <h3 className="font-medium">{entry.name}</h3>
+          <p className="text-xs text-muted-foreground">{key.slug}</p>
+        </div>
+      </div>
+
+      <UpstreamScopePicker
+        catalog={entry.scope_catalog ?? []}
+        defaultScopes={entry.default_scopes ?? []}
+        value={selectedScopes}
+        onChange={setSelectedScopes}
+        lockedScopes={lockedScopes}
+        grantedScopes={granted}
+        providerName={entry.name}
+        idPrefix="pair-manage-scope"
+      />
+
+      <Button variant="primary" onClick={() => setAuthFlowActive(true)}>
+        Re-authorize with these permissions
+      </Button>
     </div>
   );
 }
@@ -709,6 +925,13 @@ function CatalogConfirmForm({
   // submit. One hook per entry so flipping between entries doesn't
   // leak values across providers.
   const [tokenFields, setTokenFields] = useState<Record<string, string>>({});
+  // Upstream scope selection for OAuth / device-code flows (NyxID#917).
+  // Seeded with the provider's defaults (all pre-selected) so an unedited
+  // submit requests exactly today's scopes; the picker lets the user drop a
+  // default or add custom scopes. Passed to the sub-flow as `scopeOverride`.
+  const [selectedScopes, setSelectedScopes] = useState<readonly string[]>(
+    entry.default_scopes ?? [],
+  );
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const viaNode = prefill.via_node?.trim() ?? "";
@@ -897,6 +1120,17 @@ function CatalogConfirmForm({
   // this or self-hosted services will bind to the wrong host.
   const effectiveEndpointUrl = endpointUrl.trim() || prefill.endpoint_url;
 
+  // Whether the upstream provider accepts additional scopes on the
+  // initiate request. OAuth always does; `openai`-format device-code
+  // providers (Codex) reject a `scope` parameter, so hide the picker
+  // for them — same gate as `add-key-dialog.tsx::DeviceCodeStep`
+  // (NyxID#917). When supported, the sub-flow receives the picker's
+  // complete selection as `scopeOverride`; when not, no override.
+  const supportsAdditionalScopes =
+    shape === "oauth" ||
+    (shape === "device-code" && entry.device_code_format !== "openai");
+  const scopeOverride = supportsAdditionalScopes ? selectedScopes : undefined;
+
   if (authFlowActive && shape === "oauth" && entry.provider_config_id) {
     return (
       <OAuthFlow
@@ -909,6 +1143,7 @@ function CatalogConfirmForm({
         pairingId={pairingId}
         credentialMode={entry.credential_mode}
         documentationUrl={entry.documentation_url}
+        scopeOverride={scopeOverride}
         onSuccess={onSuccess}
         onCancel={() => {
           setAuthFlowActive(false);
@@ -927,6 +1162,7 @@ function CatalogConfirmForm({
         endpointUrl={effectiveEndpointUrl}
         pairingId={pairingId}
         documentationUrl={entry.documentation_url}
+        scopeOverride={scopeOverride}
         onSuccess={onSuccess}
         onCancel={() => {
           setAuthFlowActive(false);
@@ -1064,6 +1300,24 @@ function CatalogConfirmForm({
               </Field>
             ))
           : null}
+
+        {supportsAdditionalScopes ? (
+          <UpstreamScopePicker
+            catalog={entry.scope_catalog ?? []}
+            defaultScopes={entry.default_scopes ?? []}
+            value={selectedScopes}
+            onChange={setSelectedScopes}
+            customPlaceholder={
+              shape === "oauth" ? "e.g. media.write" : "e.g. repo,read:org"
+            }
+            idPrefix="pair-aikey-scope"
+          />
+        ) : shape === "device-code" ? (
+          <p className="text-xs text-muted-foreground">
+            This provider does not accept additional scopes — they are
+            fixed by the upstream client registration.
+          </p>
+        ) : null}
 
         {viaNode ? (
           <div className="rounded-lg border border-border bg-muted/40 px-3 py-2">
