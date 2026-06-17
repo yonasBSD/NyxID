@@ -2,10 +2,10 @@ import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { CheckCircle2, Printer, QrCode } from "lucide-react";
+import { CheckCircle2, Printer, QrCode, XCircle } from "lucide-react";
 import QRCode from "qrcode";
 import { toast } from "sonner";
-import { useOnboardDevice } from "@/hooks/use-devices";
+import { useOnboardDevice, useRevokeOnboardDevice } from "@/hooks/use-devices";
 import { useKeys } from "@/hooks/use-keys";
 import { useOrgs } from "@/hooks/use-orgs";
 import { ApiError } from "@/lib/api-client";
@@ -13,6 +13,7 @@ import {
   maskIdentifier,
   onboardDeviceFormSchema,
   type OnboardDeviceFormData,
+  type OnboardDeviceFormValues,
   type OnboardDeviceRequest,
   type OnboardDeviceResponse,
 } from "@/schemas/devices";
@@ -48,6 +49,7 @@ const PERSONAL_OWNER_VALUE = "__personal__";
 
 export function DevicesOnboardPage() {
   const onboardDevice = useOnboardDevice();
+  const revokeOnboardDevice = useRevokeOnboardDevice();
   const { data: orgs, isLoading: isOrgsLoading } = useOrgs();
   const { data: services, isLoading: isServicesLoading } = useKeys();
   const [onboardedDevice, setOnboardedDevice] =
@@ -67,7 +69,7 @@ export function DevicesOnboardPage() {
   const qrDataUrl = qrCodeQuery.data ?? null;
 
   const adminOrgs = (orgs ?? []).filter((org) => org.your_role === "admin");
-  const form = useForm<OnboardDeviceFormData, unknown, OnboardDeviceRequest>({
+  const form = useForm<OnboardDeviceFormData, unknown, OnboardDeviceFormValues>({
     resolver: zodResolver(onboardDeviceFormSchema),
     defaultValues: {
       org_id: null,
@@ -107,14 +109,37 @@ export function DevicesOnboardPage() {
     }
   }, [form, grantableServices]);
 
-  async function handleOnboard(values: OnboardDeviceRequest) {
+  async function handleOnboard(values: OnboardDeviceFormValues) {
     form.clearErrors("root");
+    const request: OnboardDeviceRequest = {
+      org_id: values.org_id,
+      label: values.label,
+      default_services: values.default_services,
+    };
     try {
-      const response = await onboardDevice.mutateAsync(values);
-      setOnboardedDevice(response);
-      toast.success("Device onboarded");
+      const response = await onboardDevice.mutateAsync(request);
+      setOnboardedDevice({
+        ...response,
+        qr_payload: buildFullProvisioningPayload(
+          response.qr_payload,
+          values.wifi_ssid,
+          values.wifi_password,
+        ),
+      });
+      toast.success("Provisioning QR generated");
     } catch (error) {
       form.setError("root", { message: deviceOnboardErrorMessage(error) });
+    }
+  }
+
+  async function handleRevokeOnboard() {
+    if (!onboardedDevice) return;
+    try {
+      await revokeOnboardDevice.mutateAsync(onboardedDevice.bootstrap_id);
+      setOnboardedDevice(null);
+      toast.success("Provisioning QR revoked");
+    } catch (error) {
+      toast.error(deviceOnboardRevokeErrorMessage(error));
     }
   }
 
@@ -148,15 +173,17 @@ export function DevicesOnboardPage() {
           device={onboardedDevice}
           qrError={qrCodeQuery.isError}
           qrDataUrl={qrDataUrl}
+          isRevoking={revokeOnboardDevice.isPending}
           onPrint={() => window.print()}
+          onRevoke={handleRevokeOnboard}
         />
         ) : (
           <Card className="rounded-lg">
             <CardHeader>
               <CardTitle>QR provisioning</CardTitle>
               <CardDescription>
-                The QR includes WiFi and scoped NyxID credentials for the device
-                camera to scan.
+                NyxID creates a short-lived bootstrap token. WiFi details are
+                added to the QR in this browser.
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -346,8 +373,9 @@ export function DevicesOnboardPage() {
                   />
 
                   <p className="rounded-lg border border-border bg-muted/25 px-3 py-2 text-[12px] leading-relaxed text-muted-foreground">
-                    Your WiFi password is sent to the server only to embed in
-                    the QR code. It is not stored.
+                    Your WiFi password stays in this browser. NyxID receives
+                    only the owner, label, and optional service grants needed to
+                    create a short-lived bootstrap token.
                   </p>
 
                   <div className="flex justify-end">
@@ -378,12 +406,16 @@ function OnboardSuccess({
   device,
   qrError,
   qrDataUrl,
+  isRevoking,
   onPrint,
+  onRevoke,
 }: {
   readonly device: OnboardDeviceResponse;
   readonly qrError: boolean;
   readonly qrDataUrl: string | null;
+  readonly isRevoking: boolean;
   readonly onPrint: () => void;
+  readonly onRevoke: () => void;
 }) {
   return (
     <Card className="rounded-lg">
@@ -395,7 +427,7 @@ function OnboardSuccess({
           <div className="min-w-0">
             <CardTitle>Device onboarded</CardTitle>
             <CardDescription>
-              Scan this QR from the headless device camera.
+              Scan this QR from the headless device camera before it expires.
             </CardDescription>
           </div>
         </div>
@@ -418,13 +450,26 @@ function OnboardSuccess({
         <dl className="grid gap-3 text-[13px] sm:grid-cols-2">
           <DetailRow label="Device" value={device.label} />
           <DetailRow
-            label="API key"
-            value={maskIdentifier(device.api_key_id)}
+            label="Bootstrap"
+            value={maskIdentifier(device.bootstrap_id)}
           />
-          <DetailRow label="Node" value={maskIdentifier(device.node_id)} />
+          <DetailRow label="Expires" value={formatExpiry(device.expires_at)} />
         </dl>
 
-        <div className="flex justify-end">
+        <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+          <Button
+            className="h-11 w-full text-sm sm:w-auto"
+            disabled={isRevoking}
+            isLoading={isRevoking}
+            onClick={onRevoke}
+            type="button"
+            variant="destructive"
+          >
+            <ButtonIcon variant="destructive">
+              <XCircle />
+            </ButtonIcon>
+            Revoke QR
+          </Button>
           <Button
             className="h-11 w-full text-sm sm:w-auto"
             disabled={!qrDataUrl}
@@ -468,6 +513,24 @@ function toggleStringArray(values: readonly string[], value: string): string[] {
     : [...values, value];
 }
 
+function buildFullProvisioningPayload(
+  bootstrapPayload: string,
+  wifiSsid: string,
+  wifiPassword: string,
+): string {
+  const source = new URL(bootstrapPayload);
+  const params = new URLSearchParams(source.search);
+  params.set("ssid", wifiSsid);
+  params.set("psw", wifiPassword);
+  return `nyxprov://full?${params.toString()}`;
+}
+
+function formatExpiry(value: string): string {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleString();
+}
+
 function deviceOnboardErrorMessage(error: unknown): string {
   if (!(error instanceof ApiError)) {
     return "Device onboarding failed. Try again.";
@@ -481,4 +544,14 @@ function deviceOnboardErrorMessage(error: unknown): string {
   }
 
   return error.message || "Device onboarding failed. Try again.";
+}
+
+function deviceOnboardRevokeErrorMessage(error: unknown): string {
+  if (!(error instanceof ApiError)) {
+    return "Device QR revocation failed. Try again.";
+  }
+  if (error.status === 404 || error.status === 410) {
+    return "This provisioning QR is no longer active.";
+  }
+  return error.message || "Device QR revocation failed. Try again.";
 }

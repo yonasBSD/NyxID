@@ -197,6 +197,7 @@ interface CreateApiKeyPayload {
   readonly allowed_node_ids?: readonly string[];
   readonly allow_all_services?: boolean;
   readonly allow_all_nodes?: boolean;
+  readonly platform?: string;
   readonly callback_url?: string;
   /** Create the key under the given org (caller must be an org admin). */
   readonly target_org_id?: string;
@@ -228,6 +229,7 @@ export function useCreateApiKey() {
           : (data.allowed_node_ids ?? []),
         allow_all_services: allowAllServices,
         allow_all_nodes: allowAllNodes,
+        platform: data.platform ?? undefined,
         callback_url: data.callback_url ?? undefined,
         target_org_id: data.target_org_id ?? undefined,
       };

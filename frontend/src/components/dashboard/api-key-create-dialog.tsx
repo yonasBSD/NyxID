@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "@tanstack/react-router";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
@@ -6,6 +7,7 @@ import {
   type CreateApiKeyFormData,
   API_KEY_SCOPES,
 } from "@/schemas/api-keys";
+import { PLATFORM_OPTIONS } from "@/schemas/agent-bindings";
 import { useCreateApiKey } from "@/hooks/use-api-keys";
 import { useKeys } from "@/hooks/use-keys";
 import { useNodes } from "@/hooks/use-nodes";
@@ -41,6 +43,7 @@ import {
   Check,
   Shield,
   Server,
+  Monitor,
 } from "lucide-react";
 import { DatePicker } from "@/components/ui/date-picker";
 import { toast } from "sonner";
@@ -58,15 +61,20 @@ export function ApiKeyCreateDialog({
   externalOpen,
   onExternalOpenChange,
   hideTrigger,
+  setupMode = false,
+  initialServiceId,
 }: {
   readonly externalOpen?: boolean;
   readonly onExternalOpenChange?: (open: boolean) => void;
   readonly hideTrigger?: boolean;
+  readonly setupMode?: boolean;
+  readonly initialServiceId?: string | null;
 } = {}) {
   const [internalOpen, setInternalOpen] = useState(false);
   const open = externalOpen ?? internalOpen;
   const setOpen = onExternalOpenChange ?? setInternalOpen;
   const [createdKey, setCreatedKey] = useState<string | null>(null);
+  const [createdKeyId, setCreatedKeyId] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const createMutation = useCreateApiKey();
 
@@ -100,12 +108,49 @@ export function ApiKeyCreateDialog({
 
   const watchAllServices = form.watch("allow_all_services") ?? true;
   const watchAllNodes = form.watch("allow_all_nodes") ?? true;
+  const watchAllowedServices = form.watch("allowed_service_ids") ?? [];
   const watchTargetOrg = form.watch("target_org_id");
+  const setupRequiresServiceSelection =
+    setupMode && !watchAllServices && watchAllowedServices.length === 0;
+  const initializedSetupRef = useRef(false);
+
+  useEffect(() => {
+    if (!open || !setupMode) {
+      initializedSetupRef.current = false;
+      return;
+    }
+    if (initializedSetupRef.current) return;
+    if (initialServiceId && services === undefined) return;
+
+    initializedSetupRef.current = true;
+    const initialService = (services ?? []).find(
+      (service) => service.id === initialServiceId,
+    );
+    const serviceSource = initialService?.credential_source;
+    form.reset({
+      name: "Claude Code Agent",
+      scopes: ["proxy", "services:read"],
+      expires_at: null,
+      description: initialService
+        ? `Isolated Agent Key for ${initialService.label}`
+        : "Isolated Agent Key",
+      allow_all_services: false,
+      allow_all_nodes: true,
+      allowed_service_ids: initialService ? [initialService.id] : [],
+      allowed_node_ids: [],
+      callback_url: null,
+      platform: "claude-code",
+      target_org_id: serviceSource?.type === "org"
+        ? serviceSource.org_id
+        : undefined,
+    });
+  }, [form, initialServiceId, open, services, setupMode]);
 
   async function onSubmit(data: CreateApiKeyFormData) {
     try {
       const result = await createMutation.mutateAsync(data);
       setCreatedKey(result.full_key);
+      setCreatedKeyId(result.id);
       toast.success("API key created successfully");
     } catch (error) {
       if (error instanceof ApiError) {
@@ -126,6 +171,7 @@ export function ApiKeyCreateDialog({
   function handleClose() {
     setOpen(false);
     setCreatedKey(null);
+    setCreatedKeyId(null);
     setCopied(false);
     form.reset();
   }
@@ -144,9 +190,14 @@ export function ApiKeyCreateDialog({
         {createdKey ? (
           <>
             <DialogHeader>
-              <DialogTitle>API Key Created</DialogTitle>
+              <DialogTitle>
+                {setupMode ? "Agent Key Created" : "API Key Created"}
+              </DialogTitle>
               <DialogDescription>
                 Copy your API key now. You will not be able to see it again.
+                {setupMode
+                  ? " Open the Agent Key detail page next to review service scope, add credential bindings only when this agent needs overrides, and verify proxy access."
+                  : ""}
               </DialogDescription>
             </DialogHeader>
             <div className="flex items-center gap-2">
@@ -166,15 +217,30 @@ export function ApiKeyCreateDialog({
               </Button>
             </div>
             <DialogFooter>
+              {setupMode && createdKeyId && (
+                <Button variant="outline" asChild>
+                  <Link
+                    to="/keys/api-key/$keyId"
+                    params={{ keyId: createdKeyId }}
+                    onClick={handleClose}
+                  >
+                    Review Scope & Bindings
+                  </Link>
+                </Button>
+              )}
               <Button variant="primary" onClick={handleClose}>Done</Button>
             </DialogFooter>
           </>
         ) : (
           <>
             <DialogHeader>
-              <DialogTitle>Create API Key</DialogTitle>
+              <DialogTitle>
+                {setupMode ? "Create Agent Key" : "Create API Key"}
+              </DialogTitle>
               <DialogDescription>
-                Create a new API key to access the NyxID API.
+                {setupMode
+                  ? "Create a scoped Agent Key using the existing key creation and service-scope controls."
+                  : "Create a new API key to access the NyxID API."}
               </DialogDescription>
             </DialogHeader>
 
@@ -202,6 +268,36 @@ export function ApiKeyCreateDialog({
                     </FormItem>
                   )}
                 />
+
+                {setupMode && (
+                  <FormField
+                    control={form.control}
+                    name="platform"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Platform</FormLabel>
+                        <div className="flex flex-wrap gap-2">
+                          {PLATFORM_OPTIONS.map((platform) => (
+                            <Badge
+                              key={platform}
+                              variant={field.value === platform ? "default" : "secondary"}
+                              className="cursor-pointer"
+                              onClick={() => field.onChange(platform)}
+                            >
+                              <Monitor className="mr-1 h-3 w-3" />
+                              {platform}
+                            </Badge>
+                          ))}
+                        </div>
+                        <p className="text-xs text-muted-foreground">
+                          Stored on the key for audit attribution. You can
+                          change it later on the Agent Key detail page.
+                        </p>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                )}
 
                 {adminOrgs.length > 0 && (
                   <FormField
@@ -330,6 +426,9 @@ export function ApiKeyCreateDialog({
                   <p className="text-[12px] font-medium">Access Scope</p>
                   <p className="text-xs text-muted-foreground">
                     Restrict which services and nodes this key can access via proxy.
+                    {setupMode
+                      ? " Keep service access narrow, then verify the allowed service succeeds and an unselected service is denied before giving the key to an agent."
+                      : ""}
                   </p>
 
                   {/* Service scope */}
@@ -542,9 +641,9 @@ export function ApiKeyCreateDialog({
                     variant="primary"
                     type="submit"
                     isLoading={createMutation.isPending}
-                    disabled={!form.watch("name").trim()}
+                    disabled={!form.watch("name").trim() || setupRequiresServiceSelection}
                   >
-                    Create Key
+                    {setupMode ? "Create Agent Key" : "Create Key"}
                   </Button>
                 </DialogFooter>
               </form>

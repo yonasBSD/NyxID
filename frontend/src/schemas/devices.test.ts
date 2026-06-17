@@ -196,10 +196,11 @@ describe("onboardDeviceFormSchema", () => {
 describe("onboardDeviceResponseSchema", () => {
   it("parses the backend onboard response", () => {
     const result = onboardDeviceResponseSchema.safeParse({
-      qr_payload: "nyxprov://full?ssid=Home",
-      node_id: "4df27e8f-8cb5-47b7-8d29-e6529f2c1c40",
-      api_key_id: "7ef9c1a4-8df9-43af-9f92-98a6c9a7f45d",
+      qr_payload: "nyxprov://bootstrap?token=nyx_obt_secret",
+      bootstrap_id: "boot-1",
       label: "Kitchen Camera",
+      expires_in: 900,
+      expires_at: "2026-06-16T12:15:00Z",
     });
 
     expect(result.success).toBe(true);

@@ -226,7 +226,8 @@ describe("KeyDetailPage — load states", () => {
 });
 
 describe("KeyDetailPage — core rendering", () => {
-  it("renders the key's identity, endpoint, credential and service config from the hook", () => {
+  it("prioritizes identity, health, endpoint and API usage before advanced controls", async () => {
+    const user = userEvent.setup();
     render(<KeyDetailPage />);
 
     // Label heading + catalog-name/proxy-path subtitle.
@@ -251,7 +252,15 @@ describe("KeyDetailPage — core rendering", () => {
     expect(screen.getByText("Authorization")).toBeInTheDocument();
     expect(screen.getByText("/proxy/s/openai-x")).toBeInTheDocument();
 
-    // Real routing widget mounted in editable (non-readOnly) mode.
+    // API Usage is on the default Overview tab so verification is immediate.
+    expect(screen.getByText("API Usage")).toBeInTheDocument();
+    expect(screen.getByRole("tabpanel", { name: "Overview" })).toBeVisible();
+    expect(
+      screen.queryByRole("tabpanel", { name: "Advanced" }),
+    ).not.toBeInTheDocument();
+
+    // Advanced configuration stays reachable without taking over first scan.
+    await user.click(screen.getByRole("tab", { name: "Advanced" }));
     expect(screen.getByTestId("routing-section")).toHaveAttribute(
       "data-readonly",
       "false",
@@ -404,6 +413,7 @@ describe("KeyDetailPage — edit flows", () => {
   it("saves an OpenAPI spec URL via useUpdateEndpoint", async () => {
     const user = userEvent.setup();
     render(<KeyDetailPage />);
+    await user.click(screen.getByRole("tab", { name: "Advanced" }));
 
     // "Not set" badge marks the empty OpenAPI spec section.
     const notSet = screen.getByText("Not set");
@@ -474,6 +484,7 @@ describe("KeyDetailPage — edit flows", () => {
   it("saves a custom User-Agent via useUpdateUserService", async () => {
     const user = userEvent.setup();
     render(<KeyDetailPage />);
+    await user.click(screen.getByRole("tab", { name: "Advanced" }));
 
     // The User-Agent row shows a "Passthrough (default)" badge with a pencil.
     const uaLabel = screen.getByText("User-Agent");
@@ -542,7 +553,8 @@ describe("KeyDetailPage — API usage section", () => {
 });
 
 describe("KeyDetailPage — org read-only branch", () => {
-  it("shows the shared-from-org banner and hides edit/delete controls for non-admin org members", () => {
+  it("shows the shared-from-org banner and hides edit/delete controls for non-admin org members", async () => {
+    const user = userEvent.setup();
     hooks.key.data = makeKey({
       credential_source: {
         type: "org",
@@ -563,6 +575,7 @@ describe("KeyDetailPage — org read-only branch", () => {
     expect(
       screen.queryByRole("button", { name: /Deactivate/i }),
     ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Advanced" }));
     expect(screen.getByTestId("routing-section")).toHaveAttribute(
       "data-readonly",
       "true",
@@ -652,12 +665,15 @@ describe("KeyDetailPage — provider connect callback", () => {
 });
 
 describe("KeyDetailPage — node-routed extras", () => {
-  it("renders the node setup helper and resolves the bound node name", () => {
+  it("keeps node setup behind advanced disclosure", async () => {
+    const user = userEvent.setup();
     hooks.nodes = [{ id: "node-9", name: "Edge Node" }];
     hooks.key.data = makeKey({ node_id: "node-9" });
 
     render(<KeyDetailPage />);
 
+    expect(screen.getByText("API Usage")).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Advanced" }));
     // Node Setup helper card appears for node-routed non-SSH keys.
     expect(screen.getByText("Node Setup")).toBeInTheDocument();
     // The setup command embeds the slug.
@@ -686,15 +702,18 @@ describe("KeyDetailPage — SSH branch", () => {
     const user = userEvent.setup();
     render(<KeyDetailPage />);
 
-    // SSH connection card surfaces host:port, TTL and principals.
+    // SSH usage instructions are the SSH equivalent of API Usage on Overview.
+    expect(screen.getByTestId("ssh-instructions")).toBeInTheDocument();
+    expect(screen.getByRole("tabpanel", { name: "Overview" })).toBeVisible();
+    // The non-SSH-only API usage / OpenAPI sections are absent.
+    expect(screen.queryByText("API Usage")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Advanced" }));
+    // SSH connection setup details remain available behind Advanced.
     expect(screen.getByText("bastion.example.com:2222")).toBeInTheDocument();
     expect(screen.getByText("15 minutes")).toBeInTheDocument();
     expect(screen.getByText("deploy")).toBeInTheDocument();
     expect(screen.getByText("ops")).toBeInTheDocument();
-    // Connection instructions card mounts the SSH instructions child.
-    expect(screen.getByTestId("ssh-instructions")).toBeInTheDocument();
-    // The non-SSH-only API usage / OpenAPI sections are absent.
-    expect(screen.queryByText("API Usage")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /Terminal/i }));
     expect(mockNavigate).toHaveBeenCalledWith({
@@ -706,7 +725,7 @@ describe("KeyDetailPage — SSH branch", () => {
 });
 
 describe("KeyDetailPage — Lark permission setup", () => {
-  it("renders the permissions deep link and pre-selected scopes", () => {
+  it("renders the permissions deep link and pre-selected scopes after usage", () => {
     hooks.key.data = makeKey({
       permission_setup_url: "https://open.larksuite.com/app/abc/permission",
       permission_setup_scopes: ["im:message", "contact:user.id:readonly"],

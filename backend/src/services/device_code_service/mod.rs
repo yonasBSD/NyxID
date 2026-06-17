@@ -17,7 +17,7 @@ pub use approve::approve;
 pub use initiate::initiate;
 pub use lockout::{claim_lockout_notification, is_locked};
 use lockout::{is_pubkey_locked, record_pubkey_signature_failure, reset_pubkey_lockout};
-pub use onboard::onboard;
+pub use onboard::{onboard, redeem_onboard, revoke_onboard};
 pub use poll::poll;
 
 pub const DEVICE_CODE_SIGNATURE_FAILURE_LOCK_THRESHOLD: u32 = 3;
@@ -100,8 +100,6 @@ pub struct DeviceCodeApprove {
 pub struct DeviceOnboardInput {
     pub org_id: Option<String>,
     pub label: String,
-    pub wifi_ssid: String,
-    pub wifi_password: String,
     pub default_services: Option<Vec<String>>,
     pub base_url: String,
 }
@@ -109,9 +107,23 @@ pub struct DeviceOnboardInput {
 #[derive(Clone, Serialize, PartialEq)]
 pub struct DeviceOnboard {
     pub qr_payload: String,
-    pub node_id: String,
-    pub api_key_id: String,
+    pub bootstrap_id: String,
     pub label: String,
+    pub expires_in: i64,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Clone, PartialEq)]
+pub struct DeviceOnboardRedeemInput {
+    pub bootstrap_token: String,
+}
+
+#[derive(Clone, Serialize, PartialEq)]
+pub struct DeviceOnboardRedeem {
+    pub api_key: String,
+    pub node_id: String,
+    pub refresh_token: String,
+    pub expires_in: i64,
 }
 
 #[derive(Clone, PartialEq)]
@@ -224,8 +236,6 @@ impl fmt::Debug for DeviceOnboardInput {
         f.debug_struct("DeviceOnboardInput")
             .field("org_id", &self.org_id)
             .field("label", &self.label)
-            .field("wifi_ssid", &self.wifi_ssid)
-            .field("wifi_password", &RedactedLen(self.wifi_password.len()))
             .field("default_services", &self.default_services)
             .field("base_url", &self.base_url)
             .finish()
@@ -236,9 +246,29 @@ impl fmt::Debug for DeviceOnboard {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DeviceOnboard")
             .field("qr_payload", &RedactedLen(self.qr_payload.len()))
-            .field("node_id", &self.node_id)
-            .field("api_key_id", &RedactedLen(self.api_key_id.len()))
+            .field("bootstrap_id", &RedactedLen(self.bootstrap_id.len()))
             .field("label", &self.label)
+            .field("expires_in", &self.expires_in)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+impl fmt::Debug for DeviceOnboardRedeemInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DeviceOnboardRedeemInput")
+            .field("bootstrap_token", &RedactedLen(self.bootstrap_token.len()))
+            .finish()
+    }
+}
+
+impl fmt::Debug for DeviceOnboardRedeem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DeviceOnboardRedeem")
+            .field("api_key", &RedactedLen(self.api_key.len()))
+            .field("node_id", &self.node_id)
+            .field("refresh_token", &RedactedLen(self.refresh_token.len()))
+            .field("expires_in", &self.expires_in)
             .finish()
     }
 }

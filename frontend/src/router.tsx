@@ -425,9 +425,18 @@ const devicesBindRoute = createRoute({
 });
 
 const devicesOnboardRoute = createRoute({
-  path: "/settings/devices/onboard",
+  path: "/devices/onboard",
   getParentRoute: () => dashboardLayout,
   component: DevicesOnboardPage,
+});
+
+const settingsDevicesOnboardRoute = createRoute({
+  path: "/settings/devices/onboard",
+  getParentRoute: () => dashboardLayout,
+  beforeLoad: () => {
+    throw redirect({ to: "/devices/onboard" });
+  },
+  component: () => null,
 });
 
 const guideRoute = createRoute({
@@ -538,16 +547,21 @@ const keysRoute = createRoute({
   // or `useSearch()` inside `KeysPage` will never observe it and
   // the auto-open-AddKeyDialog flow silently degrades to the
   // generic catalog grid. `action` is whitelisted for the same
-  // reason — the dashboard deep-links `/keys?action=add-service`
-  // and `/keys?action=create-key` to auto-open the add dialogs.
+  // reason — the dashboard deep-links `/keys?action=add-service`,
+  // `/keys?action=create-key`, and `/keys?action=setup-agent` to auto-open
+  // the existing add/create dialogs. `service` preselects a least-privilege
+  // service scope in the Agent Key create dialog.
   validateSearch: (
     search: Record<string, unknown>,
-  ): { tab?: string; slug?: string; action?: string } => ({
+  ): { tab?: string; slug?: string; action?: string; service?: string } => ({
     ...(typeof search.tab === "string" ? { tab: search.tab } : {}),
     ...(typeof search.slug === "string" && search.slug.length > 0
       ? { slug: search.slug }
       : {}),
     ...(typeof search.action === "string" ? { action: search.action } : {}),
+    ...(typeof search.service === "string" && search.service.length > 0
+      ? { service: search.service }
+      : {}),
   }),
   component: KeysPage,
 });
@@ -737,6 +751,7 @@ const routeTree = rootRoute.addChildren([
     settingsRoute,
     devicesBindRoute,
     devicesOnboardRoute,
+    settingsDevicesOnboardRoute,
     consentsRoute,
     authorizationsRedirectRoute,
     guideRoute,

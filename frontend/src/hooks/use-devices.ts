@@ -31,8 +31,6 @@ export function useApproveDevice() {
 }
 
 export function useOnboardDevice() {
-  const queryClient = useQueryClient();
-
   return useMutation({
     mutationFn: async (
       body: OnboardDeviceRequest,
@@ -43,10 +41,15 @@ export function useOnboardDevice() {
       );
       return onboardDeviceResponseSchema.parse(response);
     },
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["api-keys"] });
-      void queryClient.invalidateQueries({ queryKey: ["keys"] });
-      void queryClient.invalidateQueries({ queryKey: ["nodes"] });
+  });
+}
+
+export function useRevokeOnboardDevice() {
+  return useMutation({
+    mutationFn: async (bootstrapId: string): Promise<void> => {
+      await api.delete<void>(
+        `/devices/onboard/${encodeURIComponent(bootstrapId)}`,
+      );
     },
   });
 }

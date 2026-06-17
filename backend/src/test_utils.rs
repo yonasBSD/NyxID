@@ -697,6 +697,7 @@ pub(crate) fn test_user_service(
         node_priority: 0,
         service_type: "http".to_string(),
         ssh_auth_mode: crate::models::ssh_auth_mode::SshAuthMode::ProxyOnly,
+        admin_only: false,
         ssh_node_keys_stale: false,
         identity_propagation_mode: "none".to_string(),
         identity_include_user_id: false,

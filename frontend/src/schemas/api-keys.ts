@@ -53,6 +53,7 @@ export const createApiKeySchema = z.object({
     .url("Must be a valid URL")
     .nullable()
     .optional(),
+  platform: z.string().nullable().optional(),
   /**
    * When set, the key is created under the given org and managed by every
    * admin of that org. Omit for a personal key. The backend enforces that

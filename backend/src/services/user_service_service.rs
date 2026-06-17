@@ -293,8 +293,9 @@ pub async fn list_user_services_with_sources(
             if !crate::services::org_role_scope_service::scope_allows(&effective_scope, &svc.id) {
                 continue;
             }
-            // Viewer can see but not proxy. Member/Admin can use.
-            let allowed = m.role.can_proxy();
+            // Viewer can see but not proxy. Admin-only services are also
+            // visible to members, but not executable by them.
+            let allowed = m.role.can_proxy() && (!svc.admin_only || m.role.can_admin());
 
             out.push(UserServiceWithSource {
                 service: svc,
@@ -503,6 +504,7 @@ pub async fn create_user_service(
     source_app_id: Option<&str>,
     identity: &IdentityConfig,
     ws_frame_injections: Option<&[WsFrameInjection]>,
+    admin_only: bool,
 ) -> AppResult<UserService> {
     validate_slug(slug)?;
     validate_auth_method(auth_method)?;
@@ -618,6 +620,7 @@ pub async fn create_user_service(
         node_priority,
         service_type: service_type.to_string(),
         ssh_auth_mode,
+        admin_only,
         ssh_node_keys_stale: false,
         identity_propagation_mode: identity.identity_propagation_mode,
         identity_include_user_id: identity.identity_include_user_id,
@@ -668,6 +671,7 @@ pub async fn update_user_service(
         &Option<Vec<crate::models::default_request_header::DefaultRequestHeader>>,
     >,
     ws_frame_injections: Option<&[WsFrameInjection]>,
+    admin_only: Option<bool>,
 ) -> AppResult<()> {
     let current = get_user_service(db, user_id, service_id).await?;
     let mut set_doc = doc! {
@@ -755,6 +759,9 @@ pub async fn update_user_service(
     }
     if let Some(active) = is_active {
         set_doc.insert("is_active", active);
+    }
+    if let Some(admin_only) = admin_only {
+        set_doc.insert("admin_only", admin_only);
     }
     if let Some(id_config) = identity {
         let id_config = normalize_identity_config(id_config)?;
@@ -1532,6 +1539,7 @@ pub async fn deactivate_user_service(
         None,
         None,
         None,
+        None,
     )
     .await?;
 
@@ -1961,6 +1969,7 @@ mod tests {
             None,
             &IdentityConfig::none(),
             None,
+            false,
         )
         .await
         .expect_err("empty auth_key_name should be rejected");
@@ -2026,6 +2035,7 @@ mod tests {
             None,
             &IdentityConfig::none(),
             None,
+            false,
         )
         .await
         .expect("bearer auth should not require auth_key_name");
@@ -2065,6 +2075,7 @@ mod tests {
             &user_id,
             &service_id,
             Some("header"),
+            None,
             None,
             None,
             None,
@@ -2121,6 +2132,7 @@ mod tests {
             None,
             None,
             Some(&rules),
+            None,
         )
         .await
         .unwrap();
@@ -2181,6 +2193,7 @@ mod tests {
             None,
             None,
             Some(&too_many),
+            None,
         )
         .await
         .expect_err("more than four rules should be rejected");
@@ -2207,6 +2220,7 @@ mod tests {
             None,
             None,
             Some(&overlong_rules),
+            None,
         )
         .await
         .expect_err("overlong templates should be rejected");
