@@ -180,8 +180,11 @@ pub async fn submit_task(
 
     // Session resolution (three-state conversation_id).
     let now = Utc::now();
-    let (conversation_id, is_followup) = match input.conversation_id.as_deref() {
-        None => (None, false),
+    let (conversation_id, is_followup, required_worker_label) = match input
+        .conversation_id
+        .as_deref()
+    {
+        None => (None, false, None),
         Some("") => {
             let conv_id = mint_conversation_id();
             let session = OracleSession {
@@ -192,6 +195,7 @@ pub async fn submit_task(
                 api_key_id: submitter.api_key_id.clone(),
                 tag: input.tag.clone(),
                 chatgpt_url: None,
+                owner_worker_label: None,
                 turn_count: 0,
                 last_task_id: None,
                 closed_at: None,
@@ -201,7 +205,7 @@ pub async fn submit_task(
             db.collection::<OracleSession>(ORACLE_SESSIONS)
                 .insert_one(&session)
                 .await?;
-            (Some(conv_id), false)
+            (Some(conv_id), false, None)
         }
         Some(conv_id) => {
             let session = db
@@ -222,7 +226,14 @@ pub async fn submit_task(
                     "only the session owner can continue it".to_string(),
                 ));
             }
-            (Some(conv_id.to_string()), session.turn_count > 0)
+            // Pin the follow-up to the account that owns this
+            // conversation (stamped on its first result). Fresh sessions
+            // with no owner yet stay unpinned.
+            (
+                Some(conv_id.to_string()),
+                session.turn_count > 0,
+                session.owner_worker_label.clone(),
+            )
         }
     };
 
@@ -244,6 +255,7 @@ pub async fn submit_task(
         pdf_name: input.pdf_name,
         conversation_id,
         is_followup,
+        required_worker_label,
         client_ref: input.client_ref,
         status: OracleTaskStatus::Queued,
         phase: None,
@@ -495,6 +507,7 @@ pub async fn extract_url(
         pdf_name: None,
         conversation_id: None,
         is_followup: false,
+        required_worker_label: None,
         client_ref: None,
         status: OracleTaskStatus::Queued,
         phase: None,
@@ -544,6 +557,7 @@ pub async fn attach_conversation(
         api_key_id: submitter.api_key_id.clone(),
         tag: tag.clone(),
         chatgpt_url: Some(chatgpt_url.to_string()),
+        owner_worker_label: None,
         turn_count: 0,
         last_task_id: None,
         closed_at: None,
@@ -570,6 +584,7 @@ pub async fn attach_conversation(
         pdf_name: None,
         conversation_id: Some(session.id.clone()),
         is_followup: false,
+        required_worker_label: None,
         client_ref: None,
         status: OracleTaskStatus::Queued,
         phase: None,
@@ -898,10 +913,21 @@ pub async fn claim_task(
         return Ok(None);
     }
 
+    // Fresh tasks (`required_worker_label` absent/null — `{ $eq: null }`
+    // matches both) are claimable by any worker; a follow-up pinned to a
+    // specific account is claimable only by that account's worker, so
+    // multi-turn lands back on the account that owns the conversation.
     let claimed = db
         .collection::<OracleTask>(ORACLE_TASKS)
         .find_one_and_update(
-            doc! { "pool_id": &pool.id, "status": "queued" },
+            doc! {
+                "pool_id": &pool.id,
+                "status": "queued",
+                "$or": [
+                    { "required_worker_label": null },
+                    { "required_worker_label": worker_label },
+                ],
+            },
             doc! { "$set": {
                 "status": "dispatched",
                 "assigned_worker_id": worker_label,
@@ -1103,6 +1129,20 @@ pub async fn worker_submit_result(
                 },
             )
             .await?;
+
+        // Stamp the owning account on the first successful result: the
+        // worker that produced it created the `/c/<id>` conversation, so
+        // follow-ups must pin to it. `{ owner_worker_label: null }`
+        // matches both unset and legacy-null docs; once stamped this is a
+        // no-op, so the first account to answer keeps ownership.
+        if !is_failure {
+            db.collection::<OracleSession>(ORACLE_SESSIONS)
+                .update_one(
+                    doc! { "_id": conv_id, "owner_worker_label": null },
+                    doc! { "$set": { "owner_worker_label": worker_label } },
+                )
+                .await?;
+        }
     }
 
     Ok(if is_failure {
@@ -1227,6 +1267,7 @@ pub async fn worker_submit_transcript(
                 pdf_name: None,
                 conversation_id: Some(session_id.clone()),
                 is_followup: true,
+                required_worker_label: None,
                 client_ref: None,
                 status: OracleTaskStatus::Completed,
                 phase: None,
@@ -1268,6 +1309,15 @@ pub async fn worker_submit_transcript(
                 "$set": session_set,
                 "$inc": { "turn_count": pair_count as i64 },
             },
+        )
+        .await?;
+
+    // The account that scraped the conversation physically owns its
+    // `/c/<id>`; pin follow-ups (`oracle ask --conversation`) to it.
+    db.collection::<OracleSession>(ORACLE_SESSIONS)
+        .update_one(
+            doc! { "_id": &session_id, "owner_worker_label": null },
+            doc! { "$set": { "owner_worker_label": worker_label } },
         )
         .await?;
 
@@ -1906,6 +1956,100 @@ mod tests {
         )
         .await;
         assert!(matches!(missing, Err(AppError::OracleSessionNotFound(_))));
+
+        db.drop().await.ok();
+    }
+
+    #[tokio::test]
+    async fn followup_pins_to_owning_worker() {
+        let Some(db) = connect_test_database("oracle_task_affinity").await else {
+            return;
+        };
+        let owner = uuid::Uuid::new_v4().to_string();
+        let mut pool = test_pool(&owner);
+        pool.per_user_max_inflight = 5;
+        seed_pool(&db, &pool).await;
+
+        // Open a session; tab_1 (account A) answers turn 1 and so becomes
+        // the conversation owner.
+        let t1 = submit_task(
+            &db,
+            &pool,
+            &submitter(&owner),
+            SubmitTaskInput {
+                conversation_id: Some(String::new()),
+                ..prompt_input("turn one")
+            },
+        )
+        .await
+        .unwrap();
+        let conv_id = t1.task.conversation_id.clone().expect("conv id minted");
+        assert!(t1.task.required_worker_label.is_none(), "fresh task unpinned");
+
+        let claimed = claim_task(&db, &pool, "tab_1", None, None)
+            .await
+            .unwrap()
+            .expect("claim turn one");
+        assert_eq!(claimed.task_id, t1.task.id);
+        worker_submit_result(
+            &db,
+            &pool,
+            "tab_1",
+            &t1.task.id,
+            "turn one answer",
+            Some("https://chatgpt.com/c/xyz"),
+            None,
+            None,
+            30,
+        )
+        .await
+        .unwrap();
+
+        // Ownership is stamped on the session.
+        let session =
+            crate::services::oracle_session_service::get_session_for_consumer(&db, &owner, &conv_id)
+                .await
+                .unwrap();
+        assert_eq!(session.owner_worker_label.as_deref(), Some("tab_1"));
+
+        // A follow-up copies the owner onto the task.
+        let t2 = submit_task(
+            &db,
+            &pool,
+            &submitter(&owner),
+            SubmitTaskInput {
+                conversation_id: Some(conv_id.clone()),
+                ..prompt_input("turn two")
+            },
+        )
+        .await
+        .unwrap();
+        assert!(t2.task.is_followup);
+        assert_eq!(t2.task.required_worker_label.as_deref(), Some("tab_1"));
+
+        // A worker on a different account (tab_2) cannot claim the pinned
+        // follow-up — it idles instead of misrouting.
+        let other = claim_task(&db, &pool, "tab_2", None, None).await.unwrap();
+        assert!(other.is_none(), "tab_2 must not claim tab_1's follow-up");
+
+        // The owning account's worker claims it.
+        let claimed2 = claim_task(&db, &pool, "tab_1", None, None)
+            .await
+            .unwrap()
+            .expect("tab_1 claims its follow-up");
+        assert_eq!(claimed2.task_id, t2.task.id);
+
+        // A fresh single-shot task stays competitively load-balanced: any
+        // worker, including tab_2, may claim it.
+        let fresh = submit_task(&db, &pool, &submitter(&owner), prompt_input("fresh"))
+            .await
+            .unwrap();
+        assert!(fresh.task.required_worker_label.is_none());
+        let claimed_fresh = claim_task(&db, &pool, "tab_2", None, None)
+            .await
+            .unwrap()
+            .expect("tab_2 claims a fresh task");
+        assert_eq!(claimed_fresh.task_id, fresh.task.id);
 
         db.drop().await.ok();
     }
