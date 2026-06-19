@@ -787,6 +787,43 @@ async fn requeue_expired_leases(db: &mongodb::Database, pool_id: &str) -> AppRes
     Ok(result.modified_count)
 }
 
+/// Affinity escape hatch — the "lease/age fallback" the issue deferred.
+///
+/// A follow-up pinned (`required_worker_label`) to an owning account whose
+/// worker never comes back would otherwise sit queued forever: it is never
+/// dispatched to a non-matching worker, so its lease never starts and
+/// `requeue_expired_leases` never touches it, yet it keeps counting against
+/// the submitter's inflight quota and the pool queue cap (see
+/// `enforce_submit_quotas`). Once such a task has waited a full
+/// `task_timeout_secs` window — generous enough to absorb a tab reload or
+/// network blip — without its owner claiming it, drop the pin so any worker
+/// may claim it. A non-owner that picks it up cannot reopen the other
+/// account's `/c/<id>` and will report an extraction failure, but that
+/// surfaces a terminal error and frees the quota instead of leaking it.
+async fn release_stale_affinity(db: &mongodb::Database, pool: &OraclePool) -> AppResult<u64> {
+    let now = Utc::now();
+    let cutoff = now - Duration::seconds(pool.task_timeout_secs as i64);
+    let result = db
+        .collection::<OracleTask>(ORACLE_TASKS)
+        .update_many(
+            doc! {
+                "pool_id": &pool.id,
+                "status": "queued",
+                "required_worker_label": { "$ne": null },
+                "created_at": { "$lt": bson::DateTime::from_chrono(cutoff) },
+            },
+            doc! {
+                "$set": {
+                    "phase": "affinity_released_after_grace",
+                    "updated_at": bson::DateTime::from_chrono(now),
+                },
+                "$unset": { "required_worker_label": "" },
+            },
+        )
+        .await?;
+    Ok(result.modified_count)
+}
+
 /// The payload a worker receives for a claimed task. Field names mirror
 /// the local oracle servers' task dicts so the userscript port stays a
 /// thin diff.
@@ -852,10 +889,13 @@ async fn worker_payload(
     })
 }
 
-/// Worker poll: requeue expired leases, resume the worker's own in-flight
-/// task if any (idempotent re-claim — this is what lets a tab survive a
-/// mid-task page reload), then atomically claim the oldest queued task if
-/// the pool has dispatch capacity. `None` = idle.
+/// Worker poll: requeue expired leases, release follow-ups whose owning
+/// worker is long gone (affinity grace fallback), resume the worker's own
+/// in-flight task if any (idempotent re-claim — this is what lets a tab
+/// survive a mid-task page reload), then atomically claim the oldest queued
+/// task if the pool has dispatch capacity. `None` = idle. Because every
+/// live worker polls here continuously, the stale-affinity sweep runs as
+/// long as any worker in the pool is alive.
 pub async fn claim_task(
     db: &mongodb::Database,
     pool: &OraclePool,
@@ -865,6 +905,7 @@ pub async fn claim_task(
 ) -> AppResult<Option<WorkerTaskPayload>> {
     validate_worker_label(worker_label)?;
     requeue_expired_leases(db, &pool.id).await?;
+    release_stale_affinity(db, pool).await?;
 
     let now = Utc::now();
     let lease = now + Duration::seconds(pool.task_timeout_secs as i64);
@@ -2052,6 +2093,167 @@ mod tests {
             .unwrap()
             .expect("tab_2 claims a fresh task");
         assert_eq!(claimed_fresh.task_id, fresh.task.id);
+
+        db.drop().await.ok();
+    }
+
+    #[tokio::test]
+    async fn stale_followup_affinity_is_released_after_grace() {
+        let Some(db) = connect_test_database("oracle_task_affinity_grace").await else {
+            return;
+        };
+        let owner = uuid::Uuid::new_v4().to_string();
+        let mut pool = test_pool(&owner);
+        pool.per_user_max_inflight = 5;
+        // task_timeout_secs is the affinity grace window (test_pool: 3600s).
+        seed_pool(&db, &pool).await;
+
+        // tab_1 (account A) owns the conversation.
+        let t1 = submit_task(
+            &db,
+            &pool,
+            &submitter(&owner),
+            SubmitTaskInput {
+                conversation_id: Some(String::new()),
+                ..prompt_input("turn one")
+            },
+        )
+        .await
+        .unwrap();
+        let conv_id = t1.task.conversation_id.clone().unwrap();
+        claim_task(&db, &pool, "tab_1", None, None)
+            .await
+            .unwrap()
+            .expect("claim turn one");
+        worker_submit_result(
+            &db,
+            &pool,
+            "tab_1",
+            &t1.task.id,
+            "turn one answer",
+            Some("https://chatgpt.com/c/xyz"),
+            None,
+            None,
+            30,
+        )
+        .await
+        .unwrap();
+
+        // A follow-up pins to tab_1, which has now vanished.
+        let t2 = submit_task(
+            &db,
+            &pool,
+            &submitter(&owner),
+            SubmitTaskInput {
+                conversation_id: Some(conv_id.clone()),
+                ..prompt_input("turn two")
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(t2.task.required_worker_label.as_deref(), Some("tab_1"));
+
+        // Before the grace elapses, a different account still cannot claim it.
+        assert!(
+            claim_task(&db, &pool, "tab_2", None, None)
+                .await
+                .unwrap()
+                .is_none(),
+            "pinned follow-up must not be claimable before grace"
+        );
+
+        // Age the follow-up past the grace window (simulates tab_1 never
+        // returning).
+        db.collection::<OracleTask>(ORACLE_TASKS)
+            .update_one(
+                doc! { "_id": &t2.task.id },
+                doc! { "$set": { "created_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(pool.task_timeout_secs as i64 + 60)) } },
+            )
+            .await
+            .unwrap();
+
+        // Now any worker may claim it (affinity released), freeing the quota.
+        let recovered = claim_task(&db, &pool, "tab_2", None, None)
+            .await
+            .unwrap()
+            .expect("released follow-up claimable by any worker");
+        assert_eq!(recovered.task_id, t2.task.id);
+        let (claimed_doc, _) = get_task_for_consumer(&db, &owner, &t2.task.id)
+            .await
+            .unwrap();
+        assert!(claimed_doc.required_worker_label.is_none());
+        assert_eq!(claimed_doc.assigned_worker_id.as_deref(), Some("tab_2"));
+
+        db.drop().await.ok();
+    }
+
+    #[tokio::test]
+    async fn failed_first_turn_leaves_session_unowned() {
+        let Some(db) = connect_test_database("oracle_task_failed_first_turn").await else {
+            return;
+        };
+        let owner = uuid::Uuid::new_v4().to_string();
+        let mut pool = test_pool(&owner);
+        pool.per_user_max_inflight = 5;
+        seed_pool(&db, &pool).await;
+
+        let t1 = submit_task(
+            &db,
+            &pool,
+            &submitter(&owner),
+            SubmitTaskInput {
+                conversation_id: Some(String::new()),
+                ..prompt_input("turn one")
+            },
+        )
+        .await
+        .unwrap();
+        let conv_id = t1.task.conversation_id.clone().unwrap();
+        claim_task(&db, &pool, "tab_1", None, None)
+            .await
+            .unwrap()
+            .expect("claim turn one");
+
+        // Turn 1 fails even though a chat URL was reported.
+        let outcome = worker_submit_result(
+            &db,
+            &pool,
+            "tab_1",
+            &t1.task.id,
+            "ERROR: extraction failed",
+            Some("https://chatgpt.com/c/xyz"),
+            None,
+            None,
+            30,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, ResultOutcome::Failed);
+
+        // The turn is counted and the URL pinned, but ownership is NOT
+        // stamped on a failed first turn.
+        let session = crate::services::oracle_session_service::get_session_for_consumer(
+            &db, &owner, &conv_id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(session.turn_count, 1);
+        assert!(session.owner_worker_label.is_none());
+
+        // So the next follow-up stays unpinned (any worker may serve it).
+        let t2 = submit_task(
+            &db,
+            &pool,
+            &submitter(&owner),
+            SubmitTaskInput {
+                conversation_id: Some(conv_id.clone()),
+                ..prompt_input("turn two")
+            },
+        )
+        .await
+        .unwrap();
+        assert!(t2.task.is_followup);
+        assert!(t2.task.required_worker_label.is_none());
 
         db.drop().await.ok();
     }

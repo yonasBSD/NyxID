@@ -37,6 +37,15 @@ pub struct OracleSession {
     /// `required_worker_label` so multi-turn lands back on the owning
     /// account in a multi-account pool. `None` for legacy/unstamped
     /// sessions (unpinned, today's behavior).
+    ///
+    /// Affinity keys on the worker *label*, so correctness rests on the
+    /// operational invariant that one stable label maps to one ChatGPT
+    /// account. Two tabs of the same account under different labels are
+    /// treated as different accounts (over-pinning — harmless beyond lost
+    /// load-balancing); two different accounts sharing a label would
+    /// reintroduce the misroute this pinning prevents. Worker label
+    /// assignment lives in the CDP/userscript clients, which already mint a
+    /// stable per-tab label (`?nyx=N` → `tab_N`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_worker_label: Option<String>,
     pub turn_count: u64,
