@@ -180,62 +180,60 @@ pub async fn submit_task(
 
     // Session resolution (three-state conversation_id).
     let now = Utc::now();
-    let (conversation_id, is_followup, required_worker_label) = match input
-        .conversation_id
-        .as_deref()
-    {
-        None => (None, false, None),
-        Some("") => {
-            let conv_id = mint_conversation_id();
-            let session = OracleSession {
-                id: conv_id.clone(),
-                pool_id: pool.id.clone(),
-                owner_user_id: submitter.user_id.clone(),
-                origin: "nyxid".to_string(),
-                api_key_id: submitter.api_key_id.clone(),
-                tag: input.tag.clone(),
-                chatgpt_url: None,
-                owner_worker_label: None,
-                turn_count: 0,
-                last_task_id: None,
-                closed_at: None,
-                created_at: now,
-                updated_at: now,
-            };
-            db.collection::<OracleSession>(ORACLE_SESSIONS)
-                .insert_one(&session)
-                .await?;
-            (Some(conv_id), false, None)
-        }
-        Some(conv_id) => {
-            let session = db
-                .collection::<OracleSession>(ORACLE_SESSIONS)
-                .find_one(doc! { "_id": conv_id })
-                .await?
-                .ok_or_else(|| AppError::OracleSessionNotFound(conv_id.to_string()))?;
-            if session.closed_at.is_some() {
-                return Err(AppError::OracleSessionClosed(conv_id.to_string()));
+    let (conversation_id, is_followup, required_worker_label) =
+        match input.conversation_id.as_deref() {
+            None => (None, false, None),
+            Some("") => {
+                let conv_id = mint_conversation_id();
+                let session = OracleSession {
+                    id: conv_id.clone(),
+                    pool_id: pool.id.clone(),
+                    owner_user_id: submitter.user_id.clone(),
+                    origin: "nyxid".to_string(),
+                    api_key_id: submitter.api_key_id.clone(),
+                    tag: input.tag.clone(),
+                    chatgpt_url: None,
+                    owner_worker_label: None,
+                    turn_count: 0,
+                    last_task_id: None,
+                    closed_at: None,
+                    created_at: now,
+                    updated_at: now,
+                };
+                db.collection::<OracleSession>(ORACLE_SESSIONS)
+                    .insert_one(&session)
+                    .await?;
+                (Some(conv_id), false, None)
             }
-            if session.pool_id != pool.id {
-                return Err(AppError::ValidationError(
-                    "conversation belongs to a different pool".to_string(),
-                ));
+            Some(conv_id) => {
+                let session = db
+                    .collection::<OracleSession>(ORACLE_SESSIONS)
+                    .find_one(doc! { "_id": conv_id })
+                    .await?
+                    .ok_or_else(|| AppError::OracleSessionNotFound(conv_id.to_string()))?;
+                if session.closed_at.is_some() {
+                    return Err(AppError::OracleSessionClosed(conv_id.to_string()));
+                }
+                if session.pool_id != pool.id {
+                    return Err(AppError::ValidationError(
+                        "conversation belongs to a different pool".to_string(),
+                    ));
+                }
+                if session.owner_user_id != submitter.user_id {
+                    return Err(AppError::Forbidden(
+                        "only the session owner can continue it".to_string(),
+                    ));
+                }
+                // Pin the follow-up to the account that owns this
+                // conversation (stamped on its first result). Fresh sessions
+                // with no owner yet stay unpinned.
+                (
+                    Some(conv_id.to_string()),
+                    session.turn_count > 0,
+                    session.owner_worker_label.clone(),
+                )
             }
-            if session.owner_user_id != submitter.user_id {
-                return Err(AppError::Forbidden(
-                    "only the session owner can continue it".to_string(),
-                ));
-            }
-            // Pin the follow-up to the account that owns this
-            // conversation (stamped on its first result). Fresh sessions
-            // with no owner yet stay unpinned.
-            (
-                Some(conv_id.to_string()),
-                session.turn_count > 0,
-                session.owner_worker_label.clone(),
-            )
-        }
-    };
+        };
 
     let task = OracleTask {
         id: uuid::Uuid::new_v4().to_string(),
@@ -1984,7 +1982,10 @@ mod tests {
         .await
         .unwrap();
         let conv_id = t1.task.conversation_id.clone().expect("conv id minted");
-        assert!(t1.task.required_worker_label.is_none(), "fresh task unpinned");
+        assert!(
+            t1.task.required_worker_label.is_none(),
+            "fresh task unpinned"
+        );
 
         let claimed = claim_task(&db, &pool, "tab_1", None, None)
             .await
@@ -2006,10 +2007,11 @@ mod tests {
         .unwrap();
 
         // Ownership is stamped on the session.
-        let session =
-            crate::services::oracle_session_service::get_session_for_consumer(&db, &owner, &conv_id)
-                .await
-                .unwrap();
+        let session = crate::services::oracle_session_service::get_session_for_consumer(
+            &db, &owner, &conv_id,
+        )
+        .await
+        .unwrap();
         assert_eq!(session.owner_worker_label.as_deref(), Some("tab_1"));
 
         // A follow-up copies the owner onto the task.
