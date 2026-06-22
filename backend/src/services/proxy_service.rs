@@ -727,6 +727,12 @@ pub async fn resolve_proxy_target_from_user_service(
     slug: Option<&str>,
     catalog_service_id: Option<&str>,
 ) -> AppResult<Option<UserServiceResolution>> {
+    // NyxID#974 routing boundary: identical-instance service pools belong
+    // here, before `finish_resolution()`, because this function is the
+    // authoritative place that preserves personal/legacy/org precedence and
+    // chooses the concrete `UserService`. `node_routing_service` only handles
+    // node failover after a service member has already been selected.
+
     // 1. Personal lookup (short-circuit for the common case).
     let personal = lookup_user_service(db, user_id, slug, catalog_service_id).await?;
     if let Some(us) = personal {
