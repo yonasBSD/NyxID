@@ -596,6 +596,13 @@ pub async fn create_user_service(
             "You already have an active service with slug '{slug}'"
         )));
     }
+    let existing_pool = db
+        .collection::<mongodb::bson::Document>(crate::models::service_pool::COLLECTION_NAME)
+        .find_one(doc! { "user_id": user_id, "slug": slug })
+        .await?;
+    if existing_pool.is_some() {
+        return Err(AppError::ServicePoolSlugTaken(slug.to_string()));
+    }
 
     if let Some(node_id) = node_id {
         // Actor-based check: the human (or API key) making the request must
