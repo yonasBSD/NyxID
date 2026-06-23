@@ -58,7 +58,7 @@ pub struct ServicePool {
     pub user_id: String,
     pub slug: String,
     pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
     pub strategy: PoolStrategy,
@@ -133,6 +133,26 @@ mod tests {
         assert_eq!(pool.members, restored.members);
         assert_eq!(pool.rr_counter, restored.rr_counter);
         assert!(restored.is_active);
+    }
+
+    #[test]
+    fn bson_serializes_none_description() {
+        let pool = ServicePool {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: uuid::Uuid::new_v4().to_string(),
+            slug: "null-description-pool".to_string(),
+            name: "Null Description Pool".to_string(),
+            description: None,
+            strategy: PoolStrategy::RoundRobin,
+            members: vec![],
+            rr_counter: 0,
+            is_active: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let doc = bson::to_document(&pool).expect("serialize");
+        assert_eq!(doc.get("description"), Some(&bson::Bson::Null));
     }
 
     #[test]
