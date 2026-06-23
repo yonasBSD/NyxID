@@ -1348,6 +1348,31 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    // -- service_pools --
+    let service_pools = db.collection::<mongodb::bson::Document>("service_pools");
+    service_pools
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1, "slug": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    service_pools
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1, "is_active": 1 })
+                .build(),
+        )
+        .await?;
+    service_pools
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "members.user_service_id": 1 })
+                .build(),
+        )
+        .await?;
+
     // -- agent_service_bindings --
     let agent_bindings = db.collection::<Document>("agent_service_bindings");
     agent_bindings

@@ -231,21 +231,24 @@ fn audit_org_routing(
     routing: &proxy_service::OrgRouting,
     user_service_id: &str,
     service_id: &str,
+    pool_selection: Option<&crate::services::service_pool_service::PoolSelection>,
 ) {
+    let mut event_data = serde_json::json!({
+        "routed_via": "org",
+        "service_id": service_id,
+        "user_service_id": user_service_id,
+        // Org-routed audits use org_user_id; node-routed audits use owner_user_id.
+        // Owner-centric audit queries must check both fields.
+        "org_user_id": routing.org_user_id,
+        "member_user_id": routing.member_user_id,
+        "membership_id": routing.membership_id,
+    });
+    add_pool_selection_metadata(&mut event_data, pool_selection);
     audit_service::log_for_user(
         state.db.clone(),
         auth_user,
         "proxy_routed_via_org",
-        Some(serde_json::json!({
-            "routed_via": "org",
-            "service_id": service_id,
-            "user_service_id": user_service_id,
-            // Org-routed audits use org_user_id; node-routed audits use owner_user_id.
-            // Owner-centric audit queries must check both fields.
-            "org_user_id": routing.org_user_id,
-            "member_user_id": routing.member_user_id,
-            "membership_id": routing.membership_id,
-        })),
+        Some(event_data),
     );
 }
 
@@ -265,17 +268,47 @@ fn audit_personal_routing(
     auth_user: &AuthUser,
     user_service_id: Option<&str>,
     service_id: &str,
+    pool_selection: Option<&crate::services::service_pool_service::PoolSelection>,
 ) {
+    let mut event_data = serde_json::json!({
+        "routed_via": "personal",
+        "service_id": service_id,
+        "user_service_id": user_service_id,
+    });
+    add_pool_selection_metadata(&mut event_data, pool_selection);
     audit_service::log_for_user(
         state.db.clone(),
         auth_user,
         "proxy_routed_via_personal",
-        Some(serde_json::json!({
-            "routed_via": "personal",
-            "service_id": service_id,
-            "user_service_id": user_service_id,
-        })),
+        Some(event_data),
     );
+}
+
+fn add_pool_selection_metadata(
+    value: &mut serde_json::Value,
+    pool_selection: Option<&crate::services::service_pool_service::PoolSelection>,
+) {
+    let Some(selection) = pool_selection else {
+        return;
+    };
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "pool_id".to_string(),
+            serde_json::Value::String(selection.pool_id.clone()),
+        );
+        object.insert(
+            "pool_slug".to_string(),
+            serde_json::Value::String(selection.pool_slug.clone()),
+        );
+        object.insert(
+            "chosen_user_service_id".to_string(),
+            serde_json::Value::String(selection.selected_member_id.clone()),
+        );
+        object.insert(
+            "pool_strategy".to_string(),
+            serde_json::Value::String(selection.strategy.as_str().to_string()),
+        );
+    }
 }
 
 fn add_owner_user_id_if_shared(
@@ -512,6 +545,7 @@ async fn proxy_request_inner(
                     routing,
                     &resolved.user_service_id,
                     &effective_service_id,
+                    resolved.pool_selection.as_ref(),
                 );
             } else {
                 audit_personal_routing(
@@ -519,6 +553,7 @@ async fn proxy_request_inner(
                     auth_user,
                     Some(&resolved.user_service_id),
                     &effective_service_id,
+                    resolved.pool_selection.as_ref(),
                 );
             }
             return execute_proxy_inner(
@@ -566,6 +601,7 @@ async fn proxy_request_inner(
                 routing,
                 &resolved.user_service_id,
                 &effective_service_id,
+                resolved.pool_selection.as_ref(),
             );
         } else {
             audit_personal_routing(
@@ -573,6 +609,7 @@ async fn proxy_request_inner(
                 auth_user,
                 Some(&resolved.user_service_id),
                 &effective_service_id,
+                resolved.pool_selection.as_ref(),
             );
         }
         return execute_proxy_inner(
@@ -719,6 +756,7 @@ async fn proxy_request_by_slug_inner(
                     routing,
                     &resolved.user_service_id,
                     &effective_service_id,
+                    resolved.pool_selection.as_ref(),
                 );
             } else {
                 audit_personal_routing(
@@ -726,6 +764,7 @@ async fn proxy_request_by_slug_inner(
                     auth_user,
                     Some(&resolved.user_service_id),
                     &effective_service_id,
+                    resolved.pool_selection.as_ref(),
                 );
             }
             return execute_proxy_inner(
@@ -773,6 +812,7 @@ async fn proxy_request_by_slug_inner(
                 routing,
                 &resolved.user_service_id,
                 &effective_service_id,
+                resolved.pool_selection.as_ref(),
             );
         } else {
             audit_personal_routing(
@@ -780,6 +820,7 @@ async fn proxy_request_by_slug_inner(
                 auth_user,
                 Some(&resolved.user_service_id),
                 &effective_service_id,
+                resolved.pool_selection.as_ref(),
             );
         }
         return execute_proxy_inner(
@@ -1341,7 +1382,7 @@ async fn execute_proxy_inner(
         // so we never record a "routed via personal" entry for a request
         // that failed before a target was resolved (disconnected service,
         // missing credential, etc.). See ChronoAIProject/NyxID#423.
-        audit_personal_routing(state, auth_user, None, service_id);
+        audit_personal_routing(state, auth_user, None, service_id, None);
         resolved
     };
 

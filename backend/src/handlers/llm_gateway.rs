@@ -436,33 +436,55 @@ pub async fn gateway_request(
                         .map(|r| r.org_user_id.clone())
                         .unwrap_or_else(|| user_id_str.clone()),
                 );
+                let pool_metadata = resolution.pool_selection.as_ref().map(|selection| {
+                    serde_json::json!({
+                        "pool_id": selection.pool_id,
+                        "pool_slug": selection.pool_slug,
+                        "chosen_user_service_id": selection.selected_member_id,
+                        "pool_strategy": selection.strategy.as_str(),
+                    })
+                });
                 // Audit org-routed LLM gateway calls so the org's owner can
                 // see who is using shared credentials. Mirrors the pattern
                 // in handlers/proxy.rs.
                 if let Some(routing) = &resolution.org_routing {
+                    let mut event_data = serde_json::json!({
+                        "routed_via": "org",
+                        "service_id": service_id,
+                        "user_service_id": resolution.user_service_id,
+                        "org_user_id": routing.org_user_id,
+                        "member_user_id": routing.member_user_id,
+                        "membership_id": routing.membership_id,
+                    });
+                    if let Some(metadata) = pool_metadata.clone()
+                        && let (Some(dst), Some(src)) =
+                            (event_data.as_object_mut(), metadata.as_object())
+                    {
+                        dst.extend(src.clone());
+                    }
                     audit_service::log_for_user(
                         state.db.clone(),
                         &auth_user,
                         "llm_gateway_routed_via_org",
-                        Some(serde_json::json!({
-                            "routed_via": "org",
-                            "service_id": service_id,
-                            "user_service_id": resolution.user_service_id,
-                            "org_user_id": routing.org_user_id,
-                            "member_user_id": routing.member_user_id,
-                            "membership_id": routing.membership_id,
-                        })),
+                        Some(event_data),
                     );
                 } else {
+                    let mut event_data = serde_json::json!({
+                        "routed_via": "personal",
+                        "service_id": service_id,
+                        "user_service_id": resolution.user_service_id,
+                    });
+                    if let Some(metadata) = pool_metadata
+                        && let (Some(dst), Some(src)) =
+                            (event_data.as_object_mut(), metadata.as_object())
+                    {
+                        dst.extend(src.clone());
+                    }
                     audit_service::log_for_user(
                         state.db.clone(),
                         &auth_user,
                         "llm_gateway_routed_via_personal",
-                        Some(serde_json::json!({
-                            "routed_via": "personal",
-                            "service_id": service_id,
-                            "user_service_id": resolution.user_service_id,
-                        })),
+                        Some(event_data),
                     );
                 }
                 (resolution.target, true)

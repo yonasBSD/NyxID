@@ -27,8 +27,8 @@ use crate::services::delegation_service::DelegatedCredential;
 use crate::services::node_ws_manager::NodeWsManager;
 use crate::services::provider_token_exchange_service::{self, TokenExchangeCache};
 use crate::services::{
-    agent_binding_service, gcp_sa_service, user_api_key_service, user_service_service,
-    user_token_service,
+    agent_binding_service, gcp_sa_service, service_pool_service, user_api_key_service,
+    user_service_service, user_token_service,
 };
 use nyxid_cloud_auth::aws_sigv4::{self, AwsCredentials};
 
@@ -678,6 +678,9 @@ pub struct UserServiceResolution {
     /// Set when the resolved UserService was reached via org membership
     /// (the actor has no personal copy). `None` means personal credentials.
     pub org_routing: Option<OrgRouting>,
+    /// Set when a slug resolved through a `ServicePool` before selecting
+    /// the concrete `UserService` member.
+    pub pool_selection: Option<service_pool_service::PoolSelection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -700,6 +703,17 @@ fn admin_only_allows_role(
     role: crate::models::org_membership::OrgRole,
 ) -> bool {
     !user_service.admin_only || role.can_admin()
+}
+
+async fn lookup_service_pool_member(
+    db: &mongodb::Database,
+    owner_id: &str,
+    slug: Option<&str>,
+) -> AppResult<Option<(UserService, service_pool_service::PoolSelection)>> {
+    match slug {
+        Some(slug) => service_pool_service::resolve_member(db, owner_id, slug).await,
+        None => Ok(None),
+    }
 }
 
 /// Resolve proxy target from the new UserService model.
@@ -737,7 +751,22 @@ pub async fn resolve_proxy_target_from_user_service(
     let personal = lookup_user_service(db, user_id, slug, catalog_service_id).await?;
     if let Some(us) = personal {
         return Ok(Some(
-            finish_resolution(db, encryption_keys, user_id, us, None).await?,
+            finish_resolution(db, encryption_keys, user_id, us, None, None).await?,
+        ));
+    }
+    if catalog_service_id.is_none()
+        && let Some((us, pool_selection)) = lookup_service_pool_member(db, user_id, slug).await?
+    {
+        tracing::debug!(
+            user_id = %user_id,
+            pool_id = %pool_selection.pool_id,
+            pool_slug = %pool_selection.pool_slug,
+            chosen_user_service_id = %pool_selection.selected_member_id,
+            strategy = %pool_selection.strategy.as_str(),
+            "Resolved proxy target via service pool"
+        );
+        return Ok(Some(
+            finish_resolution(db, encryption_keys, user_id, us, None, Some(pool_selection)).await?,
         ));
     }
 
@@ -773,7 +802,14 @@ pub async fn resolve_proxy_target_from_user_service(
     for membership in &memberships {
         let org_us =
             lookup_user_service(db, &membership.org_user_id, slug, catalog_service_id).await?;
-        let Some(org_us) = org_us else {
+        let (org_us, pool_selection) = if let Some(org_us) = org_us {
+            (org_us, None)
+        } else if catalog_service_id.is_none() {
+            match lookup_service_pool_member(db, &membership.org_user_id, slug).await? {
+                Some((svc, selection)) => (svc, Some(selection)),
+                None => continue,
+            }
+        } else {
             continue;
         };
 
@@ -829,6 +865,7 @@ pub async fn resolve_proxy_target_from_user_service(
                 &membership.org_user_id,
                 org_us,
                 Some(routing),
+                pool_selection,
             )
             .await?,
         ));
@@ -1190,7 +1227,7 @@ pub async fn resolve_proxy_target_by_user_service_id(
 
     let owner_id = svc.user_id.clone();
     Ok(Some(
-        finish_resolution(db, encryption_keys, &owner_id, svc, org_routing).await?,
+        finish_resolution(db, encryption_keys, &owner_id, svc, org_routing, None).await?,
     ))
 }
 
@@ -1217,6 +1254,13 @@ pub async fn find_effective_service_owner(
 ) -> AppResult<Option<String>> {
     // 1. Personal lookup (short-circuit).
     if let Some(svc) = lookup_user_service(db, actor_user_id, slug, catalog_service_id).await? {
+        return Ok(Some(svc.user_id));
+    }
+    if catalog_service_id.is_none()
+        && let Some(slug) = slug
+        && let Some(svc) =
+            service_pool_service::find_first_viable_member(db, actor_user_id, slug).await?
+    {
         return Ok(Some(svc.user_id));
     }
 
@@ -1250,9 +1294,25 @@ pub async fn find_effective_service_owner(
             Err(e) => return Err(e),
         };
     for membership in memberships {
-        let Some(org_us) =
-            lookup_user_service(db, &membership.org_user_id, slug, catalog_service_id).await?
-        else {
+        let org_us =
+            lookup_user_service(db, &membership.org_user_id, slug, catalog_service_id).await?;
+        let org_us = if let Some(org_us) = org_us {
+            org_us
+        } else if catalog_service_id.is_none() {
+            match slug {
+                Some(slug) => match service_pool_service::find_first_viable_member(
+                    db,
+                    &membership.org_user_id,
+                    slug,
+                )
+                .await?
+                {
+                    Some(svc) => svc,
+                    None => continue,
+                },
+                None => continue,
+            }
+        } else {
             continue;
         };
         // Mirror the proxy resolver's role + scope filters.
@@ -1288,6 +1348,13 @@ pub async fn find_approval_resolution_hint(
     if let Some(svc) = lookup_user_service(db, actor_user_id, slug, catalog_service_id).await? {
         return Ok(Some(approval_hint_from_user_service(&svc)));
     }
+    if catalog_service_id.is_none()
+        && let Some(slug) = slug
+        && let Some(svc) =
+            service_pool_service::find_first_viable_member(db, actor_user_id, slug).await?
+    {
+        return Ok(Some(approval_hint_from_user_service(&svc)));
+    }
 
     if user_has_legacy_personal_connection(db, actor_user_id, slug, catalog_service_id).await? {
         return legacy_approval_hint(db, actor_user_id, slug, catalog_service_id).await;
@@ -1304,9 +1371,25 @@ pub async fn find_approval_resolution_hint(
         };
 
     for membership in memberships {
-        let Some(org_us) =
-            lookup_user_service(db, &membership.org_user_id, slug, catalog_service_id).await?
-        else {
+        let org_us =
+            lookup_user_service(db, &membership.org_user_id, slug, catalog_service_id).await?;
+        let org_us = if let Some(org_us) = org_us {
+            org_us
+        } else if catalog_service_id.is_none() {
+            match slug {
+                Some(slug) => match service_pool_service::find_first_viable_member(
+                    db,
+                    &membership.org_user_id,
+                    slug,
+                )
+                .await?
+                {
+                    Some(svc) => svc,
+                    None => continue,
+                },
+                None => continue,
+            }
+        } else {
             continue;
         };
         if !membership.role.can_proxy() {
@@ -1573,6 +1656,7 @@ async fn finish_resolution(
     effective_owner_id: &str,
     user_service: crate::models::user_service::UserService,
     org_routing: Option<OrgRouting>,
+    pool_selection: Option<service_pool_service::PoolSelection>,
 ) -> AppResult<UserServiceResolution> {
     // For auto-provisioned services, verify the catalog entry is still eligible
     // before allowing the proxy request through.
@@ -1636,6 +1720,7 @@ async fn finish_resolution(
             user_service_id: user_service.id.clone(),
             has_server_credential: true,
             org_routing,
+            pool_selection,
         });
     }
 
@@ -1677,6 +1762,7 @@ async fn finish_resolution(
             user_service_id: user_service.id.clone(),
             has_server_credential: true,
             org_routing,
+            pool_selection,
         });
     }
 
@@ -1743,6 +1829,7 @@ async fn finish_resolution(
             user_service_id: user_service.id.clone(),
             has_server_credential,
             org_routing,
+            pool_selection,
         });
     }
 
@@ -1787,6 +1874,7 @@ async fn finish_resolution(
         user_service_id: user_service.id.clone(),
         has_server_credential: true,
         org_routing,
+        pool_selection,
     })
 }
 
