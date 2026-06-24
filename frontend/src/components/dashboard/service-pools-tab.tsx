@@ -109,11 +109,7 @@ function normalizeDescription(value: string | undefined): string | undefined {
 function selectableServices(
   services: readonly UserServiceResponse[] | undefined,
 ): readonly UserServiceResponse[] {
-  return (services ?? []).filter(
-    (service) =>
-      service.is_active &&
-      service.credential_source.type === "personal",
-  );
+  return (services ?? []).filter((service) => service.is_active);
 }
 
 function CreatePoolDialog({
@@ -299,7 +295,7 @@ function CreatePoolDialog({
               </p>
               {services.length === 0 ? (
                 <div className="rounded-lg bg-white/[0.03] px-4 py-3 text-[12px] text-muted-foreground">
-                  Add an active personal service first, then include it in a pool.
+                  Add an active service first, then include it in a pool.
                 </div>
               ) : (
                 <div className="max-h-60 space-y-2 overflow-y-auto rounded-xl border border-border/50 p-2">
