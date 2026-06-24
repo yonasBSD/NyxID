@@ -329,6 +329,72 @@ pub async fn apply_settlement_for_row(
     Ok(())
 }
 
+/// Atomically transition a finalized row from `released:false` to
+/// `released:true` and debit the wallet exactly once.
+///
+/// The wallet debit (`apply_settlement_for_row`) must be atomic with the
+/// `released` marker so a concurrent reconciler sweep
+/// (`recover_unreleased_finalized`, whose selector is exactly
+/// `{status:finalized, released:false, wallet_id:{$ne:null}}`) — or a retry of
+/// the settle path itself — cannot debit the same row twice
+/// (ChronoAIProject/NyxID#1023). The `find_one_and_update` below is the single
+/// compare-and-set that decides the winner: whoever flips `released` from
+/// `false` to `true` is the *only* caller that performs the debit. Every later
+/// attempt finds `released:true`, claims nothing, and debits nothing.
+///
+/// Returns `true` when this caller won the claim (and therefore debited),
+/// `false` when the row was already released by someone else.
+pub async fn claim_released_and_settle(
+    db: &mongodb::Database,
+    row: &UsageMeterRow,
+) -> AppResult<bool> {
+    if row.wallet_id.is_none() {
+        // No wallet attached (dark-launch / unbilled row): still flip the
+        // released marker so the recovery sweep stops re-examining it, but
+        // there is nothing to debit.
+        let _ = claim_released_marker(db, &row.id).await?;
+        return Ok(false);
+    }
+
+    let Some(claimed) = claim_released_marker(db, &row.id).await? else {
+        // Another caller (settle replay or recovery sweep) already released
+        // this row and performed the debit. Do nothing.
+        return Ok(false);
+    };
+
+    let quantity = claimed.quantity.unwrap_or(0);
+    let actual_credits =
+        actual_credits_for_row(db, &claimed, quantity, claimed.model.as_deref()).await?;
+    apply_settlement_for_row(db, &claimed, actual_credits).await?;
+    Ok(true)
+}
+
+/// Compare-and-set the `released` marker from `false` to `true`. Returns the
+/// post-update row only to the single caller that won the transition; all
+/// other callers see `None`.
+async fn claim_released_marker(
+    db: &mongodb::Database,
+    row_id: &str,
+) -> AppResult<Option<UsageMeterRow>> {
+    db.collection::<UsageMeterRow>(USAGE_METER)
+        .find_one_and_update(
+            doc! { "_id": row_id, "released": false },
+            doc! {
+                "$set": {
+                    "released": true,
+                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                }
+            },
+        )
+        .with_options(
+            FindOneAndUpdateOptions::builder()
+                .return_document(ReturnDocument::After)
+                .build(),
+        )
+        .await
+        .map_err(Into::into)
+}
+
 pub async fn release_unforwarded_rows(
     db: &mongodb::Database,
     billing_request_id: &str,
@@ -395,25 +461,16 @@ pub async fn recover_unreleased_finalized(db: &mongodb::Database) -> AppResult<u
 
     let mut recovered = 0;
     for row in rows {
-        let Some(quantity) = row.quantity else {
+        if row.quantity.is_none() {
             continue;
-        };
-        let actual_credits =
-            actual_credits_for_row(db, &row, quantity, row.model.as_deref()).await?;
-        apply_settlement_for_row(db, &row, actual_credits).await?;
-        let update = db
-            .collection::<UsageMeterRow>(USAGE_METER)
-            .update_one(
-                doc! { "_id": &row.id, "released": false },
-                doc! {
-                    "$set": {
-                        "released": true,
-                        "updated_at": bson::DateTime::from_chrono(Utc::now()),
-                    }
-                },
-            )
-            .await?;
-        recovered += update.modified_count;
+        }
+        // Atomically claim `released:false -> released:true` and debit ONLY on
+        // win. This is the same compare-and-set the settle path uses, so the
+        // recovery sweep and a concurrent/late settle can never both debit the
+        // same row (ChronoAIProject/NyxID#1023).
+        if claim_released_and_settle(db, &row).await? {
+            recovered += 1;
+        }
     }
     Ok(recovered)
 }

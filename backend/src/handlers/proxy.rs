@@ -1410,10 +1410,20 @@ async fn execute_proxy_inner(
     // before the handler returns `Ok`.
     *resolved_slug = target.service.slug.clone();
 
+    // Billing is metadata-only and must never change proxy resolution
+    // behavior. Resolve the billing owner using the SAME identity the proxy
+    // used to resolve and authorize the target (`proxy_resolution_user_id`,
+    // which collapses a service account to its owner). Using the raw subject
+    // here would make `resolve_owner_access` deny a service account billing
+    // its own owner and abort an otherwise-authorized proxy request.
+    let billing_resolution_user_id = auth_user.proxy_resolution_user_id();
     let billing_owner = state
         .billing
         .owner_resolver()
-        .resolve(&user_id_str, effective_owner_for_approval.as_deref())
+        .resolve(
+            &billing_resolution_user_id,
+            effective_owner_for_approval.as_deref(),
+        )
         .await?;
     let billing_request_id = uuid::Uuid::new_v4().to_string();
     let credential_class = final_credential_class(

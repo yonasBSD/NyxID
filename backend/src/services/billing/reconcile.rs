@@ -364,6 +364,17 @@ mod tests {
 
     use super::{BillingReconciler, LagoPushDecision, decide_lago_push, extract_metric_quantity};
 
+    /// Reconcile pushes usage to Lago only when billing is enabled (the
+    /// `if !self.config.billing_enabled { return }` gate in `run_once`).
+    /// Tests that exercise the Lago push/ack/retry/dead-letter path must run
+    /// with billing enabled so the reconciler reaches `push_unacked`.
+    fn billing_enabled_config() -> crate::config::AppConfig {
+        crate::config::AppConfig {
+            billing_enabled: true,
+            ..test_app_config()
+        }
+    }
+
     #[derive(Clone)]
     struct StaticLago {
         result: Result<LagoAck, LagoError>,
@@ -524,7 +535,7 @@ mod tests {
             Some(std::sync::Arc::new(StaticLago {
                 result: Err(LagoError::duplicate("duplicate")),
             })),
-            std::sync::Arc::new(test_app_config()),
+            std::sync::Arc::new(billing_enabled_config()),
         );
 
         let stats = reconciler.run_once().await.expect("run reconcile");
@@ -559,7 +570,7 @@ mod tests {
                     "missing metric",
                 )),
             })),
-            std::sync::Arc::new(test_app_config()),
+            std::sync::Arc::new(billing_enabled_config()),
         );
 
         let stats = reconciler.run_once().await.expect("run reconcile");
@@ -591,7 +602,7 @@ mod tests {
             Some(std::sync::Arc::new(StaticLago {
                 result: Err(LagoError::retry("timeout")),
             })),
-            std::sync::Arc::new(test_app_config()),
+            std::sync::Arc::new(billing_enabled_config()),
         );
 
         let stats = reconciler.run_once().await.expect("run reconcile");
