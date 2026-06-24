@@ -348,6 +348,34 @@ async fn load_active_bot(state: &AppState, original: &ChannelMessage) -> AppResu
     Ok(bot)
 }
 
+fn validate_message_bot_scope(
+    message: &ChannelMessage,
+    conversation: &ChannelConversation,
+    bot: &ChannelBot,
+) -> AppResult<()> {
+    if message.channel_bot_id.as_deref() != Some(bot.id.as_str())
+        || conversation.channel_bot_id.as_deref() != Some(bot.id.as_str())
+    {
+        return Err(AppError::Conflict(
+            "Channel relay message bot scope does not match its active conversation".to_string(),
+        ));
+    }
+
+    if message.platform != bot.platform || conversation.platform != bot.platform {
+        return Err(AppError::Conflict(
+            "Channel relay message platform does not match its active bot".to_string(),
+        ));
+    }
+
+    if message.user_id != bot.user_id || conversation.user_id != bot.user_id {
+        return Err(AppError::Conflict(
+            "Channel relay message owner does not match its active bot".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 async fn consume_reply_token_use(
     state: &AppState,
     claims: &jwt::RelayReplyClaims,
@@ -448,6 +476,7 @@ async fn resolve_reply_token_context(
     // `api_key.is_active` re-check below.
     let api_key = load_active_api_key(state, &claims.api_key_id).await?;
     let bot = load_active_bot(state, &original).await?;
+    validate_message_bot_scope(&original, &conversation, &bot)?;
 
     if claims.platform != conversation.platform {
         return Err(AppError::Unauthorized(
@@ -1583,6 +1612,91 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, AppError::Unauthorized(msg) if msg.contains("platform mismatch")));
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reply_token_context_rejects_message_conversation_bound_to_other_bot() {
+        let Some(fixture) =
+            setup_reply_token_fixture("reply_token_lark_conversation_bot_mismatch").await
+        else {
+            eprintln!("skipping channel_relay reply-token test: no local MongoDB available");
+            return;
+        };
+        let db = fixture.state.db.clone();
+        let now = Utc::now();
+        let other_bot = ChannelBot {
+            id: Uuid::new_v4().to_string(),
+            user_id: fixture.bot.user_id.clone(),
+            platform: "lark".to_string(),
+            label: "Aevatar2".to_string(),
+            bot_token_encrypted: fixture.bot.bot_token_encrypted.clone(),
+            platform_bot_id: "cli_aab1d48eadb8ded3".to_string(),
+            platform_bot_username: "lark_bot".to_string(),
+            webhook_registered: true,
+            webhook_secret_hash: "secret".to_string(),
+            app_id: Some("cli_aab1d48eadb8ded3".to_string()),
+            app_secret_encrypted: None,
+            lark_verification_token_encrypted: None,
+            lark_encrypt_key_encrypted: None,
+            public_key: None,
+            status: "active".to_string(),
+            is_active: true,
+            created_at: now,
+            updated_at: now,
+        };
+
+        db.collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
+            .insert_one(&other_bot)
+            .await
+            .unwrap();
+        db.collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": &fixture.bot.id },
+                doc! { "$set": {
+                    "platform": "lark",
+                    "platform_bot_id": "cli_aab147d27238deed",
+                } },
+            )
+            .await
+            .unwrap();
+        db.collection::<ChannelConversation>(CONVERSATIONS)
+            .update_one(
+                doc! { "_id": &fixture.conversation.id },
+                doc! { "$set": {
+                    "platform": "lark",
+                    "channel_bot_id": &other_bot.id,
+                } },
+            )
+            .await
+            .unwrap();
+        db.collection::<ChannelMessage>(crate::models::channel_message::COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": &fixture.message.id },
+                doc! { "$set": { "platform": "lark" } },
+            )
+            .await
+            .unwrap();
+
+        let token = jwt::generate_relay_reply_token(
+            &fixture.state.jwt_keys,
+            &fixture.state.config,
+            &fixture.api_key.id,
+            &fixture.conversation.id,
+            &fixture.message.id,
+            "lark",
+        )
+        .unwrap();
+
+        let err = resolve_reply_token_context(
+            &fixture.state,
+            &token,
+            &reply_request(&fixture.message.id),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, AppError::Conflict(msg) if msg.contains("bot scope")));
         db.drop().await.unwrap();
     }
 
