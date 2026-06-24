@@ -22,6 +22,7 @@ pub mod openclaw;
 pub mod oracle;
 pub mod org;
 pub mod pairing;
+pub mod pool;
 pub mod profile;
 pub mod provider;
 pub mod proxy;
