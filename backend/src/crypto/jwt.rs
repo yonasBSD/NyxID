@@ -130,18 +130,6 @@ pub struct RelayReplyClaims {
     pub inbound_message_id: String,
     /// Platform bound to this reply attempt.
     pub platform: String,
-    /// Channel bot that received the inbound message.
-    #[serde(default)]
-    pub channel_bot_id: Option<String>,
-    /// Platform-native app/bot identifier for the receiving channel bot.
-    #[serde(default)]
-    pub platform_bot_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct RelayReplyBotScope<'a> {
-    pub channel_bot_id: &'a str,
-    pub platform_bot_id: &'a str,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -424,7 +412,6 @@ pub fn generate_relay_reply_token(
     conversation_id: &str,
     inbound_message_id: &str,
     platform: &str,
-    bot_scope: Option<RelayReplyBotScope<'_>>,
 ) -> Result<String, AppError> {
     let now = Utc::now().timestamp();
 
@@ -439,8 +426,6 @@ pub fn generate_relay_reply_token(
         conversation_id: conversation_id.to_string(),
         inbound_message_id: inbound_message_id.to_string(),
         platform: platform.to_string(),
-        channel_bot_id: bot_scope.map(|scope| scope.channel_bot_id.to_string()),
-        platform_bot_id: bot_scope.map(|scope| scope.platform_bot_id.to_string()),
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -908,8 +893,6 @@ mod tests {
             conversation_id: Uuid::new_v4().to_string(),
             inbound_message_id: Uuid::new_v4().to_string(),
             platform: "lark".to_string(),
-            channel_bot_id: Some(Uuid::new_v4().to_string()),
-            platform_bot_id: Some("cli_test".to_string()),
         }
     }
 
@@ -1448,10 +1431,6 @@ mod tests {
             &conversation_id,
             &inbound_message_id,
             "telegram",
-            Some(RelayReplyBotScope {
-                channel_bot_id: "bot_123",
-                platform_bot_id: "platform_bot_123",
-            }),
         )
         .unwrap();
 
@@ -1460,8 +1439,6 @@ mod tests {
         assert_eq!(claims.conversation_id, conversation_id);
         assert_eq!(claims.inbound_message_id, inbound_message_id);
         assert_eq!(claims.platform, "telegram");
-        assert_eq!(claims.channel_bot_id.as_deref(), Some("bot_123"));
-        assert_eq!(claims.platform_bot_id.as_deref(), Some("platform_bot_123"));
         assert_eq!(claims.aud, RELAY_REPLY_AUDIENCE);
         assert_eq!(claims.token_type, RELAY_REPLY_TOKEN_TYPE);
     }

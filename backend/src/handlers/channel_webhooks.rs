@@ -497,10 +497,6 @@ async fn handle_webhook_inner_with_deps(
             &route.conversation.id,
             &stored_message.id,
             &route.conversation.platform,
-            Some(crate::crypto::jwt::RelayReplyBotScope {
-                channel_bot_id: &bot.id,
-                platform_bot_id: &bot.platform_bot_id,
-            }),
         ) {
             Ok(token) => token,
             Err(e) => {

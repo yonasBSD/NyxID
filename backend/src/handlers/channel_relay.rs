@@ -376,29 +376,6 @@ fn validate_message_bot_scope(
     Ok(())
 }
 
-fn validate_reply_token_bot_scope(
-    claims: &jwt::RelayReplyClaims,
-    bot: &ChannelBot,
-) -> AppResult<()> {
-    if let Some(claim_bot_id) = claims.channel_bot_id.as_deref()
-        && claim_bot_id != bot.id
-    {
-        return Err(AppError::Unauthorized(
-            "Reply token channel_bot_id mismatch".to_string(),
-        ));
-    }
-
-    if let Some(claim_platform_bot_id) = claims.platform_bot_id.as_deref()
-        && claim_platform_bot_id != bot.platform_bot_id
-    {
-        return Err(AppError::Unauthorized(
-            "Reply token platform_bot_id mismatch".to_string(),
-        ));
-    }
-
-    Ok(())
-}
-
 async fn consume_reply_token_use(
     state: &AppState,
     claims: &jwt::RelayReplyClaims,
@@ -500,7 +477,6 @@ async fn resolve_reply_token_context(
     let api_key = load_active_api_key(state, &claims.api_key_id).await?;
     let bot = load_active_bot(state, &original).await?;
     validate_message_bot_scope(&original, &conversation, &bot)?;
-    validate_reply_token_bot_scope(&claims, &bot)?;
 
     if claims.platform != conversation.platform {
         return Err(AppError::Unauthorized(
@@ -535,17 +511,12 @@ async fn resolve_api_key_reply_context(
             "API key is not the assigned agent for this conversation".to_string(),
         ));
     }
-    if is_device_reply_forbidden(&original.platform, &conversation.platform) {
-        return Err(AppError::DeviceChannelReplyNotAllowed);
-    }
-    let bot = load_active_bot(state, &original).await?;
-    validate_message_bot_scope(&original, &conversation, &bot)?;
 
     Ok(ReplyRequestContext {
         original,
         conversation,
         attributed_api_key_id: caller_api_key_id.to_string(),
-        validated_bot: Some(bot),
+        validated_bot: None,
     })
 }
 
@@ -594,8 +565,6 @@ async fn resolve_reply_token_edit_context(
 
     let api_key = load_active_api_key(state, &claims.api_key_id).await?;
     let bot = load_active_bot(state, &outbound).await?;
-    validate_message_bot_scope(&outbound, &conversation, &bot)?;
-    validate_reply_token_bot_scope(&claims, &bot)?;
 
     Ok(EditRequestContext {
         outbound,
@@ -633,7 +602,6 @@ async fn resolve_api_key_edit_context(
     }
 
     let bot = load_active_bot(state, &outbound).await?;
-    validate_message_bot_scope(&outbound, &conversation, &bot)?;
 
     Ok(EditRequestContext {
         outbound,
@@ -1165,8 +1133,6 @@ mod tests {
             conversation_id: fixture.conversation.id.clone(),
             inbound_message_id: fixture.message.id.clone(),
             platform: fixture.conversation.platform.clone(),
-            channel_bot_id: Some(fixture.bot.id.clone()),
-            platform_bot_id: Some(fixture.bot.platform_bot_id.clone()),
         }
     }
 
@@ -1178,10 +1144,6 @@ mod tests {
             &fixture.conversation.id,
             &fixture.message.id,
             &fixture.conversation.platform,
-            Some(jwt::RelayReplyBotScope {
-                channel_bot_id: &fixture.bot.id,
-                platform_bot_id: &fixture.bot.platform_bot_id,
-            }),
         )
         .expect("generate relay reply token")
     }
@@ -1494,10 +1456,6 @@ mod tests {
             &Uuid::new_v4().to_string(),
             &fixture.message.id,
             &fixture.conversation.platform,
-            Some(jwt::RelayReplyBotScope {
-                channel_bot_id: &fixture.bot.id,
-                platform_bot_id: &fixture.bot.platform_bot_id,
-            }),
         )
         .unwrap();
 
@@ -1642,10 +1600,6 @@ mod tests {
             &fixture.conversation.id,
             &fixture.message.id,
             "discord",
-            Some(jwt::RelayReplyBotScope {
-                channel_bot_id: &fixture.bot.id,
-                platform_bot_id: &fixture.bot.platform_bot_id,
-            }),
         )
         .unwrap();
 
@@ -1658,68 +1612,6 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, AppError::Unauthorized(msg) if msg.contains("platform mismatch")));
-        db.drop().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn reply_token_context_rejects_token_for_other_lark_app() {
-        let Some(fixture) = setup_reply_token_fixture("reply_token_lark_app_mismatch").await else {
-            eprintln!("skipping channel_relay reply-token test: no local MongoDB available");
-            return;
-        };
-        let db = fixture.state.db.clone();
-
-        db.collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
-            .update_one(
-                doc! { "_id": &fixture.bot.id },
-                doc! { "$set": {
-                    "platform": "lark",
-                    "platform_bot_id": "cli_aab147d27238deed",
-                } },
-            )
-            .await
-            .unwrap();
-        db.collection::<ChannelConversation>(CONVERSATIONS)
-            .update_one(
-                doc! { "_id": &fixture.conversation.id },
-                doc! { "$set": { "platform": "lark" } },
-            )
-            .await
-            .unwrap();
-        db.collection::<ChannelMessage>(crate::models::channel_message::COLLECTION_NAME)
-            .update_one(
-                doc! { "_id": &fixture.message.id },
-                doc! { "$set": { "platform": "lark" } },
-            )
-            .await
-            .unwrap();
-
-        let token = jwt::generate_relay_reply_token(
-            &fixture.state.jwt_keys,
-            &fixture.state.config,
-            &fixture.api_key.id,
-            &fixture.conversation.id,
-            &fixture.message.id,
-            "lark",
-            Some(jwt::RelayReplyBotScope {
-                channel_bot_id: &fixture.bot.id,
-                platform_bot_id: "cli_aab1d48eadb8ded3",
-            }),
-        )
-        .unwrap();
-
-        let err = resolve_reply_token_context(
-            &fixture.state,
-            &token,
-            &reply_request(&fixture.message.id),
-        )
-        .await
-        .unwrap_err();
-
-        assert!(matches!(
-            err,
-            AppError::Unauthorized(msg) if msg.contains("platform_bot_id mismatch")
-        ));
         db.drop().await.unwrap();
     }
 
@@ -1793,10 +1685,6 @@ mod tests {
             &fixture.conversation.id,
             &fixture.message.id,
             "lark",
-            Some(jwt::RelayReplyBotScope {
-                channel_bot_id: &fixture.bot.id,
-                platform_bot_id: "cli_aab147d27238deed",
-            }),
         )
         .unwrap();
 
@@ -1835,10 +1723,6 @@ mod tests {
             &fixture.conversation.id,
             &fixture.message.id,
             "device",
-            Some(jwt::RelayReplyBotScope {
-                channel_bot_id: &fixture.bot.id,
-                platform_bot_id: &fixture.bot.platform_bot_id,
-            }),
         )
         .unwrap();
 
