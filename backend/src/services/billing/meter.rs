@@ -615,19 +615,17 @@ mod tests {
 
         // Run both a second time to prove idempotency under retry: neither a
         // settle replay nor a later sweep re-debits an already-released row.
-        let settled_again = crate::services::billing::reservation::claim_released_and_settle(
-            &db, &gap_row,
-        )
-        .await
-        .expect("settle replay");
+        let settled_again =
+            crate::services::billing::reservation::claim_released_and_settle(&db, &gap_row)
+                .await
+                .expect("settle replay");
         let recovered_again =
             crate::services::billing::reservation::recover_unreleased_finalized(&db)
                 .await
                 .expect("recovery replay");
 
         // Exactly one debit total across all four attempts.
-        let winners =
-            usize::from(settled_won) + recovered as usize + usize::from(settled_again);
+        let winners = usize::from(settled_won) + recovered as usize + usize::from(settled_again);
         assert_eq!(
             winners, 1,
             "exactly one of (settle, recovery, settle-replay) may debit the row"
