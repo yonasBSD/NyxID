@@ -3922,6 +3922,11 @@ pub enum OracleCommands {
         /// Submit and print the task id without waiting
         #[arg(long)]
         no_wait: bool,
+        /// Save any generated image(s) to this path (or directory). With
+        /// multiple images, the name is used as a prefix. Default: auto-named
+        /// `oracle-<task_id>-<n>.<ext>` in the current directory.
+        #[arg(long, value_name = "PATH")]
+        out: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -3929,6 +3934,9 @@ pub enum OracleCommands {
     Result {
         /// Task id returned by `oracle ask --no-wait`
         task_id: String,
+        /// Save any generated image(s) to this path (or directory)
+        #[arg(long, value_name = "PATH")]
+        out: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },

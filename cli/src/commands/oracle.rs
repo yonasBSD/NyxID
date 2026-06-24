@@ -35,6 +35,7 @@ pub async fn run(command: OracleCommands) -> Result<()> {
             client_ref,
             wait,
             no_wait,
+            out,
             auth,
         } => {
             let output = auth.output;
@@ -83,12 +84,14 @@ pub async fn run(command: OracleCommands) -> Result<()> {
                 eprintln!("Conversation: {conv}");
             }
             let task = poll_until_terminal(&mut api, &task_id, wait).await?;
+            save_result_images(output, &task, out.as_deref())?;
             print_result(output, &task)
         }
-        OracleCommands::Result { task_id, auth } => {
+        OracleCommands::Result { task_id, out, auth } => {
             let output = auth.output;
             let mut api = ApiClient::from_auth_checked(&auth).await?;
             let task: Value = api.get(&format!("/oracle/tasks/{task_id}")).await?;
+            save_result_images(output, &task, out.as_deref())?;
             print_result(output, &task)
         }
         OracleCommands::Cancel { task_id, auth } => {
@@ -543,6 +546,73 @@ fn print_extract_submit(output: OutputFormat, task_id: &str, submit: &Value) -> 
     Ok(())
 }
 
+fn mime_ext(mime: &str) -> &'static str {
+    match mime {
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        "image/svg+xml" => "svg",
+        _ => "png",
+    }
+}
+
+/// Resolve the on-disk path for image `idx` of `count`. With no `--out`, images
+/// are auto-named `oracle-<task_id>-<n>.<ext>` in the cwd. With `--out` and a
+/// single image, the path is used verbatim; with multiple images it becomes a
+/// prefix (`-<n>` inserted before any extension).
+fn resolve_image_path(
+    out: Option<&str>,
+    task_id: &str,
+    idx: usize,
+    count: usize,
+    ext: &str,
+) -> String {
+    match out {
+        None => format!("oracle-{task_id}-{}.{ext}", idx + 1),
+        Some(p) if count <= 1 => p.to_string(),
+        Some(p) => {
+            let slash = p.rfind('/').map(|s| s + 1).unwrap_or(0);
+            match p[slash..].rfind('.') {
+                Some(rel) => {
+                    let dot = slash + rel;
+                    format!("{}-{}{}", &p[..dot], idx + 1, &p[dot..])
+                }
+                None => format!("{p}-{}.{ext}", idx + 1),
+            }
+        }
+    }
+}
+
+/// Decode and write any images on a completed task to disk, printing the saved
+/// paths to stderr. Writes when `--out` is given, or in Table mode (JSON mode
+/// without `--out` leaves the base64 in the printed JSON instead).
+fn save_result_images(output: OutputFormat, task: &Value, out: Option<&str>) -> Result<()> {
+    let images = match task["images"].as_array() {
+        Some(a) if !a.is_empty() => a,
+        _ => return Ok(()),
+    };
+    if out.is_none() && !matches!(output, OutputFormat::Table) {
+        return Ok(());
+    }
+    let task_id = task["task_id"].as_str().unwrap_or("task");
+    let count = images.len();
+    for (i, img) in images.iter().enumerate() {
+        let b64 = img["data_base64"].as_str().unwrap_or("");
+        if b64.is_empty() {
+            continue;
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(b64.as_bytes())
+            .context("server returned undecodable image data")?;
+        let ext = mime_ext(img["mime"].as_str().unwrap_or("image/png"));
+        let path = resolve_image_path(out, task_id, i, count, ext);
+        std::fs::write(&path, &bytes)
+            .with_context(|| format!("failed to write image to {path}"))?;
+        eprintln!("Saved image to {path} ({} bytes)", bytes.len());
+    }
+    Ok(())
+}
+
 fn print_result(output: OutputFormat, task: &Value) -> Result<()> {
     match output {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(task)?),
@@ -720,6 +790,53 @@ mod tests {
     }
 
     #[test]
+    fn resolve_image_path_auto_names_without_out() {
+        assert_eq!(
+            resolve_image_path(None, "t1", 0, 1, "png"),
+            "oracle-t1-1.png"
+        );
+        assert_eq!(
+            resolve_image_path(None, "t1", 1, 2, "jpg"),
+            "oracle-t1-2.jpg"
+        );
+    }
+
+    #[test]
+    fn resolve_image_path_single_out_is_verbatim() {
+        assert_eq!(
+            resolve_image_path(Some("apple.png"), "t1", 0, 1, "png"),
+            "apple.png"
+        );
+        assert_eq!(
+            resolve_image_path(Some("out/apple.png"), "t1", 0, 1, "png"),
+            "out/apple.png"
+        );
+    }
+
+    #[test]
+    fn resolve_image_path_multi_out_is_prefix() {
+        // Extension present → -N inserted before it.
+        assert_eq!(
+            resolve_image_path(Some("apple.png"), "t1", 0, 2, "png"),
+            "apple-1.png"
+        );
+        assert_eq!(
+            resolve_image_path(Some("apple.png"), "t1", 1, 2, "png"),
+            "apple-2.png"
+        );
+        // No extension → -N.<ext> appended.
+        assert_eq!(
+            resolve_image_path(Some("apple"), "t1", 0, 2, "png"),
+            "apple-1.png"
+        );
+        // A dot only in the directory must not be treated as an extension.
+        assert_eq!(
+            resolve_image_path(Some("my.dir/apple"), "t1", 0, 2, "png"),
+            "my.dir/apple-1.png"
+        );
+    }
+
+    #[test]
     fn insert_opt_helpers_skip_none() {
         let mut body = serde_json::json!({});
         insert_opt_str(&mut body, "a", None);
@@ -770,6 +887,7 @@ mod tests {
             client_ref: None,
             wait: 3600,
             no_wait: true,
+            out: None,
             auth: mock_auth_with_output(server.uri(), OutputFormat::Json),
         })
         .await;
@@ -810,6 +928,7 @@ mod tests {
             client_ref: None,
             wait: 3600,
             no_wait: true,
+            out: None,
             auth: mock_auth_with_output(server.uri(), OutputFormat::Json),
         })
         .await
@@ -848,6 +967,7 @@ mod tests {
             client_ref: None,
             wait: 3600,
             no_wait: true,
+            out: None,
             auth: mock_auth_with_output(server.uri(), OutputFormat::Json),
         })
         .await
@@ -897,6 +1017,7 @@ mod tests {
             client_ref: None,
             wait: 30,
             no_wait: false,
+            out: None,
             auth: mock_auth_with_output(server.uri(), OutputFormat::Json),
         })
         .await
@@ -1048,6 +1169,7 @@ mod tests {
 
         let result = run(OracleCommands::Result {
             task_id: "task-x".to_string(),
+            out: None,
             // Table output is where failed status maps to an error exit.
             auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
         })

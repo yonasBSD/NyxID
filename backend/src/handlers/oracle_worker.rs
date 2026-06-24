@@ -128,10 +128,23 @@ pub async fn ack(
 }
 
 #[derive(Deserialize)]
+pub struct WorkerImageDto {
+    pub mime: String,
+    pub data_base64: String,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+#[derive(Deserialize)]
 pub struct WorkerResultRequest {
     pub task_id: String,
     pub worker: String,
     pub response: String,
+    /// Images produced on an image-generation turn (base64). Optional and
+    /// validated/capped server-side; an image-only turn sends an empty
+    /// `response` and a non-empty `images` list.
+    #[serde(default)]
+    pub images: Option<Vec<WorkerImageDto>>,
     #[serde(default)]
     pub chatgpt_url: Option<String>,
     #[serde(default)]
@@ -152,12 +165,24 @@ pub async fn submit_result(
     Json(body): Json<WorkerResultRequest>,
 ) -> AppResult<Json<WorkerResultResponse>> {
     let pool = authenticate_worker(&state, &headers).await?;
+    let req_images = body.images.unwrap_or_default();
+    let image_count = req_images.len();
+    let image_base64_chars: usize = req_images.iter().map(|i| i.data_base64.len()).sum();
+    let images: Vec<oracle_task_service::ResultImage> = req_images
+        .into_iter()
+        .map(|i| oracle_task_service::ResultImage {
+            mime: i.mime,
+            data_base64: i.data_base64,
+            name: i.name,
+        })
+        .collect();
     let outcome = oracle_task_service::worker_submit_result(
         &state.db,
         &pool,
         &body.worker,
         &body.task_id,
         &body.response,
+        images,
         body.chatgpt_url.as_deref(),
         body.model.as_deref(),
         body.script_version.as_deref(),
@@ -165,12 +190,14 @@ pub async fn submit_result(
     )
     .await?;
 
-    // Metadata-only trace: task id + outcome + size, never the body.
+    // Metadata-only trace: task id + outcome + sizes, never the body or bytes.
     tracing::info!(
         task_id = %body.task_id,
         pool_id = %pool.id,
         outcome = ?outcome,
         response_chars = body.response.chars().count(),
+        image_count,
+        image_base64_chars,
         "Oracle worker result received"
     );
 
