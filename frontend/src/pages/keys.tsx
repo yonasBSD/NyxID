@@ -38,6 +38,7 @@ import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
 import { ApiKeyTable } from "@/components/dashboard/api-key-table";
 import { ApiKeyCreateDialog } from "@/components/dashboard/api-key-create-dialog";
 import { ApiKeyUsageDashboard } from "@/components/dashboard/api-key-usage-dashboard";
+import { ServicePoolsTab } from "@/components/dashboard/service-pools-tab";
 import { RoleBadge } from "@/components/orgs/role-badge";
 import { OrgAvatar } from "@/components/orgs/org-avatar";
 import type { KeyInfo } from "@/types/keys";
@@ -744,14 +745,19 @@ function NyxIdApiKeysTab({
 function AddButton({
   tab,
   onAddService,
+  onCreatePool,
   onCreateKey,
 }: {
   readonly tab: KeysTab;
   readonly onAddService: () => void;
+  readonly onCreatePool: () => void;
   readonly onCreateKey: () => void;
 }) {
   if (tab === "services") {
     return <AddCtaButton label="Add Service" onClick={onAddService} />;
+  }
+  if (tab === "pools") {
+    return <AddCtaButton label="Create Pool" onClick={onCreatePool} />;
   }
   return <AddCtaButton label="Create API Key" onClick={onCreateKey} />;
 }
@@ -789,6 +795,7 @@ export function KeysPage() {
   const tab = parseTab(search.tab, KEYS_TABS, KEYS_TAB_DEFAULT);
 
   const [addServiceOpen, setAddServiceOpen] = useState(false);
+  const [createPoolOpen, setCreatePoolOpen] = useState(false);
   const [createKeyOpen, setCreateKeyOpen] = useState(false);
   const [createKeySetupMode, setCreateKeySetupMode] = useState(false);
   const [initialSetupServiceId, setInitialSetupServiceId] = useState<string | null>(null);
@@ -885,6 +892,7 @@ export function KeysPage() {
         <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between sm:gap-4">
           <TabsList className="min-w-0">
             <TabsTrigger value="services">External Services</TabsTrigger>
+            <TabsTrigger value="pools">Service Pools</TabsTrigger>
             <TabsTrigger value="nyxid">Agent Keys</TabsTrigger>
           </TabsList>
           <div className="flex shrink-0 items-center justify-between gap-4 sm:pb-1">
@@ -895,13 +903,16 @@ export function KeysPage() {
                 count={autoCount}
               />
             )}
-            <ViewToggle
-              viewMode={tab === "services" ? servicesViewMode : agentKeysViewMode}
-              onViewModeChange={tab === "services" ? setServicesViewMode : setAgentKeysViewMode}
-            />
+            {tab !== "pools" && (
+              <ViewToggle
+                viewMode={tab === "services" ? servicesViewMode : agentKeysViewMode}
+                onViewModeChange={tab === "services" ? setServicesViewMode : setAgentKeysViewMode}
+              />
+            )}
             <AddButton
               tab={tab}
               onAddService={() => setAddServiceOpen(true)}
+              onCreatePool={() => setCreatePoolOpen(true)}
               onCreateKey={() => setCreateKeyOpen(true)}
             />
           </div>
@@ -916,6 +927,13 @@ export function KeysPage() {
             }}
             showAutoConnected={showAutoConnected}
             viewMode={servicesViewMode}
+          />
+        </TabsContent>
+
+        <TabsContent value="pools" className="mt-6">
+          <ServicePoolsTab
+            createOpen={createPoolOpen}
+            onCreateOpenChange={setCreatePoolOpen}
           />
         </TabsContent>
 

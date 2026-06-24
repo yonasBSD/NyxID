@@ -155,6 +155,11 @@ async fn load_viable_bindings(
 /// Returns Some(NodeRoute) if the user has an active binding to an active online node.
 /// Returns None to fall through to standard proxy.
 ///
+/// This is node failover for one already chosen logical service, not
+/// service-pool balancing. It cannot select among multiple `UserService`
+/// endpoint/credential members behind one slug; that belongs in
+/// `proxy_service::resolve_proxy_target_from_user_service()`.
+///
 /// Selection logic:
 /// 1. Check UserService.node_id (streamlined services path) for the catalog service
 /// 2. If no UserService node_id, find active NodeServiceBindings ordered by priority

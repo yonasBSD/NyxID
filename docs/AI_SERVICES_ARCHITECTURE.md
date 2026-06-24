@@ -58,6 +58,19 @@ graph TB
     ASB --> UAK
 ```
 
+## Service-Pool Routing Boundary
+
+NyxID#974 was narrowed to a routing proof before adding a user-facing pool
+surface. The proof is recorded in
+[SERVICE_POOL_ROUTING_PROOF.md](SERVICE_POOL_ROUTING_PROOF.md).
+
+The important boundary is that `UserService` remains the concrete proxy target
+member, while any future `ServicePool` must be selected inside
+`proxy_service::resolve_proxy_target_from_user_service()`. The existing
+`node_routing_service::resolve_node_route()` / `fallback_node_ids` layer remains
+node failover below a selected `UserService`; it is not sufficient by itself to
+balance multiple endpoint/credential instances behind one stable slug.
+
 ## Data Model Relationships
 
 ```mermaid
