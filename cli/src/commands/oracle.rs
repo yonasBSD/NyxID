@@ -84,14 +84,20 @@ pub async fn run(command: OracleCommands) -> Result<()> {
                 eprintln!("Conversation: {conv}");
             }
             let task = poll_until_terminal(&mut api, &task_id, wait).await?;
-            save_result_images(output, &task, out.as_deref())?;
+            // Non-fatal: a failed image write must not swallow the text answer.
+            if let Err(e) = save_result_images(output, &task, out.as_deref()) {
+                eprintln!("warning: could not save image(s): {e:#}");
+            }
             print_result(output, &task)
         }
         OracleCommands::Result { task_id, out, auth } => {
             let output = auth.output;
             let mut api = ApiClient::from_auth_checked(&auth).await?;
             let task: Value = api.get(&format!("/oracle/tasks/{task_id}")).await?;
-            save_result_images(output, &task, out.as_deref())?;
+            // Non-fatal: a failed image write must not swallow the text answer.
+            if let Err(e) = save_result_images(output, &task, out.as_deref()) {
+                eprintln!("warning: could not save image(s): {e:#}");
+            }
             print_result(output, &task)
         }
         OracleCommands::Cancel { task_id, auth } => {

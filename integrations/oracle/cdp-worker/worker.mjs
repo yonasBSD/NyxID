@@ -286,15 +286,23 @@ window.__nyx = (function () {
     for (const img of Array.from(scope.querySelectorAll("img"))) {
       const src = img.currentSrc || img.src || "";
       if (!src || !/^(https?:|blob:)/.test(src)) continue;
-      const w = img.naturalWidth || img.width || 0;
-      const h = img.naturalHeight || img.height || 0;
+      // SSRF guard: the assistant turn is untrusted output, so only ever fetch
+      // ChatGPT's own content hosts — never a model-emitted <img src> pointing
+      // at an arbitrary/internal URL. Same allowlist downloadImages fetches.
       const looksContent =
         /oaiusercontent|backend-api|blob:/.test(src) ||
         /^generated image/i.test(img.alt || "");
-      if (!looksContent && (!w || w < 200)) continue;
+      if (!looksContent) continue;
+      const w = img.naturalWidth || img.width || 0;
+      const h = img.naturalHeight || img.height || 0;
       if (w && h && (w < 64 || h < 64)) continue;
-      if (seen.has(src)) continue;
-      seen.add(src);
+      // Dedupe by file id when present, so one generated image rendered at
+      // multiple resolutions (thumbnail/full/zoom) under different URLs
+      // collapses to a single entry; fall back to the exact src.
+      const idMatch = src.match(/file[-_][A-Za-z0-9]+/);
+      const key = idMatch ? idMatch[0] : src;
+      if (seen.has(key)) continue;
+      seen.add(key);
       out.push(src);
     }
     return out;
@@ -630,7 +638,10 @@ async function handlePrompt(page, task) {
   await input.click();
   await input.fill(task.prompt);
   await sleep(300);
-  if (task.pdf_base64) {
+  // Only attach a PDF on the FIRST turn of a conversation — never re-upload it
+  // into an existing chat if the server ever resends pdf_base64 on a follow-up
+  // (mirrors the userscript's `!is_followup && pdf_base64` guard).
+  if (!task.is_followup && task.pdf_base64) {
     await ack(task_id, "uploading_pdf");
     await uploadPdf(page, task_id, task);
   }
