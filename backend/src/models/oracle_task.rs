@@ -1,9 +1,37 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use super::bson_bytes;
 use super::bson_datetime;
 
 pub const COLLECTION_NAME: &str = "oracle_tasks";
+
+/// One image produced by the worker on an image-generation turn.
+///
+/// Bytes are stored as BSON Binary (via `bson_bytes`) rather than base64
+/// inside the document, so a few-MB image keeps the task doc well under
+/// MongoDB's 16 MB ceiling. Like prompt/response bodies, image bytes live
+/// only on the task doc and are TTL-expired via `OracleTask::expires_at`;
+/// the redacting Debug impl keeps the bytes out of logs.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct OracleImage {
+    /// MIME type reported by the worker (always `image/*`).
+    pub mime: String,
+    #[serde(with = "bson_bytes::required")]
+    pub data: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+impl std::fmt::Debug for OracleImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OracleImage")
+            .field("mime", &self.mime)
+            .field("name", &self.name)
+            .field("bytes", &self.data.len())
+            .finish()
+    }
+}
 
 pub fn default_task_kind() -> String {
     "prompt".into()
@@ -113,6 +141,11 @@ pub struct OracleTask {
     pub response: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_chars: Option<u64>,
+    /// Images produced on an image-generation turn (bytes as BSON Binary).
+    /// An image-only turn completes with an empty `response` and a non-empty
+    /// `images` list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<OracleImage>>,
     /// Browser-side conversation URL reported by the worker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chatgpt_url: Option<String>,
@@ -169,6 +202,7 @@ mod tests {
             lease_expires_at: None,
             response: None,
             response_chars: None,
+            images: None,
             chatgpt_url: None,
             failure_reason: None,
             worker_script_version: None,

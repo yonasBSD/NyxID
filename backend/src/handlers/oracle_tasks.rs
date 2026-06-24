@@ -12,6 +12,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
@@ -84,6 +85,15 @@ pub struct ExtractResponse {
 }
 
 #[derive(Serialize)]
+pub struct OracleImageInfo {
+    pub mime: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub bytes: u64,
+    pub data_base64: String,
+}
+
+#[derive(Serialize)]
 pub struct OracleTaskInfo {
     pub task_id: String,
     pub pool_id: String,
@@ -107,6 +117,10 @@ pub struct OracleTaskInfo {
     pub response: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_chars: Option<u64>,
+    /// Images produced on an image-generation turn (bytes re-encoded as
+    /// base64 for JSON transport). Present only on the single-task GET.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<OracleImageInfo>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chatgpt_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -183,6 +197,16 @@ fn task_info(task: &OracleTask, queue_position: u64) -> OracleTaskInfo {
         assigned_worker: task.assigned_worker_id.clone(),
         response: task.response.clone(),
         response_chars: task.response_chars,
+        images: task.images.as_ref().map(|imgs| {
+            imgs.iter()
+                .map(|im| OracleImageInfo {
+                    mime: im.mime.clone(),
+                    name: im.name.clone(),
+                    bytes: im.data.len() as u64,
+                    data_base64: base64::engine::general_purpose::STANDARD.encode(&im.data),
+                })
+                .collect()
+        }),
         chatgpt_url: task.chatgpt_url.clone(),
         failure_reason: task.failure_reason.clone(),
         created_at: task.created_at.to_rfc3339(),
@@ -512,6 +536,7 @@ mod tests {
             lease_expires_at: None,
             response: None,
             response_chars: None,
+            images: None,
             chatgpt_url: None,
             failure_reason: None,
             worker_script_version: None,
