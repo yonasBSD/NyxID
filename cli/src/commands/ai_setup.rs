@@ -19,6 +19,7 @@ const SKILL_DIR: &str = "skills/nyxid";
 const REFERENCE_FILES: &[&str] = &[
     "services",
     "proxy",
+    "service-pools",
     "managing",
     "organizations",
     "nodes",
