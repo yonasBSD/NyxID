@@ -17,6 +17,7 @@ use crate::models::downstream_service::{
     ServiceCapabilities, TokenExchangeConfig,
 };
 use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
+use crate::models::service_billing::ServiceBilling;
 use crate::models::ssh_auth_mode::SshAuthMode;
 use crate::models::ws_frame_injection::WsFrameInjection;
 use crate::mw::auth::AuthUser;
@@ -56,6 +57,7 @@ pub struct CreateServiceRequest {
     pub repository_url: Option<String>,
     pub issues_url: Option<String>,
     pub capabilities: Option<ServiceCapabilities>,
+    pub billing: Option<ServiceBilling>,
     pub auth_notes: Option<String>,
     pub known_limitations: Option<String>,
     pub required_permissions: Option<Vec<String>>,
@@ -171,6 +173,8 @@ pub struct ServiceResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<ServiceCapabilities>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub billing: Option<ServiceBilling>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_notes: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub known_limitations: Option<String>,
@@ -255,6 +259,7 @@ pub struct UpdateServiceRequest {
     pub repository_url: Option<String>,
     pub issues_url: Option<String>,
     pub capabilities: Option<ServiceCapabilities>,
+    pub billing: Option<ServiceBilling>,
     pub auth_notes: Option<String>,
     pub known_limitations: Option<String>,
     pub required_permissions: Option<Vec<String>>,
@@ -533,6 +538,40 @@ fn resolve_spec_url_update(
     } else {
         current_url.cloned()
     }
+}
+
+fn validate_service_billing(billing: Option<&ServiceBilling>) -> AppResult<()> {
+    let Some(billing) = billing else {
+        return Ok(());
+    };
+
+    if !billing.resale_billable {
+        return Ok(());
+    }
+
+    let metric_code = billing
+        .lago_resale_metric_code
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AppError::ValidationError(
+                "billing.lago_resale_metric_code is required when resale_billable=true".to_string(),
+            )
+        })?;
+
+    if metric_code.len() > 128
+        || !metric_code
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || ch == '.')
+    {
+        return Err(AppError::ValidationError(
+            "billing.lago_resale_metric_code must be 1-128 ASCII letters, numbers, '.', '_' or '-'"
+                .to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 // --- Handlers ---
@@ -973,6 +1012,7 @@ pub async fn create_service(
     };
     crate::services::ws_frame_injector::validate_rules(&body.ws_frame_injections)?;
     anonymous_endpoint_service::validate_rule_list(&body.anonymous_endpoints)?;
+    validate_service_billing(body.billing.as_ref())?;
 
     let new_service = DownstreamService {
         id: id.clone(),
@@ -1008,6 +1048,7 @@ pub async fn create_service(
         repository_url: body.repository_url.clone(),
         issues_url: body.issues_url.clone(),
         capabilities: body.capabilities.clone(),
+        billing: body.billing.clone(),
         auth_notes: body.auth_notes.clone(),
         known_limitations: body.known_limitations.clone(),
         required_permissions: body.required_permissions.clone(),
@@ -1527,6 +1568,27 @@ pub async fn update_service(
             .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?;
         set_doc.insert("capabilities", bson_caps);
     }
+    let mut next_resale_billable: Option<bool> = None;
+    if body.billing.is_some() {
+        validate_service_billing(body.billing.as_ref())?;
+        let next_billing = body
+            .billing
+            .clone()
+            .filter(|billing| billing.resale_billable || billing.lago_resale_metric_code.is_some());
+        next_resale_billable = Some(
+            next_billing
+                .as_ref()
+                .is_some_and(|billing| billing.resale_billable),
+        );
+        set_doc.insert(
+            "billing",
+            match next_billing {
+                Some(billing) => bson::to_bson(&billing)
+                    .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?,
+                None => bson::Bson::Null,
+            },
+        );
+    }
     if body.auth_notes.is_some() {
         let val = body
             .auth_notes
@@ -1704,6 +1766,7 @@ pub async fn update_service(
         body.forward_access_token,
         body.inject_delegation_token,
         next_anonymous_rules.as_deref(),
+        next_resale_billable,
     )?;
 
     if set_doc.is_empty() {

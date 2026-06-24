@@ -11,6 +11,7 @@ use utoipa::{IntoParams, ToSchema};
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{CredentialFieldSpec, ServiceCapabilities};
+use crate::models::service_billing::ServiceBilling;
 use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
 use crate::models::user_service::UserService;
 use crate::mw::auth::AuthUser;
@@ -105,6 +106,8 @@ pub struct CatalogEntryResponse {
     pub issues_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<ServiceCapabilities>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub billing: Option<ServiceBilling>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_notes: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -306,6 +309,7 @@ fn catalog_entry_response(entry: catalog_service::CatalogEntry) -> CatalogEntryR
         repository_url: entry.repository_url,
         issues_url: entry.issues_url,
         capabilities: entry.capabilities,
+        billing: entry.billing,
         auth_notes: entry.auth_notes,
         known_limitations: entry.known_limitations,
         required_permissions: entry.required_permissions,
@@ -863,6 +867,7 @@ mod tests {
             repository_url: None,
             issues_url: None,
             capabilities: None,
+            billing: None,
             auth_notes: None,
             known_limitations: None,
             required_permissions: None,

@@ -8,7 +8,9 @@ use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, legacy_http_service_type_filter,
 };
+use crate::models::service_billing::{BillingMetric, PlatformUsage};
 use crate::models::service_endpoint::{COLLECTION_NAME as SERVICE_ENDPOINTS, ServiceEndpoint};
+use crate::models::usage_meter::CredentialClass;
 use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
 use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
@@ -79,6 +81,25 @@ pub struct McpToolService {
     pub source: McpToolSource,
     /// true if this service has only a generic proxy tool (custom endpoint, no predefined endpoints)
     pub is_generic_proxy: bool,
+}
+
+fn mcp_credential_class(
+    source: &McpToolSource,
+    node_route_active: bool,
+    has_server_credential: bool,
+    target: &proxy_service::ProxyTarget,
+) -> CredentialClass {
+    if node_route_active && !has_server_credential {
+        CredentialClass::NodeManaged
+    } else if target.auth_method == "none" && target.credential.is_empty() {
+        CredentialClass::NoAuth
+    } else if source.is_user_service() {
+        CredentialClass::UserOwned
+    } else if !target.service.requires_user_credential && !target.credential.is_empty() {
+        CredentialClass::NyxidManagedMaster
+    } else {
+        CredentialClass::UserOwned
+    }
 }
 
 /// A single endpoint within a service.
@@ -2348,6 +2369,7 @@ pub async fn execute_tool(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
     node_ws_manager: &std::sync::Arc<NodeWsManager>,
+    billing: &std::sync::Arc<crate::services::billing::BillingService>,
     user_id: &str,
     service: &McpToolService,
     endpoint: &McpToolEndpoint,
@@ -2657,6 +2679,43 @@ pub async fn execute_tool(
     } else {
         build_downstream_request_headers(endpoint, body.is_some())?
     };
+    let billing_owner = billing.owner_resolver().resolve(user_id, None).await?;
+    let node_intent = match &node_route {
+        Some(route) if !route.fallback_node_ids.is_empty() => {
+            crate::services::billing::NodeIntent::NodeWithFallback
+        }
+        Some(_) => crate::services::billing::NodeIntent::Node,
+        None => crate::services::billing::NodeIntent::Direct,
+    };
+    let user_service_id = match &service.source {
+        McpToolSource::UserManaged {
+            user_service_id, ..
+        } => Some(user_service_id.clone()),
+        McpToolSource::Platform { .. } => None,
+    };
+    let catalog_service_id = Some(target.service.id.clone());
+    let billing_ctx = crate::services::billing::BillingRouteContext::new(
+        uuid::Uuid::new_v4().to_string(),
+        billing_owner.owner_id,
+        user_id.to_string(),
+        exec_ctx.api_key_id.map(str::to_string),
+        user_service_id,
+        catalog_service_id,
+        Some(target.service.slug.clone()),
+        node_intent,
+        target.auth_method.clone(),
+        mcp_credential_class(
+            &service.source,
+            node_route.is_some(),
+            has_server_credential,
+            &target,
+        ),
+        BillingMetric::Requests,
+        target.service.billing.as_ref(),
+        billing.billing_enabled(),
+    );
+    let metered = billing.open(&billing_ctx).await?;
+    let request_len = body.as_ref().map(|body| body.len() as i64).unwrap_or(0);
 
     // -------------------------------------------------------------------
     // Route through node when a node route exists (primary + fallbacks).
@@ -2733,11 +2792,20 @@ pub async fn execute_tool(
                 None
             };
 
+            billing.mark_forwarded(&metered).await?;
             match node_ws_manager
                 .send_proxy_request(nid, attempt, signing_secret.as_ref().map(|s| s.as_slice()))
                 .await
             {
                 Ok(ProxyResponseType::Complete(resp)) => {
+                    billing
+                        .settle(
+                            &metered,
+                            PlatformUsage::single_request(request_len + resp.body.len() as i64),
+                            None,
+                            None,
+                        )
+                        .await?;
                     let body_text = String::from_utf8_lossy(&resp.body).to_string();
                     return Ok((resp.status, body_text));
                 }
@@ -2763,6 +2831,14 @@ pub async fn execute_tool(
                             }
                         }
                     }
+                    billing
+                        .settle(
+                            &metered,
+                            PlatformUsage::single_request(request_len + body_buf.len() as i64),
+                            None,
+                            None,
+                        )
+                        .await?;
                     return Ok((status, String::from_utf8_lossy(&body_buf).to_string()));
                 }
                 Err(e) => {
@@ -2785,6 +2861,7 @@ pub async fn execute_tool(
     // -------------------------------------------------------------------
     // Direct proxy (no node, or node offline with server credential fallback)
     // -------------------------------------------------------------------
+    billing.mark_forwarded(&metered).await?;
     let response = proxy_service::forward_request(
         http_client,
         &target,
@@ -2806,6 +2883,14 @@ pub async fn execute_tool(
         tracing::error!("Failed to read downstream response: {e}");
         AppError::Internal("Failed to read downstream response".to_string())
     })?;
+    billing
+        .settle(
+            &metered,
+            PlatformUsage::single_request(request_len + body_text.len() as i64),
+            None,
+            None,
+        )
+        .await?;
 
     Ok((status, body_text))
 }
@@ -5156,6 +5241,7 @@ mod tests {
                 repository_url: None,
                 issues_url: None,
                 capabilities: None,
+                billing: None,
                 auth_notes: None,
                 known_limitations: None,
                 required_permissions: None,

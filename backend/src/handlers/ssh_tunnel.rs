@@ -19,6 +19,10 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::ssh_auth_mode::SshAuthMode;
 use crate::models::user::{COLLECTION_NAME as USERS, User};
+use crate::models::{
+    service_billing::{BillingMetric, PlatformUsage},
+    usage_meter::CredentialClass,
+};
 use crate::mw::auth::{AuthMethod, AuthUser};
 use crate::services::{
     approval_service, audit_service, node_routing_service, node_service, notification_service,
@@ -84,10 +88,10 @@ pub async fn issue_ssh_certificate(
     // lookup) must never fail the issuance. Fall back to the UUID and
     // accept that the event will be scrubbed to `[UUID_REDACTED]` in
     // that rare case.
-    let service_slug = fetch_service(&state, &service_id)
-        .await
-        .ok()
-        .map(|s| s.slug)
+    let service_row = fetch_service(&state, &service_id).await.ok();
+    let service_slug = service_row
+        .as_ref()
+        .map(|s| s.slug.clone())
         .unwrap_or_else(|| service_id.clone());
     let user_id = auth_user.user_id.to_string();
     let auth_context =
@@ -184,11 +188,15 @@ pub async fn ssh_tunnel_ws(
     // (`ssh.tunnel_opened` / `_closed`) emits the slug, not the UUID.
     // Best-effort: SSH tunnel establishment is user-facing; a transient
     // telemetry-only lookup failure must never block the tunnel.
-    let service_slug = fetch_service(&state, &service_id)
-        .await
-        .ok()
-        .map(|s| s.slug)
+    let service_row = fetch_service(&state, &service_id).await.ok();
+    let service_slug = service_row
+        .as_ref()
+        .map(|s| s.slug.clone())
         .unwrap_or_else(|| service_id.clone());
+    let service_owner_id = service_row
+        .as_ref()
+        .map(|s| s.created_by.clone())
+        .unwrap_or_else(|| auth_user.user_id.to_string());
     let auth_context = ssh_service::resolve_ssh_auth_context(
         &state.db,
         &auth_user.user_id.to_string(),
@@ -238,6 +246,7 @@ pub async fn ssh_tunnel_ws(
                 session_guard,
                 client_meta,
                 tele,
+                service_owner_id,
             )
             .await;
         })
@@ -255,6 +264,7 @@ async fn handle_ssh_socket(
     session_guard: ssh_service::SshSessionGuard,
     client_meta: TunnelClientMeta,
     tele: TelemetryContext,
+    service_owner_id: String,
 ) {
     // Held for Drop-based session count cleanup for the tunnel lifetime.
     let _ = &session_guard;
@@ -281,6 +291,63 @@ async fn handle_ssh_socket(
             return;
         }
     };
+    let billing_owner = match state
+        .billing
+        .owner_resolver()
+        .resolve(&user_id, Some(&service_owner_id))
+        .await
+    {
+        Ok(owner) => owner,
+        Err(error) => {
+            tracing::warn!(service_id = %service_id, error = %error, "Failed to resolve SSH billing owner");
+            let _ = socket
+                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                    code: 1011,
+                    reason: "Failed to resolve billing owner".into(),
+                })))
+                .await;
+            return;
+        }
+    };
+    let node_intent = match &node_route {
+        Some(route) if !route.fallback_node_ids.is_empty() => {
+            crate::services::billing::NodeIntent::NodeWithFallback
+        }
+        Some(_) => crate::services::billing::NodeIntent::Node,
+        None => crate::services::billing::NodeIntent::Direct,
+    };
+    let billing_ctx = crate::services::billing::BillingRouteContext::new(
+        uuid::Uuid::new_v4().to_string(),
+        billing_owner.owner_id,
+        user_id.clone(),
+        auth_user.api_key_id.clone(),
+        None,
+        Some(service_id.clone()),
+        Some(service_slug.clone()),
+        node_intent,
+        "ssh".to_string(),
+        if node_route.is_some() {
+            CredentialClass::NodeManaged
+        } else {
+            CredentialClass::NoAuth
+        },
+        BillingMetric::Bytes,
+        None,
+        state.billing.billing_enabled(),
+    );
+    let metered = match state.billing.open(&billing_ctx).await {
+        Ok(metered) => metered,
+        Err(error) => {
+            tracing::warn!(service_id = %service_id, error = %error, "Failed to open SSH usage meter");
+            let _ = socket
+                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                    code: 1011,
+                    reason: "Failed to open billing meter".into(),
+                })))
+                .await;
+            return;
+        }
+    };
 
     if let Some(node_route) = node_route {
         handle_node_ssh_socket(
@@ -296,6 +363,7 @@ async fn handle_ssh_socket(
             client_meta,
             node_route,
             tele,
+            metered,
         )
         .await;
         return;
@@ -434,6 +502,10 @@ async fn handle_ssh_socket(
         );
         return;
     }
+    if let Err(error) = state.billing.mark_forwarded(&metered).await {
+        tracing::warn!(service_id = %service_id, error = %error, "Failed to mark SSH usage forwarded");
+        return;
+    }
     to_client_bytes += initial_downstream_bytes.len() as u64;
 
     audit_service::log_async(
@@ -527,6 +599,18 @@ async fn handle_ssh_socket(
     let _ = socket.close().await;
 
     let duration_ms = started_at.elapsed().as_millis() as u64;
+    if let Err(error) = state
+        .billing
+        .settle(
+            &metered,
+            PlatformUsage::single_request((from_client_bytes + to_client_bytes) as i64),
+            None,
+            None,
+        )
+        .await
+    {
+        tracing::warn!(service_id = %service_id, error = %error, "Failed to settle SSH usage meter");
+    }
     audit_service::log_async(
         state.db.clone(),
         Some(user_id.clone()),
@@ -575,6 +659,7 @@ async fn handle_node_ssh_socket(
     client_meta: TunnelClientMeta,
     node_route: crate::services::node_routing_service::NodeRoute,
     tele: TelemetryContext,
+    metered: crate::services::billing::MeteredProxyContext,
 ) {
     let all_node_ids: Vec<&str> = std::iter::once(node_route.node_id.as_str())
         .chain(node_route.fallback_node_ids.iter().map(|id| id.as_str()))
@@ -766,6 +851,17 @@ async fn handle_node_ssh_socket(
         );
         return;
     }
+    if let Err(error) = state.billing.mark_forwarded(&metered).await {
+        tracing::warn!(service_id = %service_id, error = %error, "Failed to mark node SSH usage forwarded");
+        close_node_ssh_tunnel(
+            &state,
+            &service_id,
+            &node_id,
+            &session_id,
+            "billing_mark_forwarded_failed",
+        );
+        return;
+    }
     to_client_bytes += initial_downstream_bytes.len() as u64;
 
     audit_service::log_async(
@@ -872,6 +968,18 @@ async fn handle_node_ssh_socket(
     let _ = socket.close().await;
 
     let duration_ms = started_at.elapsed().as_millis() as u64;
+    if let Err(error) = state
+        .billing
+        .settle(
+            &metered,
+            PlatformUsage::single_request((from_client_bytes + to_client_bytes) as i64),
+            None,
+            None,
+        )
+        .await
+    {
+        tracing::warn!(service_id = %service_id, error = %error, "Failed to settle node SSH usage meter");
+    }
     audit_service::log_async(
         state.db.clone(),
         Some(user_id.clone()),
@@ -1343,6 +1451,7 @@ mod tests {
             repository_url: None,
             issues_url: None,
             capabilities: None,
+            billing: None,
             auth_notes: None,
             known_limitations: None,
             required_permissions: None,

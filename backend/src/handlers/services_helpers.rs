@@ -277,6 +277,7 @@ pub fn service_to_response_with_viewer(
         repository_url: s.repository_url,
         issues_url: s.issues_url,
         capabilities: s.capabilities,
+        billing: s.billing,
         auth_notes: s.auth_notes,
         known_limitations: s.known_limitations,
         required_permissions: s.required_permissions,
