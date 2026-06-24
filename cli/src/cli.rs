@@ -58,6 +58,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: ServiceCommands,
     },
+    /// Manage service pools
+    Pool {
+        #[command(subcommand)]
+        command: PoolCommands,
+    },
     /// Manage connected provider tokens
     Provider {
         #[command(subcommand)]
@@ -983,6 +988,117 @@ pub enum ServiceCommands {
         /// OAuth client secret (hidden from help -- use --client-secret-env instead)
         #[arg(long, hide = true)]
         client_secret: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+// ---- Service Pools ----
+
+#[derive(Clone, Copy, ValueEnum)]
+pub enum PoolStrategyArg {
+    #[value(name = "round_robin", alias = "round-robin")]
+    RoundRobin,
+    Weighted,
+}
+
+impl PoolStrategyArg {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RoundRobin => "round_robin",
+            Self::Weighted => "weighted",
+        }
+    }
+}
+
+#[derive(Subcommand)]
+pub enum PoolCommands {
+    /// Create a service pool
+    Create {
+        /// Pool slug
+        #[arg(long)]
+        slug: String,
+        /// Display name
+        #[arg(long)]
+        name: String,
+        /// Optional description
+        #[arg(long)]
+        description: Option<String>,
+        /// Routing strategy
+        #[arg(long, value_enum, default_value = "round_robin")]
+        strategy: PoolStrategyArg,
+        /// Service slug or ID to add as an initial member. Repeatable.
+        #[arg(long = "member", value_name = "SERVICE_SLUG_OR_ID")]
+        members: Vec<String>,
+        /// Create this pool under the given org (you must be an admin of that org).
+        #[arg(
+            long,
+            value_name = "ID|SLUG|NAME",
+            help = "Organization to act on (UUID, slug, or display name)"
+        )]
+        org: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// List service pools
+    List {
+        /// List pools owned by the given org instead of your personal scope
+        #[arg(
+            long,
+            value_name = "ID|SLUG|NAME",
+            help = "Organization to act on (UUID, slug, or display name)"
+        )]
+        org: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Show service pool details
+    Show {
+        /// Pool slug or ID
+        pool: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Delete a service pool
+    Delete {
+        /// Pool ID
+        pool_id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Add a service member to a pool
+    AddMember {
+        /// Pool slug or ID
+        pool: String,
+        /// Service slug or ID
+        #[arg(long)]
+        service: String,
+        /// Member weight
+        #[arg(long)]
+        weight: Option<u32>,
+        /// Enable or disable this member
+        #[arg(long)]
+        enabled: Option<bool>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Remove a service member from a pool
+    RemoveMember {
+        /// Pool slug or ID
+        pool: String,
+        /// Service slug or ID
+        #[arg(long)]
+        service: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Set a pool's routing strategy
+    SetStrategy {
+        /// Pool slug or ID
+        pool: String,
+        /// Routing strategy
+        #[arg(value_enum)]
+        strategy: PoolStrategyArg,
         #[command(flatten)]
         auth: AuthArgs,
     },

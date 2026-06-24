@@ -151,6 +151,7 @@ fn command_names(command: &Commands) -> (&'static str, &'static str) {
         Commands::Session { .. } => ("user", "session"),
         Commands::Catalog { .. } => ("catalog", "subcommand"),
         Commands::Service { .. } => ("service", "subcommand"),
+        Commands::Pool { .. } => ("pool", "subcommand"),
         Commands::Provider { .. } => ("provider", "subcommand"),
         Commands::ApiKey { .. } => ("api_key", "subcommand"),
         Commands::Org { .. } => ("org", "subcommand"),
@@ -216,6 +217,7 @@ async fn run(cli: Cli) -> Result<()> {
 
         Commands::Catalog { command } => commands::catalog::run(command).await,
         Commands::Service { command } => commands::service::run(command).await,
+        Commands::Pool { command } => commands::pool::run(command).await,
         Commands::Provider { command } => commands::provider::run(command).await,
         Commands::ApiKey { command } => commands::api_key::run(command).await,
         Commands::Org { command } => commands::org::run(command).await,
