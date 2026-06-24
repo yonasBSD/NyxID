@@ -694,9 +694,7 @@ pub fn build_router(
             delete(handlers::service_pools_handler::remove_member),
         );
 
-    let billing_routes = Router::new()
-        .route("/usage", get(handlers::billing::get_usage))
-        .route("/wallet", get(handlers::billing::get_wallet));
+    let billing_routes = Router::new().route("/usage", get(handlers::billing::get_usage));
 
     // Org management routes (creation, members, invites). All routes
     // authenticate as a regular session/user; admin-vs-member checks happen

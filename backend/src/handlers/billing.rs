@@ -61,15 +61,6 @@ pub struct BillingReadOnlyBlock {
     pub rates_are_approximate: bool,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
-pub struct BillingWalletResponse {
-    pub owner_id: String,
-    pub charging_enabled: bool,
-    pub lago_configured: bool,
-    pub balance_credits: Option<i64>,
-    pub source: String,
-}
-
 pub async fn get_usage(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -172,39 +163,6 @@ pub async fn get_usage(
             lago_configured: state.billing.lago_configured(),
             source: "usage_meter".to_string(),
             rates_are_approximate: true,
-        },
-    }))
-}
-
-pub async fn get_wallet(
-    State(state): State<AppState>,
-    auth_user: AuthUser,
-) -> AppResult<Json<BillingWalletResponse>> {
-    let owner_id = auth_user.user_id.to_string();
-    let balance_credits = match state.billing.lago_client() {
-        Some(lago) => match lago.wallet_balance(&owner_id).await {
-            Ok(balance) => Some(balance),
-            Err(error) => {
-                tracing::warn!(
-                    owner_id = %owner_id,
-                    error = %error,
-                    "Failed to read Lago wallet balance"
-                );
-                None
-            }
-        },
-        None => None,
-    };
-
-    Ok(Json(BillingWalletResponse {
-        owner_id,
-        charging_enabled: false,
-        lago_configured: state.billing.lago_configured(),
-        balance_credits,
-        source: if balance_credits.is_some() {
-            "lago_wallet".to_string()
-        } else {
-            "not_configured".to_string()
         },
     }))
 }

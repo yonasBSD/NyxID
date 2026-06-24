@@ -69,7 +69,7 @@ absolute accept URL from `runtime-config.api_base_url`; see
 
 ## Billing Meter and Lago Sink (P1/P2)
 
-Phase P1 writes a durable `usage_meter` ledger. Phase P2 can push finalized ledger rows into Lago and expose read-only usage/wallet display. These variables do not enable wallet charging, top-ups, reservations, or the P3 charging gate.
+Phase P1 writes a durable `usage_meter` ledger. Phase P2 can push finalized ledger rows into Lago and expose read-only usage display. These variables do not enable wallet charging, top-ups, reservations, or the P3 charging gate.
 
 | Variable | Default | Description |
 |----------|---------|-------------|

@@ -17,7 +17,6 @@ pub trait LagoApi: Send + Sync {
     async fn record_events_batch(&self, events: &[LagoEvent]) -> Result<Vec<LagoAck>, LagoError>;
     async fn current_usage(&self, customer_id: &str, subscription_id: &str)
     -> AppResult<LagoUsage>;
-    async fn wallet_balance(&self, customer_id: &str) -> AppResult<i64>;
     async fn entitlements(&self, subscription_id: &str) -> AppResult<Vec<Entitlement>>;
 }
 
@@ -238,24 +237,6 @@ impl LagoApi for LagoClient {
             subscription_id: subscription_id.to_string(),
             raw: value,
         })
-    }
-
-    async fn wallet_balance(&self, customer_id: &str) -> AppResult<i64> {
-        let path = format!(
-            "wallets?external_customer_id={}&per_page=100&page=1",
-            urlencoding::encode(customer_id)
-        );
-        let value = self
-            .json_request(reqwest::Method::GET, &path, None)
-            .await
-            .map_err(lago_error_to_app)?;
-
-        let balance = value
-            .get("wallets")
-            .and_then(Value::as_array)
-            .map(|wallets| wallets.iter().map(wallet_balance_credits).sum())
-            .unwrap_or(0);
-        Ok(balance)
     }
 
     async fn entitlements(&self, subscription_id: &str) -> AppResult<Vec<Entitlement>> {
@@ -517,32 +498,6 @@ fn body_contains(value: &Value, needle: &str) -> bool {
 
 fn body_contains_any(value: &Value, needles: &[&str]) -> bool {
     needles.iter().any(|needle| body_contains(value, needle))
-}
-
-fn wallet_balance_credits(wallet: &Value) -> i64 {
-    for key in [
-        "credits_balance",
-        "balance_credits",
-        "balance",
-        "amount_cents",
-        "ongoing_balance_cents",
-    ] {
-        if let Some(num) = value_as_i64(wallet.get(key)) {
-            return num;
-        }
-    }
-    0
-}
-
-fn value_as_i64(value: Option<&Value>) -> Option<i64> {
-    match value? {
-        Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f.round() as i64)),
-        Value::String(s) => s
-            .parse::<i64>()
-            .ok()
-            .or_else(|| s.parse::<f64>().ok().map(|f| f.round() as i64)),
-        _ => None,
-    }
 }
 
 #[cfg(test)]
