@@ -753,6 +753,11 @@ async function downloadImages(page, srcs) {
   const out = [];
   let total = 0;
   for (const src of (srcs || []).slice(0, MAX_IMAGES)) {
+    // Trust boundary (SSRF): this is where the privileged, cookie-bearing fetch
+    // happens, so enforce the content-host allowlist HERE — independent of
+    // extractImages' heuristics (its alt-based match is model-controlled and
+    // could otherwise smuggle an internal URL through). blob: is page-local.
+    if (!src.startsWith("blob:") && !/oaiusercontent|backend-api/.test(src)) continue;
     try {
       let buffer, mime;
       if (src.startsWith("blob:")) {
