@@ -254,9 +254,10 @@ async fn finalize_layer(
         return Ok(());
     };
 
-    let actual_credits =
-        reservation::actual_credits_for_row(db, &claimed, quantity, model.as_deref()).await?;
-    reservation::apply_settlement_for_row(db, &claimed, actual_credits).await?;
+    // Settlement owns the wallet debit and the `released` transition together.
+    // The bounded wallet lock covers the crash gap between those two writes, so
+    // recovery and live settlement share one idempotent path.
+    reservation::claim_released_and_settle(db, &claimed).await?;
     Ok(())
 }
 
@@ -288,6 +289,13 @@ fn platform_quantity(metric: BillingMetric, usage: &PlatformUsage) -> i64 {
         BillingMetric::Bytes => usage.bytes.max(0),
         BillingMetric::Requests | BillingMetric::Tokens => usage.requests.max(0),
     }
+}
+
+fn is_duplicate_key_error(error: &mongodb::error::Error) -> bool {
+    error
+        .to_string()
+        .to_ascii_lowercase()
+        .contains("duplicate key")
 }
 
 #[cfg(test)]
@@ -603,6 +611,146 @@ mod tests {
         assert!(row.released);
     }
 
+    /// ChronoAIProject/NyxID#1023 — the settle path and the reconciler's
+    /// `recover_unreleased_finalized` sweep can race the SAME finalized row
+    /// while it sits in the gap state `{status:finalized, released:false,
+    /// wallet_id:set}`. The wallet debit MUST be atomic with the `released`
+    /// transition, so the customer is charged exactly once no matter how many
+    /// settle replays or recovery sweeps touch the row concurrently.
+    ///
+    /// This drives `settle` to produce the gap state, then runs the settle
+    /// path's `claim_released_and_settle` AND `recover_unreleased_finalized`
+    /// concurrently against that row, and asserts a single debit
+    /// (`reserved_credits` lands at 0, never negative; `pending_lago_debits`
+    /// is the single-debit amount, never doubled).
+    #[tokio::test]
+    async fn settle_and_recovery_sweep_debit_wallet_exactly_once() {
+        let Some(db) = connect_test_database("billing_settle_recovery_once").await else {
+            return;
+        };
+        create_usage_transaction_index(&db).await;
+        // rate = 5 credits/unit, reserve 5; a single debit moves
+        // reserved_credits 5 -> 0 and pending_lago_debits 0 -> 5. A double
+        // debit would drive reserved_credits to -5 and pending_lago_debits to
+        // 10, so the assertions below catch the #1023 regression directly.
+        insert_rate(&db, "platform_requests", 5).await;
+        let owner_id = "owner-1023-race";
+        insert_wallet(&db, owner_id, 10, 0).await;
+
+        let ctx = platform_context("billing-1023", owner_id);
+        let reservation = BillingReservation {
+            owner_id: owner_id.to_string(),
+            wallet_id: format!("wallet-{owner_id}"),
+            total_reserved_credits: 5,
+            layers: vec![crate::services::billing::reservation::LayerReservation {
+                layer: BillingLayer::Platform,
+                reserved_credits: 5,
+            }],
+        };
+        crate::services::billing::reservation::try_reserve_prepaid(&db, owner_id, 5)
+            .await
+            .expect("reserve")
+            .expect("reserved");
+
+        let metered = open(&db, &ctx, Some(&reservation)).await.expect("open");
+        mark_forwarded(&db, &metered).await.expect("mark forwarded");
+
+        // Put the row into the exact gap state the bug exploits: finalized,
+        // wallet still attached, but NOT yet released — i.e. a crash or pause
+        // landed between `finalize_layer`'s finalize claim and its release.
+        let collection =
+            db.collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME);
+        collection
+            .update_one(
+                doc! { "billing_request_id": "billing-1023" },
+                doc! {
+                    "$set": {
+                        "status": "finalized",
+                        "forwarded": true,
+                        "released": false,
+                        "quantity": 1_i64,
+                    }
+                },
+            )
+            .await
+            .expect("force gap state");
+
+        let gap_row = collection
+            .find_one(doc! { "billing_request_id": "billing-1023" })
+            .await
+            .expect("find gap row")
+            .expect("gap row exists");
+        assert_eq!(gap_row.status, UsageStatus::Finalized);
+        assert!(!gap_row.released);
+        assert!(gap_row.wallet_id.is_some());
+
+        // Race the settle path's atomic claim+debit against the reconciler
+        // recovery sweep. Exactly one of them must win the released CAS and
+        // perform the single debit; the other must observe `released:true` and
+        // debit nothing.
+        let settle_db = db.clone();
+        let settle_row = gap_row.clone();
+        let settle_task = tokio::spawn(async move {
+            crate::services::billing::reservation::claim_released_and_settle(
+                &settle_db,
+                &settle_row,
+            )
+            .await
+            .expect("settle claim")
+        });
+        let recover_db = db.clone();
+        let recover_task = tokio::spawn(async move {
+            crate::services::billing::reservation::recover_unreleased_finalized(&recover_db)
+                .await
+                .expect("recovery sweep")
+        });
+        let settled_won = settle_task.await.expect("settle join");
+        let recovered = recover_task.await.expect("recover join");
+
+        // Run both a second time to prove idempotency under retry: neither a
+        // settle replay nor a later sweep re-debits an already-released row.
+        let settled_again =
+            crate::services::billing::reservation::claim_released_and_settle(&db, &gap_row)
+                .await
+                .expect("settle replay");
+        let recovered_again =
+            crate::services::billing::reservation::recover_unreleased_finalized(&db)
+                .await
+                .expect("recovery replay");
+
+        // Exactly one debit total across all four attempts.
+        let winners = usize::from(settled_won) + recovered as usize + usize::from(settled_again);
+        assert_eq!(
+            winners, 1,
+            "exactly one of (settle, recovery, settle-replay) may debit the row"
+        );
+        assert_eq!(recovered_again, 0, "released row is never re-recovered");
+
+        let wallet = db
+            .collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
+            .find_one(doc! { "owner_id": owner_id })
+            .await
+            .expect("find wallet")
+            .expect("wallet exists");
+        assert_eq!(
+            wallet.reserved_credits, 0,
+            "reserved_credits must not go negative (double-debit guard)"
+        );
+        assert_eq!(
+            wallet.pending_lago_debits, 5,
+            "wallet must be debited exactly once, never twice"
+        );
+
+        let final_row = db
+            .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+            .find_one(doc! { "billing_request_id": "billing-1023" })
+            .await
+            .expect("find final row")
+            .expect("row exists");
+        assert!(final_row.released, "row must end released exactly once");
+        assert_eq!(final_row.status, UsageStatus::Finalized);
+    }
+
     async fn create_usage_transaction_index(db: &mongodb::Database) {
         db.collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
             .create_index(
@@ -674,11 +822,4 @@ mod tests {
             true,
         )
     }
-}
-
-fn is_duplicate_key_error(error: &mongodb::error::Error) -> bool {
-    error
-        .to_string()
-        .to_ascii_lowercase()
-        .contains("duplicate key")
 }

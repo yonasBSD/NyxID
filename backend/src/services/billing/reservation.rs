@@ -626,6 +626,21 @@ fn document_i64(document: &Document, key: &str) -> Option<i64> {
     }
 }
 
+/// Settle a finalized row through the bounded wallet lock.
+///
+/// The money move is guarded by `active_settlement`, then the usage row's
+/// `released:false -> released:true` transition is completed on the same path
+/// used by recovery. This avoids both double-debit replay and lost debit if the
+/// process stops after the wallet update but before the row marker is written.
+pub async fn claim_released_and_settle(
+    db: &mongodb::Database,
+    row: &UsageMeterRow,
+) -> AppResult<bool> {
+    let quantity = row.quantity.unwrap_or(0);
+    let actual_credits = actual_credits_for_row(db, row, quantity, row.model.as_deref()).await?;
+    apply_settlement_for_row(db, row, actual_credits).await
+}
+
 pub async fn release_unforwarded_rows(
     db: &mongodb::Database,
     billing_request_id: &str,
@@ -692,12 +707,11 @@ pub async fn recover_unreleased_finalized(db: &mongodb::Database) -> AppResult<u
 
     let mut recovered = 0;
     for row in rows {
-        let Some(quantity) = row.quantity else {
+        if row.quantity.is_none() {
             continue;
-        };
-        let actual_credits =
-            actual_credits_for_row(db, &row, quantity, row.model.as_deref()).await?;
-        if apply_settlement_for_row(db, &row, actual_credits).await? {
+        }
+        // Recovery uses the same bounded settlement path as live settlement.
+        if claim_released_and_settle(db, &row).await? {
             recovered += 1;
         }
     }
