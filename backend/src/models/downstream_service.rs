@@ -528,6 +528,7 @@ mod tests {
                 supports_proxy_write: true,
                 ..Default::default()
             }),
+            billing: None,
             auth_notes: Some("Bearer token required".to_string()),
             known_limitations: None,
             required_permissions: Some(vec!["read:api".to_string()]),
