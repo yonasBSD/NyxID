@@ -4,9 +4,10 @@ use utoipa::ToSchema;
 
 pub const COLLECTION_NAME: &str = "service_pools";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PoolStrategy {
+    #[default]
     RoundRobin,
     Weighted,
 }
@@ -25,12 +26,6 @@ impl PoolStrategy {
             "weighted" => Some(Self::Weighted),
             _ => None,
         }
-    }
-}
-
-impl Default for PoolStrategy {
-    fn default() -> Self {
-        Self::RoundRobin
     }
 }
 

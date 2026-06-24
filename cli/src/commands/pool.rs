@@ -370,7 +370,7 @@ mod tests {
                 "name": "LLM Pool",
                 "description": "primary pool",
                 "strategy": "weighted",
-                "members": [{ "user_service_id": "svc-1" }],
+                "members": [{ "user_service_id": "llm-openai" }],
                 "org_id": ORG_UUID
             })))
             .respond_with(ResponseTemplate::new(201).set_body_json(pool_response()))
