@@ -254,14 +254,9 @@ async fn finalize_layer(
         return Ok(());
     };
 
-    // Settle the wallet atomically with the `released` transition: the wallet
-    // debit happens ONLY for the caller that wins the
-    // `released:false -> released:true` compare-and-set. A concurrent
-    // reconciler recovery sweep (whose selector is exactly
-    // `{status:finalized, released:false, wallet_id:{$ne:null}}`) or a settle
-    // replay finds `released:true`, claims nothing, and debits nothing — so the
-    // wallet is charged exactly once even when the sweep races this path or a
-    // crash lands between finalize and release (ChronoAIProject/NyxID#1023).
+    // Settlement owns the wallet debit and the `released` transition together.
+    // The bounded wallet lock covers the crash gap between those two writes, so
+    // recovery and live settlement share one idempotent path.
     reservation::claim_released_and_settle(db, &claimed).await?;
     Ok(())
 }
@@ -467,6 +462,105 @@ mod tests {
             second_reservation.is_none(),
             "pending_lago_debits must reduce availability before Lago sync"
         );
+    }
+
+    #[tokio::test]
+    async fn recovery_after_settle_debit_gap_does_not_debit_wallet_twice() {
+        let Some(db) = connect_test_database("billing_settle_recovery_overlap").await else {
+            return;
+        };
+        create_usage_transaction_index(&db).await;
+        insert_rate(&db, "platform_requests", 5).await;
+        let owner_id = "owner-wallet-recovery";
+        insert_wallet(&db, owner_id, 10, 0).await;
+
+        let ctx = platform_context("billing-wallet-recovery", owner_id);
+        let reservation = BillingReservation {
+            owner_id: owner_id.to_string(),
+            wallet_id: "wallet-owner-wallet-recovery".to_string(),
+            total_reserved_credits: 5,
+            layers: vec![crate::services::billing::reservation::LayerReservation {
+                layer: BillingLayer::Platform,
+                reserved_credits: 5,
+            }],
+        };
+        crate::services::billing::reservation::try_reserve_prepaid(&db, owner_id, 5)
+            .await
+            .expect("reserve")
+            .expect("reserved");
+
+        let metered = open(&db, &ctx, Some(&reservation)).await.expect("open");
+        mark_forwarded(&db, &metered).await.expect("mark forwarded");
+        settle(&db, &metered, PlatformUsage::single_request(1), None, None)
+            .await
+            .expect("settle");
+
+        let settled_row = db
+            .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+            .find_one(doc! { "billing_request_id": "billing-wallet-recovery" })
+            .await
+            .expect("find settled row")
+            .expect("row exists");
+        db.collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": &settled_row.id },
+                doc! {
+                    "$set": {
+                        "released": false,
+                        "updated_at": mongodb::bson::DateTime::from_chrono(Utc::now()),
+                    }
+                },
+            )
+            .await
+            .expect("simulate missing release marker after wallet debit");
+        db.collection::<mongodb::bson::Document>(crate::models::billing_wallet::COLLECTION_NAME)
+            .update_one(
+                doc! { "owner_id": owner_id },
+                doc! {
+                    "$set": {
+                        "active_settlement": {
+                            "row_id": &settled_row.id,
+                            "reserved_credits": 5_i64,
+                            "actual_credits": 5_i64,
+                            "applied": true,
+                            "updated_at": mongodb::bson::DateTime::from_chrono(Utc::now()),
+                        },
+                        "updated_at": mongodb::bson::DateTime::from_chrono(Utc::now()),
+                    }
+                },
+            )
+            .await
+            .expect("simulate applied bounded settlement lock");
+
+        let recovered = crate::services::billing::reservation::recover_unreleased_finalized(&db)
+            .await
+            .expect("recover unreleased");
+        assert_eq!(recovered, 1);
+
+        let wallet = db
+            .collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
+            .find_one(doc! { "owner_id": owner_id })
+            .await
+            .expect("find wallet")
+            .expect("wallet exists");
+        let wallet_doc = db
+            .collection::<mongodb::bson::Document>(crate::models::billing_wallet::COLLECTION_NAME)
+            .find_one(doc! { "owner_id": owner_id })
+            .await
+            .expect("find wallet document")
+            .expect("wallet document exists");
+        let row = db
+            .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+            .find_one(doc! { "billing_request_id": "billing-wallet-recovery" })
+            .await
+            .expect("find row")
+            .expect("row exists");
+
+        assert_eq!(wallet.reserved_credits, 0);
+        assert_eq!(wallet.pending_lago_debits, 5);
+        assert!(!wallet_doc.contains_key("active_settlement"));
+        assert!(!wallet_doc.contains_key("settled_usage_row_ids"));
+        assert!(row.released);
     }
 
     #[tokio::test]
