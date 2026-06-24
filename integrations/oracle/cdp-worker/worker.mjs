@@ -39,11 +39,21 @@ const TOKEN = (() => {
 })();
 const LABEL = process.env.NYXID_WORKER_LABEL || "tab_1";
 const CDP_URL = process.env.CHROME_CDP_URL || "http://localhost:9222";
-const SCRIPT_VERSION = "cdp-1.0";
+const SCRIPT_VERSION = "cdp-1.3-image";
 const POLL_MS = Number(process.env.NYXID_POLL_MS || 5000);
 const STABLE_INTERVAL_MS = 8000;
 const MAX_WAIT_MS = Number(process.env.NYXID_MAX_WAIT_MS || 2 * 60 * 60 * 1000); // 2h
+// Wedge guard: if ChatGPT has clearly stopped (not generating) yet produced
+// nothing extractable after this long, fail the task fast and free the slot
+// instead of spinning to MAX_WAIT_MS. Mirrors the userscript's
+// NO_OUTPUT_IDLE_TIMEOUT (420s).
+const NO_OUTPUT_IDLE_MS = Number(process.env.NYXID_NO_OUTPUT_IDLE_MS || 7 * 60 * 1000);
 const HEARTBEAT_MS = 60000;
+// Result-image caps (the server re-validates and caps lower-or-equal). Kept
+// below the 16 MiB worker body cap once base64-inflated (~33%).
+const MAX_IMAGES = Number(process.env.NYXID_MAX_IMAGES || 4);
+const MAX_IMAGE_BYTES = Number(process.env.NYXID_MAX_IMAGE_BYTES || 6 * 1024 * 1024);
+const MAX_IMAGES_TOTAL_BYTES = Number(process.env.NYXID_MAX_IMAGES_TOTAL_BYTES || 9 * 1024 * 1024);
 
 if (!BASE_URL || !TOKEN) {
   console.error(
@@ -250,6 +260,54 @@ window.__nyx = (function () {
     return cleanText(extractTextWithMath(els[els.length - 1]));
   }
 
+  // Image URLs in the LATEST assistant turn (generated images). An image-gen
+  // turn renders its <img> inside a conversation-turn that does NOT carry
+  // data-message-author-role="assistant" (verified against the live DOM), so
+  // scope to the last conversation-turn — skipping it if it's the user's —
+  // and fall back to the last assistant message otherwise. Content images are
+  // matched by ChatGPT's file/CDN src patterns or a "Generated image" alt;
+  // small sprites/avatars are dropped. Dedupes the thumbnail/full/zoom copies
+  // that share one src.
+  function extractImages() {
+    const main = document.querySelector("main");
+    if (!main) return [];
+    let scope = null;
+    const turns = main.querySelectorAll('[data-testid^="conversation-turn"]');
+    if (turns.length) {
+      scope = turns[turns.length - 1];
+      if (scope.querySelector("[data-message-author-role='user']")) return [];
+    } else {
+      const els = main.querySelectorAll("[data-message-author-role='assistant']");
+      if (!els.length) return [];
+      scope = els[els.length - 1];
+    }
+    const out = [];
+    const seen = new Set();
+    for (const img of Array.from(scope.querySelectorAll("img"))) {
+      const src = img.currentSrc || img.src || "";
+      if (!src || !/^(https?:|blob:)/.test(src)) continue;
+      // SSRF guard: the assistant turn is untrusted output, so only ever fetch
+      // ChatGPT's own content hosts — never a model-emitted <img src> pointing
+      // at an arbitrary/internal URL. Same allowlist downloadImages fetches.
+      const looksContent =
+        /oaiusercontent|backend-api|blob:/.test(src) ||
+        /^generated image/i.test(img.alt || "");
+      if (!looksContent) continue;
+      const w = img.naturalWidth || img.width || 0;
+      const h = img.naturalHeight || img.height || 0;
+      if (w && h && (w < 64 || h < 64)) continue;
+      // Dedupe by file id when present, so one generated image rendered at
+      // multiple resolutions (thumbnail/full/zoom) under different URLs
+      // collapses to a single entry; fall back to the exact src.
+      const idMatch = src.match(/file[-_][A-Za-z0-9]+/);
+      const key = idMatch ? idMatch[0] : src;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(src);
+    }
+    return out;
+  }
+
   // Full conversation: every user/assistant turn in order.
   function extractTranscript() {
     const main = document.querySelector("main") || document.body;
@@ -283,7 +341,7 @@ window.__nyx = (function () {
     return { rendered: nodes.length, turns };
   }
 
-  return { isStillGenerating, assistantCount, extractResponse, extractTranscript, extractTranscriptKeys, scrollContainer, extractTextWithMath, cleanText };
+  return { isStillGenerating, assistantCount, extractResponse, extractImages, extractTranscript, extractTranscriptKeys, scrollContainer, extractTextWithMath, cleanText };
 })();
 `;
 
@@ -498,6 +556,48 @@ async function selectModel(page, modelLabel) {
   }
 }
 
+async function uploadPdf(page, task_id, task) {
+  if (!task.pdf_base64) return false;
+  const buffer = Buffer.from(task.pdf_base64, "base64");
+  const name = task.pdf_name || "attachment.pdf";
+  log(`uploading PDF ${name} (${(buffer.length / 1024).toFixed(0)} KB)`);
+  let fileInput = page.locator("input[type='file']").first();
+  if ((await fileInput.count()) === 0) {
+    const attach = page.locator("button[aria-label='Attach files'], button[aria-label='Upload file'], button[data-testid='composer-attach-button'], button[aria-haspopup='menu']").first();
+    if (await attach.count()) { await attach.click().catch(() => {}); await sleep(800); }
+    fileInput = page.locator("input[type='file']").first();
+  }
+  try {
+    await fileInput.setInputFiles({ name, mimeType: "application/pdf", buffer }, { timeout: 30000 });
+  } catch (e) { log(`PDF setInputFiles failed: ${e.message}`); return false; }
+  const start = Date.now();
+  let lastHeartbeat = start;
+  while (Date.now() - start < 120000) {
+    await sleep(1500);
+    // Keep the task lease warm + honor a server-side cancel during a long upload
+    // (matches the heartbeat discipline in waitForResponse).
+    if (Date.now() - lastHeartbeat >= HEARTBEAT_MS) {
+      lastHeartbeat = Date.now();
+      if (await ack(task_id, "uploading_pdf")) throw new Error("cancelled by server");
+    }
+    // Primary signal: the filename rendered in the composer attachment chip
+    // (verified against the live ChatGPT DOM). The data-testid*='file' / class
+    // fallbacks cover future DOM tweaks.
+    const { attached, uploading } = await page.evaluate((fname) => {
+      const txt = document.body.innerText || "";
+      return {
+        attached: txt.includes(fname)
+          || !!document.querySelector("[data-testid*='file'],[class*='file-chip'],[class*='attachment']")
+          || !!document.querySelector("img[alt*='pdf' i]"),
+        uploading: !!document.querySelector("[role='progressbar'],[class*='uploading']"),
+      };
+    }, name);
+    if (attached && !uploading) { log(`PDF attached (${Math.round((Date.now()-start)/1000)}s)`); return true; }
+  }
+  log("PDF upload wait timed out — sending anyway");
+  return false;
+}
+
 async function handlePrompt(page, task) {
   const { task_id } = task;
   log(`prompt task ${task_id} (followup=${!!task.is_followup})`);
@@ -538,6 +638,13 @@ async function handlePrompt(page, task) {
   await input.click();
   await input.fill(task.prompt);
   await sleep(300);
+  // Only attach a PDF on the FIRST turn of a conversation — never re-upload it
+  // into an existing chat if the server ever resends pdf_base64 on a follow-up
+  // (mirrors the userscript's `!is_followup && pdf_base64` guard).
+  if (!task.is_followup && task.pdf_base64) {
+    await ack(task_id, "uploading_pdf");
+    await uploadPdf(page, task_id, task);
+  }
 
   const beforeCount = await page.evaluate(() => window.__nyx.assistantCount());
   const sendBtn = page
@@ -546,15 +653,18 @@ async function handlePrompt(page, task) {
   await sendBtn.click({ timeout: 30000 });
   await ack(task_id, "sent");
 
-  const response = await waitForResponse(page, task_id, beforeCount);
+  const { text, images } = await waitForResponse(page, task_id, beforeCount);
   const chatgpt_url = page.url();
-  if (!response || !response.trim()) {
+  const downloaded = await downloadImages(page, images);
+  // Image-only turns settle with empty text but a non-empty image list — still
+  // a success. Only an empty text AND no images is an extraction failure.
+  if ((!text || !text.trim()) && downloaded.length === 0) {
     await apiPost("/result", { task_id, worker: LABEL, response: "ERROR: empty extraction", chatgpt_url, model: task.model });
     log(`prompt ${task_id} → empty`);
     return;
   }
-  const res = await apiPost("/result", { task_id, worker: LABEL, response, chatgpt_url, model: task.model });
-  log(`prompt ${task_id} → ${res.status} (${response.length} chars)`);
+  const res = await apiPost("/result", { task_id, worker: LABEL, response: text || "", images: downloaded, chatgpt_url, model: task.model });
+  log(`prompt ${task_id} → ${res.status} (${(text || "").length} chars, ${downloaded.length} image(s))`);
 }
 
 function convId(url) {
@@ -562,6 +672,10 @@ function convId(url) {
   return m ? m[1] : null;
 }
 
+// Returns { text, images } where images is an array of on-page src strings
+// for the latest assistant turn. An image-generation turn settles with empty
+// text but a non-empty images list; the stability key spans both so the turn
+// terminates once text AND image srcs stop changing.
 async function waitForResponse(page, task_id, beforeCount) {
   const start = Date.now();
   let lastHeartbeat = start;
@@ -574,34 +688,116 @@ async function waitForResponse(page, task_id, beforeCount) {
       const cancelled = await ack(task_id, "waiting_response");
       if (cancelled) throw new Error("cancelled by server");
     }
-    const [generating, count, text] = await page.evaluate(() => [
+    const [generating, count, text, images] = await page.evaluate(() => [
       window.__nyx.isStillGenerating(),
       window.__nyx.assistantCount(),
       window.__nyx.extractResponse(),
+      window.__nyx.extractImages(),
     ]);
-    if (count <= beforeCount) continue; // answer not yet appended
+    const hasText = !!(text && text.length > 0);
+    const hasImages = Array.isArray(images) && images.length > 0;
+    // A text answer bumps the assistant-role count; an image-generation turn
+    // does NOT (its <img> lives in a conversation-turn with no assistant role),
+    // so images carry that case through. Until text or an image appears there's
+    // no new answer yet — wedge guard bails fast if ChatGPT has clearly stopped.
+    if (count <= beforeCount && !hasImages) {
+      if (!generating && Date.now() - start >= NO_OUTPUT_IDLE_MS) {
+        throw new Error("no assistant output (idle timeout)");
+      }
+      continue;
+    }
     if (generating) {
       stable = 0;
       continue;
     }
-    const key = (text || "").slice(0, 200) + "|" + (text || "").length;
-    if (key === lastKey && text && text.length > 0) {
+    if (!hasText && !hasImages) {
+      // New turn settled but produced nothing extractable (e.g. an unrenderable
+      // tool turn). Don't wedge — fail fast once the idle window elapses.
+      if (Date.now() - start >= NO_OUTPUT_IDLE_MS) {
+        throw new Error("assistant turn produced no extractable content (idle timeout)");
+      }
+      stable = 0;
+      continue;
+    }
+    const key =
+      (text || "").slice(0, 200) + "|" + (text || "").length + "|" + (images || []).join(",");
+    if (key === lastKey) {
       stable += 1;
-      if (stable >= 2) return text;
+      if (stable >= 2) return { text: text || "", images: images || [] };
     } else {
       stable = 0;
       lastKey = key;
     }
   }
-  // Timed out. Only return text if a NEW assistant message actually appeared
-  // since we sent the prompt; otherwise the latest message is stale (a
-  // previous turn), so return "" and let the server mark the task failed
-  // instead of handing back the wrong answer.
-  const [count, text] = await page.evaluate(() => [
+  // Timed out. Only return content if a NEW assistant turn actually appeared
+  // since we sent the prompt; otherwise the latest message is stale (a previous
+  // turn), so return empty and let the server mark the task failed instead of
+  // handing back the wrong answer.
+  const [count, text, images] = await page.evaluate(() => [
     window.__nyx.assistantCount(),
     window.__nyx.extractResponse(),
+    window.__nyx.extractImages(),
   ]);
-  return count > beforeCount ? text : "";
+  return count > beforeCount
+    ? { text: text || "", images: images || [] }
+    : { text: "", images: [] };
+}
+
+// Download the latest turn's images through the browser's authenticated
+// context — page.request.get carries the session cookies and isn't subject to
+// the same-origin policy, so it can read cross-origin oaiusercontent bytes a
+// page fetch() would get only as an opaque (unreadable) response. blob: URLs
+// resolve only inside the page, so those are fetched there. Returns the
+// worker-API image array; caps mirror the server (which re-validates).
+async function downloadImages(page, srcs) {
+  const out = [];
+  let total = 0;
+  for (const src of (srcs || []).slice(0, MAX_IMAGES)) {
+    // Trust boundary (SSRF): this is where the privileged, cookie-bearing fetch
+    // happens, so enforce the content-host allowlist HERE — independent of
+    // extractImages' heuristics (its alt-based match is model-controlled and
+    // could otherwise smuggle an internal URL through). blob: is page-local.
+    if (!src.startsWith("blob:") && !/oaiusercontent|backend-api/.test(src)) continue;
+    try {
+      let buffer, mime;
+      if (src.startsWith("blob:")) {
+        const data = await page.evaluate(async (u) => {
+          const r = await fetch(u);
+          const b = await r.blob();
+          const buf = new Uint8Array(await b.arrayBuffer());
+          let bin = "";
+          for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
+          return { b64: btoa(bin), mime: b.type || "image/png" };
+        }, src);
+        buffer = Buffer.from(data.b64, "base64");
+        mime = data.mime;
+      } else {
+        const resp = await page.request.get(src, { timeout: 30000 });
+        if (!resp.ok()) {
+          log(`image fetch ${resp.status()} for ${src.slice(0, 80)}`);
+          continue;
+        }
+        buffer = await resp.body();
+        mime = (resp.headers()["content-type"] || "image/png").split(";")[0].trim();
+      }
+      if (!buffer || !buffer.length) continue;
+      if (buffer.length > MAX_IMAGE_BYTES) {
+        log(`image too large (${buffer.length}B), skipping`);
+        continue;
+      }
+      if (total + buffer.length > MAX_IMAGES_TOTAL_BYTES) {
+        log("image total cap reached, skipping remaining");
+        break;
+      }
+      total += buffer.length;
+      if (!/^image\//.test(mime)) mime = "image/png";
+      const ext = (mime.split("/")[1] || "png").replace(/[^a-z0-9]/gi, "") || "png";
+      out.push({ mime, name: `image_${out.length + 1}.${ext}`, data_base64: buffer.toString("base64") });
+    } catch (e) {
+      log(`image download failed: ${e.message}`);
+    }
+  }
+  return out;
 }
 
 // ── Scrape flow (attach existing conversation) ───────────────────────────

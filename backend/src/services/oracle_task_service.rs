@@ -23,7 +23,9 @@ use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
 use crate::errors::{AppError, AppResult};
 use crate::models::oracle_pool::OraclePool;
 use crate::models::oracle_session::{COLLECTION_NAME as ORACLE_SESSIONS, OracleSession};
-use crate::models::oracle_task::{COLLECTION_NAME as ORACLE_TASKS, OracleTask, OracleTaskStatus};
+use crate::models::oracle_task::{
+    COLLECTION_NAME as ORACLE_TASKS, OracleImage, OracleTask, OracleTaskStatus,
+};
 use crate::models::oracle_worker::{
     COLLECTION_NAME as ORACLE_WORKERS, OracleWorker, worker_doc_id,
 };
@@ -32,6 +34,14 @@ use crate::services::oracle_pool_service;
 pub const MAX_PROMPT_CHARS: usize = 512_000;
 pub const MAX_PDF_BASE64_BYTES: usize = 12_000_000;
 pub const MAX_RESPONSE_CHARS: usize = 2_000_000;
+/// Result-image caps (server-authoritative; the worker self-caps lower).
+/// Decoded-byte totals are kept comfortably below the 16 MiB worker body
+/// cap (base64 inflates ~33%) and the 16 MB MongoDB document ceiling.
+pub const MAX_RESULT_IMAGES: usize = 8;
+pub const MAX_RESULT_IMAGE_BYTES: usize = 8_000_000;
+pub const MAX_RESULT_IMAGES_TOTAL_BYTES: usize = 10_000_000;
+const MAX_IMAGE_MIME_LEN: usize = 128;
+const MAX_IMAGE_NAME_LEN: usize = 256;
 const MAX_TAG_LEN: usize = 128;
 const MAX_MODEL_LABEL_LEN: usize = 128;
 const MAX_CLIENT_REF_LEN: usize = 128;
@@ -264,6 +274,7 @@ pub async fn submit_task(
         lease_expires_at: None,
         response: None,
         response_chars: None,
+        images: None,
         chatgpt_url: None,
         failure_reason: None,
         worker_script_version: None,
@@ -516,6 +527,7 @@ pub async fn extract_url(
         lease_expires_at: None,
         response: None,
         response_chars: None,
+        images: None,
         chatgpt_url: None,
         failure_reason: None,
         worker_script_version: None,
@@ -593,6 +605,7 @@ pub async fn attach_conversation(
         lease_expires_at: None,
         response: None,
         response_chars: None,
+        images: None,
         chatgpt_url: Some(chatgpt_url.to_string()),
         failure_reason: None,
         worker_script_version: None,
@@ -1077,8 +1090,56 @@ pub enum ResultOutcome {
     Ignored,
 }
 
-/// Store a worker's result. Empty or `ERROR:`-prefixed responses mark the
-/// task `failed` (extraction failure), mirroring the local oracle servers.
+/// Worker-reported image payload (base64 over the wire), validated and decoded
+/// to bytes before storage. The handler maps its request DTO to this type.
+pub struct ResultImage {
+    pub mime: String,
+    pub data_base64: String,
+    pub name: Option<String>,
+}
+
+/// Validate + decode worker images: drop non-`image/*` and undecodable entries,
+/// enforce the count cap and the per-image / aggregate decoded-byte caps.
+/// Best-effort — one malformed image is skipped, never fatal, so a bad entry
+/// can't fail an otherwise-good turn.
+fn decode_result_images(images: Vec<ResultImage>) -> Vec<OracleImage> {
+    use base64::Engine;
+    let mut out: Vec<OracleImage> = Vec::new();
+    let mut total = 0usize;
+    for img in images.into_iter().take(MAX_RESULT_IMAGES) {
+        let mime = img.mime.trim();
+        if !mime.starts_with("image/") || mime.len() > MAX_IMAGE_MIME_LEN {
+            continue;
+        }
+        let Ok(bytes) =
+            base64::engine::general_purpose::STANDARD.decode(img.data_base64.as_bytes())
+        else {
+            continue;
+        };
+        if bytes.is_empty() || bytes.len() > MAX_RESULT_IMAGE_BYTES {
+            continue;
+        }
+        if total + bytes.len() > MAX_RESULT_IMAGES_TOTAL_BYTES {
+            break;
+        }
+        total += bytes.len();
+        let name = img
+            .name
+            .map(|n| truncate_chars(&n, MAX_IMAGE_NAME_LEN))
+            .filter(|n| !n.is_empty());
+        out.push(OracleImage {
+            mime: mime.to_string(),
+            data: bytes,
+            name,
+        });
+    }
+    out
+}
+
+/// Store a worker's result. Empty/`ERROR:`-prefixed responses mark the task
+/// `failed` (extraction failure), mirroring the local oracle servers — but an
+/// image-generation turn legitimately has empty text, so a result carrying at
+/// least one valid image is treated as a success.
 #[allow(clippy::too_many_arguments)]
 pub async fn worker_submit_result(
     db: &mongodb::Database,
@@ -1086,6 +1147,7 @@ pub async fn worker_submit_result(
     worker_label: &str,
     task_id: &str,
     response: &str,
+    images: Vec<ResultImage>,
     chatgpt_url: Option<&str>,
     model: Option<&str>,
     script_version: Option<&str>,
@@ -1094,7 +1156,10 @@ pub async fn worker_submit_result(
     validate_worker_label(worker_label)?;
     let now = Utc::now();
     let trimmed = response.trim();
-    let is_failure = trimmed.is_empty() || trimmed.starts_with("ERROR:");
+    let stored_images = decode_result_images(images);
+    let has_images = !stored_images.is_empty();
+    // An image-only turn has empty text but is NOT a failure.
+    let is_failure = (trimmed.is_empty() && !has_images) || trimmed.starts_with("ERROR:");
     let stored_response = truncate_chars(response, MAX_RESPONSE_CHARS);
     let response_chars = stored_response.chars().count() as u64;
 
@@ -1106,6 +1171,26 @@ pub async fn worker_submit_result(
         "expires_at": bson::DateTime::from_chrono(terminal_expiry(retention_days)),
         "updated_at": bson::DateTime::from_chrono(now),
     };
+    if has_images {
+        // Store bytes as BSON Binary (compact) — keeps the doc under 16 MB.
+        let arr: Vec<bson::Bson> = stored_images
+            .iter()
+            .map(|im| {
+                let mut d = doc! {
+                    "mime": &im.mime,
+                    "data": bson::Binary {
+                        subtype: bson::spec::BinarySubtype::Generic,
+                        bytes: im.data.clone(),
+                    },
+                };
+                if let Some(n) = &im.name {
+                    d.insert("name", n);
+                }
+                bson::Bson::Document(d)
+            })
+            .collect();
+        set.insert("images", arr);
+    }
     if is_failure {
         set.insert(
             "failure_reason",
@@ -1317,6 +1402,7 @@ pub async fn worker_submit_transcript(
                 lease_expires_at: None,
                 response: Some(assistant_text),
                 response_chars: Some(response_chars),
+                images: None,
                 chatgpt_url: chatgpt_url
                     .filter(|u| !u.is_empty())
                     .map(|u| truncate_chars(u, MAX_URL_LEN))
@@ -1578,6 +1664,68 @@ mod tests {
     }
 
     #[test]
+    fn decode_result_images_validates_mime_caps_and_base64() {
+        use base64::Engine;
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+
+        // Valid image: kept, name truncated/echoed.
+        // Non-image mime: dropped. Bad base64: dropped.
+        // Over per-image cap: dropped.
+        let imgs = vec![
+            ResultImage {
+                mime: "image/png".to_string(),
+                data_base64: b64(b"\x89PNGabc"),
+                name: Some("apple.png".to_string()),
+            },
+            ResultImage {
+                mime: "application/pdf".to_string(),
+                data_base64: b64(b"%PDF-1.7"),
+                name: None,
+            },
+            ResultImage {
+                mime: "image/jpeg".to_string(),
+                data_base64: "not%%%base64".to_string(),
+                name: None,
+            },
+            ResultImage {
+                mime: "image/png".to_string(),
+                data_base64: b64(&vec![0u8; MAX_RESULT_IMAGE_BYTES + 1]),
+                name: None,
+            },
+        ];
+        let out = decode_result_images(imgs);
+        assert_eq!(out.len(), 1, "only the one valid image survives");
+        assert_eq!(out[0].mime, "image/png");
+        assert_eq!(out[0].data, b"\x89PNGabc");
+        assert_eq!(out[0].name.as_deref(), Some("apple.png"));
+    }
+
+    #[test]
+    fn decode_result_images_enforces_count_and_total_caps() {
+        use base64::Engine;
+        // Count cap: more than MAX_RESULT_IMAGES tiny images → truncated.
+        let many: Vec<ResultImage> = (0..(MAX_RESULT_IMAGES + 5))
+            .map(|_| ResultImage {
+                mime: "image/png".to_string(),
+                data_base64: base64::engine::general_purpose::STANDARD.encode(b"x"),
+                name: None,
+            })
+            .collect();
+        assert_eq!(decode_result_images(many).len(), MAX_RESULT_IMAGES);
+
+        // Total-bytes cap: two ~6MB images, total cap 10MB → second dropped.
+        let half = MAX_RESULT_IMAGES_TOTAL_BYTES / 2 + 1_000_000;
+        let big: Vec<ResultImage> = (0..2)
+            .map(|_| ResultImage {
+                mime: "image/png".to_string(),
+                data_base64: base64::engine::general_purpose::STANDARD.encode(vec![1u8; half]),
+                name: None,
+            })
+            .collect();
+        assert_eq!(decode_result_images(big).len(), 1);
+    }
+
+    #[test]
     fn worker_label_validation() {
         assert!(validate_worker_label("tab_1").is_ok());
         assert!(validate_worker_label("bedc-2").is_ok());
@@ -1704,6 +1852,7 @@ mod tests {
             "tab_1",
             &first.task.id,
             "The answer is 42.",
+            vec![],
             Some("https://chatgpt.com/c/abc"),
             Some("chatgpt-5.5-pro"),
             Some("v1"),
@@ -1726,6 +1875,7 @@ mod tests {
             "tab_2",
             &second.task.id,
             "ERROR: Response too short or empty",
+            vec![],
             None,
             None,
             None,
@@ -1747,6 +1897,7 @@ mod tests {
             "tab_1",
             &first.task.id,
             "stale",
+            vec![],
             None,
             None,
             None,
@@ -1872,6 +2023,7 @@ mod tests {
             "tab_1",
             &old.task.id,
             "from dead tab",
+            vec![],
             None,
             None,
             None,
@@ -1939,6 +2091,7 @@ mod tests {
             "tab_1",
             &t1.task.id,
             "turn one answer",
+            vec![],
             Some("https://chatgpt.com/c/xyz"),
             None,
             None,
@@ -2039,6 +2192,7 @@ mod tests {
             "tab_1",
             &t1.task.id,
             "turn one answer",
+            vec![],
             Some("https://chatgpt.com/c/xyz"),
             None,
             None,
@@ -2131,6 +2285,7 @@ mod tests {
             "tab_1",
             &t1.task.id,
             "turn one answer",
+            vec![],
             Some("https://chatgpt.com/c/xyz"),
             None,
             None,
@@ -2221,6 +2376,7 @@ mod tests {
             "tab_1",
             &t1.task.id,
             "ERROR: extraction failed",
+            vec![],
             Some("https://chatgpt.com/c/xyz"),
             None,
             None,
