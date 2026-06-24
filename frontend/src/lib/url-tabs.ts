@@ -34,7 +34,7 @@ export const ORG_DETAIL_TABS = [
 export type OrgDetailTab = (typeof ORG_DETAIL_TABS)[number];
 export const ORG_DETAIL_TAB_DEFAULT: OrgDetailTab = "members";
 
-export const KEYS_TABS = ["services", "nyxid"] as const;
+export const KEYS_TABS = ["services", "pools", "nyxid"] as const;
 export type KeysTab = (typeof KEYS_TABS)[number];
 export const KEYS_TAB_DEFAULT: KeysTab = "services";
 
