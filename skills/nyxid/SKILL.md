@@ -119,6 +119,7 @@ Load the matching `references/<file>.md` when the user asks for one of these top
 |---|---|
 | "list my services", "what's connected", "discover services", "add a service", "connect OpenAI / GitHub / Lark / etc.", "OAuth scopes", browser-wizard / pairing-code questions, "where do I get the API key" | `references/services.md` |
 | "call the API", "proxy request", "send a message via Telegram/Discord/Slack" (single call), curl examples, raw HTTP integration, WebSocket auth-frame injection, Home Assistant connection | `references/proxy.md` |
+| "service pool", "pool slug", "load balance services", "several identical backends", "proxy to a pool" | `references/service-pools.md` |
 | "list / rename / delete a service", attaching an OpenAPI spec to a custom endpoint, default headers, "create / rotate / delete an API key", agent key bindings, callback URLs, scope/rate-limit edits | `references/managing.md` |
 | Anything mentioning "org", "organization", "shared credentials", "family / company key", invites, role scopes, primary-org tiebreaker, org-level approval policies, `--via-service`, CLI profiles | `references/organizations.md` |
 | "set up a node", "credentials on my own machine", org-owned/shared nodes, node daemon (install/start/stop/logs), node credentials add/setup/list, remote credential injection / `node-credential inject` / "push a secret to a node from my laptop or browser without SSH" / fingerprint verification / browser accept page, SSH node-key credentials, SSH exec / terminal / cert-issue, SSH ProxyCommand | `references/nodes.md` |
@@ -142,6 +143,18 @@ Prefer the canonical reference over guessing. If a topic spans two files (e.g. "
 - If multiple AI agents share a machine, each should have its own `NYXID_ACCESS_TOKEN`. Never share a single API key across multiple agents -- it defeats audit isolation and makes revocation impossible without disrupting all agents.
 - Your User-Agent header is forwarded to downstream services by default (passthrough). Some downstreams block SDK-specific User-Agent strings -- see the 403 troubleshooting note in `references/admin.md`.
 - If a downstream requires a static header on every call (scope hint, API version, routing key), configure it once as a service default via `nyxid service update ... --default-header 'name=value'` rather than sending it from every caller.
+
+## Service pools
+
+A service pool is a stable slug that resolves proxy traffic to one of several interchangeable configured services. Use a pool when the user has multiple equivalent backends for capacity or redundancy and callers should target one logical service name instead of choosing a member directly.
+
+Proxy to a pool by its slug exactly like a normal service slug:
+
+```bash
+nyxid proxy request <pool_slug> /v1/path -m POST -d '<body>'
+```
+
+Raw HTTP clients use the same slug route: `/api/v1/proxy/s/{pool_slug}/{path}`. For the shipped proxy behavior and current documentation bounds, load `references/service-pools.md`.
 
 ## External Endpoints
 
