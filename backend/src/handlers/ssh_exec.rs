@@ -9,6 +9,10 @@ use utoipa::ToSchema;
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::ssh_auth_mode::SshAuthMode;
+use crate::models::{
+    service_billing::{BillingMetric, PlatformUsage},
+    usage_meter::CredentialClass,
+};
 use crate::mw::auth::AuthUser;
 use crate::services::{
     audit_service, node_metrics_service, node_routing_service, node_service, operation_descriptor,
@@ -107,12 +111,16 @@ pub async fn ssh_exec(
     let ssh_svc = ssh_service::get_ssh_service(&state.db, &service_id).await?;
     // Resolve the catalog slug for telemetry -- best-effort so exec
     // never fails on a telemetry-only DB read.
-    let service_slug = fetch_service(&state, &service_id)
-        .await
-        .ok()
-        .map(|s| s.slug)
+    let service_row = fetch_service(&state, &service_id).await.ok();
+    let service_slug = service_row
+        .as_ref()
+        .map(|s| s.slug.clone())
         .unwrap_or_else(|| service_id.clone());
     let user_id = auth_user.user_id.to_string();
+    let service_owner_id = service_row
+        .as_ref()
+        .map(|s| s.created_by.clone())
+        .unwrap_or_else(|| user_id.clone());
     let auth_context =
         ssh_service::resolve_ssh_auth_context(&state.db, &user_id, &service_id, &service_slug)
             .await?;
@@ -181,6 +189,33 @@ pub async fn ssh_exec(
                 .to_string(),
         )
     })?;
+    let billing_owner = state
+        .billing
+        .owner_resolver()
+        .resolve(&user_id, Some(&service_owner_id))
+        .await?;
+    let node_intent = if node_route.fallback_node_ids.is_empty() {
+        crate::services::billing::NodeIntent::Node
+    } else {
+        crate::services::billing::NodeIntent::NodeWithFallback
+    };
+    let billing_ctx = crate::services::billing::BillingRouteContext::new(
+        uuid::Uuid::new_v4().to_string(),
+        billing_owner.owner_id,
+        user_id.clone(),
+        auth_user.api_key_id.clone(),
+        None,
+        Some(service_id.clone()),
+        Some(service_slug.clone()),
+        node_intent,
+        "ssh".to_string(),
+        CredentialClass::NodeManaged,
+        BillingMetric::Bytes,
+        None,
+        state.billing.billing_enabled(),
+    );
+    let metered = state.billing.open(&billing_ctx).await?;
+    let request_len = command.len() as i64;
 
     // -- Generate ephemeral SSH credentials for cert mode only (key + cert as strings, no files) --
     let ephemeral = if auth_context.mode == SshAuthMode::Cert {
@@ -232,6 +267,7 @@ pub async fn ssh_exec(
             None
         };
 
+        state.billing.mark_forwarded(&metered).await?;
         let exec_result = match auth_context.mode {
             SshAuthMode::Cert => {
                 let ephemeral = ephemeral.as_ref().ok_or_else(|| {
@@ -279,6 +315,17 @@ pub async fn ssh_exec(
 
         match exec_result {
             Ok(result) => {
+                state
+                    .billing
+                    .settle(
+                        &metered,
+                        PlatformUsage::single_request(
+                            request_len + result.stdout.len() as i64 + result.stderr.len() as i64,
+                        ),
+                        None,
+                        None,
+                    )
+                    .await?;
                 if auth_context.mode == SshAuthMode::NodeKey {
                     record_node_ssh_metric_success(
                         state.db.clone(),

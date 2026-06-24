@@ -369,6 +369,24 @@ pub enum AppError {
 
     #[error("Service pool has no viable member: {0}")]
     ServicePoolNoViableMember(String),
+
+    #[error("Insufficient billing credits")]
+    InsufficientCredits,
+
+    #[error("Billing is not configured: {0}")]
+    BillingNotConfigured(String),
+
+    #[error("Billing provider unavailable: {0}")]
+    BillingProviderUnavailable(String),
+
+    #[error("Plan entitlement required: {0}")]
+    PlanEntitlementRequired(String),
+
+    #[error("Billing is incompatible with anonymous endpoints: {0}")]
+    AnonymousIncompatibleBilling(String),
+
+    #[error("Billing wallet suspended")]
+    WalletSuspended,
 }
 
 impl AppError {
@@ -481,6 +499,12 @@ impl AppError {
             Self::ServicePoolSlugTaken(_) => StatusCode::CONFLICT,
             Self::ServicePoolMemberInvalid(_) => StatusCode::BAD_REQUEST,
             Self::ServicePoolNoViableMember(_) => StatusCode::BAD_GATEWAY,
+            Self::InsufficientCredits
+            | Self::BillingNotConfigured(_)
+            | Self::BillingProviderUnavailable(_)
+            | Self::PlanEntitlementRequired(_)
+            | Self::WalletSuspended => StatusCode::PAYMENT_REQUIRED,
+            Self::AnonymousIncompatibleBilling(_) => StatusCode::BAD_REQUEST,
             Self::Internal(_) | Self::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -597,10 +621,16 @@ impl AppError {
             Self::OracleSessionClosed(_) => 11008,
             Self::OraclePayloadTooLarge(_) => 11009,
             Self::OracleExtractDisabled(_) => 11010,
-            Self::ServicePoolNotFound(_) => 11300,
-            Self::ServicePoolSlugTaken(_) => 11301,
-            Self::ServicePoolMemberInvalid(_) => 11302,
-            Self::ServicePoolNoViableMember(_) => 11303,
+            Self::ServicePoolNotFound(_) => 11400,
+            Self::ServicePoolSlugTaken(_) => 11401,
+            Self::ServicePoolMemberInvalid(_) => 11402,
+            Self::ServicePoolNoViableMember(_) => 11403,
+            Self::InsufficientCredits => 11300,
+            Self::BillingNotConfigured(_) => 11301,
+            Self::BillingProviderUnavailable(_) => 11302,
+            Self::PlanEntitlementRequired(_) => 11303,
+            Self::AnonymousIncompatibleBilling(_) => 11304,
+            Self::WalletSuspended => 11307,
         }
     }
 
@@ -753,6 +783,12 @@ impl AppError {
             Self::ServicePoolSlugTaken(_) => "service_pool_slug_taken",
             Self::ServicePoolMemberInvalid(_) => "service_pool_member_invalid",
             Self::ServicePoolNoViableMember(_) => "service_pool_no_viable_member",
+            Self::InsufficientCredits => "insufficient_credits",
+            Self::BillingNotConfigured(_) => "billing_not_configured",
+            Self::BillingProviderUnavailable(_) => "billing_provider_unavailable",
+            Self::PlanEntitlementRequired(_) => "plan_entitlement_required",
+            Self::AnonymousIncompatibleBilling(_) => "anonymous_incompatible_billing",
+            Self::WalletSuspended => "wallet_suspended",
         }
     }
 }

@@ -282,6 +282,22 @@ pub struct AppConfig {
     /// `CLOUD_RESPONSE_CACHE_MAX_ENTRIES`.
     pub cloud_response_cache_max_entries: usize,
 
+    // Billing P1 meter / later Lago configuration
+    /// Master billing switch. P1 uses this only as passive configuration;
+    /// later phases wire the charging gate behind it.
+    pub billing_enabled: bool,
+    /// Lago API URL for later phases. Empty means no Lago sink configured.
+    pub lago_api_url: Option<String>,
+    /// Lago API key for later phases. Redacted from Debug.
+    pub lago_api_key: Option<String>,
+    /// Lago webhook secret for later phases. Redacted from Debug.
+    pub lago_webhook_secret: Option<String>,
+    pub billing_reconcile_interval_secs: u64,
+    pub billing_rate_cache_ttl_secs: u64,
+    pub billing_reservation_abandon_secs: u64,
+    pub billing_default_overdraft_cap_credits: i64,
+    pub billing_fail_closed: bool,
+
     // Registration gate
     /// When `true` (default), new-user registration requires a valid invite
     /// code and first-time social sign-ups are rejected. Set
@@ -522,6 +538,41 @@ impl std::fmt::Debug for AppConfig {
                 "oracle_task_retention_days",
                 &self.oracle_task_retention_days,
             )
+            .field("billing_enabled", &self.billing_enabled)
+            .field("lago_api_url", &self.lago_api_url)
+            .field(
+                "lago_api_key",
+                if self.lago_api_key.is_some() {
+                    &"Some([REDACTED])"
+                } else {
+                    &"None"
+                },
+            )
+            .field(
+                "lago_webhook_secret",
+                if self.lago_webhook_secret.is_some() {
+                    &"Some([REDACTED])"
+                } else {
+                    &"None"
+                },
+            )
+            .field(
+                "billing_reconcile_interval_secs",
+                &self.billing_reconcile_interval_secs,
+            )
+            .field(
+                "billing_rate_cache_ttl_secs",
+                &self.billing_rate_cache_ttl_secs,
+            )
+            .field(
+                "billing_reservation_abandon_secs",
+                &self.billing_reservation_abandon_secs,
+            )
+            .field(
+                "billing_default_overdraft_cap_credits",
+                &self.billing_default_overdraft_cap_credits,
+            )
+            .field("billing_fail_closed", &self.billing_fail_closed)
             .finish()
     }
 }
@@ -891,6 +942,38 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(crate::services::cloud_response_cache::DEFAULT_MAX_ENTRIES),
+            billing_enabled: parse_bool_env("BILLING_ENABLED", false),
+            lago_api_url: env::var("LAGO_API_URL")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+            lago_api_key: env::var("LAGO_API_KEY")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+            lago_webhook_secret: env::var("LAGO_WEBHOOK_SECRET")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+            billing_reconcile_interval_secs: env::var("BILLING_RECONCILE_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(300),
+            billing_rate_cache_ttl_secs: env::var("BILLING_RATE_CACHE_TTL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(900),
+            billing_reservation_abandon_secs: env::var("BILLING_RESERVATION_ABANDON_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(600),
+            billing_default_overdraft_cap_credits: env::var(
+                "BILLING_DEFAULT_OVERDRAFT_CAP_CREDITS",
+            )
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
+            billing_fail_closed: parse_bool_env("BILLING_FAIL_CLOSED", false),
 
             invite_code_required: parse_invite_code_required(env::var("INVITE_CODE_REQUIRED").ok()),
             email_auth_enabled: parse_bool_env("EMAIL_AUTH_ENABLED", false),
@@ -1220,6 +1303,15 @@ mod tests {
                 crate::services::cloud_response_cache::DEFAULT_MAX_ENTRY_BYTES,
             cloud_response_cache_max_entries:
                 crate::services::cloud_response_cache::DEFAULT_MAX_ENTRIES,
+            billing_enabled: false,
+            lago_api_url: None,
+            lago_api_key: None,
+            lago_webhook_secret: None,
+            billing_reconcile_interval_secs: 300,
+            billing_rate_cache_ttl_secs: 900,
+            billing_reservation_abandon_secs: 600,
+            billing_default_overdraft_cap_credits: 0,
+            billing_fail_closed: false,
             invite_code_required: true,
             email_auth_enabled: false,
             auto_verify_email: false,

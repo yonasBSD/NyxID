@@ -11,11 +11,67 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
+use crate::models::service_billing::{BillingMetric, PlatformUsage, ResaleUsage};
+use crate::models::usage_meter::CredentialClass;
 use crate::mw::auth::AuthUser;
 use crate::services::{
     approval_service, audit_service, chatgpt_translator, delegation_service, llm_gateway_service,
     llm_usage_service, notification_service, operation_descriptor, proxy_service, sse_parser,
 };
+
+fn llm_credential_class(
+    resolved_via_user_service: bool,
+    target: &proxy_service::ProxyTarget,
+) -> CredentialClass {
+    if target.auth_method == "none" && target.credential.is_empty() {
+        CredentialClass::NoAuth
+    } else if resolved_via_user_service {
+        CredentialClass::UserOwned
+    } else if !target.service.requires_user_credential && !target.credential.is_empty() {
+        CredentialClass::NyxidManagedMaster
+    } else {
+        CredentialClass::UserOwned
+    }
+}
+
+fn resale_usage_from_optional_reported(
+    metric: BillingMetric,
+    usage: Option<&llm_usage_service::ReportedLlmUsage>,
+    fallback_bytes: i64,
+) -> Option<ResaleUsage> {
+    match metric {
+        BillingMetric::Tokens => usage.map(|usage| ResaleUsage {
+            metric,
+            quantity: usage.total_tokens.min(i64::MAX as u64) as i64,
+        }),
+        BillingMetric::Requests => Some(ResaleUsage {
+            metric,
+            quantity: 1,
+        }),
+        BillingMetric::Bytes => Some(ResaleUsage {
+            metric,
+            quantity: fallback_bytes.max(0),
+        }),
+    }
+}
+
+fn settle_meter_async(
+    billing: std::sync::Arc<crate::services::billing::BillingService>,
+    metered: crate::services::billing::MeteredProxyContext,
+    platform: PlatformUsage,
+    resale: Option<ResaleUsage>,
+    model: Option<String>,
+) {
+    if !metered.is_enabled() {
+        return;
+    }
+
+    tokio::spawn(async move {
+        if let Err(error) = billing.settle(&metered, platform, resale, model).await {
+            tracing::warn!(error = %error, "Failed to settle LLM usage meter row");
+        }
+    });
+}
 
 /// Maximum size for upstream response bodies (50 MB).
 const MAX_RESPONSE_BODY_SIZE: usize = 50 * 1024 * 1024;
@@ -155,7 +211,6 @@ pub async fn llm_proxy_request(
                 (legacy, false)
             }
         };
-
     // Check approval if user has it enabled. The two-tier resolver above
     // doesn't surface its `org_routing` back to this scope, so we look up
     // the effective owner separately via `find_effective_service_owner`,
@@ -184,6 +239,29 @@ pub async fn llm_proxy_request(
         owner_for_approval.as_deref(),
     )
     .await?;
+
+    let billing_owner = state
+        .billing
+        .owner_resolver()
+        .resolve(&user_id_str, owner_for_approval.as_deref())
+        .await?;
+    let billing_ctx = crate::services::billing::BillingRouteContext::new(
+        uuid::Uuid::new_v4().to_string(),
+        billing_owner.owner_id,
+        user_id_str.clone(),
+        auth_user.api_key_id.clone(),
+        None,
+        Some(service_id.clone()),
+        Some(service.slug.clone()),
+        crate::services::billing::NodeIntent::Direct,
+        target.auth_method.clone(),
+        llm_credential_class(resolved_via_user_service, &target),
+        BillingMetric::Requests,
+        target.service.billing.as_ref().or(service.billing.as_ref()),
+        state.billing.billing_enabled(),
+    );
+    let metered = state.billing.open(&billing_ctx).await?;
+    let request_len = body_bytes.len() as i64;
 
     // Resolve credentials for injection. The new UserService path bakes the
     // credential into `target` (via auth_method / credential), so we only need
@@ -251,7 +329,8 @@ pub async fn llm_proxy_request(
             .and_then(|s| s.as_bool())
             .unwrap_or(false);
 
-        chatgpt_translator::send_to_chatgpt(
+        state.billing.mark_forwarded(&metered).await?;
+        let response = chatgpt_translator::send_to_chatgpt(
             &translated.body,
             &bearer_token,
             is_streaming,
@@ -259,7 +338,18 @@ pub async fn llm_proxy_request(
             query.as_deref(),
             Some(usage_context),
         )
-        .await?
+        .await?;
+        settle_meter_async(
+            state.billing.clone(),
+            metered.clone(),
+            PlatformUsage::single_request(request_len),
+            None,
+            body_json
+                .get("model")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+        );
+        response
     } else {
         let body = if body_bytes.is_empty() {
             None
@@ -270,6 +360,7 @@ pub async fn llm_proxy_request(
         let reqwest_method = convert_method(&method)?;
         let reqwest_headers = convert_headers(&headers);
 
+        state.billing.mark_forwarded(&metered).await?;
         let downstream_response = proxy_service::forward_request(
             &state.http_client,
             &target,
@@ -301,6 +392,9 @@ pub async fn llm_proxy_request(
             downstream_response,
             Some(usage_context),
             state.config.proxy_stream_idle_timeout_secs,
+            metered.clone(),
+            state.billing.clone(),
+            request_len,
         )
         .await?
     };
@@ -534,6 +628,28 @@ pub async fn gateway_request(
     )
     .await?;
 
+    let billing_owner = state
+        .billing
+        .owner_resolver()
+        .resolve(&user_id_str, effective_owner_for_approval.as_deref())
+        .await?;
+    let billing_ctx = crate::services::billing::BillingRouteContext::new(
+        uuid::Uuid::new_v4().to_string(),
+        billing_owner.owner_id,
+        user_id_str.clone(),
+        auth_user.api_key_id.clone(),
+        None,
+        Some(service_id.clone()),
+        Some(service.slug.clone()),
+        crate::services::billing::NodeIntent::Direct,
+        target.auth_method.clone(),
+        llm_credential_class(resolved_via_user_service, &target),
+        BillingMetric::Requests,
+        target.service.billing.as_ref().or(service.billing.as_ref()),
+        state.billing.billing_enabled(),
+    );
+    let metered = state.billing.open(&billing_ctx).await?;
+
     // Resolve delegated credentials. When the target came from the new
     // UserService path, the credential is already baked into `target`; we only
     // synthesize a bearer DelegatedCredential for the openai-codex branch,
@@ -639,6 +755,10 @@ pub async fn gateway_request(
         api_key_name: auth_user.api_key_name.clone(),
     };
     let idle_timeout_secs = state.config.proxy_stream_idle_timeout_secs;
+    let request_len = final_body_bytes
+        .as_ref()
+        .map(|body| body.len() as i64)
+        .unwrap_or(0);
 
     // OpenAI Codex: use the specialized HTTP SSE transport and preserve query
     // parameters on the translated request.
@@ -653,7 +773,8 @@ pub async fn gateway_request(
         // to Chat Completions, responses → return Responses API as-is
         let is_chat_completions_path = path.contains("chat/completions");
 
-        chatgpt_translator::send_to_chatgpt(
+        state.billing.mark_forwarded(&metered).await?;
+        let response = chatgpt_translator::send_to_chatgpt(
             &translated_body,
             &bearer_token,
             is_streaming,
@@ -661,8 +782,17 @@ pub async fn gateway_request(
             query.as_deref(),
             Some(usage_context),
         )
-        .await?
+        .await?;
+        settle_meter_async(
+            state.billing.clone(),
+            metered.clone(),
+            PlatformUsage::single_request(request_len),
+            None,
+            Some(model.to_string()),
+        );
+        response
     } else {
+        state.billing.mark_forwarded(&metered).await?;
         let downstream_response = proxy_service::forward_request(
             &state.http_client,
             &target,
@@ -688,6 +818,9 @@ pub async fn gateway_request(
                     translator,
                     Some(usage_context),
                     idle_timeout_secs,
+                    metered.clone(),
+                    state.billing.clone(),
+                    request_len,
                 )
                 .await?
             } else {
@@ -696,12 +829,22 @@ pub async fn gateway_request(
                     downstream_response,
                     translator.as_ref(),
                     Some(usage_context),
+                    metered.clone(),
+                    state.billing.clone(),
+                    request_len,
                 )
                 .await?
             }
         } else {
-            build_filtered_response(downstream_response, Some(usage_context), idle_timeout_secs)
-                .await?
+            build_filtered_response(
+                downstream_response,
+                Some(usage_context),
+                idle_timeout_secs,
+                metered.clone(),
+                state.billing.clone(),
+                request_len,
+            )
+            .await?
         }
     };
 
@@ -850,6 +993,9 @@ async fn build_filtered_response(
     downstream_response: reqwest::Response,
     usage_context: Option<llm_usage_service::UsageAuditContext>,
     idle_timeout_secs: u64,
+    metered: crate::services::billing::MeteredProxyContext,
+    billing: std::sync::Arc<crate::services::billing::BillingService>,
+    request_len: i64,
 ) -> AppResult<Response> {
     let status = StatusCode::from_u16(downstream_response.status().as_u16())
         .unwrap_or(StatusCode::BAD_GATEWAY);
@@ -881,15 +1027,23 @@ async fn build_filtered_response(
         if let Some(context) = usage_context {
             let idle_timeout = std::time::Duration::from_secs(idle_timeout_secs);
             let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(32);
+            let stream_metered = metered.clone();
+            let stream_billing = billing.clone();
+            let resale_metric = stream_metered
+                .route
+                .as_ref()
+                .and_then(|ctx| ctx.resale.as_ref().map(|spec| spec.metric));
 
             tokio::spawn(async move {
                 let mut buffer = String::new();
                 let mut stream = downstream_response.bytes_stream();
                 let mut accumulator = llm_usage_service::ReportedLlmUsageAccumulator::default();
+                let mut response_len: i64 = 0;
 
                 loop {
                     match tokio::time::timeout(idle_timeout, stream.next()).await {
                         Ok(Some(Ok(bytes))) => {
+                            response_len += bytes.len() as i64;
                             buffer.push_str(&String::from_utf8_lossy(&bytes));
 
                             while let Some(event) = parse_next_sse_event(&mut buffer) {
@@ -922,9 +1076,24 @@ async fn build_filtered_response(
                     }
                 }
 
-                if let Some(usage) = accumulator.finalize() {
-                    llm_usage_service::log_reported_usage_async(context, usage);
+                let usage = accumulator.finalize();
+                if let Some(usage) = usage.clone() {
+                    llm_usage_service::log_reported_usage_async(context.clone(), usage);
                 }
+                let resale = resale_metric.and_then(|metric| {
+                    resale_usage_from_optional_reported(
+                        metric,
+                        usage.as_ref(),
+                        request_len + response_len,
+                    )
+                });
+                settle_meter_async(
+                    stream_billing,
+                    stream_metered,
+                    PlatformUsage::single_request(request_len + response_len),
+                    resale,
+                    context.model,
+                );
             });
 
             let body = Body::from_stream(ReceiverStream::new(rx));
@@ -934,7 +1103,32 @@ async fn build_filtered_response(
         }
 
         // Stream SSE responses directly without buffering
-        let body = Body::from_stream(downstream_response.bytes_stream());
+        let mut stream = downstream_response.bytes_stream();
+        let stream_metered = metered.clone();
+        let stream_billing = billing.clone();
+        let body_stream = async_stream::stream! {
+            let mut response_len: i64 = 0;
+            while let Some(next) = stream.next().await {
+                match next {
+                    Ok(bytes) => {
+                        response_len += bytes.len() as i64;
+                        yield Ok::<_, reqwest::Error>(bytes);
+                    }
+                    Err(error) => {
+                        yield Err(error);
+                        break;
+                    }
+                }
+            }
+            settle_meter_async(
+                stream_billing,
+                stream_metered,
+                PlatformUsage::single_request(request_len + response_len),
+                None,
+                None,
+            );
+        };
+        let body = Body::from_stream(body_stream);
         response_builder
             .body(body)
             .map_err(|e| AppError::Internal(format!("Failed to build response: {e}")))
@@ -942,12 +1136,34 @@ async fn build_filtered_response(
         // H-3: Buffer non-streaming responses with size limit
         let response_body = read_response_with_limit(downstream_response).await?;
 
+        let mut reported_usage = None;
+        let mut model = None;
         if let Some(context) = usage_context
             && let Ok(json) = serde_json::from_slice::<serde_json::Value>(&response_body)
             && let Some(usage) = llm_usage_service::extract_reported_usage(&json)
         {
-            llm_usage_service::log_reported_usage_async(context, usage);
+            model = context.model.clone();
+            llm_usage_service::log_reported_usage_async(context, usage.clone());
+            reported_usage = Some(usage);
         }
+        let response_len = response_body.len() as i64;
+        let resale = metered.route.as_ref().and_then(|ctx| {
+            ctx.resale.as_ref().and_then(|spec| {
+                resale_usage_from_optional_reported(
+                    spec.metric,
+                    reported_usage.as_ref(),
+                    request_len + response_len,
+                )
+            })
+        });
+        billing
+            .settle(
+                &metered,
+                PlatformUsage::single_request(request_len + response_len),
+                resale,
+                model,
+            )
+            .await?;
 
         response_builder
             .body(Body::from(response_body))
@@ -961,6 +1177,9 @@ async fn build_translated_json_response(
     downstream_response: reqwest::Response,
     translator: &dyn llm_gateway_service::LlmTranslator,
     usage_context: Option<llm_usage_service::UsageAuditContext>,
+    metered: crate::services::billing::MeteredProxyContext,
+    billing: std::sync::Arc<crate::services::billing::BillingService>,
+    request_len: i64,
 ) -> AppResult<Response> {
     let status = downstream_response.status();
     let resp_headers = downstream_response.headers().clone();
@@ -972,14 +1191,36 @@ async fn build_translated_json_response(
         })?;
 
         let translated = translator.translate_response(resp_json)?;
+        let mut reported_usage = None;
+        let mut model = None;
         if let Some(context) = usage_context
             && let Some(usage) = llm_usage_service::extract_reported_usage(&translated)
         {
-            llm_usage_service::log_reported_usage_async(context, usage);
+            model = context.model.clone();
+            llm_usage_service::log_reported_usage_async(context, usage.clone());
+            reported_usage = Some(usage);
         }
         let translated_bytes = serde_json::to_vec(&translated).map_err(|e| {
             AppError::Internal(format!("Failed to serialize translated response: {e}"))
         })?;
+        let response_len = translated_bytes.len() as i64;
+        let resale = metered.route.as_ref().and_then(|ctx| {
+            ctx.resale.as_ref().and_then(|spec| {
+                resale_usage_from_optional_reported(
+                    spec.metric,
+                    reported_usage.as_ref(),
+                    request_len + response_len,
+                )
+            })
+        });
+        billing
+            .settle(
+                &metered,
+                PlatformUsage::single_request(request_len + response_len),
+                resale,
+                model,
+            )
+            .await?;
 
         let axum_status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
 
@@ -1027,6 +1268,14 @@ async fn build_translated_json_response(
 
         let error_bytes = serde_json::to_vec(&error_body)
             .map_err(|e| AppError::Internal(format!("Failed to serialize error response: {e}")))?;
+        billing
+            .settle(
+                &metered,
+                PlatformUsage::single_request(request_len + error_bytes.len() as i64),
+                None,
+                usage_context.and_then(|context| context.model),
+            )
+            .await?;
 
         Response::builder()
             .status(axum_status)
@@ -1044,6 +1293,9 @@ async fn build_translated_sse_response(
     translator: Box<dyn llm_gateway_service::LlmTranslator>,
     usage_context: Option<llm_usage_service::UsageAuditContext>,
     idle_timeout_secs: u64,
+    metered: crate::services::billing::MeteredProxyContext,
+    billing: std::sync::Arc<crate::services::billing::BillingService>,
+    request_len: i64,
 ) -> AppResult<Response> {
     let status = downstream_response.status();
 
@@ -1053,6 +1305,9 @@ async fn build_translated_sse_response(
             downstream_response,
             translator.as_ref(),
             usage_context,
+            metered,
+            billing,
+            request_len,
         )
         .await;
     }
@@ -1061,12 +1316,19 @@ async fn build_translated_sse_response(
     let idle_timeout = std::time::Duration::from_secs(idle_timeout_secs);
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(32);
+    let stream_metered = metered.clone();
+    let stream_billing = billing.clone();
+    let resale_metric = stream_metered
+        .route
+        .as_ref()
+        .and_then(|ctx| ctx.resale.as_ref().map(|spec| spec.metric));
 
     tokio::spawn(async move {
         let mut buffer = String::new();
         let mut state = llm_gateway_service::StreamTranslationState::default();
         let mut stream = downstream_response.bytes_stream();
         let mut accumulator = llm_usage_service::ReportedLlmUsageAccumulator::default();
+        let mut response_len: i64 = 0;
 
         loop {
             match tokio::time::timeout(idle_timeout, stream.next()).await {
@@ -1085,13 +1347,31 @@ async fn build_translated_sse_response(
 
                         if let Some(translated) =
                             translator.translate_stream_event(&event, &mut state)
-                            && tx.send(Ok(bytes::Bytes::from(translated))).await.is_err()
+                            && {
+                                response_len += translated.len() as i64;
+                                tx.send(Ok(bytes::Bytes::from(translated))).await.is_err()
+                            }
                         {
                             if let Some(context) = usage_context.clone()
                                 && let Some(usage) = accumulator.clone().finalize()
                             {
                                 llm_usage_service::log_reported_usage_async(context, usage);
                             }
+                            let usage = accumulator.clone().finalize();
+                            let resale = resale_metric.and_then(|metric| {
+                                resale_usage_from_optional_reported(
+                                    metric,
+                                    usage.as_ref(),
+                                    request_len + response_len,
+                                )
+                            });
+                            settle_meter_async(
+                                stream_billing,
+                                stream_metered,
+                                PlatformUsage::single_request(request_len + response_len),
+                                resale,
+                                usage_context.and_then(|context| context.model),
+                            );
                             return; // client disconnected
                         }
                     }
@@ -1117,10 +1397,21 @@ async fn build_translated_sse_response(
         }
 
         if let Some(context) = usage_context
-            && let Some(usage) = accumulator.finalize()
+            && let Some(usage) = accumulator.clone().finalize()
         {
             llm_usage_service::log_reported_usage_async(context, usage);
         }
+        let usage = accumulator.finalize();
+        let resale = resale_metric.and_then(|metric| {
+            resale_usage_from_optional_reported(metric, usage.as_ref(), request_len + response_len)
+        });
+        settle_meter_async(
+            stream_billing,
+            stream_metered,
+            PlatformUsage::single_request(request_len + response_len),
+            resale,
+            None,
+        );
     });
 
     let body = Body::from_stream(ReceiverStream::new(rx));
