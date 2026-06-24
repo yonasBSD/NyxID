@@ -694,6 +694,10 @@ pub fn build_router(
             delete(handlers::service_pools_handler::remove_member),
         );
 
+    let billing_routes = Router::new()
+        .route("/usage", get(handlers::billing::get_usage))
+        .route("/wallet", get(handlers::billing::get_wallet));
+
     // Org management routes (creation, members, invites). All routes
     // authenticate as a regular session/user; admin-vs-member checks happen
     // inside the handlers based on org_memberships rather than a global flag.
@@ -1022,6 +1026,7 @@ pub fn build_router(
         .nest("/api-keys/external", external_api_key_routes)
         .nest("/user-services", user_service_routes)
         .nest("/service-pools", service_pool_routes)
+        .nest("/billing", billing_routes)
         .nest("/orgs", org_routes)
         .route(
             "/users/me/primary-org",

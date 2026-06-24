@@ -1,0 +1,728 @@
+use std::time::Duration;
+
+use async_trait::async_trait;
+use reqwest::StatusCode;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+use crate::errors::{AppError, AppResult};
+
+const HTTP_TIMEOUT_SECS: u64 = 20;
+
+#[async_trait]
+pub trait LagoApi: Send + Sync {
+    async fn ensure_customer(&self, owner: &OwnerProvisionInput) -> AppResult<String>;
+    async fn ensure_subscription(&self, customer_id: &str, plan_code: &str) -> AppResult<String>;
+    async fn record_event(&self, event: &LagoEvent) -> Result<LagoAck, LagoError>;
+    async fn record_events_batch(&self, events: &[LagoEvent]) -> Result<Vec<LagoAck>, LagoError>;
+    async fn current_usage(&self, customer_id: &str, subscription_id: &str)
+    -> AppResult<LagoUsage>;
+    async fn wallet_balance(&self, customer_id: &str) -> AppResult<i64>;
+    async fn entitlements(&self, subscription_id: &str) -> AppResult<Vec<Entitlement>>;
+}
+
+#[derive(Clone)]
+pub struct LagoClient {
+    base_url: String,
+    api_key: String,
+    http: reqwest::Client,
+}
+
+impl LagoClient {
+    pub fn new(base_url: String, api_key: String) -> AppResult<Self> {
+        let base_url = base_url.trim().trim_end_matches('/').to_string();
+        if base_url.is_empty() {
+            return Err(AppError::BillingNotConfigured(
+                "LAGO_API_URL is empty".to_string(),
+            ));
+        }
+        if api_key.trim().is_empty() {
+            return Err(AppError::BillingNotConfigured(
+                "LAGO_API_KEY is empty".to_string(),
+            ));
+        }
+
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
+            .build()
+            .map_err(|err| {
+                AppError::Internal(format!("failed to build Lago HTTP client: {err}"))
+            })?;
+
+        Ok(Self {
+            base_url,
+            api_key,
+            http,
+        })
+    }
+
+    fn url(&self, path: &str) -> String {
+        let path = path.trim_start_matches('/');
+        if self.base_url.ends_with("/api/v1") {
+            format!("{}/{}", self.base_url, path)
+        } else {
+            format!("{}/api/v1/{}", self.base_url, path)
+        }
+    }
+
+    fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+        self.http
+            .request(method, self.url(path))
+            .bearer_auth(&self.api_key)
+            .header(reqwest::header::ACCEPT, "application/json")
+    }
+
+    async fn json_request(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<Value, LagoError> {
+        let mut builder = self.request(method, path);
+        if let Some(body) = body {
+            builder = builder.json(&body);
+        }
+
+        let response = builder.send().await.map_err(LagoError::from_reqwest)?;
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        let json = serde_json::from_str::<Value>(&text).unwrap_or(Value::Null);
+
+        if status.is_success() {
+            Ok(json)
+        } else {
+            Err(LagoError::from_response(status, json, text))
+        }
+    }
+
+    async fn get_one_by_external_id(
+        &self,
+        resource: &str,
+        wrapper_key: &str,
+        external_id: &str,
+    ) -> AppResult<Option<Value>> {
+        let path = format!("{}/{}", resource, urlencoding::encode(external_id));
+        match self.json_request(reqwest::Method::GET, &path, None).await {
+            Ok(value) => Ok(value.get(wrapper_key).cloned().or(Some(value))),
+            Err(error) if error.status == Some(StatusCode::NOT_FOUND) => Ok(None),
+            Err(error) => Err(lago_error_to_app(error)),
+        }
+    }
+}
+
+#[async_trait]
+impl LagoApi for LagoClient {
+    async fn ensure_customer(&self, owner: &OwnerProvisionInput) -> AppResult<String> {
+        if let Some(existing) = self
+            .get_one_by_external_id("customers", "customer", &owner.external_customer_id)
+            .await?
+            && value_string(&existing, &["external_id"])
+                .as_deref()
+                .is_some_and(|id| id == owner.external_customer_id)
+        {
+            return Ok(owner.external_customer_id.clone());
+        }
+
+        let body = json!({
+            "customer": {
+                "external_id": owner.external_customer_id,
+                "name": owner.name,
+                "email": owner.email,
+            }
+        });
+        match self
+            .json_request(reqwest::Method::POST, "customers", Some(body))
+            .await
+        {
+            Ok(_) => Ok(owner.external_customer_id.clone()),
+            Err(error) if error.is_conflict_like() => Ok(owner.external_customer_id.clone()),
+            Err(error) => Err(lago_error_to_app(error)),
+        }
+    }
+
+    async fn ensure_subscription(&self, customer_id: &str, plan_code: &str) -> AppResult<String> {
+        let external_id = subscription_external_id(customer_id, plan_code);
+        if let Some(existing) = self
+            .get_one_by_external_id("subscriptions", "subscription", &external_id)
+            .await?
+            && value_string(&existing, &["external_id"])
+                .as_deref()
+                .is_some_and(|id| id == external_id)
+        {
+            return Ok(external_id);
+        }
+
+        let body = json!({
+            "subscription": {
+                "external_customer_id": customer_id,
+                "external_id": external_id,
+                "plan_code": plan_code,
+                "billing_time": "calendar",
+            }
+        });
+        match self
+            .json_request(reqwest::Method::POST, "subscriptions", Some(body))
+            .await
+        {
+            Ok(_) => Ok(subscription_external_id(customer_id, plan_code)),
+            Err(error) if error.is_conflict_like() => {
+                Ok(subscription_external_id(customer_id, plan_code))
+            }
+            Err(error) => Err(lago_error_to_app(error)),
+        }
+    }
+
+    async fn record_event(&self, event: &LagoEvent) -> Result<LagoAck, LagoError> {
+        let body = json!({ "event": event });
+        self.json_request(reqwest::Method::POST, "events", Some(body))
+            .await
+            .map(|_| LagoAck {
+                transaction_id: event.transaction_id.clone(),
+            })
+    }
+
+    async fn record_events_batch(&self, events: &[LagoEvent]) -> Result<Vec<LagoAck>, LagoError> {
+        if events.is_empty() {
+            return Ok(Vec::new());
+        }
+        let body = json!({ "events": events });
+        match self
+            .json_request(reqwest::Method::POST, "events/batch", Some(body))
+            .await
+        {
+            Ok(_) => Ok(events
+                .iter()
+                .map(|event| LagoAck {
+                    transaction_id: event.transaction_id.clone(),
+                })
+                .collect()),
+            Err(error)
+                if matches!(
+                    error.status,
+                    Some(StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED)
+                ) =>
+            {
+                let mut acks = Vec::with_capacity(events.len());
+                for event in events {
+                    acks.push(self.record_event(event).await?);
+                }
+                Ok(acks)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn current_usage(
+        &self,
+        customer_id: &str,
+        subscription_id: &str,
+    ) -> AppResult<LagoUsage> {
+        let path = if subscription_id.trim().is_empty() {
+            format!(
+                "customers/{}/current_usage",
+                urlencoding::encode(customer_id)
+            )
+        } else {
+            format!(
+                "customers/{}/current_usage?external_subscription_id={}",
+                urlencoding::encode(customer_id),
+                urlencoding::encode(subscription_id)
+            )
+        };
+        let value = self
+            .json_request(reqwest::Method::GET, &path, None)
+            .await
+            .map_err(lago_error_to_app)?;
+        Ok(LagoUsage {
+            customer_id: customer_id.to_string(),
+            subscription_id: subscription_id.to_string(),
+            raw: value,
+        })
+    }
+
+    async fn wallet_balance(&self, customer_id: &str) -> AppResult<i64> {
+        let path = format!(
+            "wallets?external_customer_id={}&per_page=100&page=1",
+            urlencoding::encode(customer_id)
+        );
+        let value = self
+            .json_request(reqwest::Method::GET, &path, None)
+            .await
+            .map_err(lago_error_to_app)?;
+
+        let balance = value
+            .get("wallets")
+            .and_then(Value::as_array)
+            .map(|wallets| wallets.iter().map(wallet_balance_credits).sum())
+            .unwrap_or(0);
+        Ok(balance)
+    }
+
+    async fn entitlements(&self, subscription_id: &str) -> AppResult<Vec<Entitlement>> {
+        let path = format!(
+            "subscriptions/{}/entitlements",
+            urlencoding::encode(subscription_id)
+        );
+        let value = self
+            .json_request(reqwest::Method::GET, &path, None)
+            .await
+            .map_err(lago_error_to_app)?;
+        Ok(value
+            .get("entitlements")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        value_string(item, &["code", "feature_code"]).map(|code| Entitlement {
+                            code,
+                            raw: item.clone(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OwnerProvisionInput {
+    pub external_customer_id: String,
+    pub name: Option<String>,
+    pub email: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LagoEvent {
+    pub transaction_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_customer_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_subscription_id: Option<String>,
+    pub code: String,
+    pub timestamp: i64,
+    pub properties: LagoEventProperties,
+}
+
+impl LagoEvent {
+    pub fn from_usage_row(
+        row: &crate::models::usage_meter::UsageMeterRow,
+        subscription_id: Option<String>,
+    ) -> Option<Self> {
+        let quantity = row.quantity?;
+        let properties = LagoEventProperties {
+            quantity: quantity.max(0),
+            model: row.model.clone(),
+            service_code: row.service_slug.clone(),
+            layer: Some(row.layer.as_transaction_suffix().to_string()),
+        };
+
+        Some(Self {
+            transaction_id: row.transaction_id.clone(),
+            external_customer_id: if subscription_id.is_some() {
+                None
+            } else {
+                Some(row.billing_owner_id.clone())
+            },
+            external_subscription_id: subscription_id,
+            code: row.lago_metric_code.clone(),
+            timestamp: row.finalized_at.unwrap_or(row.updated_at).timestamp(),
+            properties,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LagoEventProperties {
+    pub quantity: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layer: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LagoAck {
+    pub transaction_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LagoUsage {
+    pub customer_id: String,
+    pub subscription_id: String,
+    pub raw: Value,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Entitlement {
+    pub code: String,
+    pub raw: Value,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LagoErrorKind {
+    Duplicate,
+    DeadLetter,
+    Retry,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LagoError {
+    pub status: Option<StatusCode>,
+    pub code: Option<String>,
+    pub message: String,
+    pub kind: LagoErrorKind,
+}
+
+impl LagoError {
+    pub fn retry(message: impl Into<String>) -> Self {
+        Self {
+            status: None,
+            code: None,
+            message: message.into(),
+            kind: LagoErrorKind::Retry,
+        }
+    }
+
+    pub fn dead_letter(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            status: Some(StatusCode::UNPROCESSABLE_ENTITY),
+            code: Some(code.into()),
+            message: message.into(),
+            kind: LagoErrorKind::DeadLetter,
+        }
+    }
+
+    pub fn duplicate(message: impl Into<String>) -> Self {
+        Self {
+            status: Some(StatusCode::UNPROCESSABLE_ENTITY),
+            code: Some("transaction_id_taken".to_string()),
+            message: message.into(),
+            kind: LagoErrorKind::Duplicate,
+        }
+    }
+
+    fn from_reqwest(error: reqwest::Error) -> Self {
+        Self {
+            status: error.status(),
+            code: None,
+            message: error.to_string(),
+            kind: LagoErrorKind::Unavailable,
+        }
+    }
+
+    fn from_response(status: StatusCode, json: Value, raw_text: String) -> Self {
+        let code = lago_error_code(&json);
+        let message = lago_error_message(&json).unwrap_or(raw_text);
+        let kind = classify_lago_failure(status, code.as_deref(), &json);
+        Self {
+            status: Some(status),
+            code,
+            message,
+            kind,
+        }
+    }
+
+    pub fn is_conflict_like(&self) -> bool {
+        self.status == Some(StatusCode::CONFLICT)
+            || (self.status == Some(StatusCode::UNPROCESSABLE_ENTITY)
+                && matches!(
+                    self.code.as_deref(),
+                    Some("value_already_exist" | "validation_errors")
+                ))
+    }
+}
+
+pub fn classify_lago_failure(
+    status: StatusCode,
+    code: Option<&str>,
+    body: &Value,
+) -> LagoErrorKind {
+    if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+        return LagoErrorKind::Retry;
+    }
+
+    if status == StatusCode::UNPROCESSABLE_ENTITY {
+        if matches!(code, Some("transaction_id_taken"))
+            || body_contains(body, "value_already_exist")
+        {
+            return LagoErrorKind::Duplicate;
+        }
+        if matches!(
+            code,
+            Some(
+                "billable_metric_not_found"
+                    | "subscription_not_found"
+                    | "customer_not_found"
+                    | "invalid_subscription"
+                    | "closed_period"
+                    | "wallet_not_found"
+            )
+        ) || body_contains_any(
+            body,
+            &[
+                "billable_metric_not_found",
+                "subscription_not_found",
+                "customer_not_found",
+                "closed_period",
+                "terminated",
+            ],
+        ) {
+            return LagoErrorKind::DeadLetter;
+        }
+    }
+
+    if status.is_client_error() {
+        LagoErrorKind::DeadLetter
+    } else {
+        LagoErrorKind::Retry
+    }
+}
+
+pub fn subscription_external_id(customer_id: &str, plan_code: &str) -> String {
+    format!("{}:{}", customer_id, plan_code)
+}
+
+fn lago_error_to_app(error: LagoError) -> AppError {
+    AppError::BillingProviderUnavailable(error.message)
+}
+
+fn value_string(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(Value::as_str))
+        .map(ToString::to_string)
+}
+
+fn lago_error_code(value: &Value) -> Option<String> {
+    value_string(value, &["code", "error_code"])
+}
+
+fn lago_error_message(value: &Value) -> Option<String> {
+    value_string(value, &["message", "error"])
+}
+
+fn body_contains(value: &Value, needle: &str) -> bool {
+    match value {
+        Value::String(s) => s.eq_ignore_ascii_case(needle) || s.contains(needle),
+        Value::Array(items) => items.iter().any(|item| body_contains(item, needle)),
+        Value::Object(map) => map
+            .iter()
+            .any(|(key, value)| key.contains(needle) || body_contains(value, needle)),
+        _ => false,
+    }
+}
+
+fn body_contains_any(value: &Value, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| body_contains(value, needle))
+}
+
+fn wallet_balance_credits(wallet: &Value) -> i64 {
+    for key in [
+        "credits_balance",
+        "balance_credits",
+        "balance",
+        "amount_cents",
+        "ongoing_balance_cents",
+    ] {
+        if let Some(num) = value_as_i64(wallet.get(key)) {
+            return num;
+        }
+    }
+    0
+}
+
+fn value_as_i64(value: Option<&Value>) -> Option<i64> {
+    match value? {
+        Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f.round() as i64)),
+        Value::String(s) => s
+            .parse::<i64>()
+            .ok()
+            .or_else(|| s.parse::<f64>().ok().map(|f| f.round() as i64)),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use reqwest::StatusCode;
+    use serde_json::json;
+
+    use super::{
+        LagoApi, LagoClient, LagoErrorKind, LagoEvent, LagoEventProperties, OwnerProvisionInput,
+        classify_lago_failure, subscription_external_id,
+    };
+
+    async fn spawn_lago_mock(app: axum::Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock Lago listener");
+        let addr = listener.local_addr().expect("mock Lago addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("mock Lago server");
+        });
+        format!("http://{addr}")
+    }
+
+    #[test]
+    fn duplicate_transaction_is_success_class() {
+        let body = json!({
+            "status": 422,
+            "code": "validation_errors",
+            "error_details": {
+                "0": { "transaction_id": ["value_already_exist"] }
+            }
+        });
+
+        assert_eq!(
+            classify_lago_failure(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Some("validation_errors"),
+                &body
+            ),
+            LagoErrorKind::Duplicate
+        );
+    }
+
+    #[test]
+    fn missing_billable_metric_is_dead_letter_class() {
+        let body = json!({ "code": "billable_metric_not_found" });
+
+        assert_eq!(
+            classify_lago_failure(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Some("billable_metric_not_found"),
+                &body
+            ),
+            LagoErrorKind::DeadLetter
+        );
+    }
+
+    #[test]
+    fn rate_limit_and_server_errors_retry() {
+        assert_eq!(
+            classify_lago_failure(StatusCode::TOO_MANY_REQUESTS, None, &json!({})),
+            LagoErrorKind::Retry
+        );
+        assert_eq!(
+            classify_lago_failure(StatusCode::BAD_GATEWAY, None, &json!({})),
+            LagoErrorKind::Retry
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_customer_gets_existing_customer_before_create() {
+        async fn get_customer() -> axum::Json<serde_json::Value> {
+            axum::Json(json!({
+                "customer": { "external_id": "owner-1" }
+            }))
+        }
+
+        async fn create_customer() -> axum::http::StatusCode {
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        }
+
+        let base_url = spawn_lago_mock(
+            axum::Router::new()
+                .route(
+                    "/api/v1/customers/owner-1",
+                    axum::routing::get(get_customer),
+                )
+                .route("/api/v1/customers", axum::routing::post(create_customer)),
+        )
+        .await;
+        let client = LagoClient::new(base_url, "test-key".to_string()).expect("client");
+
+        let customer_id = client
+            .ensure_customer(&OwnerProvisionInput {
+                external_customer_id: "owner-1".to_string(),
+                name: Some("Owner One".to_string()),
+                email: None,
+            })
+            .await
+            .expect("ensure customer");
+
+        assert_eq!(customer_id, "owner-1");
+    }
+
+    #[tokio::test]
+    async fn ensure_subscription_treats_create_conflict_as_existing() {
+        async fn subscription_not_found() -> axum::http::StatusCode {
+            axum::http::StatusCode::NOT_FOUND
+        }
+
+        async fn create_subscription() -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
+            (
+                axum::http::StatusCode::CONFLICT,
+                axum::Json(json!({ "code": "value_already_exist", "error": "exists" })),
+            )
+        }
+
+        let base_url = spawn_lago_mock(
+            axum::Router::new()
+                .route(
+                    "/api/v1/subscriptions/owner-1:starter",
+                    axum::routing::get(subscription_not_found),
+                )
+                .route(
+                    "/api/v1/subscriptions",
+                    axum::routing::post(create_subscription),
+                ),
+        )
+        .await;
+        let client = LagoClient::new(base_url, "test-key".to_string()).expect("client");
+
+        let subscription_id = client
+            .ensure_subscription("owner-1", "starter")
+            .await
+            .expect("ensure subscription");
+
+        assert_eq!(
+            subscription_id,
+            subscription_external_id("owner-1", "starter")
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_event_push_falls_back_to_single_event_endpoint() {
+        async fn batch_unsupported() -> axum::http::StatusCode {
+            axum::http::StatusCode::NOT_FOUND
+        }
+
+        async fn create_event() -> axum::Json<serde_json::Value> {
+            axum::Json(json!({ "event": { "lago_id": "evt_1" } }))
+        }
+
+        let base_url = spawn_lago_mock(
+            axum::Router::new()
+                .route(
+                    "/api/v1/events/batch",
+                    axum::routing::post(batch_unsupported),
+                )
+                .route("/api/v1/events", axum::routing::post(create_event)),
+        )
+        .await;
+        let client = LagoClient::new(base_url, "test-key".to_string()).expect("client");
+
+        let acks = client
+            .record_events_batch(&[LagoEvent {
+                transaction_id: "tx-1".to_string(),
+                external_customer_id: Some("owner-1".to_string()),
+                external_subscription_id: None,
+                code: "platform_requests".to_string(),
+                timestamp: 1,
+                properties: LagoEventProperties {
+                    quantity: 1,
+                    model: None,
+                    service_code: Some("svc".to_string()),
+                    layer: Some("platform".to_string()),
+                },
+            }])
+            .await
+            .expect("batch fallback");
+
+        assert_eq!(acks[0].transaction_id, "tx-1");
+    }
+}

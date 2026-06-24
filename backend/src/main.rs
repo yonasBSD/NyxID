@@ -540,6 +540,10 @@ async fn main() {
     // Spawn the telemetry-erasure worker. No-op when `state.telemetry`
     // is `None` (hard-off mode); the function logs + returns.
     services::telemetry_erasure_service::spawn_worker(state.db.clone(), state.telemetry.clone());
+    services::billing::reconcile::spawn_reconcile_worker(
+        state.billing.reconciler(),
+        config.billing_reconcile_interval_secs,
+    );
 
     // Create rate limiters
     let global_rate_limiter =

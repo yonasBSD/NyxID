@@ -1805,6 +1805,20 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    // ── billing_rate_cache ──
+    let billing_rate_cache =
+        db.collection::<Document>(crate::models::billing_rate_cache::COLLECTION_NAME);
+    billing_rate_cache
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "lago_metric_code": 1, "model": 1 })
+                .build(),
+        )
+        .await?;
+    billing_rate_cache
+        .create_index(IndexModel::builder().keys(doc! { "synced_at": -1 }).build())
+        .await?;
+
     // ── oracle_sessions ──
     let oracle_sessions = db.collection::<Document>(crate::models::oracle_session::COLLECTION_NAME);
     oracle_sessions

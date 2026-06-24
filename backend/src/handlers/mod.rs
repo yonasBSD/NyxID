@@ -12,6 +12,7 @@ pub mod api_keys;
 pub mod approvals;
 pub mod auth;
 pub mod auth_device;
+pub mod billing;
 pub mod broker_bindings;
 pub mod catalog;
 pub mod channel_bots;

@@ -276,6 +276,7 @@ fn platform_quantity(metric: BillingMetric, usage: &PlatformUsage) -> i64 {
 mod tests {
     use futures::TryStreamExt;
     use mongodb::bson::doc;
+    use mongodb::options::IndexOptions;
 
     use crate::models::service_billing::{BillingMetric, PlatformUsage, ServiceBilling};
     use crate::models::usage_meter::{BillingLayer, CredentialClass, UsageMeterRow, UsageStatus};
@@ -288,6 +289,15 @@ mod tests {
         let Some(db) = connect_test_database("usage_meter_ledger").await else {
             return;
         };
+        db.collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+            .create_index(
+                mongodb::IndexModel::builder()
+                    .keys(doc! { "transaction_id": 1 })
+                    .options(IndexOptions::builder().unique(true).build())
+                    .build(),
+            )
+            .await
+            .expect("create transaction id index");
 
         let billing = ServiceBilling {
             resale_billable: true,
@@ -352,6 +362,22 @@ mod tests {
                 && row.credential_class == CredentialClass::NyxidManagedMaster
         }));
     }
+
+    #[test]
+    fn transaction_id_is_per_layer_and_flush() {
+        assert_eq!(
+            super::transaction_id("req", BillingLayer::Platform, None),
+            "req:platform"
+        );
+        assert_eq!(
+            super::transaction_id("req", BillingLayer::Resale, None),
+            "req:resale"
+        );
+        assert_eq!(
+            super::transaction_id("req", BillingLayer::Platform, Some(7)),
+            "req:platform:7"
+        );
+    }
 }
 
 fn is_duplicate_key_error(error: &mongodb::error::Error) -> bool {
@@ -359,25 +385,4 @@ fn is_duplicate_key_error(error: &mongodb::error::Error) -> bool {
         .to_string()
         .to_ascii_lowercase()
         .contains("duplicate key")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{BillingLayer, transaction_id};
-
-    #[test]
-    fn transaction_id_is_per_layer_and_flush() {
-        assert_eq!(
-            transaction_id("req", BillingLayer::Platform, None),
-            "req:platform"
-        );
-        assert_eq!(
-            transaction_id("req", BillingLayer::Resale, None),
-            "req:resale"
-        );
-        assert_eq!(
-            transaction_id("req", BillingLayer::Platform, Some(7)),
-            "req:platform:7"
-        );
-    }
 }
