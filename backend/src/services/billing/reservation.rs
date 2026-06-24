@@ -303,30 +303,75 @@ pub async fn apply_settlement_for_row(
     db: &mongodb::Database,
     row: &UsageMeterRow,
     actual_credits: i64,
-) -> AppResult<()> {
-    if row.wallet_id.is_none() {
-        return Ok(());
+) -> AppResult<bool> {
+    let usage_rows = db.collection::<UsageMeterRow>(USAGE_METER);
+    if row.released
+        || usage_rows
+            .count_documents(doc! { "_id": &row.id, "released": false })
+            .await?
+            == 0
+    {
+        return Ok(false);
     }
 
-    let reserved_credits = row.reserved_credits.max(0);
-    let actual_credits = actual_credits.max(0);
-    if reserved_credits == 0 && actual_credits == 0 {
-        return Ok(());
+    if row.wallet_id.is_some() {
+        let reserved_credits = row.reserved_credits.max(0);
+        let actual_credits = actual_credits.max(0);
+        if reserved_credits > 0 || actual_credits > 0 {
+            let wallet_id = row.wallet_id.as_deref().unwrap_or_default();
+            let mut wallet_filter = doc! {
+                "_id": wallet_id,
+                "owner_id": &row.billing_owner_id,
+            };
+            wallet_filter.insert("settled_usage_row_ids", doc! { "$ne": &row.id });
+
+            let wallets = db.collection::<BillingWallet>(BILLING_WALLET);
+            // MongoDB transactions are not assumed available in local deployments, so
+            // the wallet document carries the durable idempotency key for this debit.
+            let wallet_update = wallets
+                .update_one(
+                    wallet_filter,
+                    doc! {
+                        "$inc": {
+                            "reserved_credits": -reserved_credits,
+                            "pending_lago_debits": actual_credits,
+                        },
+                        "$addToSet": { "settled_usage_row_ids": &row.id },
+                        "$set": { "updated_at": bson::DateTime::from_chrono(Utc::now()) },
+                    },
+                )
+                .await?;
+            if wallet_update.matched_count == 0 {
+                let already_settled = wallets
+                    .count_documents(doc! {
+                        "_id": wallet_id,
+                        "owner_id": &row.billing_owner_id,
+                        "settled_usage_row_ids": &row.id,
+                    })
+                    .await?
+                    > 0;
+                if !already_settled {
+                    return Err(AppError::Internal(format!(
+                        "billing wallet settlement guard missing for usage row {}",
+                        row.id
+                    )));
+                }
+            }
+        }
     }
 
-    db.collection::<BillingWallet>(BILLING_WALLET)
+    let update = usage_rows
         .update_one(
-            doc! { "owner_id": &row.billing_owner_id },
+            doc! { "_id": &row.id, "released": false },
             doc! {
-                "$inc": {
-                    "reserved_credits": -reserved_credits,
-                    "pending_lago_debits": actual_credits,
-                },
-                "$set": { "updated_at": bson::DateTime::from_chrono(Utc::now()) },
+                "$set": {
+                    "released": true,
+                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                }
             },
         )
         .await?;
-    Ok(())
+    Ok(update.modified_count > 0)
 }
 
 pub async fn release_unforwarded_rows(
@@ -400,20 +445,9 @@ pub async fn recover_unreleased_finalized(db: &mongodb::Database) -> AppResult<u
         };
         let actual_credits =
             actual_credits_for_row(db, &row, quantity, row.model.as_deref()).await?;
-        apply_settlement_for_row(db, &row, actual_credits).await?;
-        let update = db
-            .collection::<UsageMeterRow>(USAGE_METER)
-            .update_one(
-                doc! { "_id": &row.id, "released": false },
-                doc! {
-                    "$set": {
-                        "released": true,
-                        "updated_at": bson::DateTime::from_chrono(Utc::now()),
-                    }
-                },
-            )
-            .await?;
-        recovered += update.modified_count;
+        if apply_settlement_for_row(db, &row, actual_credits).await? {
+            recovered += 1;
+        }
     }
     Ok(recovered)
 }
@@ -665,6 +699,7 @@ mod tests {
             balance_credits,
             reserved_credits: 0,
             pending_lago_debits: 0,
+            settled_usage_row_ids: Vec::new(),
             has_payment_instrument: false,
             overdraft_cap_credits: 0,
             suspended: false,

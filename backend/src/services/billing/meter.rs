@@ -257,17 +257,6 @@ async fn finalize_layer(
     let actual_credits =
         reservation::actual_credits_for_row(db, &claimed, quantity, model.as_deref()).await?;
     reservation::apply_settlement_for_row(db, &claimed, actual_credits).await?;
-    collection
-        .update_one(
-            doc! { "_id": &claimed.id, "released": false },
-            doc! {
-                "$set": {
-                    "released": true,
-                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
-                }
-            },
-        )
-        .await?;
     Ok(())
 }
 
@@ -468,6 +457,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recovery_after_settle_debit_gap_does_not_debit_wallet_twice() {
+        let Some(db) = connect_test_database("billing_settle_recovery_overlap").await else {
+            return;
+        };
+        create_usage_transaction_index(&db).await;
+        insert_rate(&db, "platform_requests", 5).await;
+        let owner_id = "owner-wallet-recovery";
+        insert_wallet(&db, owner_id, 10, 0).await;
+
+        let ctx = platform_context("billing-wallet-recovery", owner_id);
+        let reservation = BillingReservation {
+            owner_id: owner_id.to_string(),
+            wallet_id: "wallet-owner-wallet-recovery".to_string(),
+            total_reserved_credits: 5,
+            layers: vec![crate::services::billing::reservation::LayerReservation {
+                layer: BillingLayer::Platform,
+                reserved_credits: 5,
+            }],
+        };
+        crate::services::billing::reservation::try_reserve_prepaid(&db, owner_id, 5)
+            .await
+            .expect("reserve")
+            .expect("reserved");
+
+        let metered = open(&db, &ctx, Some(&reservation)).await.expect("open");
+        mark_forwarded(&db, &metered).await.expect("mark forwarded");
+        settle(&db, &metered, PlatformUsage::single_request(1), None, None)
+            .await
+            .expect("settle");
+
+        let settled_row = db
+            .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+            .find_one(doc! { "billing_request_id": "billing-wallet-recovery" })
+            .await
+            .expect("find settled row")
+            .expect("row exists");
+        db.collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": &settled_row.id },
+                doc! {
+                    "$set": {
+                        "released": false,
+                        "updated_at": mongodb::bson::DateTime::from_chrono(Utc::now()),
+                    }
+                },
+            )
+            .await
+            .expect("simulate missing release marker after wallet debit");
+
+        let recovered = crate::services::billing::reservation::recover_unreleased_finalized(&db)
+            .await
+            .expect("recover unreleased");
+        assert_eq!(recovered, 1);
+
+        let wallet = db
+            .collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
+            .find_one(doc! { "owner_id": owner_id })
+            .await
+            .expect("find wallet")
+            .expect("wallet exists");
+        let row = db
+            .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+            .find_one(doc! { "billing_request_id": "billing-wallet-recovery" })
+            .await
+            .expect("find row")
+            .expect("row exists");
+
+        assert_eq!(wallet.reserved_credits, 0);
+        assert_eq!(wallet.pending_lago_debits, 5);
+        assert_eq!(
+            wallet.settled_usage_row_ids,
+            vec![settled_row.id],
+            "the wallet idempotency key must be written once"
+        );
+        assert!(row.released);
+    }
+
+    #[tokio::test]
     async fn fail_releases_only_never_forwarded_wallet_hold() {
         let Some(db) = connect_test_database("billing_fail_releases_hold").await else {
             return;
@@ -557,6 +624,7 @@ mod tests {
                 balance_credits,
                 reserved_credits: 0,
                 pending_lago_debits: 0,
+                settled_usage_row_ids: Vec::new(),
                 has_payment_instrument: false,
                 overdraft_cap_credits,
                 suspended: false,
