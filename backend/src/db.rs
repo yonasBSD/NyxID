@@ -1805,6 +1805,25 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    // ── billing_wallet ──
+    let billing_wallet = db.collection::<Document>(crate::models::billing_wallet::COLLECTION_NAME);
+    billing_wallet
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "owner_id": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    billing_wallet
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "lago_customer_id": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+
     // ── billing_rate_cache ──
     let billing_rate_cache =
         db.collection::<Document>(crate::models::billing_rate_cache::COLLECTION_NAME);

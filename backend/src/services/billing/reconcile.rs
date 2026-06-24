@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 use futures::TryStreamExt;
-use mongodb::bson::{self, Bson, Document, doc};
+use mongodb::bson::{Bson, Document, doc};
 use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
 
 use crate::config::AppConfig;
@@ -11,6 +11,7 @@ use crate::errors::AppResult;
 use crate::models::usage_meter::{COLLECTION_NAME as USAGE_METER, UsageMeterRow};
 
 use super::lago_client::{LagoApi, LagoError, LagoErrorKind, LagoEvent};
+use super::reservation;
 
 const PUSH_GRACE_SECS: i64 = 30;
 const MAX_RECONCILE_PUSH_BATCH: i64 = 100;
@@ -30,6 +31,7 @@ pub struct ReconcileStats {
     pub retried: u64,
     pub dead_lettered: u64,
     pub abandoned: u64,
+    pub recovered_settlements: u64,
     pub drift_alerts: u64,
 }
 
@@ -52,6 +54,10 @@ impl BillingReconciler {
     pub async fn run_once(&self) -> AppResult<ReconcileStats> {
         let mut stats = ReconcileStats::default();
         stats.abandoned += self.abandon_unforwarded_reserved().await?;
+        if !self.config.billing_enabled {
+            return Ok(stats);
+        }
+        stats.recovered_settlements += reservation::recover_unreleased_finalized(&self.db).await?;
 
         let Some(lago) = &self.lago else {
             return Ok(stats);
@@ -66,27 +72,7 @@ impl BillingReconciler {
     async fn abandon_unforwarded_reserved(&self) -> AppResult<u64> {
         let cutoff =
             Utc::now() - Duration::seconds(self.config.billing_reservation_abandon_secs as i64);
-        let now = Utc::now();
-        let result = self
-            .db
-            .collection::<UsageMeterRow>(USAGE_METER)
-            .update_many(
-                doc! {
-                    "status": "reserved",
-                    "forwarded": false,
-                    "updated_at": { "$lt": bson::DateTime::from_chrono(cutoff) },
-                },
-                doc! {
-                    "$set": {
-                        "status": "abandoned",
-                        "released": true,
-                        "updated_at": bson::DateTime::from_chrono(now),
-                        "finalized_at": bson::DateTime::from_chrono(now),
-                    }
-                },
-            )
-            .await?;
-        Ok(result.modified_count)
+        reservation::abandon_stale_unforwarded(&self.db, cutoff).await
     }
 
     async fn push_unacked(&self, lago: &dyn LagoApi, stats: &mut ReconcileStats) -> AppResult<()> {
@@ -668,5 +654,38 @@ mod tests {
         assert_eq!(stats.abandoned, 1);
         assert_eq!(abandoned.status, UsageStatus::Abandoned);
         assert_eq!(still_forwarded.status, UsageStatus::Forwarded);
+    }
+
+    #[tokio::test]
+    async fn reconcile_does_not_push_lago_events_when_billing_disabled() {
+        let Some(db) = connect_test_database("billing_reconcile_dark").await else {
+            return;
+        };
+        let row = finalized_row("tx-dark");
+        let row_id = row.id.clone();
+        db.collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+            .insert_one(&row)
+            .await
+            .expect("insert row");
+        let reconciler = BillingReconciler::new(
+            db.clone(),
+            Some(std::sync::Arc::new(StaticLago {
+                result: Ok(LagoAck {
+                    transaction_id: "tx-dark".to_string(),
+                }),
+            })),
+            std::sync::Arc::new(test_app_config()),
+        );
+
+        let stats = reconciler.run_once().await.expect("run reconcile");
+        let saved = db
+            .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+            .find_one(doc! { "_id": row_id })
+            .await
+            .expect("find row")
+            .expect("row exists");
+
+        assert_eq!(stats.pushed, 0);
+        assert!(!saved.lago_acked);
     }
 }

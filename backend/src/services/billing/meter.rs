@@ -8,6 +8,7 @@ use crate::models::usage_meter::{
     BillingLayer, COLLECTION_NAME as USAGE_METER, UsageMeterRow, UsageStatus,
 };
 
+use super::reservation::{self, BillingReservation};
 use super::route_context::BillingRouteContext;
 
 pub const PLATFORM_REQUESTS_METRIC_CODE: &str = "platform_requests";
@@ -31,6 +32,7 @@ impl MeteredProxyContext {
 pub async fn open(
     db: &mongodb::Database,
     ctx: &BillingRouteContext,
+    reservation: Option<&BillingReservation>,
 ) -> AppResult<MeteredProxyContext> {
     if !ctx.is_metered() {
         return Ok(MeteredProxyContext::disabled());
@@ -43,6 +45,7 @@ pub async fn open(
             BillingLayer::Platform,
             ctx.platform_metric,
             platform_metric_code(ctx.platform_metric).to_string(),
+            reservation,
             None,
         )
         .await?;
@@ -55,6 +58,7 @@ pub async fn open(
             BillingLayer::Resale,
             resale.metric,
             resale.lago_metric_code.clone(),
+            reservation,
             None,
         )
         .await?;
@@ -138,23 +142,13 @@ pub async fn fail(
         return Ok(());
     };
 
-    db.collection::<UsageMeterRow>(USAGE_METER)
-        .update_many(
-            doc! {
-                "billing_request_id": &ctx.billing_request_id,
-                "forwarded": false,
-                "status": "reserved",
-            },
-            doc! {
-                "$set": {
-                    "status": "failed",
-                    "last_error": reason,
-                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
-                    "finalized_at": bson::DateTime::from_chrono(Utc::now()),
-                }
-            },
-        )
-        .await?;
+    reservation::release_unforwarded_rows(
+        db,
+        &ctx.billing_request_id,
+        UsageStatus::Failed,
+        Some(reason),
+    )
+    .await?;
     Ok(())
 }
 
@@ -164,10 +158,15 @@ async fn insert_reserved_row(
     layer: BillingLayer,
     metric: BillingMetric,
     lago_metric_code: String,
+    reservation: Option<&BillingReservation>,
     flush_seq: Option<i64>,
 ) -> AppResult<()> {
     let now = Utc::now();
     let transaction_id = transaction_id(&ctx.billing_request_id, layer, flush_seq);
+    let wallet_id = reservation.map(|reservation| reservation.wallet_id.clone());
+    let reserved_credits = reservation
+        .map(|reservation| reservation.reserved_for(layer))
+        .unwrap_or(0);
     let row = UsageMeterRow {
         id: Uuid::new_v4().to_string(),
         transaction_id,
@@ -175,7 +174,7 @@ async fn insert_reserved_row(
         layer,
         flush_seq,
         billing_owner_id: ctx.billing_owner_id.clone(),
-        wallet_id: None,
+        wallet_id,
         actor_user_id: ctx.actor_user_id.clone(),
         api_key_id: ctx.api_key_id.clone(),
         service_id: ctx
@@ -187,7 +186,7 @@ async fn insert_reserved_row(
         lago_metric_code,
         credential_class: ctx.credential_class,
         model: None,
-        reserved_credits: 0,
+        reserved_credits,
         quantity: None,
         status: UsageStatus::Reserved,
         forwarded: false,
@@ -223,8 +222,10 @@ async fn finalize_layer(
     model: Option<String>,
 ) -> AppResult<()> {
     let now = Utc::now();
-    db.collection::<UsageMeterRow>(USAGE_METER)
-        .update_one(
+    let model_for_row = model.clone();
+    let collection = db.collection::<UsageMeterRow>(USAGE_METER);
+    let claimed = collection
+        .find_one_and_update(
             doc! {
                 "billing_request_id": &ctx.billing_request_id,
                 "layer": layer.as_transaction_suffix(),
@@ -235,10 +236,34 @@ async fn finalize_layer(
                     "status": "finalized",
                     "forwarded": true,
                     "quantity": quantity,
-                    "released": true,
-                    "model": model,
+                    "released": false,
+                    "model": model_for_row,
                     "updated_at": bson::DateTime::from_chrono(now),
                     "finalized_at": bson::DateTime::from_chrono(now),
+                }
+            },
+        )
+        .with_options(
+            mongodb::options::FindOneAndUpdateOptions::builder()
+                .return_document(mongodb::options::ReturnDocument::After)
+                .build(),
+        )
+        .await?;
+
+    let Some(claimed) = claimed else {
+        return Ok(());
+    };
+
+    let actual_credits =
+        reservation::actual_credits_for_row(db, &claimed, quantity, model.as_deref()).await?;
+    reservation::apply_settlement_for_row(db, &claimed, actual_credits).await?;
+    collection
+        .update_one(
+            doc! { "_id": &claimed.id, "released": false },
+            doc! {
+                "$set": {
+                    "released": true,
+                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
                 }
             },
         )
@@ -246,7 +271,11 @@ async fn finalize_layer(
     Ok(())
 }
 
-fn transaction_id(billing_request_id: &str, layer: BillingLayer, flush_seq: Option<i64>) -> String {
+pub(crate) fn transaction_id(
+    billing_request_id: &str,
+    layer: BillingLayer,
+    flush_seq: Option<i64>,
+) -> String {
     match flush_seq {
         Some(seq) => format!(
             "{}:{}:{}",
@@ -258,7 +287,7 @@ fn transaction_id(billing_request_id: &str, layer: BillingLayer, flush_seq: Opti
     }
 }
 
-fn platform_metric_code(metric: BillingMetric) -> &'static str {
+pub(crate) fn platform_metric_code(metric: BillingMetric) -> &'static str {
     match metric {
         BillingMetric::Requests | BillingMetric::Tokens => PLATFORM_REQUESTS_METRIC_CODE,
         BillingMetric::Bytes => PLATFORM_BYTES_METRIC_CODE,
@@ -274,13 +303,18 @@ fn platform_quantity(metric: BillingMetric, usage: &PlatformUsage) -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
     use futures::TryStreamExt;
     use mongodb::bson::doc;
     use mongodb::options::IndexOptions;
+    use uuid::Uuid;
 
+    use crate::models::billing_rate_cache::BillingRateCache;
+    use crate::models::billing_wallet::{BillingWallet, CollectionState, PlanKind};
     use crate::models::service_billing::{BillingMetric, PlatformUsage, ServiceBilling};
     use crate::models::usage_meter::{BillingLayer, CredentialClass, UsageMeterRow, UsageStatus};
     use crate::services::billing::meter::{mark_forwarded, open, settle};
+    use crate::services::billing::reservation::BillingReservation;
     use crate::services::billing::route_context::{BillingRouteContext, NodeIntent};
     use crate::test_utils::connect_test_database;
 
@@ -320,8 +354,8 @@ mod tests {
             true,
         );
 
-        let metered = open(&db, &ctx).await.expect("open meter");
-        open(&db, &ctx).await.expect("idempotent open");
+        let metered = open(&db, &ctx, None).await.expect("open meter");
+        open(&db, &ctx, None).await.expect("idempotent open");
         mark_forwarded(&db, &metered).await.expect("mark forwarded");
         settle(
             &db,
@@ -377,6 +411,180 @@ mod tests {
             super::transaction_id("req", BillingLayer::Platform, Some(7)),
             "req:platform:7"
         );
+    }
+
+    #[tokio::test]
+    async fn settle_moves_wallet_once_and_blocks_double_spend_before_lago_sync() {
+        let Some(db) = connect_test_database("billing_settle_wallet_once").await else {
+            return;
+        };
+        create_usage_transaction_index(&db).await;
+        insert_rate(&db, "platform_requests", 5).await;
+        let owner_id = "owner-wallet-settle";
+        insert_wallet(&db, owner_id, 10, 5).await;
+
+        let ctx = platform_context("billing-wallet-1", owner_id);
+        let reservation = BillingReservation {
+            owner_id: owner_id.to_string(),
+            wallet_id: "wallet-owner-wallet-settle".to_string(),
+            total_reserved_credits: 5,
+            layers: vec![crate::services::billing::reservation::LayerReservation {
+                layer: BillingLayer::Platform,
+                reserved_credits: 5,
+            }],
+        };
+        crate::services::billing::reservation::try_reserve_prepaid(&db, owner_id, 5)
+            .await
+            .expect("reserve")
+            .expect("reserved");
+
+        let metered = open(&db, &ctx, Some(&reservation)).await.expect("open");
+        mark_forwarded(&db, &metered).await.expect("mark forwarded");
+        settle(&db, &metered, PlatformUsage::single_request(1), None, None)
+            .await
+            .expect("settle first time");
+        settle(&db, &metered, PlatformUsage::single_request(1), None, None)
+            .await
+            .expect("settle replay");
+
+        let wallet = db
+            .collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
+            .find_one(doc! { "owner_id": owner_id })
+            .await
+            .expect("find wallet")
+            .expect("wallet exists");
+        assert_eq!(wallet.reserved_credits, 0);
+        assert_eq!(wallet.pending_lago_debits, 5);
+        assert_eq!(wallet.available_credits(), 5);
+
+        let second_reservation =
+            crate::services::billing::reservation::try_reserve_prepaid(&db, owner_id, 6)
+                .await
+                .expect("second reserve query");
+        assert!(
+            second_reservation.is_none(),
+            "pending_lago_debits must reduce availability before Lago sync"
+        );
+    }
+
+    #[tokio::test]
+    async fn fail_releases_only_never_forwarded_wallet_hold() {
+        let Some(db) = connect_test_database("billing_fail_releases_hold").await else {
+            return;
+        };
+        create_usage_transaction_index(&db).await;
+        let owner_id = "owner-fail-release";
+        insert_wallet(&db, owner_id, 10, 0).await;
+
+        let ctx = platform_context("billing-wallet-fail", owner_id);
+        let reservation = BillingReservation {
+            owner_id: owner_id.to_string(),
+            wallet_id: "wallet-owner-fail-release".to_string(),
+            total_reserved_credits: 4,
+            layers: vec![crate::services::billing::reservation::LayerReservation {
+                layer: BillingLayer::Platform,
+                reserved_credits: 4,
+            }],
+        };
+        crate::services::billing::reservation::try_reserve_prepaid(&db, owner_id, 4)
+            .await
+            .expect("reserve")
+            .expect("reserved");
+
+        let metered = open(&db, &ctx, Some(&reservation)).await.expect("open");
+        super::fail(&db, &metered, "before send")
+            .await
+            .expect("fail");
+
+        let wallet = db
+            .collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
+            .find_one(doc! { "owner_id": owner_id })
+            .await
+            .expect("find wallet")
+            .expect("wallet exists");
+        let row = db
+            .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+            .find_one(doc! { "billing_request_id": "billing-wallet-fail" })
+            .await
+            .expect("find row")
+            .expect("row exists");
+
+        assert_eq!(wallet.reserved_credits, 0);
+        assert_eq!(wallet.pending_lago_debits, 0);
+        assert_eq!(row.status, UsageStatus::Failed);
+        assert!(row.released);
+    }
+
+    async fn create_usage_transaction_index(db: &mongodb::Database) {
+        db.collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+            .create_index(
+                mongodb::IndexModel::builder()
+                    .keys(doc! { "transaction_id": 1 })
+                    .options(IndexOptions::builder().unique(true).build())
+                    .build(),
+            )
+            .await
+            .expect("create transaction id index");
+    }
+
+    async fn insert_rate(db: &mongodb::Database, metric_code: &str, credits: i64) {
+        db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
+            .insert_one(BillingRateCache {
+                id: BillingRateCache::cache_id(metric_code, None),
+                lago_metric_code: metric_code.to_string(),
+                model: None,
+                credits_per_unit_micros: credits * 1_000_000,
+                synced_at: Utc::now(),
+            })
+            .await
+            .expect("insert rate");
+    }
+
+    async fn insert_wallet(
+        db: &mongodb::Database,
+        owner_id: &str,
+        balance_credits: i64,
+        overdraft_cap_credits: i64,
+    ) {
+        let now = Utc::now();
+        db.collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
+            .insert_one(BillingWallet {
+                id: format!("wallet-{owner_id}"),
+                owner_id: owner_id.to_string(),
+                lago_customer_id: owner_id.to_string(),
+                lago_subscription_id: Some(format!("{owner_id}:plan")),
+                plan_kind: PlanKind::Prepaid,
+                balance_credits,
+                reserved_credits: 0,
+                pending_lago_debits: 0,
+                has_payment_instrument: false,
+                overdraft_cap_credits,
+                suspended: false,
+                collection_state: CollectionState::Good,
+                balance_synced_at: now,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .expect("insert wallet");
+    }
+
+    fn platform_context(request_id: &str, owner_id: &str) -> BillingRouteContext {
+        BillingRouteContext::new(
+            request_id.to_string(),
+            owner_id.to_string(),
+            "actor-1".to_string(),
+            Some(Uuid::new_v4().to_string()),
+            Some("user-service-1".to_string()),
+            Some("catalog-1".to_string()),
+            Some("service-one".to_string()),
+            NodeIntent::Direct,
+            "bearer".to_string(),
+            CredentialClass::UserOwned,
+            BillingMetric::Requests,
+            None::<&ServiceBilling>,
+            true,
+        )
     }
 }
 

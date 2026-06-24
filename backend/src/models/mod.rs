@@ -7,6 +7,7 @@ pub mod audit_log;
 pub mod auth_device_code;
 pub mod authorization_code;
 pub mod billing_rate_cache;
+pub mod billing_wallet;
 pub mod bson_bytes;
 pub mod bson_datetime;
 pub mod channel_bot;
