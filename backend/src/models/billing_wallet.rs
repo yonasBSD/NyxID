@@ -36,8 +36,6 @@ pub struct BillingWallet {
     #[serde(default)]
     pub pending_lago_debits: i64,
     #[serde(default)]
-    pub settled_usage_row_ids: Vec<String>,
-    #[serde(default)]
     pub has_payment_instrument: bool,
     #[serde(default)]
     pub overdraft_cap_credits: i64,
@@ -89,7 +87,6 @@ mod tests {
             balance_credits: 100,
             reserved_credits: 30,
             pending_lago_debits: 25,
-            settled_usage_row_ids: Vec::new(),
             has_payment_instrument: false,
             overdraft_cap_credits: 0,
             suspended: false,

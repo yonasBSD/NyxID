@@ -173,7 +173,6 @@ mod tests {
                 balance_credits: 100,
                 reserved_credits: 0,
                 pending_lago_debits: 0,
-                settled_usage_row_ids: Vec::new(),
                 has_payment_instrument: false,
                 overdraft_cap_credits: 0,
                 suspended: false,

@@ -505,6 +505,24 @@ mod tests {
             )
             .await
             .expect("simulate missing release marker after wallet debit");
+        db.collection::<mongodb::bson::Document>(crate::models::billing_wallet::COLLECTION_NAME)
+            .update_one(
+                doc! { "owner_id": owner_id },
+                doc! {
+                    "$set": {
+                        "active_settlement": {
+                            "row_id": &settled_row.id,
+                            "reserved_credits": 5_i64,
+                            "actual_credits": 5_i64,
+                            "applied": true,
+                            "updated_at": mongodb::bson::DateTime::from_chrono(Utc::now()),
+                        },
+                        "updated_at": mongodb::bson::DateTime::from_chrono(Utc::now()),
+                    }
+                },
+            )
+            .await
+            .expect("simulate applied bounded settlement lock");
 
         let recovered = crate::services::billing::reservation::recover_unreleased_finalized(&db)
             .await
@@ -517,6 +535,12 @@ mod tests {
             .await
             .expect("find wallet")
             .expect("wallet exists");
+        let wallet_doc = db
+            .collection::<mongodb::bson::Document>(crate::models::billing_wallet::COLLECTION_NAME)
+            .find_one(doc! { "owner_id": owner_id })
+            .await
+            .expect("find wallet document")
+            .expect("wallet document exists");
         let row = db
             .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
             .find_one(doc! { "billing_request_id": "billing-wallet-recovery" })
@@ -526,11 +550,8 @@ mod tests {
 
         assert_eq!(wallet.reserved_credits, 0);
         assert_eq!(wallet.pending_lago_debits, 5);
-        assert_eq!(
-            wallet.settled_usage_row_ids,
-            vec![settled_row.id],
-            "the wallet idempotency key must be written once"
-        );
+        assert!(!wallet_doc.contains_key("active_settlement"));
+        assert!(!wallet_doc.contains_key("settled_usage_row_ids"));
         assert!(row.released);
     }
 
@@ -624,7 +645,6 @@ mod tests {
                 balance_credits,
                 reserved_credits: 0,
                 pending_lago_debits: 0,
-                settled_usage_row_ids: Vec::new(),
                 has_payment_instrument: false,
                 overdraft_cap_credits,
                 suspended: false,

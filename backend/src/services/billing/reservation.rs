@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use chrono::Utc;
 use futures::TryStreamExt;
-use mongodb::bson::{self, doc};
+use mongodb::bson::{self, Bson, Document, doc};
 use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
 
 use crate::errors::{AppError, AppResult};
@@ -18,6 +18,7 @@ use super::route_context::BillingRouteContext;
 
 const CREDIT_MICROS: i64 = 1_000_000;
 const RECOVERY_BATCH_SIZE: i64 = 100;
+const SETTLEMENT_LOCK_RETRIES: usize = 4;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LayerReservation {
@@ -305,58 +306,50 @@ pub async fn apply_settlement_for_row(
     actual_credits: i64,
 ) -> AppResult<bool> {
     let usage_rows = db.collection::<UsageMeterRow>(USAGE_METER);
-    if row.released
-        || usage_rows
-            .count_documents(doc! { "_id": &row.id, "released": false })
-            .await?
-            == 0
-    {
+    if row.released {
+        if let Some(wallet_id) = row.wallet_id.as_deref() {
+            clear_wallet_settlement_lock_any_state(db, wallet_id, &row.billing_owner_id, &row.id)
+                .await?;
+        }
         return Ok(false);
     }
 
-    if row.wallet_id.is_some() {
-        let reserved_credits = row.reserved_credits.max(0);
-        let actual_credits = actual_credits.max(0);
-        if reserved_credits > 0 || actual_credits > 0 {
-            let wallet_id = row.wallet_id.as_deref().unwrap_or_default();
-            let mut wallet_filter = doc! {
-                "_id": wallet_id,
-                "owner_id": &row.billing_owner_id,
-            };
-            wallet_filter.insert("settled_usage_row_ids", doc! { "$ne": &row.id });
+    if usage_rows
+        .count_documents(doc! { "_id": &row.id, "released": false })
+        .await?
+        == 0
+    {
+        if let Some(wallet_id) = row.wallet_id.as_deref() {
+            clear_wallet_settlement_lock_any_state(db, wallet_id, &row.billing_owner_id, &row.id)
+                .await?;
+        }
+        return Ok(false);
+    }
 
-            let wallets = db.collection::<BillingWallet>(BILLING_WALLET);
-            // MongoDB transactions are not assumed available in local deployments, so
-            // the wallet document carries the durable idempotency key for this debit.
-            let wallet_update = wallets
-                .update_one(
-                    wallet_filter,
-                    doc! {
-                        "$inc": {
-                            "reserved_credits": -reserved_credits,
-                            "pending_lago_debits": actual_credits,
-                        },
-                        "$addToSet": { "settled_usage_row_ids": &row.id },
-                        "$set": { "updated_at": bson::DateTime::from_chrono(Utc::now()) },
-                    },
+    if let Some(wallet_id) = row.wallet_id.as_deref() {
+        let lock = WalletSettlementLock {
+            row_id: row.id.clone(),
+            reserved_credits: row.reserved_credits.max(0),
+            actual_credits: actual_credits.max(0),
+            applied: false,
+        };
+        if lock.reserved_credits > 0 || lock.actual_credits > 0 {
+            ensure_wallet_settlement_lock(db, wallet_id, &row.billing_owner_id, &lock).await?;
+            if usage_rows
+                .count_documents(doc! { "_id": &row.id, "released": false })
+                .await?
+                == 0
+            {
+                clear_wallet_settlement_lock_any_state(
+                    db,
+                    wallet_id,
+                    &row.billing_owner_id,
+                    &row.id,
                 )
                 .await?;
-            if wallet_update.matched_count == 0 {
-                let already_settled = wallets
-                    .count_documents(doc! {
-                        "_id": wallet_id,
-                        "owner_id": &row.billing_owner_id,
-                        "settled_usage_row_ids": &row.id,
-                    })
-                    .await?
-                    > 0;
-                if !already_settled {
-                    return Err(AppError::Internal(format!(
-                        "billing wallet settlement guard missing for usage row {}",
-                        row.id
-                    )));
-                }
+                return Ok(false);
             }
+            apply_wallet_settlement_lock(db, wallet_id, &row.billing_owner_id, &lock).await?;
         }
     }
 
@@ -371,7 +364,266 @@ pub async fn apply_settlement_for_row(
             },
         )
         .await?;
+    if let Some(wallet_id) = row.wallet_id.as_deref() {
+        clear_wallet_settlement_lock(db, wallet_id, &row.billing_owner_id, &row.id).await?;
+    }
     Ok(update.modified_count > 0)
+}
+
+// Bounded crash bridge for one in-flight wallet settlement. Settled history
+// remains on the usage row's `released` transition, not in the wallet document.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WalletSettlementLock {
+    row_id: String,
+    reserved_credits: i64,
+    actual_credits: i64,
+    applied: bool,
+}
+
+impl WalletSettlementLock {
+    fn document(&self, applied: bool) -> Document {
+        doc! {
+            "row_id": &self.row_id,
+            "reserved_credits": self.reserved_credits,
+            "actual_credits": self.actual_credits,
+            "applied": applied,
+            "updated_at": bson::DateTime::from_chrono(Utc::now()),
+        }
+    }
+}
+
+async fn ensure_wallet_settlement_lock(
+    db: &mongodb::Database,
+    wallet_id: &str,
+    owner_id: &str,
+    lock: &WalletSettlementLock,
+) -> AppResult<()> {
+    let wallets = db.collection::<Document>(BILLING_WALLET);
+    for _ in 0..SETTLEMENT_LOCK_RETRIES {
+        let update = wallets
+            .update_one(
+                doc! {
+                    "_id": wallet_id,
+                    "owner_id": owner_id,
+                    "$or": [
+                        { "active_settlement": { "$exists": false } },
+                        { "active_settlement": null },
+                    ],
+                },
+                doc! {
+                    "$set": {
+                        "active_settlement": lock.document(false),
+                        "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                    },
+                },
+            )
+            .await?;
+        if update.matched_count == 1 {
+            return Ok(());
+        }
+
+        let Some(active) = load_wallet_settlement_lock(db, wallet_id, owner_id).await? else {
+            continue;
+        };
+        if active.row_id == lock.row_id {
+            return Ok(());
+        }
+        complete_wallet_settlement_lock(db, wallet_id, owner_id, &active).await?;
+    }
+
+    Err(AppError::Internal(format!(
+        "billing wallet settlement lock busy for wallet {wallet_id}"
+    )))
+}
+
+async fn complete_wallet_settlement_lock(
+    db: &mongodb::Database,
+    wallet_id: &str,
+    owner_id: &str,
+    lock: &WalletSettlementLock,
+) -> AppResult<()> {
+    apply_wallet_settlement_lock(db, wallet_id, owner_id, lock).await?;
+    let update = db
+        .collection::<UsageMeterRow>(USAGE_METER)
+        .update_one(
+            doc! { "_id": &lock.row_id, "status": "finalized", "released": false },
+            doc! {
+                "$set": {
+                    "released": true,
+                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                }
+            },
+        )
+        .await?;
+
+    if update.matched_count == 0 {
+        let released = db
+            .collection::<UsageMeterRow>(USAGE_METER)
+            .count_documents(doc! { "_id": &lock.row_id, "released": true })
+            .await?
+            > 0;
+        if !released {
+            return Err(AppError::Internal(format!(
+                "billing wallet settlement lock references unfinished usage row {}",
+                lock.row_id
+            )));
+        }
+    }
+
+    clear_wallet_settlement_lock(db, wallet_id, owner_id, &lock.row_id).await
+}
+
+async fn apply_wallet_settlement_lock(
+    db: &mongodb::Database,
+    wallet_id: &str,
+    owner_id: &str,
+    lock: &WalletSettlementLock,
+) -> AppResult<()> {
+    if lock.applied {
+        return Ok(());
+    }
+
+    let wallets = db.collection::<Document>(BILLING_WALLET);
+    let update = wallets
+        .update_one(
+            doc! {
+                "_id": wallet_id,
+                "owner_id": owner_id,
+                "active_settlement.row_id": &lock.row_id,
+                "active_settlement.applied": false,
+            },
+            doc! {
+                "$inc": {
+                    "reserved_credits": -lock.reserved_credits,
+                    "pending_lago_debits": lock.actual_credits,
+                },
+                "$set": {
+                    "active_settlement.applied": true,
+                    "active_settlement.updated_at": bson::DateTime::from_chrono(Utc::now()),
+                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                },
+            },
+        )
+        .await?;
+    if update.matched_count == 1 {
+        return Ok(());
+    }
+
+    let already_applied = load_wallet_settlement_lock(db, wallet_id, owner_id)
+        .await?
+        .is_some_and(|active| active.row_id == lock.row_id && active.applied);
+    if already_applied {
+        return Ok(());
+    }
+
+    let already_released = db
+        .collection::<UsageMeterRow>(USAGE_METER)
+        .count_documents(doc! { "_id": &lock.row_id, "released": true })
+        .await?
+        > 0;
+    if already_released {
+        return Ok(());
+    }
+
+    Err(AppError::Internal(format!(
+        "billing wallet settlement lock missing for usage row {}",
+        lock.row_id
+    )))
+}
+
+async fn clear_wallet_settlement_lock(
+    db: &mongodb::Database,
+    wallet_id: &str,
+    owner_id: &str,
+    row_id: &str,
+) -> AppResult<()> {
+    db.collection::<Document>(BILLING_WALLET)
+        .update_one(
+            doc! {
+                "_id": wallet_id,
+                "owner_id": owner_id,
+                "active_settlement.row_id": row_id,
+                "active_settlement.applied": true,
+            },
+            doc! {
+                "$unset": { "active_settlement": "" },
+                "$set": { "updated_at": bson::DateTime::from_chrono(Utc::now()) },
+            },
+        )
+        .await?;
+    Ok(())
+}
+
+async fn clear_wallet_settlement_lock_any_state(
+    db: &mongodb::Database,
+    wallet_id: &str,
+    owner_id: &str,
+    row_id: &str,
+) -> AppResult<()> {
+    db.collection::<Document>(BILLING_WALLET)
+        .update_one(
+            doc! {
+                "_id": wallet_id,
+                "owner_id": owner_id,
+                "active_settlement.row_id": row_id,
+            },
+            doc! {
+                "$unset": { "active_settlement": "" },
+                "$set": { "updated_at": bson::DateTime::from_chrono(Utc::now()) },
+            },
+        )
+        .await?;
+    Ok(())
+}
+
+async fn load_wallet_settlement_lock(
+    db: &mongodb::Database,
+    wallet_id: &str,
+    owner_id: &str,
+) -> AppResult<Option<WalletSettlementLock>> {
+    let wallet = db
+        .collection::<Document>(BILLING_WALLET)
+        .find_one(doc! { "_id": wallet_id, "owner_id": owner_id })
+        .await?
+        .ok_or_else(|| {
+            AppError::Internal(format!(
+                "billing wallet {wallet_id} missing for owner {owner_id}"
+            ))
+        })?;
+    parse_wallet_settlement_lock(&wallet)
+}
+
+fn parse_wallet_settlement_lock(wallet: &Document) -> AppResult<Option<WalletSettlementLock>> {
+    let Some(value) = wallet.get("active_settlement") else {
+        return Ok(None);
+    };
+    if matches!(value, Bson::Null) {
+        return Ok(None);
+    }
+    let lock = value.as_document().ok_or_else(|| {
+        AppError::Internal("billing wallet settlement lock is malformed".to_string())
+    })?;
+    let row_id = lock
+        .get_str("row_id")
+        .map_err(|_| {
+            AppError::Internal("billing wallet settlement lock has no row_id".to_string())
+        })?
+        .to_string();
+    Ok(Some(WalletSettlementLock {
+        row_id,
+        reserved_credits: document_i64(lock, "reserved_credits").unwrap_or(0).max(0),
+        actual_credits: document_i64(lock, "actual_credits").unwrap_or(0).max(0),
+        applied: lock.get_bool("applied").unwrap_or(false),
+    }))
+}
+
+fn document_i64(document: &Document, key: &str) -> Option<i64> {
+    match document.get(key) {
+        Some(Bson::Int32(value)) => Some(i64::from(*value)),
+        Some(Bson::Int64(value)) => Some(*value),
+        Some(Bson::Double(value)) if value.is_finite() => Some(*value as i64),
+        _ => None,
+    }
 }
 
 pub async fn release_unforwarded_rows(
@@ -699,7 +951,6 @@ mod tests {
             balance_credits,
             reserved_credits: 0,
             pending_lago_debits: 0,
-            settled_usage_row_ids: Vec::new(),
             has_payment_instrument: false,
             overdraft_cap_credits: 0,
             suspended: false,
