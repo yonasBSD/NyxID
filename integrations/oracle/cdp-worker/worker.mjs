@@ -556,6 +556,70 @@ async function selectModel(page, modelLabel) {
   }
 }
 
+// NOTE: keep this table in sync with `fileMime` in
+// integrations/oracle/nyxid_oracle.user.js (same allowlist, separate runtime —
+// the userscript can't import and the worker ships as one self-contained file).
+function fileMime(name) {
+  const ext = (name.split(".").pop() || "").toLowerCase();
+  return (
+    {
+      pdf: "application/pdf",
+      png: "image/png",
+      jpg: "image/jpeg",
+      jpeg: "image/jpeg",
+      webp: "image/webp",
+      gif: "image/gif",
+      bmp: "image/bmp",
+      svg: "image/svg+xml",
+      txt: "text/plain",
+      csv: "text/csv",
+      md: "text/markdown",
+      json: "application/json",
+    }[ext] || "application/octet-stream"
+  );
+}
+
+// Attach a general input file (image / pdf / text / ...) to the composer on the
+// first turn so the model can answer questions about it. Mime is derived from
+// the filename extension. Parallels uploadPdf; same file-input + attachment-chip
+// detection. (uploadPdf is kept for the legacy pdf_base64 field.)
+async function uploadAttachment(page, task_id, task) {
+  if (!task.attachment_base64) return false;
+  const buffer = Buffer.from(task.attachment_base64, "base64");
+  const name = task.attachment_name || "attachment.bin";
+  const mime = fileMime(name);
+  log(`uploading attachment ${name} (${(buffer.length / 1024).toFixed(0)} KB, ${mime})`);
+  let fileInput = page.locator("input[type='file']").first();
+  if ((await fileInput.count()) === 0) {
+    const attach = page.locator("button[aria-label='Attach files'], button[aria-label='Upload file'], button[data-testid='composer-attach-button'], button[aria-haspopup='menu']").first();
+    if (await attach.count()) { await attach.click().catch(() => {}); await sleep(800); }
+    fileInput = page.locator("input[type='file']").first();
+  }
+  try {
+    await fileInput.setInputFiles({ name, mimeType: mime, buffer }, { timeout: 30000 });
+  } catch (e) { log(`attachment setInputFiles failed: ${e.message}`); return false; }
+  const start = Date.now();
+  let lastHeartbeat = start;
+  while (Date.now() - start < 120000) {
+    await sleep(1500);
+    if (Date.now() - lastHeartbeat >= HEARTBEAT_MS) {
+      lastHeartbeat = Date.now();
+      if (await ack(task_id, "uploading_attachment")) throw new Error("cancelled by server");
+    }
+    const { attached, uploading } = await page.evaluate((fname) => {
+      const txt = document.body.innerText || "";
+      return {
+        attached: txt.includes(fname)
+          || !!document.querySelector("[data-testid*='file'],[class*='file-chip'],[class*='attachment']"),
+        uploading: !!document.querySelector("[role='progressbar'],[class*='uploading']"),
+      };
+    }, name);
+    if (attached && !uploading) { log(`attachment attached (${Math.round((Date.now() - start) / 1000)}s)`); return true; }
+  }
+  log("attachment upload wait timed out — sending anyway");
+  return false;
+}
+
 async function uploadPdf(page, task_id, task) {
   if (!task.pdf_base64) return false;
   const buffer = Buffer.from(task.pdf_base64, "base64");
@@ -644,6 +708,11 @@ async function handlePrompt(page, task) {
   if (!task.is_followup && task.pdf_base64) {
     await ack(task_id, "uploading_pdf");
     await uploadPdf(page, task_id, task);
+  }
+  // Same first-turn-only guard for a general attachment (image / pdf / ...).
+  if (!task.is_followup && task.attachment_base64) {
+    await ack(task_id, "uploading_attachment");
+    await uploadAttachment(page, task_id, task);
   }
 
   const beforeCount = await page.evaluate(() => window.__nyx.assistantCount());

@@ -484,12 +484,40 @@
     return false;
   }
 
-  async function uploadPDF(base64Data, fileName) {
-    log(`PDF upload: ${fileName} (${(base64Data.length * 0.75 / 1024).toFixed(0)} KB)`);
+  // NOTE: keep this table in sync with `fileMime` in
+  // integrations/oracle/cdp-worker/worker.mjs (same allowlist, separate runtime
+  // — the userscript can't import and the worker ships as one self-contained file).
+  function fileMime(name) {
+    const ext = (name.split(".").pop() || "").toLowerCase();
+    return (
+      {
+        pdf: "application/pdf",
+        png: "image/png",
+        jpg: "image/jpeg",
+        jpeg: "image/jpeg",
+        webp: "image/webp",
+        gif: "image/gif",
+        bmp: "image/bmp",
+        svg: "image/svg+xml",
+        txt: "text/plain",
+        csv: "text/csv",
+        md: "text/markdown",
+        json: "application/json",
+      }[ext] || "application/octet-stream"
+    );
+  }
+
+  // Upload any file (image / pdf / ...) to the composer. Mime is derived from the
+  // filename unless `mimeOverride` is given — the legacy pdf path passes
+  // "application/pdf" so a `pdf_name` without a `.pdf` extension still uploads as
+  // a PDF (preserving the pre-refactor behavior).
+  async function uploadFile(base64Data, fileName, mimeOverride) {
+    const mime = mimeOverride || fileMime(fileName);
+    log(`file upload: ${fileName} (${(base64Data.length * 0.75 / 1024).toFixed(0)} KB, ${mime})`);
     const byteChars = atob(base64Data);
     const byteArray = new Uint8Array(byteChars.length);
     for (let i = 0; i < byteChars.length; i++) byteArray[i] = byteChars.charCodeAt(i);
-    const file = new File([byteArray], fileName, { type: "application/pdf" });
+    const file = new File([byteArray], fileName, { type: mime });
 
     let injected = false;
 
@@ -1697,7 +1725,7 @@
   }
 
   async function processTask(task) {
-    const { task_id, prompt, conversation_url, is_followup, conversation_id, re_extract, pdf_base64, pdf_name, tag } = task;
+    const { task_id, prompt, conversation_url, is_followup, conversation_id, re_extract, pdf_base64, pdf_name, attachment_base64, attachment_name, tag } = task;
     const noOutputIdleTimeout = (tag === "bedc-deep-board-refill")
       ? REFILL_NO_OUTPUT_IDLE_TIMEOUT
       : NO_OUTPUT_IDLE_TIMEOUT;
@@ -1931,10 +1959,19 @@
       // memory, so re-uploading is wasted work.
       if (!is_followup && pdf_base64) {
         try {
-          const ok = await uploadPDF(pdf_base64, pdf_name || "main.pdf");
+          const ok = await uploadFile(pdf_base64, pdf_name || "main.pdf", "application/pdf");
           if (!ok) log("PDF upload failed — proceeding without PDF context");
         } catch (e) {
           log(`PDF upload exception: ${e.message} — proceeding without PDF`);
+        }
+      }
+      // General attachment (image / pdf / ...), first turn only.
+      if (!is_followup && attachment_base64) {
+        try {
+          const ok = await uploadFile(attachment_base64, attachment_name || "attachment.bin");
+          if (!ok) log("attachment upload failed — proceeding without it");
+        } catch (e) {
+          log(`attachment upload exception: ${e.message} — proceeding without it`);
         }
       }
 
@@ -2148,6 +2185,8 @@
       tag: resp.tag || "",
       pdf_base64: resp.pdf_base64 || "",
       pdf_name: resp.pdf_name || "",
+      attachment_base64: resp.attachment_base64 || "",
+      attachment_name: resp.attachment_name || "",
       // NyxID ADD: "scrape" tasks attach an existing conversation by URL —
       // navigate there, extract the whole transcript, post it back. Default
       // "prompt" preserves the normal inject-and-answer flow.

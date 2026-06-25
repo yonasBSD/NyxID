@@ -106,6 +106,15 @@ pub struct OracleTask {
     pub pdf_base64: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pdf_name: Option<String>,
+    /// Optional input file attachment (image / PDF / ..., base64), uploaded by
+    /// the worker on the first turn so the model can answer questions about it.
+    /// Mime is derived from `attachment_name`'s extension by the worker.
+    /// Size-capped at submit. Separate from the legacy `pdf_base64` field, which
+    /// is kept for backward compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_base64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_name: Option<String>,
     /// Multi-turn session this task belongs to (None = single-shot).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
@@ -189,6 +198,8 @@ mod tests {
             tag: Some("bedc-deep".to_string()),
             pdf_base64: None,
             pdf_name: None,
+            attachment_base64: None,
+            attachment_name: None,
             conversation_id: None,
             is_followup: false,
             required_worker_label: None,

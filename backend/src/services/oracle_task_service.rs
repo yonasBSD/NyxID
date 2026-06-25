@@ -76,6 +76,8 @@ pub struct SubmitTaskInput {
     pub conversation_id: Option<String>,
     pub pdf_base64: Option<String>,
     pub pdf_name: Option<String>,
+    pub attachment_base64: Option<String>,
+    pub attachment_name: Option<String>,
     pub client_ref: Option<String>,
 }
 
@@ -131,6 +133,31 @@ fn validate_submit_input(input: &SubmitTaskInput) -> AppResult<()> {
     {
         return Err(AppError::ValidationError(format!(
             "pdf_name exceeds {MAX_PDF_NAME_LEN} chars"
+        )));
+    }
+    if let Some(attachment) = &input.attachment_base64 {
+        if attachment.len() > MAX_PDF_BASE64_BYTES {
+            return Err(AppError::OraclePayloadTooLarge(format!(
+                "attachment_base64 exceeds {MAX_PDF_BASE64_BYTES} bytes"
+            )));
+        }
+        if input
+            .attachment_name
+            .as_deref()
+            .is_none_or(|n| n.trim().is_empty())
+        {
+            return Err(AppError::ValidationError(
+                "attachment_name is required when attachment_base64 is set".to_string(),
+            ));
+        }
+    }
+    if input
+        .attachment_name
+        .as_deref()
+        .is_some_and(|n| n.len() > MAX_PDF_NAME_LEN)
+    {
+        return Err(AppError::ValidationError(format!(
+            "attachment_name exceeds {MAX_PDF_NAME_LEN} chars"
         )));
     }
     if input.tag.as_deref().is_some_and(|t| t.len() > MAX_TAG_LEN) {
@@ -261,6 +288,8 @@ pub async fn submit_task(
         tag: input.tag,
         pdf_base64: input.pdf_base64,
         pdf_name: input.pdf_name,
+        attachment_base64: input.attachment_base64,
+        attachment_name: input.attachment_name,
         conversation_id,
         is_followup,
         required_worker_label,
@@ -514,6 +543,8 @@ pub async fn extract_url(
         tag: None,
         pdf_base64: None,
         pdf_name: None,
+        attachment_base64: None,
+        attachment_name: None,
         conversation_id: None,
         is_followup: false,
         required_worker_label: None,
@@ -592,6 +623,8 @@ pub async fn attach_conversation(
         tag,
         pdf_base64: None,
         pdf_name: None,
+        attachment_base64: None,
+        attachment_name: None,
         conversation_id: Some(session.id.clone()),
         is_followup: false,
         required_worker_label: None,
@@ -861,6 +894,10 @@ pub struct WorkerTaskPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pdf_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub attachment_base64: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attachment_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub required_project_url: Option<String>,
     pub assigned_worker: String,
     pub submitted_at: String,
@@ -893,6 +930,8 @@ async fn worker_payload(
         tag: task.tag.clone(),
         pdf_base64: task.pdf_base64.clone(),
         pdf_name: task.pdf_name.clone(),
+        attachment_base64: task.attachment_base64.clone(),
+        attachment_name: task.attachment_name.clone(),
         required_project_url: task
             .project_url
             .clone()
@@ -1389,6 +1428,8 @@ pub async fn worker_submit_transcript(
                 tag: scrape_task.tag.clone(),
                 pdf_base64: None,
                 pdf_name: None,
+                attachment_base64: None,
+                attachment_name: None,
                 conversation_id: Some(session_id.clone()),
                 is_followup: true,
                 required_worker_label: None,
@@ -1631,6 +1672,23 @@ mod tests {
             ..prompt_input("p")
         };
         assert!(validate_submit_input(&pdf_without_name).is_err());
+
+        // Mirror the pdf checks for the general --attach-file path.
+        let oversized_attachment = SubmitTaskInput {
+            attachment_base64: Some("x".repeat(MAX_PDF_BASE64_BYTES + 1)),
+            attachment_name: Some("a.png".to_string()),
+            ..prompt_input("p")
+        };
+        assert!(matches!(
+            validate_submit_input(&oversized_attachment),
+            Err(AppError::OraclePayloadTooLarge(_))
+        ));
+
+        let attachment_without_name = SubmitTaskInput {
+            attachment_base64: Some("abcd".to_string()),
+            ..prompt_input("p")
+        };
+        assert!(validate_submit_input(&attachment_without_name).is_err());
 
         let long_client_ref = SubmitTaskInput {
             client_ref: Some("c".repeat(129)),

@@ -329,6 +329,8 @@ mod tests {
                 tag: None,
                 pdf_base64: None,
                 pdf_name: None,
+                attachment_base64: None,
+                attachment_name: None,
                 required_project_url: None,
                 assigned_worker: "tab_1".to_string(),
                 submitted_at: "2026-06-11T00:00:00Z".to_string(),

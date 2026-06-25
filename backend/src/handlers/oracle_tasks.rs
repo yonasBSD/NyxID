@@ -41,6 +41,13 @@ pub struct SubmitOracleTaskRequest {
     pub pdf_base64: Option<String>,
     #[serde(default)]
     pub pdf_name: Option<String>,
+    /// Optional input file attachment (image / PDF / ..., base64) + filename,
+    /// uploaded by the worker on the first turn so the model can answer
+    /// questions about it. Mime is inferred from the filename extension.
+    #[serde(default)]
+    pub attachment_base64: Option<String>,
+    #[serde(default)]
+    pub attachment_name: Option<String>,
     /// Optional submitter-scoped idempotency key: retried submits with
     /// the same value return the original task.
     #[serde(default)]
@@ -259,6 +266,8 @@ pub async fn submit_task(
             conversation_id: body.conversation_id,
             pdf_base64: body.pdf_base64,
             pdf_name: body.pdf_name,
+            attachment_base64: body.attachment_base64,
+            attachment_name: body.attachment_name,
             client_ref: body.client_ref,
         },
     )
@@ -277,6 +286,7 @@ pub async fn submit_task(
             "is_followup": outcome.task.is_followup,
             "prompt_chars": outcome.task.prompt.chars().count(),
             "has_pdf": outcome.task.pdf_base64.is_some(),
+            "has_attachment": outcome.task.attachment_base64.is_some(),
             "deduplicated": outcome.deduplicated,
         })),
     );
@@ -523,6 +533,8 @@ mod tests {
             tag: None,
             pdf_base64: Some("cGRm".to_string()),
             pdf_name: Some("a.pdf".to_string()),
+            attachment_base64: None,
+            attachment_name: None,
             conversation_id: Some("conv_1".to_string()),
             is_followup: false,
             required_worker_label: None,
