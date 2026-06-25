@@ -191,6 +191,48 @@ pub struct ExchangedTokens {
     pub broker_capability_enabled: bool,
 }
 
+pub struct IssuedOAuthRefreshToken {
+    pub refresh_token: String,
+    pub refresh_token_jti: String,
+}
+
+pub async fn issue_oauth_refresh_token(
+    db: &mongodb::Database,
+    config: &AppConfig,
+    jwt_keys: &JwtKeys,
+    client_id: &str,
+    user_id: &str,
+) -> AppResult<IssuedOAuthRefreshToken> {
+    let user_uuid = Uuid::parse_str(user_id)
+        .map_err(|e| AppError::Internal(format!("Invalid user_id for refresh token: {e}")))?;
+    let (refresh_token_jwt, refresh_token_jti) =
+        crate::crypto::jwt::generate_refresh_token(jwt_keys, config, &user_uuid)?;
+
+    let now = Utc::now();
+    let refresh_expires = now + Duration::seconds(config.jwt_refresh_ttl_secs);
+    let new_refresh = RefreshToken {
+        id: Uuid::new_v4().to_string(),
+        jti: refresh_token_jti.clone(),
+        client_id: client_id.to_string(),
+        user_id: user_id.to_string(),
+        session_id: None,
+        expires_at: refresh_expires,
+        revoked: false,
+        replaced_by: None,
+        revoked_at: None,
+        created_at: now,
+    };
+
+    db.collection::<RefreshToken>(REFRESH_TOKENS)
+        .insert_one(&new_refresh)
+        .await?;
+
+    Ok(IssuedOAuthRefreshToken {
+        refresh_token: refresh_token_jwt,
+        refresh_token_jti,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn exchange_authorization_code(
     db: &mongodb::Database,
@@ -333,31 +375,8 @@ pub async fn exchange_authorization_code(
         None,
     )?;
 
-    let (refresh_token_jwt, refresh_jti) =
-        crate::crypto::jwt::generate_refresh_token(jwt_keys, config, &user_uuid)?;
-    let refresh_token_jti = refresh_jti.clone();
-
-    // Persist OAuth refresh token to database for revocation support
-    let refresh_id = Uuid::new_v4().to_string();
-    let now = Utc::now();
-    let refresh_expires = now + Duration::seconds(config.jwt_refresh_ttl_secs);
-
-    let new_refresh = RefreshToken {
-        id: refresh_id,
-        jti: refresh_jti,
-        client_id: client_id.to_string(),
-        user_id: stored.user_id.clone(),
-        session_id: None, // OAuth flow has no session
-        expires_at: refresh_expires,
-        revoked: false,
-        replaced_by: None,
-        revoked_at: None,
-        created_at: now,
-    };
-
-    db.collection::<RefreshToken>(REFRESH_TOKENS)
-        .insert_one(&new_refresh)
-        .await?;
+    let issued_refresh =
+        issue_oauth_refresh_token(db, config, jwt_keys, client_id, &stored.user_id).await?;
 
     // Generate ID token if openid scope was requested
     let id_token = if stored.scope.split_whitespace().any(|s| s == "openid") {
@@ -396,8 +415,8 @@ pub async fn exchange_authorization_code(
     let granted_scope = stored.scope.clone();
     Ok(ExchangedTokens {
         access_token,
-        refresh_token: refresh_token_jwt,
-        refresh_token_jti,
+        refresh_token: issued_refresh.refresh_token,
+        refresh_token_jti: issued_refresh.refresh_token_jti,
         id_token,
         granted_scope,
         user_id: stored.user_id,

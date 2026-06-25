@@ -3,10 +3,23 @@ use axum::{Json, extract::State};
 use crate::AppState;
 use crate::services::oauth_broker_service;
 
-pub(crate) const OPENID_CONFIGURATION_SCOPES_SUPPORTED: &[&str] =
-    &["openid", "profile", "email", "roles", "groups"];
-pub(crate) const OAUTH_AUTHORIZATION_SERVER_SCOPES_SUPPORTED: &[&str] =
-    &["openid", "profile", "email", "roles", "groups", "proxy"];
+pub(crate) const OPENID_CONFIGURATION_SCOPES_SUPPORTED: &[&str] = &[
+    "openid",
+    "profile",
+    "email",
+    "roles",
+    "groups",
+    "offline_access",
+];
+pub(crate) const OAUTH_AUTHORIZATION_SERVER_SCOPES_SUPPORTED: &[&str] = &[
+    "openid",
+    "profile",
+    "email",
+    "roles",
+    "groups",
+    "offline_access",
+    "proxy",
+];
 
 /// GET /.well-known/openid-configuration
 ///

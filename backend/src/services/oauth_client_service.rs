@@ -9,11 +9,15 @@ use crate::models::consent::COLLECTION_NAME as CONSENTS;
 use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
 use crate::models::refresh_token::COLLECTION_NAME as REFRESH_TOKENS;
 
+/// Standard OIDC scope that requests refresh-token issuance.
+pub const OFFLINE_ACCESS_SCOPE: &str = "offline_access";
+
 /// Known scopes supported by NyxID. Used for validation of
 /// `allowed_scopes` on OAuth clients.
 ///
 /// The list mixes OIDC-standard scopes (openid, profile, email, roles,
-/// groups) with NyxID-specific extensions (proxy, urn:nyxid:scope:*).
+/// groups, offline_access) with NyxID-specific extensions (proxy,
+/// urn:nyxid:scope:*).
 /// `urn:nyxid:scope:broker_binding` opts a client into the OAuth broker
 /// pattern when present in their allowed_scopes.
 pub const KNOWN_OIDC_SCOPES: &[&str] = &[
@@ -22,6 +26,7 @@ pub const KNOWN_OIDC_SCOPES: &[&str] = &[
     "email",
     "roles",
     "groups",
+    OFFLINE_ACCESS_SCOPE,
     "proxy",
     "urn:nyxid:scope:broker_binding",
 ];
@@ -552,6 +557,12 @@ mod tests {
     fn valid_with_proxy_scope() {
         let result = validate_allowed_scopes("openid profile email proxy").unwrap();
         assert_eq!(result, "openid profile email proxy");
+    }
+
+    #[test]
+    fn valid_with_offline_access_scope() {
+        let result = validate_allowed_scopes("openid offline_access").unwrap();
+        assert_eq!(result, "openid offline_access");
     }
 
     #[test]
