@@ -1247,13 +1247,31 @@ async fn token_inner(
                     .split_whitespace()
                     .map(str::to_string)
                     .collect();
+                let return_refresh_token = granted_scopes
+                    .iter()
+                    .any(|scope| scope == oauth_client_service::OFFLINE_ACCESS_SCOPE);
+                let binding_refresh = if return_refresh_token {
+                    oauth_service::issue_oauth_refresh_token(
+                        &state.db,
+                        &state.config,
+                        &state.jwt_keys,
+                        client_id_str,
+                        &exchanged.user_id,
+                    )
+                    .await?
+                } else {
+                    oauth_service::IssuedOAuthRefreshToken {
+                        refresh_token: exchanged.refresh_token.clone(),
+                        refresh_token_jti: exchanged.refresh_token_jti.clone(),
+                    }
+                };
                 let (binding_id, _binding_hash) = oauth_broker_service::create_binding(
                     &state.db,
                     &state.encryption_keys,
                     client_id_str,
                     &exchanged.user_id,
-                    &exchanged.refresh_token,
-                    &exchanged.refresh_token_jti,
+                    &binding_refresh.refresh_token,
+                    &binding_refresh.refresh_token_jti,
                     &granted_scopes,
                     exchanged.external_subject.as_ref(),
                 )
@@ -1284,7 +1302,7 @@ async fn token_inner(
                     access_token: exchanged.access_token,
                     token_type: "Bearer".to_string(),
                     expires_in: oauth_broker_service::BROKER_ACCESS_TTL_SECS,
-                    refresh_token: None,
+                    refresh_token: return_refresh_token.then_some(exchanged.refresh_token),
                     id_token: exchanged.id_token,
                     scope: Some(exchanged.granted_scope),
                     binding_id: Some(binding_id),
@@ -2267,13 +2285,15 @@ mod tests {
     use uuid::Uuid;
 
     use crate::crypto::jwt;
+    use crate::models::authorization_code::{AuthorizationCode, COLLECTION_NAME as AUTH_CODES};
     use crate::models::oauth_broker_binding::{
         COLLECTION_NAME as OAUTH_BROKER_BINDINGS, OauthBrokerBinding, hash_binding_id,
     };
     use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
     use crate::models::refresh_token::{COLLECTION_NAME as REFRESH_TOKENS, RefreshToken};
+    use crate::models::user::{COLLECTION_NAME as USERS, UserType};
     use crate::services::oauth_broker_service::BROKER_BINDING_SCOPE;
-    use crate::test_utils::{connect_test_database, test_app_state};
+    use crate::test_utils::{connect_test_database, test_app_state, test_user};
 
     async fn insert_public_client(db: &mongodb::Database, client_id: &str, allowed_scopes: &str) {
         let now = Utc::now();
@@ -2368,6 +2388,41 @@ mod tests {
             .expect("binding exists")
     }
 
+    async fn insert_person_user(db: &mongodb::Database, user_id: &str) {
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(user_id, UserType::Person))
+            .await
+            .expect("insert user");
+    }
+
+    async fn insert_authorization_code(
+        db: &mongodb::Database,
+        code: &str,
+        client_id: &str,
+        user_id: &str,
+        scope: &str,
+    ) {
+        let now = Utc::now();
+        db.collection::<AuthorizationCode>(AUTH_CODES)
+            .insert_one(AuthorizationCode {
+                id: Uuid::new_v4().to_string(),
+                code_hash: crate::crypto::token::hash_token(code),
+                client_id: client_id.to_string(),
+                user_id: user_id.to_string(),
+                redirect_uri: "http://localhost/callback".to_string(),
+                scope: scope.to_string(),
+                code_challenge: None,
+                code_challenge_method: None,
+                nonce: Some("nonce-1".to_string()),
+                external_subject: None,
+                expires_at: now + Duration::minutes(5),
+                used: false,
+                created_at: now,
+            })
+            .await
+            .expect("insert authorization code");
+    }
+
     #[tokio::test]
     async fn register_client_persists_requested_broker_scope() {
         let Some(db) = connect_test_database("oauth_dcr_broker_scope").await else {
@@ -2405,6 +2460,179 @@ mod tests {
             .expect("client exists");
         assert_eq!(client.allowed_scopes, response.scope);
         assert!(oauth_broker_service::is_broker_client(&client));
+    }
+
+    #[tokio::test]
+    async fn register_client_accepts_offline_access_with_broker_scope() {
+        let Some(db) = connect_test_database("oauth_dcr_broker_offline").await else {
+            return;
+        };
+        let state = test_app_state(db.clone());
+
+        let (status, Json(response)) = register_client(
+            State(state),
+            Json(RegisterClientRequest {
+                client_name: Some("Aevatar".to_string()),
+                redirect_uris: Some(vec!["http://localhost/callback".to_string()]),
+                grant_types: None,
+                response_types: None,
+                token_endpoint_auth_method: Some("none".to_string()),
+                scope: Some(format!(
+                    "openid offline_access proxy {BROKER_BINDING_SCOPE}"
+                )),
+            }),
+        )
+        .await
+        .expect("register client");
+
+        assert_eq!(status, StatusCode::CREATED);
+        let scopes: Vec<&str> = response.scope.split_whitespace().collect();
+        assert!(scopes.contains(&"offline_access"));
+        assert!(scopes.contains(&BROKER_BINDING_SCOPE));
+        let client = db
+            .collection::<OauthClient>(OAUTH_CLIENTS)
+            .find_one(doc! { "_id": &response.client_id })
+            .await
+            .expect("query client")
+            .expect("client exists");
+        assert_eq!(client.allowed_scopes, response.scope);
+    }
+
+    #[tokio::test]
+    async fn broker_authorization_code_with_offline_access_returns_refresh_token_and_binding() {
+        let Some(db) = connect_test_database("oauth_broker_offline_token").await else {
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let client_id = "public-broker-offline-token";
+        let user_id = Uuid::new_v4().to_string();
+        let scope = format!("openid profile offline_access proxy {BROKER_BINDING_SCOPE}");
+        let code = "broker-offline-code";
+
+        insert_person_user(&db, &user_id).await;
+        insert_public_client(&db, client_id, &scope).await;
+        insert_authorization_code(&db, code, client_id, &user_id, &scope).await;
+
+        let Json(response) = token_inner(
+            &state,
+            &TelemetryContext::default(),
+            &HeaderMap::new(),
+            TokenRequest {
+                grant_type: "authorization_code".to_string(),
+                code: Some(code.to_string()),
+                redirect_uri: Some("http://localhost/callback".to_string()),
+                client_id: Some(client_id.to_string()),
+                client_secret: None,
+                code_verifier: None,
+                refresh_token: None,
+                subject_token: None,
+                subject_token_type: None,
+                scope: None,
+                provider: None,
+            },
+        )
+        .await
+        .expect("exchange authorization code");
+
+        assert_eq!(response.token_type, "Bearer");
+        assert_eq!(
+            response.expires_in,
+            oauth_broker_service::BROKER_ACCESS_TTL_SECS
+        );
+        assert_eq!(response.scope.as_deref(), Some(scope.as_str()));
+        let refresh_token = response.refresh_token.expect("refresh_token returned");
+        let binding_id = response.binding_id.expect("binding_id returned");
+        assert!(!refresh_token.is_empty());
+        assert!(!binding_id.is_empty());
+
+        let refresh_claims = jwt::verify_token(&state.jwt_keys, &state.config, &refresh_token)
+            .expect("client refresh token verifies");
+        let binding = load_binding(&db, &binding_id).await;
+        assert_ne!(
+            refresh_claims.jti, binding.refresh_token_jti,
+            "client refresh token and broker binding must not share rotation state"
+        );
+
+        let refresh_count = db
+            .collection::<RefreshToken>(REFRESH_TOKENS)
+            .count_documents(doc! { "client_id": client_id, "user_id": &user_id, "revoked": false })
+            .await
+            .expect("count refresh tokens");
+        assert_eq!(refresh_count, 2);
+
+        let Json(refreshed) = token_inner(
+            &state,
+            &TelemetryContext::default(),
+            &HeaderMap::new(),
+            TokenRequest {
+                grant_type: "refresh_token".to_string(),
+                code: None,
+                redirect_uri: None,
+                client_id: None,
+                client_secret: None,
+                code_verifier: None,
+                refresh_token: Some(refresh_token),
+                subject_token: None,
+                subject_token_type: None,
+                scope: None,
+                provider: None,
+            },
+        )
+        .await
+        .expect("refresh returned token");
+        assert!(!refreshed.access_token.is_empty());
+        let rotated_refresh_token = refreshed
+            .refresh_token
+            .expect("rotated refresh_token returned");
+
+        let Json(refreshed_again) = token_inner(
+            &state,
+            &TelemetryContext::default(),
+            &HeaderMap::new(),
+            TokenRequest {
+                grant_type: "refresh_token".to_string(),
+                code: None,
+                redirect_uri: None,
+                client_id: None,
+                client_secret: None,
+                code_verifier: None,
+                refresh_token: Some(rotated_refresh_token),
+                subject_token: None,
+                subject_token_type: None,
+                scope: None,
+                provider: None,
+            },
+        )
+        .await
+        .expect("refresh rotated token");
+        assert!(!refreshed_again.access_token.is_empty());
+        assert!(refreshed_again.refresh_token.is_some());
+
+        let Json(binding_exchange) = token_inner(
+            &state,
+            &TelemetryContext::default(),
+            &HeaderMap::new(),
+            TokenRequest {
+                grant_type: "urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
+                code: None,
+                redirect_uri: None,
+                client_id: Some(client_id.to_string()),
+                client_secret: None,
+                code_verifier: None,
+                refresh_token: None,
+                subject_token: Some(binding_id),
+                subject_token_type: Some(
+                    oauth_broker_service::BROKER_SUBJECT_TOKEN_TYPE.to_string(),
+                ),
+                scope: Some("openid".to_string()),
+                provider: None,
+            },
+        )
+        .await
+        .expect("exchange binding after client refresh");
+        assert_eq!(binding_exchange.token_type, "Bearer");
+        assert!(!binding_exchange.access_token.is_empty());
+        assert_eq!(binding_exchange.scope.as_deref(), Some("openid"));
     }
 
     #[tokio::test]

@@ -532,7 +532,7 @@ pub async fn refresh_tokens(
     let new_refresh = RefreshToken {
         id: new_refresh_id,
         jti: new_jti,
-        client_id: Uuid::nil().to_string(),
+        client_id: active_token.client_id.clone(),
         user_id: user_id_str,
         session_id: session_id.clone(),
         expires_at: refresh_expires,

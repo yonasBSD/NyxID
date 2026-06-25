@@ -45,6 +45,12 @@ const OIDC_SCOPES = [
   { id: "profile", label: "profile", required: false },
   { id: "email", label: "email", required: false },
   {
+    id: "offline_access",
+    label: "offline_access",
+    required: false,
+    hint: "Allows refresh tokens for durable browser sessions",
+  },
+  {
     id: "proxy",
     label: "proxy",
     required: false,
@@ -431,4 +437,3 @@ export function OrgDeveloperAppsTab({
     </div>
   );
 }
-
