@@ -4,6 +4,7 @@ pub mod owner_resolver;
 pub mod reconcile;
 pub mod reservation;
 pub mod route_context;
+pub mod webhook;
 
 use std::sync::Arc;
 

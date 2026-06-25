@@ -17,6 +17,7 @@ pub trait LagoApi: Send + Sync {
     async fn record_events_batch(&self, events: &[LagoEvent]) -> Result<Vec<LagoAck>, LagoError>;
     async fn current_usage(&self, customer_id: &str, subscription_id: &str)
     -> AppResult<LagoUsage>;
+    async fn wallet_balance(&self, customer_id: &str) -> AppResult<i64>;
     async fn entitlements(&self, subscription_id: &str) -> AppResult<Vec<Entitlement>>;
 }
 
@@ -236,6 +237,25 @@ impl LagoApi for LagoClient {
             customer_id: customer_id.to_string(),
             subscription_id: subscription_id.to_string(),
             raw: value,
+        })
+    }
+
+    async fn wallet_balance(&self, customer_id: &str) -> AppResult<i64> {
+        let value = self
+            .json_request(
+                reqwest::Method::GET,
+                &format!(
+                    "wallets?external_customer_id={}",
+                    urlencoding::encode(customer_id)
+                ),
+                None,
+            )
+            .await
+            .map_err(lago_error_to_app)?;
+        extract_wallet_balance_credits(&value).ok_or_else(|| {
+            AppError::BillingProviderUnavailable(
+                "Lago wallet balance response did not include a balance".to_string(),
+            )
         })
     }
 
@@ -485,6 +505,79 @@ fn lago_error_message(value: &Value) -> Option<String> {
     value_string(value, &["message", "error"])
 }
 
+pub fn extract_wallet_balance_credits(value: &Value) -> Option<i64> {
+    find_wallet_object(value).and_then(|wallet| {
+        json_i64_path(
+            wallet,
+            &[
+                "credits_balance",
+                "credits_ongoing_balance",
+                "credits_ongoing_usage_balance",
+                "balance_credits",
+                "amount",
+            ],
+        )
+    })
+}
+
+fn find_wallet_object(value: &Value) -> Option<&Value> {
+    match value {
+        Value::Object(map) => {
+            if map
+                .keys()
+                .any(|key| matches!(key.as_str(), "credits_balance" | "ongoing_balance"))
+            {
+                return Some(value);
+            }
+
+            for key in ["wallet", "wallets"] {
+                if let Some(found) = map.get(key).and_then(find_wallet_object) {
+                    return Some(found);
+                }
+            }
+
+            map.values().find_map(find_wallet_object)
+        }
+        Value::Array(items) => items.iter().find_map(find_wallet_object),
+        _ => None,
+    }
+}
+
+fn json_i64_path(value: &Value, keys: &[&str]) -> Option<i64> {
+    match value {
+        Value::Object(map) => {
+            for key in keys {
+                if let Some(parsed) = map.get(*key).and_then(json_i64_value) {
+                    return Some(parsed);
+                }
+            }
+            for key in keys {
+                if let Some(parsed) = map.get(*key).and_then(|inner| json_i64_path(inner, keys)) {
+                    return Some(parsed);
+                }
+            }
+            None
+        }
+        _ => json_i64_value(value),
+    }
+}
+
+fn json_i64_value(value: &Value) -> Option<i64> {
+    match value {
+        Value::Number(number) => number
+            .as_i64()
+            .or_else(|| number.as_f64().map(|value| value.round() as i64)),
+        Value::String(value) => value.parse::<i64>().ok().or_else(|| {
+            value
+                .parse::<f64>()
+                .ok()
+                .map(|parsed| parsed.round() as i64)
+        }),
+        Value::Object(map) => map.values().find_map(json_i64_value),
+        _ => None,
+    }
+}
+
 fn body_contains(value: &Value, needle: &str) -> bool {
     match value {
         Value::String(s) => s.eq_ignore_ascii_case(needle) || s.contains(needle),
@@ -507,7 +600,7 @@ mod tests {
 
     use super::{
         LagoApi, LagoClient, LagoErrorKind, LagoEvent, LagoEventProperties, OwnerProvisionInput,
-        classify_lago_failure, subscription_external_id,
+        classify_lago_failure, extract_wallet_balance_credits, subscription_external_id,
     };
 
     async fn spawn_lago_mock(app: axum::Router) -> String {
@@ -567,6 +660,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn wallet_balance_extracts_common_lago_shapes() {
+        assert_eq!(
+            extract_wallet_balance_credits(&json!({
+                "wallet": { "credits_balance": "42.4" }
+            })),
+            Some(42)
+        );
+        assert_eq!(
+            extract_wallet_balance_credits(&json!({
+                "wallets": [{ "credits_ongoing_balance": "12.0" }]
+            })),
+            Some(12)
+        );
+    }
+
     #[tokio::test]
     async fn ensure_customer_gets_existing_customer_before_create() {
         async fn get_customer() -> axum::Json<serde_json::Value> {
@@ -600,6 +709,36 @@ mod tests {
             .expect("ensure customer");
 
         assert_eq!(customer_id, "owner-1");
+    }
+
+    #[tokio::test]
+    async fn wallet_balance_reads_by_external_customer_id() {
+        async fn get_wallet(
+            axum::extract::Query(query): axum::extract::Query<
+                std::collections::HashMap<String, String>,
+            >,
+        ) -> axum::Json<serde_json::Value> {
+            assert_eq!(
+                query.get("external_customer_id").map(String::as_str),
+                Some("owner-1")
+            );
+            axum::Json(json!({
+                "wallets": [{ "credits_balance": "77" }]
+            }))
+        }
+
+        let base_url = spawn_lago_mock(
+            axum::Router::new().route("/api/v1/wallets", axum::routing::get(get_wallet)),
+        )
+        .await;
+        let client = LagoClient::new(base_url, "test-key".to_string()).expect("client");
+
+        let balance = client
+            .wallet_balance("owner-1")
+            .await
+            .expect("wallet balance");
+
+        assert_eq!(balance, 77);
     }
 
     #[tokio::test]
