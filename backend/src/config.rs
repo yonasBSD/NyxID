@@ -290,6 +290,8 @@ pub struct AppConfig {
     pub lago_api_url: Option<String>,
     /// Lago API key for later phases. Redacted from Debug.
     pub lago_api_key: Option<String>,
+    /// Default Lago plan code used when provisioning an owner subscription.
+    pub lago_plan_code: String,
     /// Lago webhook secret for later phases. Redacted from Debug.
     pub lago_webhook_secret: Option<String>,
     pub billing_reconcile_interval_secs: u64,
@@ -548,6 +550,7 @@ impl std::fmt::Debug for AppConfig {
                     &"None"
                 },
             )
+            .field("lago_plan_code", &self.lago_plan_code)
             .field(
                 "lago_webhook_secret",
                 if self.lago_webhook_secret.is_some() {
@@ -951,6 +954,11 @@ impl AppConfig {
                 .ok()
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty()),
+            lago_plan_code: env::var("LAGO_PLAN_CODE")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "starter".to_string()),
             lago_webhook_secret: env::var("LAGO_WEBHOOK_SECRET")
                 .ok()
                 .map(|s| s.trim().to_string())
@@ -1306,6 +1314,7 @@ mod tests {
             billing_enabled: false,
             lago_api_url: None,
             lago_api_key: None,
+            lago_plan_code: "starter".to_string(),
             lago_webhook_secret: None,
             billing_reconcile_interval_secs: 300,
             billing_rate_cache_ttl_secs: 900,

@@ -1,6 +1,7 @@
 pub mod lago_client;
 pub mod meter;
 pub mod owner_resolver;
+pub mod provisioning;
 pub mod reconcile;
 pub mod reservation;
 pub mod route_context;
@@ -66,6 +67,69 @@ impl BillingService {
 
     pub fn reconciler(&self) -> reconcile::BillingReconciler {
         reconcile::BillingReconciler::new(self.db.clone(), self.lago.clone(), self.config.clone())
+    }
+
+    pub async fn get_wallet(&self, owner_id: &str) -> AppResult<Option<BillingWallet>> {
+        provisioning::get_wallet(&self.db, owner_id).await
+    }
+
+    pub async fn ensure_wallet(
+        &self,
+        owner_id: &str,
+    ) -> AppResult<provisioning::ProvisionedWallet> {
+        let lago = self.lago.as_deref().ok_or_else(|| {
+            crate::errors::AppError::BillingNotConfigured(
+                "Lago client is not configured".to_string(),
+            )
+        })?;
+        provisioning::ensure_owner_wallet(
+            &self.db,
+            lago,
+            owner_id,
+            &self.config.lago_plan_code,
+            self.config.billing_default_overdraft_cap_credits,
+        )
+        .await
+    }
+
+    pub async fn create_topup_checkout(
+        &self,
+        owner_id: &str,
+        amount_credits: i64,
+        idempotency_key: &str,
+    ) -> AppResult<provisioning::TopUpCheckout> {
+        let lago = self.lago.as_deref().ok_or_else(|| {
+            crate::errors::AppError::BillingNotConfigured(
+                "Lago client is not configured".to_string(),
+            )
+        })?;
+        provisioning::create_topup_checkout(
+            &self.db,
+            lago,
+            owner_id,
+            &self.config.lago_plan_code,
+            self.config.billing_default_overdraft_cap_credits,
+            amount_credits,
+            idempotency_key,
+        )
+        .await
+    }
+
+    pub async fn backfill_existing_owner_wallets(
+        &self,
+    ) -> AppResult<provisioning::BillingBackfillStats> {
+        let lago = self.lago.as_deref().ok_or_else(|| {
+            crate::errors::AppError::BillingNotConfigured(
+                "Lago client is not configured".to_string(),
+            )
+        })?;
+        provisioning::backfill_existing_owner_wallets(
+            &self.db,
+            lago,
+            &self.config.lago_plan_code,
+            self.config.billing_default_overdraft_cap_credits,
+        )
+        .await
     }
 
     pub async fn open(&self, ctx: &BillingRouteContext) -> AppResult<MeteredProxyContext> {
@@ -230,6 +294,7 @@ mod tests {
                 id: format!("wallet-{owner_id}"),
                 owner_id: owner_id.to_string(),
                 lago_customer_id: owner_id.to_string(),
+                lago_wallet_id: Some(format!("{owner_id}:wallet")),
                 lago_subscription_id: Some(format!("{owner_id}:plan")),
                 plan_kind: PlanKind::Prepaid,
                 balance_credits: 100,

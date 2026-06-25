@@ -10,6 +10,7 @@ use mongodb::{Client, Database, IndexModel};
 use crate::config::AppConfig;
 use crate::models::anonymous_endpoint_usage::COLLECTION_NAME as ANONYMOUS_ENDPOINT_USAGE;
 use crate::models::auth_device_code::{AuthDeviceCode, COLLECTION_NAME as AUTH_DEVICE_CODES};
+use crate::models::billing_topup_session::COLLECTION_NAME as BILLING_TOPUP_SESSIONS;
 use crate::models::device_code::COLLECTION_NAME as DEVICE_CODES;
 use crate::models::device_onboard_credential::COLLECTION_NAME as DEVICE_ONBOARD_CREDENTIALS;
 use crate::models::downstream_service::{
@@ -1820,6 +1821,24 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
             IndexModel::builder()
                 .keys(doc! { "lago_customer_id": 1 })
                 .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+
+    // ── billing_topup_sessions ──
+    let billing_topup_sessions = db.collection::<Document>(BILLING_TOPUP_SESSIONS);
+    billing_topup_sessions
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "owner_id": 1, "idempotency_key": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    billing_topup_sessions
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "owner_id": 1, "created_at": -1 })
                 .build(),
         )
         .await?;

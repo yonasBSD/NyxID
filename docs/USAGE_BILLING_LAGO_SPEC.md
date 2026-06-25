@@ -481,6 +481,7 @@ in `error_key()` (oracle 11000-block is the template).
 BILLING_ENABLED=false                 # refuse to SERVE a billing-active request unless meter+ledger(+gate for charging) are wired
 LAGO_API_URL=                         # e.g. http://lago-api:3000
 LAGO_API_KEY=                         # bearer for NyxID->Lago; network-isolate Lago
+LAGO_PLAN_CODE=starter                # default owner subscription plan created during provisioning/backfill
 LAGO_WEBHOOK_SECRET=                  # verify subscription.updated / wallet webhooks
 BILLING_RECONCILE_INTERVAL_SECS=300   # reconcile + balance sync sweep (0 disables); bounds fail-open drift window
 BILLING_RATE_CACHE_TTL_SECS=900
