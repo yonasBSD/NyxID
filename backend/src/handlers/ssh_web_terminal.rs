@@ -325,7 +325,6 @@ async fn handle_node_web_terminal(
         CredentialClass::NodeManaged,
         BillingMetric::Bytes,
         None,
-        state.billing.billing_enabled(),
     );
     let metered = match state.billing.open(&billing_ctx).await {
         Ok(metered) => metered,

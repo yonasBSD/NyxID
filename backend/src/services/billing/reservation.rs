@@ -50,7 +50,7 @@ pub async fn gate_and_reserve(
     ctx: &BillingRouteContext,
     billing_fail_closed: bool,
 ) -> AppResult<Option<BillingReservation>> {
-    if !ctx.is_metered() {
+    if !ctx.has_billable_layers() {
         return Ok(None);
     }
     if billing_fail_closed {
@@ -64,24 +64,31 @@ pub async fn gate_and_reserve(
         .find_one(doc! { "owner_id": &ctx.billing_owner_id })
         .await?
         .ok_or_else(|| {
-            AppError::BillingNotConfigured(format!(
-                "billing wallet is missing for owner {}",
-                ctx.billing_owner_id
-            ))
-        })?;
+            tracing::warn!(
+                owner_id = %ctx.billing_owner_id,
+                "Billing wallet is missing; continuing without reservation"
+            );
+        })
+        .ok();
+
+    let Some(wallet) = wallet else {
+        return Ok(None);
+    };
 
     if wallet.is_suspended() {
         return Err(AppError::WalletSuspended);
     }
-    let subscription_id = wallet.lago_subscription_id.as_deref().ok_or_else(|| {
-        AppError::BillingNotConfigured(format!(
-            "billing subscription is missing for owner {}",
-            ctx.billing_owner_id
-        ))
-    })?;
-    let lago = lago.ok_or_else(|| {
-        AppError::BillingNotConfigured("Lago client is not configured".to_string())
-    })?;
+    let Some(subscription_id) = wallet.lago_subscription_id.as_deref() else {
+        tracing::warn!(
+            owner_id = %ctx.billing_owner_id,
+            "Billing subscription is missing; continuing without reservation"
+        );
+        return Ok(None);
+    };
+    let Some(lago) = lago else {
+        tracing::warn!("Lago client is not configured; continuing without billing reservation");
+        return Ok(None);
+    };
     let entitlements = lago.entitlements(subscription_id).await.map_err(|error| {
         tracing::warn!(
             owner_id = %ctx.billing_owner_id,
@@ -97,7 +104,18 @@ pub async fn gate_and_reserve(
         ));
     }
 
-    let layers = estimate_layer_reservations(db, ctx).await?;
+    let layers = match estimate_layer_reservations(db, ctx).await {
+        Ok(layers) => layers,
+        Err(AppError::BillingNotConfigured(message)) => {
+            tracing::warn!(
+                owner_id = %ctx.billing_owner_id,
+                error = %message,
+                "Billing reservation is not fully configured; continuing without reservation"
+            );
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
     let total_reserved_credits = layers
         .iter()
         .map(|reservation| reservation.reserved_credits)
@@ -724,7 +742,7 @@ async fn estimate_layer_reservations(
 ) -> AppResult<Vec<LayerReservation>> {
     let mut reservations = Vec::new();
 
-    if ctx.platform_enabled {
+    if ctx.platform_billable {
         let metric_code = platform_metric_code(ctx.platform_metric);
         reservations.push(LayerReservation {
             layer: BillingLayer::Platform,
@@ -1006,8 +1024,8 @@ mod tests {
             CredentialClass::UserOwned,
             BillingMetric::Requests,
             None::<&ServiceBilling>,
-            true,
         )
+        .with_platform_metering(true)
     }
 
     #[tokio::test]
@@ -1074,6 +1092,19 @@ mod tests {
             err,
             crate::errors::AppError::PlanEntitlementRequired(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn missing_wallet_degrades_to_meter_only() {
+        let Some(db) = connect_test_database("billing_gate_missing_wallet").await else {
+            return;
+        };
+        let owner_id = "owner-missing-wallet";
+        let reservation = gate_and_reserve(&db, None, &route_context(owner_id), false)
+            .await
+            .expect("missing wallet should not deny proxy traffic");
+
+        assert!(reservation.is_none());
     }
 
     #[tokio::test]
