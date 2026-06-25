@@ -38,7 +38,7 @@ pub async fn open(
         return Ok(MeteredProxyContext::disabled());
     }
 
-    if ctx.platform_enabled {
+    if ctx.platform_metered() {
         insert_reserved_row(
             db,
             ctx,
@@ -106,7 +106,7 @@ pub async fn settle(
         return Ok(());
     };
 
-    if ctx.platform_enabled {
+    if ctx.platform_metered() {
         finalize_layer(
             db,
             ctx,
@@ -348,8 +348,8 @@ mod tests {
             CredentialClass::NyxidManagedMaster,
             BillingMetric::Bytes,
             Some(&billing),
-            true,
-        );
+        )
+        .with_platform_metering(true);
 
         let metered = open(&db, &ctx, None).await.expect("open meter");
         open(&db, &ctx, None).await.expect("idempotent open");
@@ -819,7 +819,7 @@ mod tests {
             CredentialClass::UserOwned,
             BillingMetric::Requests,
             None::<&ServiceBilling>,
-            true,
         )
+        .with_platform_metering(true)
     }
 }

@@ -11,7 +11,9 @@ use std::sync::Arc;
 use crate::config::AppConfig;
 use crate::db::DbHandle;
 use crate::errors::AppResult;
+use crate::models::billing_wallet::{BillingWallet, COLLECTION_NAME as BILLING_WALLET};
 use lago_client::{LagoApi, LagoClient};
+use mongodb::bson::doc;
 
 pub use meter::MeteredProxyContext;
 pub use owner_resolver::BillingOwnerResolver;
@@ -67,18 +69,39 @@ impl BillingService {
     }
 
     pub async fn open(&self, ctx: &BillingRouteContext) -> AppResult<MeteredProxyContext> {
+        let ctx = if self.config.billing_enabled {
+            let platform_billable = self
+                .owner_has_chargeable_wallet(&ctx.billing_owner_id)
+                .await?;
+            ctx.clone().with_platform_metering(platform_billable)
+        } else {
+            ctx.clone()
+        };
+
         let reservation = if self.config.billing_enabled {
             reservation::gate_and_reserve(
                 &self.db,
                 self.lago.as_deref(),
-                ctx,
+                &ctx,
                 self.config.billing_fail_closed,
             )
             .await?
         } else {
             None
         };
-        meter::open(&self.db, ctx, reservation.as_ref()).await
+        meter::open(&self.db, &ctx, reservation.as_ref()).await
+    }
+
+    async fn owner_has_chargeable_wallet(&self, owner_id: &str) -> AppResult<bool> {
+        let wallet = self
+            .db
+            .collection::<BillingWallet>(BILLING_WALLET)
+            .find_one(doc! {
+                "owner_id": owner_id,
+                "lago_subscription_id": { "$type": "string", "$ne": "" },
+            })
+            .await?;
+        Ok(wallet.is_some())
     }
 
     pub async fn mark_forwarded(&self, metered: &MeteredProxyContext) -> AppResult<()> {
@@ -108,7 +131,7 @@ mod tests {
 
     use crate::models::billing_wallet::{BillingWallet, CollectionState, PlanKind};
     use crate::models::service_billing::{BillingMetric, ServiceBilling};
-    use crate::models::usage_meter::{CredentialClass, UsageMeterRow};
+    use crate::models::usage_meter::{BillingLayer, CredentialClass, UsageMeterRow};
     use crate::services::billing::{BillingRouteContext, BillingService, NodeIntent};
     use crate::test_utils::{connect_test_database, test_app_config};
 
@@ -138,7 +161,6 @@ mod tests {
             CredentialClass::NyxidManagedMaster,
             BillingMetric::Requests,
             Some(&billing),
-            false,
         );
 
         let metered = service.open(&ctx).await.expect("open metering");
@@ -158,6 +180,45 @@ mod tests {
 
         assert_eq!(wallet.reserved_credits, 0);
         assert_eq!(wallet.pending_lago_debits, 0);
+        assert_eq!(row.reserved_credits, 0);
+        assert!(row.wallet_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn billing_enabled_without_wallet_allows_uncharged_platform_metering() {
+        let Some(db) = connect_test_database("billing_enabled_no_wallet_meter_only").await else {
+            return;
+        };
+        let owner_id = "owner-no-wallet";
+        let mut config = test_app_config();
+        config.billing_enabled = true;
+        let service = BillingService::new(db.clone(), std::sync::Arc::new(config));
+        let ctx = BillingRouteContext::new(
+            Uuid::new_v4().to_string(),
+            owner_id.to_string(),
+            "actor-1".to_string(),
+            None,
+            Some("user-service-1".to_string()),
+            Some("catalog-1".to_string()),
+            Some("service-one".to_string()),
+            NodeIntent::Direct,
+            "bearer".to_string(),
+            CredentialClass::UserOwned,
+            BillingMetric::Requests,
+            None::<&ServiceBilling>,
+        );
+
+        let metered = service.open(&ctx).await.expect("open metering");
+        assert!(metered.is_enabled());
+
+        let row = db
+            .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+            .find_one(doc! { "billing_owner_id": owner_id })
+            .await
+            .expect("find usage row")
+            .expect("row exists");
+
+        assert_eq!(row.layer, BillingLayer::Platform);
         assert_eq!(row.reserved_credits, 0);
         assert!(row.wallet_id.is_none());
     }

@@ -22,7 +22,8 @@ pub struct BillingRouteContext {
     pub credential_class: CredentialClass,
     pub platform_metric: BillingMetric,
     pub resale: Option<ResaleSpec>,
-    pub platform_enabled: bool,
+    pub(crate) platform_metered: bool,
+    pub(crate) platform_billable: bool,
 }
 
 impl BillingRouteContext {
@@ -40,7 +41,6 @@ impl BillingRouteContext {
         credential_class: CredentialClass,
         platform_metric: BillingMetric,
         service_billing: Option<&ServiceBilling>,
-        platform_enabled: bool,
     ) -> Self {
         let resale = service_billing
             .and_then(ServiceBilling::active_resale_spec)
@@ -59,12 +59,27 @@ impl BillingRouteContext {
             credential_class,
             platform_metric,
             resale,
-            platform_enabled,
+            platform_metered: false,
+            platform_billable: false,
         }
     }
 
+    pub(crate) fn with_platform_metering(mut self, platform_billable: bool) -> Self {
+        self.platform_metered = true;
+        self.platform_billable = platform_billable;
+        self
+    }
+
+    pub(crate) fn platform_metered(&self) -> bool {
+        self.platform_metered
+    }
+
+    pub(crate) fn has_billable_layers(&self) -> bool {
+        self.platform_billable || self.resale.is_some()
+    }
+
     pub fn is_metered(&self) -> bool {
-        self.platform_enabled || self.resale.is_some()
+        self.platform_metered || self.resale.is_some()
     }
 }
 
@@ -93,7 +108,6 @@ mod tests {
             credential_class,
             BillingMetric::Requests,
             Some(&billing),
-            false,
         )
     }
 

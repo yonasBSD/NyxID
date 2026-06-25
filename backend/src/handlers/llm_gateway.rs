@@ -258,7 +258,6 @@ pub async fn llm_proxy_request(
         llm_credential_class(resolved_via_user_service, &target),
         BillingMetric::Requests,
         target.service.billing.as_ref().or(service.billing.as_ref()),
-        state.billing.billing_enabled(),
     );
     let metered = state.billing.open(&billing_ctx).await?;
     let request_len = body_bytes.len() as i64;
@@ -646,7 +645,6 @@ pub async fn gateway_request(
         llm_credential_class(resolved_via_user_service, &target),
         BillingMetric::Requests,
         target.service.billing.as_ref().or(service.billing.as_ref()),
-        state.billing.billing_enabled(),
     );
     let metered = state.billing.open(&billing_ctx).await?;
 

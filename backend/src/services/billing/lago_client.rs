@@ -513,6 +513,7 @@ pub fn extract_wallet_balance_credits(value: &Value) -> Option<i64> {
                 "credits_balance",
                 "credits_ongoing_balance",
                 "credits_ongoing_usage_balance",
+                "ongoing_balance",
                 "balance_credits",
                 "amount",
             ],
@@ -523,10 +524,17 @@ pub fn extract_wallet_balance_credits(value: &Value) -> Option<i64> {
 fn find_wallet_object(value: &Value) -> Option<&Value> {
     match value {
         Value::Object(map) => {
-            if map
-                .keys()
-                .any(|key| matches!(key.as_str(), "credits_balance" | "ongoing_balance"))
-            {
+            if map.keys().any(|key| {
+                matches!(
+                    key.as_str(),
+                    "credits_balance"
+                        | "credits_ongoing_balance"
+                        | "credits_ongoing_usage_balance"
+                        | "ongoing_balance"
+                        | "balance_credits"
+                        | "amount"
+                )
+            }) {
                 return Some(value);
             }
 
