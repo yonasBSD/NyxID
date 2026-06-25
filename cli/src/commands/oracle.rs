@@ -27,6 +27,7 @@ pub async fn run(command: OracleCommands) -> Result<()> {
             prompt,
             file,
             pdf,
+            attach_file,
             model,
             project_url,
             tag,
@@ -64,6 +65,17 @@ pub async fn run(command: OracleCommands) -> Result<()> {
                 body["pdf_base64"] =
                     Value::String(base64::engine::general_purpose::STANDARD.encode(&bytes));
                 body["pdf_name"] = Value::String(name.to_string());
+            }
+            if let Some(file_path) = &attach_file {
+                let bytes = std::fs::read(file_path)
+                    .with_context(|| format!("Failed to read attachment at {file_path}"))?;
+                let name = std::path::Path::new(file_path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("attachment.bin");
+                body["attachment_base64"] =
+                    Value::String(base64::engine::general_purpose::STANDARD.encode(&bytes));
+                body["attachment_name"] = Value::String(name.to_string());
             }
 
             let submit: Value = api
@@ -885,6 +897,7 @@ mod tests {
             prompt: Some("what is 2+2?".to_string()),
             file: None,
             pdf: None,
+            attach_file: None,
             model: Some("chatgpt-5.5-pro".to_string()),
             project_url: None,
             tag: Some("smoke".to_string()),
@@ -926,6 +939,7 @@ mod tests {
             prompt: Some("hello".to_string()),
             file: None,
             pdf: None,
+            attach_file: None,
             model: None,
             project_url: None,
             tag: None,
@@ -965,6 +979,7 @@ mod tests {
             prompt: Some("route this prompt".to_string()),
             file: None,
             pdf: None,
+            attach_file: None,
             model: None,
             project_url: Some("https://chatgpt.com/g/g-p-task/project".to_string()),
             tag: None,
@@ -1015,6 +1030,7 @@ mod tests {
             prompt: Some("2+2?".to_string()),
             file: None,
             pdf: None,
+            attach_file: None,
             model: None,
             project_url: None,
             tag: None,
