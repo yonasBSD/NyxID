@@ -4016,7 +4016,7 @@ pub enum OracleCommands {
         pdf: Option<String>,
         /// Attach any file (image, PDF, ...) to ask about; uploaded by the
         /// worker on the first turn. Mime is inferred from the extension.
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", conflicts_with = "pdf")]
         attach_file: Option<String>,
         /// Model hint forwarded to the worker (defaults to the pool's)
         #[arg(long)]

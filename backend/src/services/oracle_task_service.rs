@@ -135,8 +135,8 @@ fn validate_submit_input(input: &SubmitTaskInput) -> AppResult<()> {
             "pdf_name exceeds {MAX_PDF_NAME_LEN} chars"
         )));
     }
-    if let Some(image) = &input.attachment_base64 {
-        if image.len() > MAX_PDF_BASE64_BYTES {
+    if let Some(attachment) = &input.attachment_base64 {
+        if attachment.len() > MAX_PDF_BASE64_BYTES {
             return Err(AppError::OraclePayloadTooLarge(format!(
                 "attachment_base64 exceeds {MAX_PDF_BASE64_BYTES} bytes"
             )));
@@ -1672,6 +1672,23 @@ mod tests {
             ..prompt_input("p")
         };
         assert!(validate_submit_input(&pdf_without_name).is_err());
+
+        // Mirror the pdf checks for the general --attach-file path.
+        let oversized_attachment = SubmitTaskInput {
+            attachment_base64: Some("x".repeat(MAX_PDF_BASE64_BYTES + 1)),
+            attachment_name: Some("a.png".to_string()),
+            ..prompt_input("p")
+        };
+        assert!(matches!(
+            validate_submit_input(&oversized_attachment),
+            Err(AppError::OraclePayloadTooLarge(_))
+        ));
+
+        let attachment_without_name = SubmitTaskInput {
+            attachment_base64: Some("abcd".to_string()),
+            ..prompt_input("p")
+        };
+        assert!(validate_submit_input(&attachment_without_name).is_err());
 
         let long_client_ref = SubmitTaskInput {
             client_ref: Some("c".repeat(129)),
