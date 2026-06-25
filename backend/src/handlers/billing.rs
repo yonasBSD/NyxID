@@ -17,6 +17,8 @@ use utoipa::ToSchema;
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::billing_rate_cache::{BillingRateCache, COLLECTION_NAME as BILLING_RATE_CACHE};
+use crate::models::billing_topup_session::BillingTopUpStatus;
+use crate::models::billing_wallet::{BillingWallet, CollectionState, PlanKind};
 use crate::models::service_billing::BillingMetric;
 use crate::models::usage_meter::COLLECTION_NAME as USAGE_METER;
 use crate::mw::auth::AuthUser;
@@ -74,12 +76,70 @@ pub struct BillingReadOnlyBlock {
     pub rates_are_approximate: bool,
 }
 
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ProvisionWalletRequest {
+    pub owner_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct TopUpRequest {
+    pub amount_credits: i64,
+    pub idempotency_key: String,
+    pub owner_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct BillingWalletResponse {
+    pub owner_id: String,
+    pub plan_kind: PlanKind,
+    pub collection_state: CollectionState,
+    pub balance_credits: i64,
+    pub reserved_credits: i64,
+    pub pending_lago_debits: i64,
+    pub available_credits: i64,
+    pub available_with_overdraft_credits: i64,
+    pub has_payment_instrument: bool,
+    pub overdraft_cap_credits: i64,
+    pub suspended: bool,
+    pub lago_customer_id: String,
+    pub lago_subscription_id: Option<String>,
+    pub lago_wallet_id: Option<String>,
+    pub balance_synced_at: chrono::DateTime<Utc>,
+    pub created_at: chrono::DateTime<Utc>,
+    pub updated_at: chrono::DateTime<Utc>,
+    pub created: bool,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TopUpResponse {
+    pub owner_id: String,
+    pub amount_credits: i64,
+    pub idempotency_key: String,
+    pub checkout_url: String,
+    pub payment_provider: Option<String>,
+    pub lago_wallet_transaction_id: Option<String>,
+    pub status: BillingTopUpStatus,
+    pub reused: bool,
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct LagoWebhookResponse {
     pub ok: bool,
     pub action: String,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/billing/usage",
+    tag = "Billing",
+    params(
+        ("period" = Option<String>, Query, description = "Usage period: 24h, 7d, 30d, 90d, or all")
+    ),
+    responses(
+        (status = 200, description = "Billing usage summary", body = BillingUsageResponse)
+    ),
+    security(("bearer_auth" = []))
+)]
 pub async fn get_usage(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -183,6 +243,109 @@ pub async fn get_usage(
             source: "usage_meter".to_string(),
             rates_are_approximate: true,
         },
+    }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/billing/wallet",
+    tag = "Billing",
+    responses(
+        (status = 200, description = "Billing wallet", body = BillingWalletResponse)
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn get_wallet(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+) -> AppResult<Json<BillingWalletResponse>> {
+    let owner = state
+        .billing
+        .owner_resolver()
+        .resolve(&auth_user.user_id.to_string(), None)
+        .await?;
+    let wallet = state
+        .billing
+        .get_wallet(&owner.owner_id)
+        .await?
+        .ok_or_else(|| {
+            AppError::BillingNotConfigured(
+                "Billing wallet has not been provisioned for this owner".to_string(),
+            )
+        })?;
+
+    Ok(Json(BillingWalletResponse::from_wallet(wallet, false)))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/billing/wallet",
+    tag = "Billing",
+    request_body = ProvisionWalletRequest,
+    responses(
+        (status = 200, description = "Provisioned billing wallet", body = BillingWalletResponse)
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn provision_wallet(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<ProvisionWalletRequest>,
+) -> AppResult<Json<BillingWalletResponse>> {
+    let actor_id = auth_user.user_id.to_string();
+    let owner = state
+        .billing
+        .owner_resolver()
+        .resolve(&actor_id, body.owner_id.as_deref())
+        .await?;
+    let provisioned = state.billing.ensure_wallet(&owner.owner_id).await?;
+
+    Ok(Json(BillingWalletResponse::from_wallet(
+        provisioned.wallet,
+        provisioned.created,
+    )))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/billing/topup",
+    tag = "Billing",
+    request_body = TopUpRequest,
+    responses(
+        (status = 200, description = "Hosted top-up checkout session", body = TopUpResponse)
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn create_topup(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<TopUpRequest>,
+) -> AppResult<Json<TopUpResponse>> {
+    let actor_id = auth_user.user_id.to_string();
+    let owner = state
+        .billing
+        .owner_resolver()
+        .resolve(&actor_id, body.owner_id.as_deref())
+        .await?;
+    let checkout = state
+        .billing
+        .create_topup_checkout(&owner.owner_id, body.amount_credits, &body.idempotency_key)
+        .await?;
+    let checkout_url = checkout.session.payment_url.clone().ok_or_else(|| {
+        AppError::BillingProviderUnavailable(
+            "Billing top-up session does not have a hosted checkout URL".to_string(),
+        )
+    })?;
+
+    Ok(Json(TopUpResponse {
+        owner_id: checkout.session.owner_id,
+        amount_credits: checkout.session.amount_credits,
+        idempotency_key: checkout.session.idempotency_key,
+        checkout_url,
+        payment_provider: checkout.session.payment_provider,
+        lago_wallet_transaction_id: checkout.session.lago_wallet_transaction_id,
+        status: checkout.session.status,
+        reused: checkout.reused,
     }))
 }
 
@@ -341,6 +504,35 @@ fn sum_optional(values: impl Iterator<Item = Option<i64>>) -> Option<i64> {
         total = total.saturating_add(value);
     }
     saw_value.then_some(total)
+}
+
+impl BillingWalletResponse {
+    fn from_wallet(wallet: BillingWallet, created: bool) -> Self {
+        let available_credits = wallet.available_credits();
+        let available_with_overdraft_credits = wallet.available_with_overdraft_credits();
+        let suspended = wallet.is_suspended();
+
+        Self {
+            owner_id: wallet.owner_id,
+            plan_kind: wallet.plan_kind,
+            collection_state: wallet.collection_state,
+            balance_credits: wallet.balance_credits,
+            reserved_credits: wallet.reserved_credits,
+            pending_lago_debits: wallet.pending_lago_debits,
+            available_credits,
+            available_with_overdraft_credits,
+            has_payment_instrument: wallet.has_payment_instrument,
+            overdraft_cap_credits: wallet.overdraft_cap_credits,
+            suspended,
+            lago_customer_id: wallet.lago_customer_id,
+            lago_subscription_id: wallet.lago_subscription_id,
+            lago_wallet_id: wallet.lago_wallet_id,
+            balance_synced_at: wallet.balance_synced_at,
+            created_at: wallet.created_at,
+            updated_at: wallet.updated_at,
+            created,
+        }
+    }
 }
 
 #[cfg(test)]

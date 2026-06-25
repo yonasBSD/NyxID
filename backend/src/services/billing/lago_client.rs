@@ -13,6 +13,23 @@ const HTTP_TIMEOUT_SECS: u64 = 20;
 pub trait LagoApi: Send + Sync {
     async fn ensure_customer(&self, owner: &OwnerProvisionInput) -> AppResult<String>;
     async fn ensure_subscription(&self, customer_id: &str, plan_code: &str) -> AppResult<String>;
+    async fn ensure_wallet(&self, customer_id: &str) -> AppResult<LagoWallet> {
+        Ok(LagoWallet {
+            id: customer_id.to_string(),
+            balance_credits: 0,
+        })
+    }
+
+    async fn create_wallet_topup(
+        &self,
+        wallet_id: &str,
+        _request: &WalletTopUpInput,
+    ) -> AppResult<WalletTopUpCheckout> {
+        Err(AppError::BillingProviderUnavailable(format!(
+            "Lago wallet top-up is not supported for wallet '{wallet_id}'"
+        )))
+    }
+
     async fn record_event(&self, event: &LagoEvent) -> Result<LagoAck, LagoError>;
     async fn record_events_batch(&self, events: &[LagoEvent]) -> Result<Vec<LagoAck>, LagoError>;
     async fn current_usage(&self, customer_id: &str, subscription_id: &str)
@@ -172,6 +189,63 @@ impl LagoApi for LagoClient {
         }
     }
 
+    async fn ensure_wallet(&self, customer_id: &str) -> AppResult<LagoWallet> {
+        if let Some(wallet) = self.get_wallet_by_customer_id(customer_id).await? {
+            return Ok(wallet);
+        }
+
+        let body = json!({
+            "wallet": {
+                "external_customer_id": customer_id,
+                "currency": "USD",
+            }
+        });
+        match self
+            .json_request(reqwest::Method::POST, "wallets", Some(body))
+            .await
+        {
+            Ok(value) => extract_wallet(&value).ok_or_else(|| {
+                AppError::BillingProviderUnavailable(
+                    "Lago wallet creation response did not include a wallet id".to_string(),
+                )
+            }),
+            Err(error) if error.is_conflict_like() => self
+                .get_wallet_by_customer_id(customer_id)
+                .await?
+                .ok_or_else(|| {
+                    AppError::BillingProviderUnavailable(
+                        "Lago reported an existing wallet but it could not be read".to_string(),
+                    )
+                }),
+            Err(error) => Err(lago_error_to_app(error)),
+        }
+    }
+
+    async fn create_wallet_topup(
+        &self,
+        wallet_id: &str,
+        request: &WalletTopUpInput,
+    ) -> AppResult<WalletTopUpCheckout> {
+        let body = json!({
+            "wallet_transaction": {
+                "wallet_id": wallet_id,
+                "paid_credits": request.amount_credits,
+                "granted_credits": request.amount_credits,
+                "external_id": request.external_id,
+                "invoice_requires_successful_payment": true,
+            }
+        });
+        let value = self
+            .json_request(reqwest::Method::POST, "wallet_transactions", Some(body))
+            .await
+            .map_err(lago_error_to_app)?;
+        extract_wallet_topup_checkout(&value, &request.external_id).ok_or_else(|| {
+            AppError::BillingProviderUnavailable(
+                "Lago top-up response did not include a hosted payment URL".to_string(),
+            )
+        })
+    }
+
     async fn record_event(&self, event: &LagoEvent) -> Result<LagoAck, LagoError> {
         let body = json!({ "event": event });
         self.json_request(reqwest::Method::POST, "events", Some(body))
@@ -286,11 +360,47 @@ impl LagoApi for LagoClient {
     }
 }
 
+impl LagoClient {
+    async fn get_wallet_by_customer_id(&self, customer_id: &str) -> AppResult<Option<LagoWallet>> {
+        let value = self
+            .json_request(
+                reqwest::Method::GET,
+                &format!(
+                    "wallets?external_customer_id={}",
+                    urlencoding::encode(customer_id)
+                ),
+                None,
+            )
+            .await
+            .map_err(lago_error_to_app)?;
+        Ok(extract_wallet(&value))
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OwnerProvisionInput {
     pub external_customer_id: String,
     pub name: Option<String>,
     pub email: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LagoWallet {
+    pub id: String,
+    pub balance_credits: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WalletTopUpInput {
+    pub external_id: String,
+    pub amount_credits: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WalletTopUpCheckout {
+    pub wallet_transaction_id: String,
+    pub payment_url: String,
+    pub payment_provider: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -521,6 +631,62 @@ pub fn extract_wallet_balance_credits(value: &Value) -> Option<i64> {
     })
 }
 
+pub fn extract_wallet(value: &Value) -> Option<LagoWallet> {
+    let wallet = find_wallet_object(value)?;
+    let id =
+        value_string(wallet, &["id", "lago_id", "wallet_id", "lago_wallet_id"]).or_else(|| {
+            find_string_by_keys(wallet, &["id", "lago_id", "wallet_id", "lago_wallet_id"])
+        })?;
+    let balance_credits = extract_wallet_balance_credits(wallet).unwrap_or(0);
+    Some(LagoWallet {
+        id,
+        balance_credits,
+    })
+}
+
+pub fn extract_wallet_topup_checkout(
+    value: &Value,
+    fallback_transaction_id: &str,
+) -> Option<WalletTopUpCheckout> {
+    let transaction = find_wallet_transaction_object(value).unwrap_or(value);
+    let payment_url = find_string_by_keys(
+        transaction,
+        &[
+            "payment_url",
+            "checkout_url",
+            "hosted_payment_url",
+            "hosted_invoice_url",
+            "invoice_url",
+        ],
+    )?;
+    let wallet_transaction_id = find_string_by_keys(
+        transaction,
+        &[
+            "id",
+            "lago_id",
+            "wallet_transaction_id",
+            "lago_wallet_transaction_id",
+            "external_id",
+        ],
+    )
+    .unwrap_or_else(|| fallback_transaction_id.to_string());
+    let payment_provider = find_string_by_keys(
+        transaction,
+        &[
+            "payment_provider",
+            "payment_provider_code",
+            "provider",
+            "provider_code",
+        ],
+    );
+
+    Some(WalletTopUpCheckout {
+        wallet_transaction_id,
+        payment_url,
+        payment_provider,
+    })
+}
+
 fn find_wallet_object(value: &Value) -> Option<&Value> {
     match value {
         Value::Object(map) => {
@@ -538,8 +704,25 @@ fn find_wallet_object(value: &Value) -> Option<&Value> {
                 return Some(value);
             }
 
-            for key in ["wallet", "wallets"] {
-                if let Some(found) = map.get(key).and_then(find_wallet_object) {
+            if let Some(wallet) = map.get("wallet") {
+                if wallet.is_object() {
+                    return Some(wallet);
+                }
+                if let Some(found) = find_wallet_object(wallet) {
+                    return Some(found);
+                }
+            }
+            if let Some(wallets) = map.get("wallets") {
+                match wallets {
+                    Value::Array(items) => {
+                        if let Some(wallet) = items.iter().find(|item| item.is_object()) {
+                            return Some(wallet);
+                        }
+                    }
+                    Value::Object(_) => return Some(wallets),
+                    _ => {}
+                }
+                if let Some(found) = find_wallet_object(wallets) {
                     return Some(found);
                 }
             }
@@ -547,6 +730,58 @@ fn find_wallet_object(value: &Value) -> Option<&Value> {
             map.values().find_map(find_wallet_object)
         }
         Value::Array(items) => items.iter().find_map(find_wallet_object),
+        _ => None,
+    }
+}
+
+fn find_wallet_transaction_object(value: &Value) -> Option<&Value> {
+    match value {
+        Value::Object(map) => {
+            if map.keys().any(|key| {
+                matches!(
+                    key.as_str(),
+                    "payment_url"
+                        | "checkout_url"
+                        | "hosted_payment_url"
+                        | "hosted_invoice_url"
+                        | "invoice_url"
+                )
+            }) {
+                return Some(value);
+            }
+
+            for key in ["wallet_transaction", "wallet_transactions", "transaction"] {
+                if let Some(found) = map.get(key).and_then(find_wallet_transaction_object) {
+                    return Some(found);
+                }
+            }
+
+            map.values().find_map(find_wallet_transaction_object)
+        }
+        Value::Array(items) => items.iter().find_map(find_wallet_transaction_object),
+        _ => None,
+    }
+}
+
+fn find_string_by_keys(value: &Value, keys: &[&str]) -> Option<String> {
+    match value {
+        Value::Object(map) => {
+            for key in keys {
+                if let Some(found) = map
+                    .get(*key)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    return Some(found.to_string());
+                }
+            }
+            map.values()
+                .find_map(|inner| find_string_by_keys(inner, keys))
+        }
+        Value::Array(items) => items
+            .iter()
+            .find_map(|inner| find_string_by_keys(inner, keys)),
         _ => None,
     }
 }

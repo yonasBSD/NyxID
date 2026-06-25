@@ -255,6 +255,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         billing_enabled: false,
         lago_api_url: None,
         lago_api_key: None,
+        lago_plan_code: "starter".to_string(),
         lago_webhook_secret: None,
         billing_reconcile_interval_secs: 300,
         billing_rate_cache_ttl_secs: 900,
