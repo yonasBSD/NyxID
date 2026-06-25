@@ -107,7 +107,19 @@ pub fn validate_anonymous_service_runtime_safety(service: &DownstreamService) ->
             "Enabled anonymous endpoints require identity_propagation_mode='none', forward_access_token=false, and inject_delegation_token=false".to_string(),
         ));
     }
+    if has_enabled_anonymous_endpoints(service) && service_has_resale_billing(service) {
+        return Err(AppError::AnonymousIncompatibleBilling(
+            "Enabled anonymous endpoints cannot be combined with resale_billable=true".to_string(),
+        ));
+    }
     Ok(())
+}
+
+pub fn service_has_resale_billing(service: &DownstreamService) -> bool {
+    service
+        .billing
+        .as_ref()
+        .is_some_and(|billing| billing.resale_billable)
 }
 
 pub fn validate_service_update_anonymous_compatibility(
@@ -116,6 +128,7 @@ pub fn validate_service_update_anonymous_compatibility(
     next_forward_access_token: Option<bool>,
     next_inject_delegation_token: Option<bool>,
     next_rules: Option<&[AnonymousEndpointRule]>,
+    next_resale_billable: Option<bool>,
 ) -> AppResult<()> {
     let has_enabled = next_rules
         .map(|rules| rules.iter().any(|rule| rule.enabled))
@@ -132,6 +145,13 @@ pub fn validate_service_update_anonymous_compatibility(
     if identity_mode != "none" || forward_access_token || inject_delegation_token {
         return Err(AppError::AnonymousIncompatibleService(
             "Enabled anonymous endpoints require identity_propagation_mode='none', forward_access_token=false, and inject_delegation_token=false".to_string(),
+        ));
+    }
+    let resale_billable =
+        next_resale_billable.unwrap_or_else(|| service_has_resale_billing(service));
+    if resale_billable {
+        return Err(AppError::AnonymousIncompatibleBilling(
+            "Enabled anonymous endpoints cannot be combined with resale_billable=true".to_string(),
         ));
     }
     Ok(())
@@ -175,7 +195,7 @@ pub fn validate_rules_for_service(
     rules: &[AnonymousEndpointRule],
 ) -> AppResult<()> {
     validate_rule_list(rules)?;
-    validate_service_update_anonymous_compatibility(service, None, None, None, Some(rules))
+    validate_service_update_anonymous_compatibility(service, None, None, None, Some(rules), None)
 }
 
 pub fn validate_rule_list(rules: &[AnonymousEndpointRule]) -> AppResult<()> {
@@ -509,6 +529,7 @@ mod tests {
             repository_url: None,
             issues_url: None,
             capabilities: None,
+            billing: None,
             auth_notes: None,
             known_limitations: None,
             required_permissions: None,
@@ -563,6 +584,26 @@ mod tests {
 
         let err = validate_anonymous_service_runtime_safety(&service).unwrap_err();
         assert!(matches!(err, AppError::AnonymousIncompatibleService(_)));
+    }
+
+    #[test]
+    fn enabled_rules_reject_resale_billing() {
+        let mut service = compatible_service();
+        service.billing = Some(crate::models::service_billing::ServiceBilling {
+            resale_billable: true,
+            resale_metric: crate::models::service_billing::BillingMetric::Requests,
+            lago_resale_metric_code: Some("resale_requests".to_string()),
+        });
+        service.anonymous_endpoints = vec![AnonymousEndpointRule {
+            id: "enabled".to_string(),
+            enabled: true,
+            method: "GET".to_string(),
+            path_pattern: "/public/**".to_string(),
+            daily_quota: 1,
+        }];
+
+        let err = validate_anonymous_service_runtime_safety(&service).unwrap_err();
+        assert!(matches!(err, AppError::AnonymousIncompatibleBilling(_)));
     }
 
     #[test]

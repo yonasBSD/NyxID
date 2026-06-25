@@ -13,6 +13,8 @@ use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
+use crate::models::service_billing::{BillingMetric, PlatformUsage, ResaleUsage};
+use crate::models::usage_meter::CredentialClass;
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::AuthUser;
 use crate::services::node_ws_manager::{NodeProxyRequest, ProxyResponseType, StreamChunk};
@@ -220,6 +222,21 @@ struct PreResolved {
     /// lookups so the failover list reflects the org's bindings, not
     /// just the calling member's personal bindings.
     effective_owner_id: String,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ConnectionUsageStats {
+    frames_in: i64,
+    frames_out: i64,
+    bytes_in: i64,
+    bytes_out: i64,
+    duration: std::time::Duration,
+}
+
+impl ConnectionUsageStats {
+    fn total_bytes(self) -> i64 {
+        self.bytes_in.saturating_add(self.bytes_out)
+    }
 }
 
 /// Emit a single audit entry recording that this proxy call was routed via
@@ -1218,6 +1235,7 @@ async fn execute_proxy_inner(
     // configured to route through a node (UserService.node_id is set).
     // When true, the request must NOT silently fall back to direct
     // routing if all node attempts fail (ChronoAIProject/NyxID#328).
+    let mut agent_override_applied = false;
     let (
         node_route,
         target,
@@ -1338,6 +1356,7 @@ async fn execute_proxy_inner(
             .await?
         {
             pre.target.credential = override_cred;
+            agent_override_applied = true;
         }
 
         let required = pre.node_id.is_some();
@@ -1391,6 +1410,54 @@ async fn execute_proxy_inner(
     // before the handler returns `Ok`.
     *resolved_slug = target.service.slug.clone();
 
+    // Billing is metadata-only and must never change proxy resolution
+    // behavior. Resolve the billing owner using the SAME identity the proxy
+    // used to resolve and authorize the target (`proxy_resolution_user_id`,
+    // which collapses a service account to its owner). Using the raw subject
+    // here would make `resolve_owner_access` deny a service account billing
+    // its own owner and abort an otherwise-authorized proxy request.
+    let billing_resolution_user_id = auth_user.proxy_resolution_user_id();
+    let billing_owner = state
+        .billing
+        .owner_resolver()
+        .resolve(
+            &billing_resolution_user_id,
+            effective_owner_for_approval.as_deref(),
+        )
+        .await?;
+    let billing_request_id = uuid::Uuid::new_v4().to_string();
+    let credential_class = final_credential_class(
+        resolved_user_service_id.as_deref(),
+        node_route.is_some(),
+        agent_override_applied,
+        has_server_credential,
+        &target,
+    );
+    let is_ws_candidate = is_ws_upgrade_request(&request);
+    let platform_metric = platform_metric_for_target(&target, is_ws_candidate);
+    let node_intent = match &node_route {
+        Some(route) if !route.fallback_node_ids.is_empty() => {
+            crate::services::billing::NodeIntent::NodeWithFallback
+        }
+        Some(_) => crate::services::billing::NodeIntent::Node,
+        None => crate::services::billing::NodeIntent::Direct,
+    };
+    let billing_ctx = crate::services::billing::BillingRouteContext::new(
+        billing_request_id,
+        billing_owner.owner_id,
+        user_id_str.clone(),
+        auth_user.api_key_id.clone(),
+        resolved_user_service_id.clone(),
+        Some(target.service.id.clone()),
+        Some(target.service.slug.clone()),
+        node_intent,
+        target.auth_method.clone(),
+        credential_class,
+        platform_metric,
+        target.service.billing.as_ref(),
+        state.billing.billing_enabled(),
+    );
+
     // === Request Decomposition ===
     // Extract method, query, headers BEFORE body consumption.
     let method = request.method().clone();
@@ -1413,7 +1480,7 @@ async fn execute_proxy_inner(
         .map(String::from);
 
     // Check for WebSocket upgrade BEFORE consuming the request body.
-    let is_ws = is_ws_upgrade_request(&request);
+    let is_ws = is_ws_candidate;
 
     // Reject multi-range requests with excessive ranges (DoS prevention)
     validate_range_header(&all_headers)?;
@@ -1550,6 +1617,7 @@ async fn execute_proxy_inner(
     } else {
         Some(body_bytes)
     };
+    let request_body_len = body.as_ref().map(|b| b.len() as i64).unwrap_or(0);
 
     // === Delegated Credentials ===
     // Delegation resolves a legacy `UserProviderToken` and injects it as a
@@ -1697,6 +1765,8 @@ async fn execute_proxy_inner(
         }
     }
 
+    let metered = state.billing.open(&billing_ctx).await?;
+
     // === WebSocket Passthrough ===
     // If this is a WS upgrade request, branch into the WS path now that
     // target, credentials, and identity headers are fully resolved.
@@ -1734,6 +1804,7 @@ async fn execute_proxy_inner(
                 &ws_forward_headers,
                 service_owner_for_approval,
                 &proxy_actor_user_id,
+                metered.clone(),
             )
             .await;
         }
@@ -1751,6 +1822,7 @@ async fn execute_proxy_inner(
             query.as_deref(),
             &ws_forward_headers,
             caller_token.as_deref(),
+            metered.clone(),
         )
         .await;
     }
@@ -1887,6 +1959,7 @@ async fn execute_proxy_inner(
             };
 
             let start = std::time::Instant::now();
+            state.billing.mark_forwarded(&metered).await?;
             let result = state
                 .node_ws_manager
                 .send_proxy_request(
@@ -1909,6 +1982,15 @@ async fn execute_proxy_inner(
 
                     let mut response = match proxy_response {
                         ProxyResponseType::Complete(node_response) => {
+                            let response_len = node_response.body.len() as i64;
+                            let request_len = request_body_len;
+                            settle_meter_async(
+                                state.billing.clone(),
+                                metered.clone(),
+                                PlatformUsage::single_request(request_len + response_len),
+                                None,
+                                None,
+                            );
                             let status = StatusCode::from_u16(node_response.status)
                                 .unwrap_or(StatusCode::BAD_GATEWAY);
                             let mut response_builder = Response::builder().status(status);
@@ -1987,6 +2069,9 @@ async fn execute_proxy_inner(
                             let service_id_owned = service_id.to_string();
                             let node_id_owned = node_id.to_string();
                             let stream_db = state.db.clone();
+                            let stream_billing = state.billing.clone();
+                            let stream_metered = metered.clone();
+                            let request_len = request_body_len;
                             let stream_user_id = user_id_str.clone();
                             let stream_api_key_id = auth_user.api_key_id.clone();
                             let stream_api_key_name = auth_user.api_key_name.clone();
@@ -1995,9 +2080,11 @@ async fn execute_proxy_inner(
 
                             // Convert the mpsc receiver into a streaming body.
                             let stream = async_stream::stream! {
+                                let mut response_len: i64 = 0;
                                 loop {
                                     match tokio::time::timeout(idle_timeout, rx.recv()).await {
                                         Ok(Some(StreamChunk::Data(bytes))) => {
+                                            response_len += bytes.len() as i64;
                                             yield Ok::<_, std::io::Error>(bytes::Bytes::from(bytes));
                                         }
                                         Ok(Some(StreamChunk::End)) => break,
@@ -2046,6 +2133,13 @@ async fn execute_proxy_inner(
                                         }
                                     }
                                 }
+                                settle_meter_async(
+                                    stream_billing,
+                                    stream_metered,
+                                    PlatformUsage::single_request(request_len + response_len),
+                                    None,
+                                    None,
+                                );
                             };
 
                             response_builder
@@ -2225,6 +2319,7 @@ async fn execute_proxy_inner(
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
+        state.billing.mark_forwarded(&metered).await?;
         let mut response = chatgpt_translator::send_to_chatgpt(
             &translated.body,
             &bearer_token,
@@ -2246,6 +2341,20 @@ async fn execute_proxy_inner(
             }),
         )
         .await?;
+        settle_meter_async(
+            state.billing.clone(),
+            metered.clone(),
+            PlatformUsage::single_request(
+                serde_json::to_vec(&translated.body)
+                    .map(|bytes| bytes.len() as i64)
+                    .unwrap_or(0),
+            ),
+            None,
+            body_json
+                .get("model")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+        );
 
         let status = response.status();
 
@@ -2274,6 +2383,7 @@ async fn execute_proxy_inner(
     }
 
     // Reuse the shared reqwest::Client from AppState for connection pooling.
+    state.billing.mark_forwarded(&metered).await?;
     let downstream_response = proxy_service::forward_request(
         &state.http_client,
         &target,
@@ -2345,15 +2455,21 @@ async fn execute_proxy_inner(
             let idle_timeout_secs = state.config.proxy_stream_idle_timeout_secs;
             let mut upstream_stream = downstream_response.bytes_stream();
             let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(32);
+            let stream_billing = state.billing.clone();
+            let stream_metered = metered.clone();
+            let request_len = request_body_len;
+            let resale_metric = billing_ctx.resale.as_ref().map(|spec| spec.metric);
 
             tokio::spawn(async move {
                 let mut sse_buffer = String::new();
                 let mut usage_accumulator =
                     llm_usage_service::ReportedLlmUsageAccumulator::default();
+                let mut response_len: i64 = 0;
 
                 loop {
                     match tokio::time::timeout(idle_timeout, upstream_stream.next()).await {
                         Ok(Some(Ok(bytes))) => {
+                            response_len += bytes.len() as i64;
                             sse_buffer.push_str(&String::from_utf8_lossy(&bytes));
                             while let Some(event) = parse_sse_event(&mut sse_buffer) {
                                 if let Some((usage, mode)) =
@@ -2367,12 +2483,27 @@ async fn execute_proxy_inner(
                             }
 
                             if tx.send(Ok(bytes)).await.is_err() {
-                                if let Some(usage) = usage_accumulator.finalize() {
+                                let usage = usage_accumulator.finalize();
+                                if let Some(usage) = usage.clone() {
                                     llm_usage_service::log_reported_usage_async(
                                         stream_usage_context.clone(),
                                         usage,
                                     );
                                 }
+                                let resale = resale_metric.and_then(|metric| {
+                                    resale_usage_from_optional_reported(
+                                        metric,
+                                        usage.as_ref(),
+                                        request_len + response_len,
+                                    )
+                                });
+                                settle_meter_async(
+                                    stream_billing,
+                                    stream_metered,
+                                    PlatformUsage::single_request(request_len + response_len),
+                                    resale,
+                                    stream_usage_context.model.clone(),
+                                );
                                 return;
                             }
                         }
@@ -2383,12 +2514,27 @@ async fn execute_proxy_inner(
                                 error_debug = ?e,
                                 "Proxy stream error from upstream — connection dropped"
                             );
-                            if let Some(usage) = usage_accumulator.finalize() {
+                            let usage = usage_accumulator.finalize();
+                            if let Some(usage) = usage.clone() {
                                 llm_usage_service::log_reported_usage_async(
                                     stream_usage_context.clone(),
                                     usage,
                                 );
                             }
+                            let resale = resale_metric.and_then(|metric| {
+                                resale_usage_from_optional_reported(
+                                    metric,
+                                    usage.as_ref(),
+                                    request_len + response_len,
+                                )
+                            });
+                            settle_meter_async(
+                                stream_billing,
+                                stream_metered,
+                                PlatformUsage::single_request(request_len + response_len),
+                                resale,
+                                stream_usage_context.model.clone(),
+                            );
                             let _ = tx
                                 .send(Err(std::io::Error::other(format!(
                                     "upstream stream error: {e}"
@@ -2397,12 +2543,27 @@ async fn execute_proxy_inner(
                             return;
                         }
                         Ok(None) => {
-                            if let Some(usage) = usage_accumulator.finalize() {
+                            let usage = usage_accumulator.finalize();
+                            if let Some(usage) = usage.clone() {
                                 llm_usage_service::log_reported_usage_async(
                                     stream_usage_context.clone(),
                                     usage,
                                 );
                             }
+                            let resale = resale_metric.and_then(|metric| {
+                                resale_usage_from_optional_reported(
+                                    metric,
+                                    usage.as_ref(),
+                                    request_len + response_len,
+                                )
+                            });
+                            settle_meter_async(
+                                stream_billing,
+                                stream_metered,
+                                PlatformUsage::single_request(request_len + response_len),
+                                resale,
+                                stream_usage_context.model.clone(),
+                            );
                             return;
                         }
                         Err(_) => {
@@ -2411,12 +2572,27 @@ async fn execute_proxy_inner(
                                 idle_timeout_secs,
                                 "Proxy stream idle timeout reached"
                             );
-                            if let Some(usage) = usage_accumulator.finalize() {
+                            let usage = usage_accumulator.finalize();
+                            if let Some(usage) = usage.clone() {
                                 llm_usage_service::log_reported_usage_async(
                                     stream_usage_context.clone(),
                                     usage,
                                 );
                             }
+                            let resale = resale_metric.and_then(|metric| {
+                                resale_usage_from_optional_reported(
+                                    metric,
+                                    usage.as_ref(),
+                                    request_len + response_len,
+                                )
+                            });
+                            settle_meter_async(
+                                stream_billing,
+                                stream_metered,
+                                PlatformUsage::single_request(request_len + response_len),
+                                resale,
+                                stream_usage_context.model.clone(),
+                            );
                             return;
                         }
                     }
@@ -2433,10 +2609,15 @@ async fn execute_proxy_inner(
                 std::time::Duration::from_secs(state.config.proxy_stream_idle_timeout_secs);
             let idle_timeout_secs = state.config.proxy_stream_idle_timeout_secs;
             let mut upstream_stream = downstream_response.bytes_stream();
+            let stream_billing = state.billing.clone();
+            let stream_metered = metered.clone();
+            let request_len = request_body_len;
             let stream = async_stream::stream! {
+                let mut response_len: i64 = 0;
                 loop {
                     match tokio::time::timeout(idle_timeout, upstream_stream.next()).await {
                         Ok(Some(Ok(bytes))) => {
+                            response_len += bytes.len() as i64;
                             yield Ok::<_, std::io::Error>(bytes);
                         }
                         Ok(Some(Err(e))) => {
@@ -2462,6 +2643,13 @@ async fn execute_proxy_inner(
                         }
                     }
                 }
+                settle_meter_async(
+                    stream_billing,
+                    stream_metered,
+                    PlatformUsage::single_request(request_len + response_len),
+                    None,
+                    None,
+                );
             };
             let body = Body::from_stream(stream);
             response_builder
@@ -2486,12 +2674,35 @@ async fn execute_proxy_inner(
             );
         }
 
+        let mut reported_usage = None;
+        let mut model = None;
         if let Some(nonstream_usage_context) = usage_context
             && let Ok(json) = serde_json::from_slice::<serde_json::Value>(&response_body)
             && let Some(usage) = llm_usage_service::extract_reported_usage(&json)
         {
-            llm_usage_service::log_reported_usage_async(nonstream_usage_context, usage);
+            model = nonstream_usage_context.model.clone();
+            llm_usage_service::log_reported_usage_async(nonstream_usage_context, usage.clone());
+            reported_usage = Some(usage);
         }
+
+        let request_len = request_body_len;
+        let response_len = response_body.len() as i64;
+        let resale = billing_ctx.resale.as_ref().and_then(|spec| {
+            resale_usage_from_optional_reported(
+                spec.metric,
+                reported_usage.as_ref(),
+                request_len + response_len,
+            )
+        });
+        state
+            .billing
+            .settle(
+                &metered,
+                PlatformUsage::single_request(request_len + response_len),
+                resale,
+                model,
+            )
+            .await?;
 
         response_builder
             .body(Body::from(response_body))
@@ -2580,6 +2791,93 @@ fn should_enforce_runtime_approval(
 /// Convenience alias so existing call-sites compile without renaming.
 fn parse_sse_event(buffer: &mut String) -> Option<sse_parser::SseEvent> {
     sse_parser::parse_next_event(buffer)
+}
+
+fn final_credential_class(
+    resolved_user_service_id: Option<&str>,
+    node_route_active: bool,
+    agent_override_applied: bool,
+    has_server_credential: bool,
+    target: &proxy_service::ProxyTarget,
+) -> CredentialClass {
+    if node_route_active && !has_server_credential {
+        return CredentialClass::NodeManaged;
+    }
+    if target.auth_method == "none" && target.credential.is_empty() {
+        return CredentialClass::NoAuth;
+    }
+    if agent_override_applied {
+        return CredentialClass::AgentOverrideUserOwned;
+    }
+    if resolved_user_service_id.is_some() {
+        return CredentialClass::UserOwned;
+    }
+    if !target.service.requires_user_credential && !target.credential.is_empty() {
+        return CredentialClass::NyxidManagedMaster;
+    }
+    CredentialClass::UserOwned
+}
+
+fn platform_metric_for_target(
+    target: &proxy_service::ProxyTarget,
+    is_connection: bool,
+) -> BillingMetric {
+    if is_connection || target.service.service_type == "ssh" {
+        BillingMetric::Bytes
+    } else {
+        BillingMetric::Requests
+    }
+}
+
+fn resale_usage_from_reported(
+    metric: BillingMetric,
+    usage: &llm_usage_service::ReportedLlmUsage,
+    fallback_bytes: i64,
+) -> ResaleUsage {
+    let quantity = match metric {
+        BillingMetric::Tokens => usage.total_tokens.min(i64::MAX as u64) as i64,
+        BillingMetric::Requests => 1,
+        BillingMetric::Bytes => fallback_bytes,
+    };
+
+    ResaleUsage { metric, quantity }
+}
+
+fn resale_usage_from_optional_reported(
+    metric: BillingMetric,
+    usage: Option<&llm_usage_service::ReportedLlmUsage>,
+    fallback_bytes: i64,
+) -> Option<ResaleUsage> {
+    match metric {
+        BillingMetric::Tokens => usage
+            .map(|usage| resale_usage_from_reported(BillingMetric::Tokens, usage, fallback_bytes)),
+        BillingMetric::Requests => Some(ResaleUsage {
+            metric,
+            quantity: 1,
+        }),
+        BillingMetric::Bytes => Some(ResaleUsage {
+            metric,
+            quantity: fallback_bytes.max(0),
+        }),
+    }
+}
+
+fn settle_meter_async(
+    billing: std::sync::Arc<crate::services::billing::BillingService>,
+    metered: crate::services::billing::MeteredProxyContext,
+    platform: PlatformUsage,
+    resale: Option<ResaleUsage>,
+    model: Option<String>,
+) {
+    if !metered.is_enabled() {
+        return;
+    }
+
+    tokio::spawn(async move {
+        if let Err(error) = billing.settle(&metered, platform, resale, model).await {
+            tracing::warn!(error = %error, "Failed to settle usage meter row");
+        }
+    });
 }
 
 /// Threshold below which non-error responses are buffered (so small API
@@ -3090,8 +3388,9 @@ async fn bridge_websockets(
     api_key_name: Option<String>,
     ip_address: Option<String>,
     user_agent: Option<String>,
-) -> std::time::Duration {
+) -> ConnectionUsageStats {
     let start = std::time::Instant::now();
+    let mut stats = ConnectionUsageStats::default();
     let (mut client_sink, mut client_stream) = client_ws.split();
     let (mut downstream_sink, mut downstream_stream) = downstream_ws.split();
     let mut injector_state = ws_frame_injector::InjectorState::default();
@@ -3125,6 +3424,17 @@ async fn bridge_websockets(
             msg = client_stream.next() => {
                 match msg {
                     Some(Ok(axum_msg)) => {
+                        match &axum_msg {
+                            axum::extract::ws::Message::Text(text) => {
+                                stats.frames_in += 1;
+                                stats.bytes_in += text.len() as i64;
+                            }
+                            axum::extract::ws::Message::Binary(bytes) => {
+                                stats.frames_in += 1;
+                                stats.bytes_in += bytes.len() as i64;
+                            }
+                            _ => {}
+                        }
                         idle_timeout
                             .as_mut()
                             .reset(tokio::time::Instant::now() + std::time::Duration::from_secs(WS_PASSTHROUGH_IDLE_TIMEOUT_SECS));
@@ -3189,6 +3499,17 @@ async fn bridge_websockets(
             msg = downstream_stream.next() => {
                 match msg {
                     Some(Ok(tung_msg)) => {
+                        match &tung_msg {
+                            tokio_tungstenite::tungstenite::Message::Text(text) => {
+                                stats.frames_out += 1;
+                                stats.bytes_out += text.len() as i64;
+                            }
+                            tokio_tungstenite::tungstenite::Message::Binary(bytes) => {
+                                stats.frames_out += 1;
+                                stats.bytes_out += bytes.len() as i64;
+                            }
+                            _ => {}
+                        }
                         idle_timeout
                             .as_mut()
                             .reset(tokio::time::Instant::now() + std::time::Duration::from_secs(WS_PASSTHROUGH_IDLE_TIMEOUT_SECS));
@@ -3257,7 +3578,8 @@ async fn bridge_websockets(
     let _ = downstream_sink.close().await;
     let _ = client_sink.close().await;
 
-    start.elapsed()
+    stats.duration = start.elapsed();
+    stats
 }
 
 /// Maximum WS message size (16 MB) -- limits both client and downstream frames.
@@ -3300,6 +3622,7 @@ async fn handle_ws_passthrough(
     query: Option<&str>,
     forward_headers: &[(String, String)],
     caller_token: Option<&str>,
+    metered: crate::services::billing::MeteredProxyContext,
 ) -> AppResult<Response> {
     let downstream_url = build_downstream_ws_url(target, path, query, delegated)?;
 
@@ -3328,6 +3651,7 @@ async fn handle_ws_passthrough(
         caller_token,
     )
     .await?;
+    state.billing.mark_forwarded(&metered).await?;
 
     let user_id_str = auth_user.user_id.to_string();
     let service_id_owned = service_id.to_string();
@@ -3353,6 +3677,8 @@ async fn handle_ws_passthrough(
     );
 
     let db = state.db.clone();
+    let billing = state.billing.clone();
+    let metered_for_settle = metered.clone();
     let sid = service_id_owned.clone();
     let ws_frame_injections = target.ws_frame_injections.clone();
     let credential = target.credential.clone();
@@ -3365,7 +3691,7 @@ async fn handle_ws_passthrough(
 
     Ok(ws_upgrade
         .on_upgrade(move |client_ws| async move {
-            let duration = bridge_websockets(
+            let stats = bridge_websockets(
                 client_ws,
                 downstream.stream,
                 sid.clone(),
@@ -3380,6 +3706,13 @@ async fn handle_ws_passthrough(
             )
             .await;
             drop(guard); // decrement counter (guard moved into closure)
+            settle_meter_async(
+                billing,
+                metered_for_settle,
+                PlatformUsage::single_request(stats.total_bytes()),
+                None,
+                None,
+            );
 
             audit_service::log_async(
                 db,
@@ -3387,7 +3720,7 @@ async fn handle_ws_passthrough(
                 "proxy_ws_disconnect".to_string(),
                 Some(serde_json::json!({
                     "service_id": sid,
-                    "duration_secs": duration.as_secs(),
+                    "duration_secs": stats.duration.as_secs(),
                     "acting_client_id": &acting_client_id,
                 })),
                 req_ip,
@@ -3417,6 +3750,7 @@ async fn handle_ws_passthrough_via_node(
     forward_headers: &[(String, String)],
     service_owner_user_id: &str,
     proxy_actor_user_id: &str,
+    metered: crate::services::billing::MeteredProxyContext,
 ) -> AppResult<Response> {
     use crate::services::node_ws_manager::NodeWsProxyRequest;
 
@@ -3620,6 +3954,8 @@ async fn handle_ws_passthrough_via_node(
 
     let db = state.db.clone();
     let ws_manager = state.node_ws_manager.clone();
+    let billing = state.billing.clone();
+    let metered_for_settle = metered.clone();
     let sid = service_id_owned.clone();
     let sess_id = session_id.clone();
     let owner_for_audit = service_owner_user_id_owned.clone();
@@ -3630,10 +3966,11 @@ async fn handle_ws_passthrough_via_node(
     } else {
         ws_upgrade
     };
+    state.billing.mark_forwarded(&metered).await?;
 
     Ok(ws_upgrade
         .on_upgrade(move |client_ws| async move {
-            let duration = bridge_websockets_via_node(
+            let stats = bridge_websockets_via_node(
                 client_ws,
                 ws_proxy_session.frames,
                 &ws_manager,
@@ -3654,10 +3991,17 @@ async fn handle_ws_passthrough_via_node(
             // Best-effort close the node-side session.
             let _ = ws_manager.send_ws_proxy_close(&node_id_owned, &sess_id, None, None);
             drop(guard); // explicitly decrement counter
+            settle_meter_async(
+                billing,
+                metered_for_settle,
+                PlatformUsage::single_request(stats.total_bytes()),
+                None,
+                None,
+            );
 
             let mut disconnect_event = serde_json::json!({
                 "service_id": sid,
-                "duration_secs": duration.as_secs(),
+                "duration_secs": stats.duration.as_secs(),
                 "acting_client_id": &acting_client_id,
                 "routed_via": "node",
                 "node_id": node_id_owned,
@@ -3694,10 +4038,11 @@ async fn bridge_websockets_via_node(
     proxy_actor_user_id: String,
     ip_address: Option<String>,
     user_agent: Option<String>,
-) -> std::time::Duration {
+) -> ConnectionUsageStats {
     use crate::services::node_ws_manager::WsProxyFrame;
 
     let start = std::time::Instant::now();
+    let mut stats = ConnectionUsageStats::default();
     let (mut client_sink, mut client_stream) = client_ws.split();
 
     let max_duration = tokio::time::sleep(std::time::Duration::from_secs(
@@ -3724,6 +4069,8 @@ async fn bridge_websockets_via_node(
             msg = client_stream.next() => {
                 match msg {
                     Some(Ok(axum::extract::ws::Message::Text(t))) => {
+                        stats.frames_in += 1;
+                        stats.bytes_in += t.len() as i64;
                         idle_timeout.as_mut().reset(
                             tokio::time::Instant::now()
                                 + std::time::Duration::from_secs(WS_PASSTHROUGH_IDLE_TIMEOUT_SECS),
@@ -3733,6 +4080,8 @@ async fn bridge_websockets_via_node(
                         }
                     }
                     Some(Ok(axum::extract::ws::Message::Binary(b))) => {
+                        stats.frames_in += 1;
+                        stats.bytes_in += b.len() as i64;
                         idle_timeout.as_mut().reset(
                             tokio::time::Instant::now()
                                 + std::time::Duration::from_secs(WS_PASSTHROUGH_IDLE_TIMEOUT_SECS),
@@ -3763,6 +4112,8 @@ async fn bridge_websockets_via_node(
             frame = ws_proxy_rx.recv() => {
                 match frame {
                     Some(WsProxyFrame::Text(t)) => {
+                        stats.frames_out += 1;
+                        stats.bytes_out += t.len() as i64;
                         idle_timeout.as_mut().reset(
                             tokio::time::Instant::now()
                                 + std::time::Duration::from_secs(WS_PASSTHROUGH_IDLE_TIMEOUT_SECS),
@@ -3776,6 +4127,8 @@ async fn bridge_websockets_via_node(
                         }
                     }
                     Some(WsProxyFrame::Binary(b)) => {
+                        stats.frames_out += 1;
+                        stats.bytes_out += b.len() as i64;
                         idle_timeout.as_mut().reset(
                             tokio::time::Instant::now()
                                 + std::time::Duration::from_secs(WS_PASSTHROUGH_IDLE_TIMEOUT_SECS),
@@ -3851,7 +4204,8 @@ async fn bridge_websockets_via_node(
     }
 
     let _ = client_sink.close().await;
-    start.elapsed()
+    stats.duration = start.elapsed();
+    stats
 }
 
 #[cfg(test)]

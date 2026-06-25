@@ -252,6 +252,15 @@ pub(crate) fn test_app_config() -> AppConfig {
         cloud_response_cache_ttl_secs: 0,
         cloud_response_cache_max_entry_bytes: 1024 * 1024,
         cloud_response_cache_max_entries: 256,
+        billing_enabled: false,
+        lago_api_url: None,
+        lago_api_key: None,
+        lago_webhook_secret: None,
+        billing_reconcile_interval_secs: 300,
+        billing_rate_cache_ttl_secs: 900,
+        billing_reservation_abandon_secs: 600,
+        billing_default_overdraft_cap_credits: 0,
+        billing_fail_closed: false,
         invite_code_required: false,
         email_auth_enabled: false,
         auto_verify_email: false,
@@ -359,6 +368,10 @@ pub(crate) fn test_app_state(db: mongodb::Database) -> AppState {
 pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfig) -> AppState {
     let http_client = reqwest::Client::new();
     let jwt_keys = cached_test_jwt_keys();
+    let billing = Arc::new(crate::services::billing::BillingService::new(
+        db.clone(),
+        Arc::new(config.clone()),
+    ));
 
     AppState {
         db,
@@ -425,6 +438,7 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         cloud_response_cache: Arc::new(
             crate::services::cloud_response_cache::CloudResponseCache::new(0),
         ),
+        billing,
         telemetry: None,
     }
 }

@@ -11,6 +11,7 @@ use crate::models::downstream_service::{
 #[cfg(test)]
 use crate::models::org_membership::OrgMembership;
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
+use crate::models::service_billing::ServiceBilling;
 use crate::models::service_provider_requirement::{
     COLLECTION_NAME as SERVICE_PROVIDER_REQUIREMENTS, ServiceProviderRequirement,
 };
@@ -72,6 +73,7 @@ pub struct CatalogEntry {
     pub repository_url: Option<String>,
     pub issues_url: Option<String>,
     pub capabilities: Option<ServiceCapabilities>,
+    pub billing: Option<ServiceBilling>,
     pub auth_notes: Option<String>,
     pub known_limitations: Option<String>,
     pub required_permissions: Option<Vec<String>>,
@@ -167,6 +169,7 @@ fn build_catalog_entry(
         repository_url: svc.repository_url,
         issues_url: svc.issues_url,
         capabilities: svc.capabilities,
+        billing: svc.billing,
         auth_notes: svc.auth_notes,
         known_limitations: svc.known_limitations,
         required_permissions: svc.required_permissions,

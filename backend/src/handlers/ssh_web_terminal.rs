@@ -16,6 +16,10 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::ssh_auth_mode::SshAuthMode;
 use crate::models::user::{COLLECTION_NAME as USERS, User};
+use crate::models::{
+    service_billing::{BillingMetric, PlatformUsage},
+    usage_meter::CredentialClass,
+};
 use crate::mw::auth::AuthUser;
 use crate::services::node_ws_manager::NodeWebTerminalAuthMode;
 use crate::services::{audit_service, node_routing_service, node_service, ssh_service};
@@ -71,11 +75,15 @@ pub async fn ssh_web_terminal(
     // Resolve the catalog slug once up front so telemetry reports the
     // service by slug rather than by UUID path param. Best-effort: web
     // terminal availability must not fail on a telemetry-only lookup.
-    let service_slug = fetch_service(&state, &service_id)
-        .await
-        .ok()
-        .map(|s| s.slug)
+    let service_row = fetch_service(&state, &service_id).await.ok();
+    let service_slug = service_row
+        .as_ref()
+        .map(|s| s.slug.clone())
         .unwrap_or_else(|| service_id.clone());
+    let service_owner_id = service_row
+        .as_ref()
+        .map(|s| s.created_by.clone())
+        .unwrap_or_else(|| auth_user.user_id.to_string());
     let auth_context = ssh_service::resolve_ssh_auth_context(
         &state.db,
         &auth_user.user_id.to_string(),
@@ -150,6 +158,7 @@ pub async fn ssh_web_terminal(
                 session_guard,
                 client_meta,
                 tele,
+                service_owner_id,
             )
             .await;
         })
@@ -171,6 +180,7 @@ async fn handle_web_terminal(
     session_guard: ssh_service::SshSessionGuard,
     client_meta: (Option<String>, Option<String>),
     tele: TelemetryContext,
+    service_owner_id: String,
 ) {
     let _ = &session_guard;
     let user_id = auth_user.user_id.to_string();
@@ -233,6 +243,7 @@ async fn handle_web_terminal(
             node_route,
             ephemeral,
             tele,
+            service_owner_id,
         )
         .await;
     } else {
@@ -278,10 +289,52 @@ async fn handle_node_web_terminal(
     node_route: node_routing_service::NodeRoute,
     ephemeral: Option<EphemeralSshCredentials>,
     tele: TelemetryContext,
+    service_owner_id: String,
 ) {
     let all_node_ids: Vec<&str> = std::iter::once(node_route.node_id.as_str())
         .chain(node_route.fallback_node_ids.iter().map(|id| id.as_str()))
         .collect();
+    let billing_owner = match state
+        .billing
+        .owner_resolver()
+        .resolve(&user_id, Some(&service_owner_id))
+        .await
+    {
+        Ok(owner) => owner,
+        Err(error) => {
+            tracing::warn!(service_id = %service_id, error = %error, "Failed to resolve web terminal billing owner");
+            send_error_and_close(&mut socket, "Failed to resolve billing owner").await;
+            return;
+        }
+    };
+    let node_intent = if node_route.fallback_node_ids.is_empty() {
+        crate::services::billing::NodeIntent::Node
+    } else {
+        crate::services::billing::NodeIntent::NodeWithFallback
+    };
+    let billing_ctx = crate::services::billing::BillingRouteContext::new(
+        uuid::Uuid::new_v4().to_string(),
+        billing_owner.owner_id,
+        user_id.clone(),
+        api_key_id.clone(),
+        None,
+        Some(service_id.clone()),
+        Some(service_slug.clone()),
+        node_intent,
+        "ssh".to_string(),
+        CredentialClass::NodeManaged,
+        BillingMetric::Bytes,
+        None,
+        state.billing.billing_enabled(),
+    );
+    let metered = match state.billing.open(&billing_ctx).await {
+        Ok(metered) => metered,
+        Err(error) => {
+            tracing::warn!(service_id = %service_id, error = %error, "Failed to open web terminal usage meter");
+            send_error_and_close(&mut socket, "Failed to open billing meter").await;
+            return;
+        }
+    };
 
     let mut terminal_rx = None;
     let mut selected_node_id = None;
@@ -395,6 +448,16 @@ async fn handle_node_web_terminal(
         close_node_web_terminal(&state, &node_id, &session_id, "browser_send_failed");
         return;
     }
+    if let Err(error) = state.billing.mark_forwarded(&metered).await {
+        tracing::warn!(service_id = %service_id, error = %error, "Failed to mark web terminal usage forwarded");
+        close_node_web_terminal(
+            &state,
+            &node_id,
+            &session_id,
+            "billing_mark_forwarded_failed",
+        );
+        return;
+    }
 
     audit_service::log_async(
         state.db.clone(),
@@ -506,6 +569,18 @@ async fn handle_node_web_terminal(
     let _ = socket.close().await;
 
     let duration_ms = started_at.elapsed().as_millis() as u64;
+    if let Err(error) = state
+        .billing
+        .settle(
+            &metered,
+            PlatformUsage::single_request((from_client_bytes + to_client_bytes) as i64),
+            None,
+            None,
+        )
+        .await
+    {
+        tracing::warn!(service_id = %service_id, error = %error, "Failed to settle web terminal usage meter");
+    }
     audit_service::log_async(
         state.db.clone(),
         Some(user_id.clone()),

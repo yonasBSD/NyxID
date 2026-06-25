@@ -1681,6 +1681,7 @@ async fn finish_resolution(
     // entry has no defaults set.
     let catalog_default_headers =
         load_catalog_default_headers_for_user_service(db, &user_service).await;
+    let catalog_billing = load_catalog_billing_for_user_service(db, &user_service).await;
     let catalog_ws_frame_injections =
         load_catalog_ws_frame_injections_for_user_service(db, &user_service).await;
     let effective_ws_frame_injections = if user_service.ws_frame_injections.is_empty() {
@@ -1698,8 +1699,13 @@ async fn finish_resolution(
         let now = chrono::Utc::now();
         let token_exchange_config =
             load_token_exchange_config_for_user_service(db, &user_service).await?;
-        let minimal_service =
-            build_minimal_downstream_service(&user_service, &endpoint, now, token_exchange_config);
+        let minimal_service = build_minimal_downstream_service(
+            &user_service,
+            &endpoint,
+            now,
+            token_exchange_config,
+            catalog_billing.clone(),
+        );
 
         return Ok(UserServiceResolution {
             target: ProxyTarget {
@@ -1744,7 +1750,13 @@ async fn finish_resolution(
             AppError::Internal("Failed to decode credential".to_string())
         })?;
         let now = chrono::Utc::now();
-        let minimal_service = build_minimal_downstream_service(&user_service, &endpoint, now, None);
+        let minimal_service = build_minimal_downstream_service(
+            &user_service,
+            &endpoint,
+            now,
+            None,
+            catalog_billing.clone(),
+        );
 
         return Ok(UserServiceResolution {
             target: ProxyTarget {
@@ -1810,8 +1822,13 @@ async fn finish_resolution(
         let now = chrono::Utc::now();
         let token_exchange_config =
             load_token_exchange_config_for_user_service(db, &user_service).await?;
-        let minimal_service =
-            build_minimal_downstream_service(&user_service, &endpoint, now, token_exchange_config);
+        let minimal_service = build_minimal_downstream_service(
+            &user_service,
+            &endpoint,
+            now,
+            token_exchange_config,
+            catalog_billing.clone(),
+        );
 
         return Ok(UserServiceResolution {
             target: ProxyTarget {
@@ -1855,8 +1872,13 @@ async fn finish_resolution(
     let now = chrono::Utc::now();
     let token_exchange_config =
         load_token_exchange_config_for_user_service(db, &user_service).await?;
-    let minimal_service =
-        build_minimal_downstream_service(&user_service, &endpoint, now, token_exchange_config);
+    let minimal_service = build_minimal_downstream_service(
+        &user_service,
+        &endpoint,
+        now,
+        token_exchange_config,
+        catalog_billing,
+    );
 
     Ok(UserServiceResolution {
         target: ProxyTarget {
@@ -1962,6 +1984,29 @@ async fn load_catalog_ws_frame_injections_for_user_service(
                 "Failed to load catalog ws_frame_injections; proceeding without"
             );
             Vec::new()
+        }
+    }
+}
+
+async fn load_catalog_billing_for_user_service(
+    db: &mongodb::Database,
+    user_service: &crate::models::user_service::UserService,
+) -> Option<crate::models::service_billing::ServiceBilling> {
+    let catalog_id = user_service.catalog_service_id.as_deref()?;
+    match db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find_one(doc! { "_id": catalog_id })
+        .await
+    {
+        Ok(Some(svc)) => svc.billing,
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!(
+                catalog_id,
+                error = %e,
+                "Failed to load catalog billing config; proceeding without resale metering"
+            );
+            None
         }
     }
 }
@@ -2238,6 +2283,7 @@ fn build_minimal_downstream_service(
     endpoint: &UserEndpoint,
     now: chrono::DateTime<chrono::Utc>,
     token_exchange_config: Option<crate::models::downstream_service::TokenExchangeConfig>,
+    billing: Option<crate::models::service_billing::ServiceBilling>,
 ) -> DownstreamService {
     let platform_managed_catalog_service = user_service.source.as_deref()
         == Some(AUTO_PROVISION_SOURCE)
@@ -2286,6 +2332,7 @@ fn build_minimal_downstream_service(
         repository_url: None,
         issues_url: None,
         capabilities: None,
+        billing,
         auth_notes: None,
         known_limitations: None,
         required_permissions: None,
@@ -3454,6 +3501,7 @@ mod tests {
                 repository_url: None,
                 issues_url: None,
                 capabilities: None,
+                billing: None,
                 auth_notes: None,
                 known_limitations: None,
                 required_permissions: None,
@@ -4281,6 +4329,7 @@ mod tests {
                 repository_url: None,
                 issues_url: None,
                 capabilities: None,
+                billing: None,
                 auth_notes: None,
                 known_limitations: None,
                 required_permissions: None,
@@ -4528,6 +4577,7 @@ mod tests {
             &endpoint,
             Utc::now(),
             Some(config.clone()),
+            None,
         );
 
         let carried = svc.token_exchange_config.expect("config must be carried");
@@ -4542,7 +4592,8 @@ mod tests {
         user_service.auth_method = "bearer".to_string();
         let endpoint = make_endpoint();
 
-        let svc = build_minimal_downstream_service(&user_service, &endpoint, Utc::now(), None);
+        let svc =
+            build_minimal_downstream_service(&user_service, &endpoint, Utc::now(), None, None);
 
         assert!(svc.token_exchange_config.is_none());
         assert_eq!(svc.auth_method, "bearer");
@@ -4604,6 +4655,7 @@ mod tests {
                 repository_url: None,
                 issues_url: None,
                 capabilities: None,
+                billing: None,
                 auth_notes: None,
                 known_limitations: None,
                 required_permissions: None,
@@ -4760,7 +4812,8 @@ mod tests {
         user_service.auth_key_name = "app_secret".to_string();
         let endpoint = make_endpoint();
 
-        let svc = build_minimal_downstream_service(&user_service, &endpoint, Utc::now(), None);
+        let svc =
+            build_minimal_downstream_service(&user_service, &endpoint, Utc::now(), None, None);
 
         assert_eq!(svc.auth_method, "body");
         assert_eq!(svc.auth_key_name, "app_secret");
@@ -4822,6 +4875,7 @@ mod tests {
                 repository_url: None,
                 issues_url: None,
                 capabilities: None,
+                billing: None,
                 auth_notes: None,
                 known_limitations: None,
                 required_permissions: None,
@@ -5060,6 +5114,7 @@ mod tests {
             repository_url: None,
             issues_url: None,
             capabilities: None,
+            billing: None,
             auth_notes: None,
             known_limitations: None,
             required_permissions: None,

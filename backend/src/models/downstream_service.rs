@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::models::default_request_header::DefaultRequestHeader;
+use crate::models::service_billing::ServiceBilling;
 use crate::models::ssh_auth_mode::{SshAuthMode, default_ssh_auth_mode};
 use crate::models::ws_frame_injection::WsFrameInjection;
 
@@ -266,6 +267,10 @@ pub struct DownstreamService {
     /// Structured capability flags for proxy interaction patterns
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<ServiceCapabilities>,
+    /// Resale-layer usage billing metadata. Platform billing is plan-level
+    /// and is not configured on catalog services.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billing: Option<ServiceBilling>,
     /// Freeform notes on downstream auth expectations
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_notes: Option<String>,
@@ -422,6 +427,7 @@ pub mod test_helpers {
             repository_url: None,
             issues_url: None,
             capabilities: None,
+            billing: None,
             auth_notes: None,
             known_limitations: None,
             required_permissions: None,
@@ -522,6 +528,7 @@ mod tests {
                 supports_proxy_write: true,
                 ..Default::default()
             }),
+            billing: None,
             auth_notes: Some("Bearer token required".to_string()),
             known_limitations: None,
             required_permissions: Some(vec!["read:api".to_string()]),
@@ -597,6 +604,7 @@ mod tests {
             repository_url: None,
             issues_url: None,
             capabilities: None,
+            billing: None,
             auth_notes: None,
             known_limitations: None,
             required_permissions: None,

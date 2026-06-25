@@ -8,6 +8,7 @@ pub mod approval_service;
 pub mod audit_service;
 pub mod auth_device_service;
 pub mod auth_service;
+pub mod billing;
 pub mod cae_webhook_service;
 pub mod catalog_service;
 pub mod channel_adapters;

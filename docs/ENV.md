@@ -67,6 +67,22 @@ absolute accept URL from `runtime-config.api_base_url`; see
 |----------|---------|-------------|
 | `DATABASE_MAX_CONNECTIONS` | `10` | Connection pool max size |
 
+## Billing Meter and Lago Sink (P1/P2)
+
+Phase P1 writes a durable `usage_meter` ledger. Phase P2 can push finalized ledger rows into Lago and expose read-only usage display. These variables do not enable wallet charging, top-ups, reservations, or the P3 charging gate.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BILLING_ENABLED` | `false` | Enables platform usage capture in the P1 meter. Resale capture still requires catalog `ServiceBilling.resale_billable=true` and a final `CredentialClass::NyxidManagedMaster`. |
+| `LAGO_API_URL` | *(empty)* | Lago API URL for the P2 sink. May include or omit `/api/v1`. |
+| `LAGO_API_KEY` | *(empty)* | Lago API bearer key for NyxID-to-Lago calls; redacted from config debug output. |
+| `LAGO_WEBHOOK_SECRET` | *(empty)* | Lago webhook verification secret reserved for Lago-originated webhooks; redacted from config debug output. |
+| `BILLING_RECONCILE_INTERVAL_SECS` | `300` | Reconcile sweep interval. Set `0` to disable event push/reconcile sweeps. |
+| `BILLING_RATE_CACHE_TTL_SECS` | `900` | Read-only rate cache TTL for approximate display/reservation sizing. |
+| `BILLING_RESERVATION_ABANDON_SECS` | `600` | Grace before never-forwarded reserved rows are marked `abandoned`. |
+| `BILLING_DEFAULT_OVERDRAFT_CAP_CREDITS` | `0` | Default overdraft cap reserved for later phases. |
+| `BILLING_FAIL_CLOSED` | `false` | Operator fail-closed override reserved for later phases. |
+
 ## JWT
 
 | Variable | Default | Description |

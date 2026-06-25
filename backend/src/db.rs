@@ -1768,6 +1768,76 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    // ── usage_meter ──
+    let usage_meter = db.collection::<Document>(crate::models::usage_meter::COLLECTION_NAME);
+    usage_meter
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "transaction_id": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    usage_meter
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "status": 1, "lago_acked": 1, "updated_at": 1 })
+                .build(),
+        )
+        .await?;
+    usage_meter
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "billing_owner_id": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+    usage_meter
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Duration::from_secs(0))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
+    // ── billing_wallet ──
+    let billing_wallet = db.collection::<Document>(crate::models::billing_wallet::COLLECTION_NAME);
+    billing_wallet
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "owner_id": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    billing_wallet
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "lago_customer_id": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+
+    // ── billing_rate_cache ──
+    let billing_rate_cache =
+        db.collection::<Document>(crate::models::billing_rate_cache::COLLECTION_NAME);
+    billing_rate_cache
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "lago_metric_code": 1, "model": 1 })
+                .build(),
+        )
+        .await?;
+    billing_rate_cache
+        .create_index(IndexModel::builder().keys(doc! { "synced_at": -1 }).build())
+        .await?;
+
     // ── oracle_sessions ──
     let oracle_sessions = db.collection::<Document>(crate::models::oracle_session::COLLECTION_NAME);
     oracle_sessions
@@ -3216,6 +3286,7 @@ mod tests {
             repository_url: None,
             issues_url: None,
             capabilities: None,
+            billing: None,
             auth_notes: None,
             known_limitations: None,
             required_permissions: None,

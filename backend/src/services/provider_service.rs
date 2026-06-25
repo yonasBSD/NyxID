@@ -2737,6 +2737,7 @@ pub async fn seed_default_services(
             repository_url: None,
             issues_url: None,
             capabilities,
+            billing: None,
             auth_notes: None,
             known_limitations: None,
             required_permissions: None,

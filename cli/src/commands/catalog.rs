@@ -171,6 +171,27 @@ pub async fn run(command: CatalogCommands) -> Result<()> {
                         }
                     }
 
+                    if let Some(billing) = item["billing"].as_object()
+                        && billing
+                            .get("resale_billable")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
+                    {
+                        eprintln!();
+                        eprintln!("Billing:");
+                        eprintln!("  Resale billable: yes");
+                        if let Some(metric) = billing.get("resale_metric").and_then(|v| v.as_str())
+                        {
+                            eprintln!("  Resale metric:   {metric}");
+                        }
+                        if let Some(code) = billing
+                            .get("lago_resale_metric_code")
+                            .and_then(|v| v.as_str())
+                        {
+                            eprintln!("  Lago metric:     {code}");
+                        }
+                    }
+
                     if let Some(notes) = item["auth_notes"].as_str() {
                         eprintln!();
                         eprintln!("Auth Notes:");

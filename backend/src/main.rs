@@ -149,6 +149,8 @@ pub struct AppState {
     /// replayed from cache. TTL is driven by
     /// `cloud_response_cache_ttl_secs`. NyxID#716.
     pub cloud_response_cache: Arc<crate::services::cloud_response_cache::CloudResponseCache>,
+    /// Billing meter facade. P1 writes durable usage ledger rows only.
+    pub billing: Arc<services::billing::BillingService>,
     /// Vendor-neutral telemetry client. `None` when no DSN is configured
     /// (the default hard-off state — see `docs/TELEMETRY.md` §3).
     pub telemetry: Option<Arc<telemetry::TelemetryClient>>,
@@ -480,6 +482,10 @@ async fn main() {
     drop(jwt_private_key_pem);
 
     // Create shared state
+    let billing = Arc::new(services::billing::BillingService::new(
+        db.clone(),
+        Arc::new(config.clone()),
+    ));
     let state = AppState {
         db,
         config: config.clone(),
@@ -527,12 +533,17 @@ async fn main() {
                 config.cloud_response_cache_max_entries,
             ),
         ),
+        billing,
         telemetry: telemetry::TelemetryClient::from_config(&config),
     };
 
     // Spawn the telemetry-erasure worker. No-op when `state.telemetry`
     // is `None` (hard-off mode); the function logs + returns.
     services::telemetry_erasure_service::spawn_worker(state.db.clone(), state.telemetry.clone());
+    services::billing::reconcile::spawn_reconcile_worker(
+        state.billing.reconciler(),
+        config.billing_reconcile_interval_secs,
+    );
 
     // Create rate limiters
     let global_rate_limiter =
