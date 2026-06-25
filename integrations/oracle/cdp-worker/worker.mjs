@@ -556,6 +556,9 @@ async function selectModel(page, modelLabel) {
   }
 }
 
+// NOTE: keep this table in sync with `fileMime` in
+// integrations/oracle/nyxid_oracle.user.js (same allowlist, separate runtime —
+// the userscript can't import and the worker ships as one self-contained file).
 function fileMime(name) {
   const ext = (name.split(".").pop() || "").toLowerCase();
   return (

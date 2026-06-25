@@ -484,6 +484,9 @@
     return false;
   }
 
+  // NOTE: keep this table in sync with `fileMime` in
+  // integrations/oracle/cdp-worker/worker.mjs (same allowlist, separate runtime
+  // — the userscript can't import and the worker ships as one self-contained file).
   function fileMime(name) {
     const ext = (name.split(".").pop() || "").toLowerCase();
     return (
@@ -504,10 +507,12 @@
     );
   }
 
-  // Upload any file (image / pdf / ...) to the composer; mime is derived from
-  // the filename. Also serves the legacy pdf path (a `.pdf` name → application/pdf).
-  async function uploadFile(base64Data, fileName) {
-    const mime = fileMime(fileName);
+  // Upload any file (image / pdf / ...) to the composer. Mime is derived from the
+  // filename unless `mimeOverride` is given — the legacy pdf path passes
+  // "application/pdf" so a `pdf_name` without a `.pdf` extension still uploads as
+  // a PDF (preserving the pre-refactor behavior).
+  async function uploadFile(base64Data, fileName, mimeOverride) {
+    const mime = mimeOverride || fileMime(fileName);
     log(`file upload: ${fileName} (${(base64Data.length * 0.75 / 1024).toFixed(0)} KB, ${mime})`);
     const byteChars = atob(base64Data);
     const byteArray = new Uint8Array(byteChars.length);
@@ -1954,7 +1959,7 @@
       // memory, so re-uploading is wasted work.
       if (!is_followup && pdf_base64) {
         try {
-          const ok = await uploadFile(pdf_base64, pdf_name || "main.pdf");
+          const ok = await uploadFile(pdf_base64, pdf_name || "main.pdf", "application/pdf");
           if (!ok) log("PDF upload failed — proceeding without PDF context");
         } catch (e) {
           log(`PDF upload exception: ${e.message} — proceeding without PDF`);
