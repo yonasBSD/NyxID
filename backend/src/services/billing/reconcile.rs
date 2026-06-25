@@ -420,6 +420,10 @@ mod tests {
             })
         }
 
+        async fn wallet_balance(&self, _customer_id: &str) -> crate::errors::AppResult<i64> {
+            Ok(0)
+        }
+
         async fn entitlements(
             &self,
             _subscription_id: &str,

@@ -1069,8 +1069,9 @@ pub fn build_router(
         .layer(oauth_public_cors());
 
     // Webhook routes -- unauthenticated (verified by secret token)
-    let webhook_routes =
-        Router::new().route("/telegram", post(handlers::webhooks::telegram_webhook));
+    let webhook_routes = Router::new()
+        .route("/telegram", post(handlers::webhooks::telegram_webhook))
+        .route("/lago", post(handlers::billing::lago_webhook));
 
     // Integration webhook routes -- unauthenticated (verified by HMAC signature)
     let integration_routes = Router::new().route(

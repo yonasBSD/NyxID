@@ -1,19 +1,32 @@
 use axum::{
     Json,
+    body::Bytes,
     extract::{Query, State},
+    http::{HeaderMap, StatusCode},
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::{Duration, Utc};
 use futures::TryStreamExt;
+use hmac::{Hmac, Mac};
 use mongodb::bson::{self, Bson, Document, doc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use utoipa::ToSchema;
 
 use crate::AppState;
-use crate::errors::AppResult;
+use crate::errors::{AppError, AppResult};
 use crate::models::billing_rate_cache::{BillingRateCache, COLLECTION_NAME as BILLING_RATE_CACHE};
 use crate::models::service_billing::BillingMetric;
 use crate::models::usage_meter::COLLECTION_NAME as USAGE_METER;
 use crate::mw::auth::AuthUser;
+
+type HmacSha256 = Hmac<Sha256>;
+
+const LAGO_SIGNATURE_HEADER: &str = "x-lago-signature";
+const LAGO_SIGNATURE_ALGORITHM_HEADER: &str = "x-lago-signature-algorithm";
+const LAGO_UNIQUE_KEY_HEADER: &str = "x-lago-unique-key";
+const LAGO_HMAC_SHA256_ALGORITHM: &str = "hmac";
 
 #[derive(Debug, Deserialize)]
 pub struct UsageQuery {
@@ -59,6 +72,12 @@ pub struct BillingReadOnlyBlock {
     pub lago_configured: bool,
     pub source: String,
     pub rates_are_approximate: bool,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct LagoWebhookResponse {
+    pub ok: bool,
+    pub action: String,
 }
 
 pub async fn get_usage(
@@ -167,6 +186,105 @@ pub async fn get_usage(
     }))
 }
 
+pub async fn lago_webhook(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> AppResult<(StatusCode, Json<LagoWebhookResponse>)> {
+    let expected_secret = state.config.lago_webhook_secret.as_deref().ok_or_else(|| {
+        tracing::warn!("Lago webhook received but LAGO_WEBHOOK_SECRET is not configured");
+        AppError::Unauthorized("Lago webhook signature verification failed".to_string())
+    })?;
+
+    verify_lago_signature(&headers, &body, expected_secret).map_err(|error| {
+        tracing::warn!(error = %error, "Lago webhook signature verification failed");
+        AppError::Unauthorized("Lago webhook signature verification failed".to_string())
+    })?;
+
+    let payload: serde_json::Value = serde_json::from_slice(&body)
+        .map_err(|_| AppError::BadRequest("Lago webhook payload must be valid JSON".to_string()))?;
+    let event_type = lago_event_type(&payload).ok_or_else(|| {
+        AppError::BadRequest("Lago webhook payload is missing webhook_type".to_string())
+    })?;
+    let unique_key = headers
+        .get(LAGO_UNIQUE_KEY_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+
+    let lago = state.billing.lago_client();
+    let outcome = crate::services::billing::webhook::handle_lago_webhook_event(
+        &state.db,
+        lago.as_deref(),
+        event_type,
+        &payload,
+    )
+    .await?;
+
+    tracing::info!(
+        event_type,
+        unique_key,
+        action = outcome.action.as_str(),
+        owner_id = outcome.owner_id.as_deref().unwrap_or(""),
+        customer_id = outcome.customer_id.as_deref().unwrap_or(""),
+        "Lago webhook processed"
+    );
+
+    Ok((
+        StatusCode::OK,
+        Json(LagoWebhookResponse {
+            ok: true,
+            action: outcome.action.as_str().to_string(),
+        }),
+    ))
+}
+
+fn verify_lago_signature(
+    headers: &HeaderMap,
+    body: &[u8],
+    secret: &str,
+) -> Result<(), &'static str> {
+    if secret.trim().is_empty() {
+        return Err("missing expected secret");
+    }
+
+    let algorithm =
+        header_str(headers, LAGO_SIGNATURE_ALGORITHM_HEADER).unwrap_or(LAGO_HMAC_SHA256_ALGORITHM);
+    if !algorithm.eq_ignore_ascii_case(LAGO_HMAC_SHA256_ALGORITHM) {
+        return Err("unsupported signature algorithm");
+    }
+
+    let received = header_str(headers, LAGO_SIGNATURE_HEADER).ok_or("missing signature")?;
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).map_err(|_| "invalid expected secret")?;
+    mac.update(body);
+    let expected = BASE64_STANDARD.encode(mac.finalize().into_bytes());
+    if constant_time_str_eq(received.trim(), &expected) {
+        Ok(())
+    } else {
+        Err("signature mismatch")
+    }
+}
+
+fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers.get(name).and_then(|value| value.to_str().ok())
+}
+
+fn constant_time_str_eq(received: &str, expected: &str) -> bool {
+    let received_hash = Sha256::digest(received.as_bytes());
+    let expected_hash = Sha256::digest(expected.as_bytes());
+    received_hash.ct_eq(&expected_hash).into()
+}
+
+fn lago_event_type(payload: &serde_json::Value) -> Option<&str> {
+    payload
+        .get("webhook_type")
+        .or_else(|| payload.get("event_type"))
+        .or_else(|| payload.get("event"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
 fn period_start(period: &str) -> chrono::DateTime<Utc> {
     let now = Utc::now();
     match period {
@@ -223,4 +341,51 @@ fn sum_optional(values: impl Iterator<Item = Option<i64>>) -> Option<i64> {
         total = total.saturating_add(value);
     }
     saw_value.then_some(total)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn signed_headers(secret: &str, body: &[u8]) -> HeaderMap {
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(body);
+        let signature = BASE64_STANDARD.encode(mac.finalize().into_bytes());
+        let mut headers = HeaderMap::new();
+        headers.insert(LAGO_SIGNATURE_HEADER, signature.parse().unwrap());
+        headers.insert(
+            LAGO_SIGNATURE_ALGORITHM_HEADER,
+            LAGO_HMAC_SHA256_ALGORITHM.parse().unwrap(),
+        );
+        headers
+    }
+
+    #[test]
+    fn lago_signature_accepts_valid_hmac() {
+        let body = br#"{"webhook_type":"wallet.updated"}"#;
+        let headers = signed_headers("secret", body);
+
+        assert!(verify_lago_signature(&headers, body, "secret").is_ok());
+    }
+
+    #[test]
+    fn lago_signature_rejects_tampered_body() {
+        let headers = signed_headers("secret", br#"{"webhook_type":"wallet.updated"}"#);
+
+        assert!(
+            verify_lago_signature(
+                &headers,
+                br#"{"webhook_type":"subscription.started"}"#,
+                "secret"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn lago_event_type_reads_webhook_type() {
+        let payload = serde_json::json!({ "webhook_type": "wallet.updated" });
+
+        assert_eq!(lago_event_type(&payload), Some("wallet.updated"));
+    }
 }
