@@ -524,6 +524,34 @@ mod tests {
         assert!(matches!(error, crate::errors::AppError::Conflict(_)));
     }
 
+    #[tokio::test]
+    async fn topup_rejects_non_positive_amount() {
+        let Some(db) = connect_test_database("billing_topup_nonpositive").await else {
+            return;
+        };
+        let owner_id = insert_owner(&db, "nonpositive@example.com").await;
+        let lago = FakeLago::default();
+
+        for amount in [0_i64, -100] {
+            let error =
+                create_topup_checkout(&db, &lago, &owner_id, "starter", 0, amount, "topup-np")
+                    .await
+                    .expect_err("non-positive amount must be rejected");
+            assert!(
+                matches!(error, crate::errors::AppError::BadRequest(_)),
+                "amount_credits = {amount} should be rejected with BadRequest, got {error:?}"
+            );
+        }
+        // Guard rejects before any Lago call or top-up session write.
+        assert_eq!(lago.topup_creates.load(Ordering::SeqCst), 0);
+        let session_count = db
+            .collection::<BillingTopUpSession>(BILLING_TOPUP_SESSIONS)
+            .count_documents(doc! { "owner_id": &owner_id })
+            .await
+            .expect("count top-up sessions");
+        assert_eq!(session_count, 0);
+    }
+
     #[derive(Clone, Default)]
     struct FakeLago {
         wallet_creates: Arc<AtomicUsize>,
