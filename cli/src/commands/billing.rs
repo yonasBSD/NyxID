@@ -1,4 +1,6 @@
-use anyhow::Result;
+use std::time::{Duration, Instant};
+
+use anyhow::{Result, bail};
 use comfy_table::{Table, presets::UTF8_FULL_CONDENSED};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -159,7 +161,104 @@ pub async fn run(command: BillingCommands) -> Result<()> {
             }
             print_topup(&response, auth.output)
         }
+        BillingCommands::VerifyTopupFlow {
+            amount_credits,
+            idempotency_key,
+            owner_id,
+            open,
+            timeout_secs,
+            poll_interval_secs,
+            auth,
+        } => {
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let response = verify_topup_flow(
+                &mut api,
+                amount_credits,
+                idempotency_key,
+                owner_id,
+                open,
+                Duration::from_secs(timeout_secs),
+                Duration::from_secs(poll_interval_secs),
+            )
+            .await?;
+            print_topup_verification(&response, auth.output)
+        }
     }
+}
+
+async fn verify_topup_flow(
+    api: &mut ApiClient,
+    amount_credits: i64,
+    idempotency_key: Option<String>,
+    owner_id: Option<String>,
+    open: bool,
+    timeout: Duration,
+    poll_interval: Duration,
+) -> Result<TopUpVerificationResponse> {
+    if amount_credits <= 0 {
+        bail!("amount_credits must be greater than 0");
+    }
+    if timeout.is_zero() {
+        bail!("timeout_secs must be greater than 0");
+    }
+    if poll_interval.is_zero() {
+        bail!("poll_interval_secs must be greater than 0");
+    }
+
+    let starting_wallet: BillingWalletResponse = api.get("/billing/wallet").await?;
+    let key =
+        idempotency_key.unwrap_or_else(|| format!("nyxid-cli-verify-topup-{}", Uuid::new_v4()));
+    let topup: TopUpResponse = api
+        .post(
+            "/billing/topup",
+            &TopUpRequest {
+                amount_credits,
+                idempotency_key: key,
+                owner_id,
+            },
+        )
+        .await?;
+    if topup.payment_provider.as_deref() != Some("stripe") {
+        bail!(
+            "top-up did not return Stripe as payment_provider: {:?}",
+            topup.payment_provider
+        );
+    }
+    if !topup.checkout_url.starts_with("https://") {
+        bail!("top-up checkout_url must be HTTPS");
+    }
+    if topup.lago_wallet_transaction_id.is_none() {
+        bail!("top-up response is missing lago_wallet_transaction_id");
+    }
+    if open && let Err(error) = crate::browser::open_browser(&topup.checkout_url) {
+        eprintln!("Could not open checkout URL: {error}");
+    }
+
+    eprintln!("Complete the Stripe sandbox checkout, then leave this command running.");
+    let deadline = Instant::now() + timeout;
+    let mut final_wallet = starting_wallet.clone();
+    while Instant::now() < deadline {
+        let wallet: BillingWalletResponse = api.get("/billing/wallet").await?;
+        if wallet.balance_credits == starting_wallet.balance_credits + amount_credits {
+            final_wallet = wallet;
+            return Ok(TopUpVerificationResponse {
+                topup,
+                starting_balance_credits: starting_wallet.balance_credits,
+                final_balance_credits: final_wallet.balance_credits,
+                expected_balance_credits: starting_wallet.balance_credits + amount_credits,
+                verified: true,
+            });
+        }
+        final_wallet = wallet;
+        tokio::time::sleep(poll_interval).await;
+    }
+
+    bail!(
+        "timed out waiting for Lago/Stripe reconciliation: start={} final={} expected={}",
+        starting_wallet.balance_credits,
+        final_wallet.balance_credits,
+        starting_wallet.balance_credits + amount_credits
+    )
 }
 
 fn print_wallet(wallet: &BillingWalletResponse, output: OutputFormat) -> Result<()> {
@@ -251,6 +350,54 @@ fn print_topup(response: &TopUpResponse, output: OutputFormat) -> Result<()> {
             eprintln!("Reused:            {}", response.reused);
             eprintln!("Checkout URL:      {}", response.checkout_url);
             if let Some(invoice_id) = &response.lago_invoice_id {
+                eprintln!("Lago Invoice:      {invoice_id}");
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TopUpVerificationResponse {
+    topup: TopUpResponse,
+    starting_balance_credits: i64,
+    final_balance_credits: i64,
+    expected_balance_credits: i64,
+    verified: bool,
+}
+
+fn print_topup_verification(
+    response: &TopUpVerificationResponse,
+    output: OutputFormat,
+) -> Result<()> {
+    match output {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(response)?);
+        }
+        OutputFormat::Table => {
+            eprintln!("Billing Top-up Verification");
+            eprintln!();
+            eprintln!("Verified:          {}", response.verified);
+            eprintln!(
+                "Start Balance:     {} credits",
+                response.starting_balance_credits
+            );
+            eprintln!(
+                "Final Balance:     {} credits",
+                response.final_balance_credits
+            );
+            eprintln!(
+                "Expected Balance:  {} credits",
+                response.expected_balance_credits
+            );
+            eprintln!("Checkout URL:      {}", response.topup.checkout_url);
+            if let Some(provider) = &response.topup.payment_provider {
+                eprintln!("Payment Provider:  {provider}");
+            }
+            if let Some(transaction_id) = &response.topup.lago_wallet_transaction_id {
+                eprintln!("Lago Transaction:  {transaction_id}");
+            }
+            if let Some(invoice_id) = &response.topup.lago_invoice_id {
                 eprintln!("Lago Invoice:      {invoice_id}");
             }
         }
@@ -393,6 +540,52 @@ mod tests {
         .expect("topup should succeed");
     }
 
+    #[tokio::test]
+    async fn verify_topup_flow_polls_until_exact_paid_balance_is_reconciled() {
+        let base_url =
+            spawn_verify_topup_server(vec![10, 11], topup_json(1, "verify-key-123")).await;
+
+        let mut api = ApiClient::new(&base_url, "test-token".to_string()).expect("api client");
+        let result = verify_topup_flow(
+            &mut api,
+            1,
+            Some("verify-key-123".to_string()),
+            None,
+            false,
+            Duration::from_secs(1),
+            Duration::from_millis(1),
+        )
+        .await
+        .expect("verification should succeed");
+
+        assert!(result.verified);
+        assert_eq!(result.starting_balance_credits, 10);
+        assert_eq!(result.final_balance_credits, 11);
+        assert_eq!(result.expected_balance_credits, 11);
+        assert_eq!(result.topup.payment_provider.as_deref(), Some("stripe"));
+    }
+
+    #[tokio::test]
+    async fn verify_topup_flow_rejects_double_credit_reconciliation() {
+        let base_url =
+            spawn_verify_topup_server(vec![10, 12], topup_json(1, "verify-key-456")).await;
+
+        let mut api = ApiClient::new(&base_url, "test-token".to_string()).expect("api client");
+        let error = verify_topup_flow(
+            &mut api,
+            1,
+            Some("verify-key-456".to_string()),
+            None,
+            false,
+            Duration::from_millis(5),
+            Duration::from_millis(1),
+        )
+        .await
+        .expect_err("double-credit reconciliation must fail");
+
+        assert!(error.to_string().contains("expected=11"));
+    }
+
     fn wallet_json(created: bool) -> serde_json::Value {
         serde_json::json!({
             "owner_id": "owner-1",
@@ -413,6 +606,91 @@ mod tests {
             "created_at": "2026-06-26T00:00:00Z",
             "updated_at": "2026-06-26T00:00:00Z",
             "created": created
+        })
+    }
+
+    #[derive(Clone)]
+    struct VerifyTopupState {
+        balances: std::sync::Arc<Vec<i64>>,
+        wallet_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        topup: std::sync::Arc<serde_json::Value>,
+    }
+
+    async fn spawn_verify_topup_server(balances: Vec<i64>, topup: serde_json::Value) -> String {
+        async fn get_wallet(
+            axum::extract::State(state): axum::extract::State<VerifyTopupState>,
+        ) -> axum::Json<serde_json::Value> {
+            let index = state
+                .wallet_reads
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let balance = state
+                .balances
+                .get(index)
+                .or_else(|| state.balances.last())
+                .copied()
+                .expect("test balances must not be empty");
+            axum::Json(wallet_json_with_balance(balance))
+        }
+
+        async fn create_topup(
+            axum::extract::State(state): axum::extract::State<VerifyTopupState>,
+        ) -> axum::Json<serde_json::Value> {
+            axum::Json((*state.topup).clone())
+        }
+
+        let state = VerifyTopupState {
+            balances: std::sync::Arc::new(balances),
+            wallet_reads: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            topup: std::sync::Arc::new(topup),
+        };
+        let app = axum::Router::new()
+            .route("/api/v1/billing/wallet", axum::routing::get(get_wallet))
+            .route("/api/v1/billing/topup", axum::routing::post(create_topup))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("test server addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("test server");
+        });
+        format!("http://{addr}")
+    }
+
+    fn topup_json(amount_credits: i64, idempotency_key: &str) -> serde_json::Value {
+        serde_json::json!({
+            "owner_id": "owner-1",
+            "amount_credits": amount_credits,
+            "idempotency_key": idempotency_key,
+            "checkout_url": "https://checkout.stripe.test/session",
+            "payment_provider": "stripe",
+            "lago_wallet_transaction_id": "txn-1",
+            "lago_invoice_id": "invoice-1",
+            "status": "checkout_created",
+            "reused": false
+        })
+    }
+
+    fn wallet_json_with_balance(balance_credits: i64) -> serde_json::Value {
+        serde_json::json!({
+            "owner_id": "owner-1",
+            "plan_kind": "prepaid",
+            "collection_state": "good",
+            "balance_credits": balance_credits,
+            "reserved_credits": 0,
+            "pending_lago_debits": 0,
+            "available_credits": balance_credits,
+            "available_with_overdraft_credits": balance_credits,
+            "has_payment_instrument": false,
+            "overdraft_cap_credits": 0,
+            "suspended": false,
+            "lago_customer_id": "customer-1",
+            "lago_subscription_id": "subscription-1",
+            "lago_wallet_id": "wallet-1",
+            "balance_synced_at": "2026-06-26T00:00:00Z",
+            "created_at": "2026-06-26T00:00:00Z",
+            "updated_at": "2026-06-26T00:00:00Z",
+            "created": false
         })
     }
 }

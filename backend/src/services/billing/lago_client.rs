@@ -249,26 +249,15 @@ impl LagoApi for LagoClient {
                 "Lago top-up response did not include a wallet transaction id".to_string(),
             )
         })?;
-        let (payment_url, payment_provider) = match transaction.payment_url {
-            Some(payment_url) => (payment_url, transaction.payment_provider),
-            None => {
-                let payment_details = self
-                    .generate_wallet_transaction_payment_url(&transaction.wallet_transaction_id)
-                    .await?;
-                (
-                    payment_details.payment_url,
-                    payment_details
-                        .payment_provider
-                        .or(transaction.payment_provider),
-                )
-            }
-        };
+        let payment_details = self
+            .generate_wallet_transaction_payment_url(&transaction.wallet_transaction_id)
+            .await?;
 
         Ok(WalletTopUpCheckout {
             wallet_transaction_id: transaction.wallet_transaction_id,
             lago_invoice_id: transaction.lago_invoice_id,
-            payment_url,
-            payment_provider,
+            payment_url: payment_details.payment_url,
+            payment_provider: Some(payment_details.payment_provider),
         })
     }
 
@@ -457,14 +446,12 @@ pub struct WalletTopUpCheckout {
 pub struct WalletTopUpTransaction {
     pub wallet_transaction_id: String,
     pub lago_invoice_id: Option<String>,
-    pub payment_url: Option<String>,
-    pub payment_provider: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WalletTransactionPaymentDetails {
     pub payment_url: String,
-    pub payment_provider: Option<String>,
+    pub payment_provider: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -710,16 +697,6 @@ pub fn extract_wallet(value: &Value) -> Option<LagoWallet> {
 
 pub fn extract_wallet_topup_transaction(value: &Value) -> Option<WalletTopUpTransaction> {
     let transaction = find_wallet_transaction_object(value).unwrap_or(value);
-    let payment_url = find_string_by_keys(
-        transaction,
-        &[
-            "payment_url",
-            "checkout_url",
-            "hosted_payment_url",
-            "hosted_invoice_url",
-            "invoice_url",
-        ],
-    );
     let wallet_transaction_id = find_string_by_keys(
         transaction,
         &[
@@ -738,50 +715,19 @@ pub fn extract_wallet_topup_transaction(value: &Value) -> Option<WalletTopUpTran
             "lago_invoice_external_id",
         ],
     );
-    let payment_provider = find_string_by_keys(
-        transaction,
-        &[
-            "payment_provider",
-            "payment_provider_code",
-            "provider",
-            "provider_code",
-        ],
-    );
 
     Some(WalletTopUpTransaction {
         wallet_transaction_id,
         lago_invoice_id,
-        payment_url,
-        payment_provider,
     })
 }
 
 pub fn extract_wallet_transaction_payment_details(
     value: &Value,
 ) -> Option<WalletTransactionPaymentDetails> {
-    let payment_url = find_string_by_keys(
-        value
-            .get("wallet_transaction_payment_details")
-            .unwrap_or(value),
-        &[
-            "payment_url",
-            "checkout_url",
-            "hosted_payment_url",
-            "hosted_invoice_url",
-            "invoice_url",
-        ],
-    )?;
-    let payment_provider = find_string_by_keys(
-        value
-            .get("wallet_transaction_payment_details")
-            .unwrap_or(value),
-        &[
-            "payment_provider",
-            "payment_provider_code",
-            "provider",
-            "provider_code",
-        ],
-    );
+    let details = value.get("wallet_transaction_payment_details")?;
+    let payment_url = value_string(details, &["payment_url"])?;
+    let payment_provider = value_string(details, &["payment_provider"])?;
 
     Some(WalletTransactionPaymentDetails {
         payment_url,
@@ -1115,58 +1061,7 @@ mod tests {
             axum::Json(json!({
                 "wallet_transaction": {
                     "id": "txn-1",
-                    "lago_invoice_id": "invoice-1",
-                    "payment_url": "https://pay.example/checkout",
-                    "payment_provider_code": "stripe"
-                }
-            }))
-        }
-
-        let base_url = spawn_lago_mock(axum::Router::new().route(
-            "/api/v1/wallet_transactions",
-            axum::routing::post(create_topup),
-        ))
-        .await;
-        let client = LagoClient::new(base_url, "test-key".to_string()).expect("client");
-
-        let checkout = client
-            .create_wallet_topup(
-                "wallet-1",
-                &super::WalletTopUpInput {
-                    external_id: "topup-1".to_string(),
-                    amount_credits: 500,
-                },
-            )
-            .await
-            .expect("create wallet topup");
-
-        assert_eq!(checkout.payment_url, "https://pay.example/checkout");
-        assert_eq!(checkout.lago_invoice_id.as_deref(), Some("invoice-1"));
-        assert_eq!(checkout.payment_provider.as_deref(), Some("stripe"));
-    }
-
-    #[tokio::test]
-    async fn create_wallet_topup_generates_payment_url_when_response_has_no_url() {
-        async fn create_topup(
-            axum::Json(body): axum::Json<serde_json::Value>,
-        ) -> axum::Json<serde_json::Value> {
-            let wt = &body["wallet_transaction"];
-            assert_eq!(wt["paid_credits"].as_i64(), Some(500), "paid_credits");
-            assert_eq!(
-                wt["granted_credits"].as_i64(),
-                Some(0),
-                "granted_credits must be 0 for a paid top-up"
-            );
-            assert_eq!(
-                wt["invoice_requires_successful_payment"].as_bool(),
-                Some(true),
-                "paid top-up must require successful payment before settlement"
-            );
-            axum::Json(json!({
-                "wallet_transaction": {
-                    "lago_id": "txn-1",
-                    "lago_invoice_id": "invoice-1",
-                    "payment_provider_code": "stripe"
+                    "lago_invoice_id": "invoice-1"
                 }
             }))
         }
@@ -1174,8 +1069,8 @@ mod tests {
         async fn generate_payment_url() -> axum::Json<serde_json::Value> {
             axum::Json(json!({
                 "wallet_transaction_payment_details": {
-                    "payment_url": "https://pay.example/generated",
-                    "payment_provider_code": "stripe"
+                    "payment_url": "https://pay.example/checkout",
+                    "payment_provider": "stripe"
                 }
             }))
         }
@@ -1205,10 +1100,75 @@ mod tests {
             .await
             .expect("create wallet topup");
 
-        assert_eq!(checkout.wallet_transaction_id, "txn-1");
+        assert_eq!(checkout.payment_url, "https://pay.example/checkout");
         assert_eq!(checkout.lago_invoice_id.as_deref(), Some("invoice-1"));
-        assert_eq!(checkout.payment_url, "https://pay.example/generated");
         assert_eq!(checkout.payment_provider.as_deref(), Some("stripe"));
+    }
+
+    #[tokio::test]
+    async fn create_wallet_topup_rejects_undocumented_payment_url_response_shape() {
+        async fn create_topup(
+            axum::Json(body): axum::Json<serde_json::Value>,
+        ) -> axum::Json<serde_json::Value> {
+            let wt = &body["wallet_transaction"];
+            assert_eq!(wt["paid_credits"].as_i64(), Some(500), "paid_credits");
+            assert_eq!(
+                wt["granted_credits"].as_i64(),
+                Some(0),
+                "granted_credits must be 0 for a paid top-up"
+            );
+            assert_eq!(
+                wt["invoice_requires_successful_payment"].as_bool(),
+                Some(true),
+                "paid top-up must require successful payment before settlement"
+            );
+            axum::Json(json!({
+                "wallet_transaction": {
+                    "lago_id": "txn-1",
+                    "lago_invoice_id": "invoice-1"
+                }
+            }))
+        }
+
+        async fn generate_payment_url() -> axum::Json<serde_json::Value> {
+            axum::Json(json!({
+                "wallet_transaction_payment_details": {
+                    "checkout_url": "https://pay.example/generated",
+                    "payment_provider_code": "stripe"
+                }
+            }))
+        }
+
+        let base_url = spawn_lago_mock(
+            axum::Router::new()
+                .route(
+                    "/api/v1/wallet_transactions",
+                    axum::routing::post(create_topup),
+                )
+                .route(
+                    "/api/v1/wallet_transactions/txn-1/payment_url",
+                    axum::routing::post(generate_payment_url),
+                ),
+        )
+        .await;
+        let client = LagoClient::new(base_url, "test-key".to_string()).expect("client");
+
+        let checkout = client
+            .create_wallet_topup(
+                "wallet-1",
+                &super::WalletTopUpInput {
+                    external_id: "topup-1".to_string(),
+                    amount_credits: 500,
+                },
+            )
+            .await
+            .expect_err("undocumented payment URL response shape must fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("payment URL response did not include a payment URL")
+        );
     }
 
     #[tokio::test]
