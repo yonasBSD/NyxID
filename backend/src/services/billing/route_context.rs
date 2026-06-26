@@ -41,10 +41,15 @@ impl BillingRouteContext {
         credential_class: CredentialClass,
         platform_metric: BillingMetric,
         service_billing: Option<&ServiceBilling>,
+        resale_enabled: bool,
     ) -> Self {
-        let resale = service_billing
-            .and_then(ServiceBilling::active_resale_spec)
-            .filter(|_| credential_class == CredentialClass::NyxidManagedMaster);
+        let resale = resale_enabled
+            .then(|| {
+                service_billing
+                    .and_then(ServiceBilling::active_resale_spec)
+                    .filter(|_| credential_class == CredentialClass::NyxidManagedMaster)
+            })
+            .flatten();
 
         Self {
             billing_request_id,
@@ -108,6 +113,7 @@ mod tests {
             credential_class,
             BillingMetric::Requests,
             Some(&billing),
+            true,
         )
     }
 
@@ -126,5 +132,32 @@ mod tests {
         );
         assert!(context_for(CredentialClass::NodeManaged).resale.is_none());
         assert!(context_for(CredentialClass::NoAuth).resale.is_none());
+    }
+
+    #[test]
+    fn resale_requires_operator_flag() {
+        let billing = ServiceBilling {
+            resale_billable: true,
+            resale_metric: BillingMetric::Tokens,
+            lago_resale_metric_code: Some("resale_tokens".to_string()),
+        };
+        let ctx = BillingRouteContext::new(
+            "request-1".to_string(),
+            "owner-1".to_string(),
+            "actor-1".to_string(),
+            Some("api-key-1".to_string()),
+            Some("user-service-1".to_string()),
+            Some("catalog-1".to_string()),
+            Some("llm-test".to_string()),
+            NodeIntent::Direct,
+            "bearer".to_string(),
+            CredentialClass::NyxidManagedMaster,
+            BillingMetric::Requests,
+            Some(&billing),
+            false,
+        );
+
+        assert!(ctx.resale.is_none());
+        assert!(!ctx.has_billable_layers());
     }
 }

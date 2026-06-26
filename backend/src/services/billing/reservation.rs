@@ -1025,6 +1025,7 @@ mod tests {
             CredentialClass::UserOwned,
             BillingMetric::Requests,
             None::<&ServiceBilling>,
+            false,
         )
         .with_platform_metering(true)
     }

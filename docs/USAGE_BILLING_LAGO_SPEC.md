@@ -488,6 +488,7 @@ BILLING_RATE_CACHE_TTL_SECS=900
 BILLING_RESERVATION_ABANDON_SECS=600  # grace before Reserved(forwarded=false) -> Abandoned
 BILLING_DEFAULT_OVERDRAFT_CAP_CREDITS=0
 BILLING_FAIL_CLOSED=false             # operator override: force fail-closed everywhere (-> 11302)
+BILLING_RESALE_ENABLED=false          # explicit opt-in; platform-only by default
 # Stripe lives UNDER Lago (Lago's payment-provider config), not in NyxID env.
 ```
 

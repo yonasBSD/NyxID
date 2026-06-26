@@ -348,6 +348,7 @@ mod tests {
             CredentialClass::NyxidManagedMaster,
             BillingMetric::Bytes,
             Some(&billing),
+            true,
         )
         .with_platform_metering(true);
 
@@ -820,6 +821,7 @@ mod tests {
             CredentialClass::UserOwned,
             BillingMetric::Requests,
             None::<&ServiceBilling>,
+            false,
         )
         .with_platform_metering(true)
     }
