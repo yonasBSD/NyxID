@@ -88,6 +88,7 @@ export const topUpBillingResponseSchema = z.object({
   checkout_url: z.string().url(),
   payment_provider: z.string().nullable().optional(),
   lago_wallet_transaction_id: z.string().nullable().optional(),
+  lago_invoice_id: z.string().nullable().optional(),
   status: billingTopUpStatusSchema,
   reused: z.boolean(),
 });

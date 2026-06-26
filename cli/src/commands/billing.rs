@@ -77,6 +77,7 @@ pub struct TopUpResponse {
     pub checkout_url: String,
     pub payment_provider: Option<String>,
     pub lago_wallet_transaction_id: Option<String>,
+    pub lago_invoice_id: Option<String>,
     pub status: String,
     pub reused: bool,
 }
@@ -249,6 +250,9 @@ fn print_topup(response: &TopUpResponse, output: OutputFormat) -> Result<()> {
             eprintln!("Status:            {}", response.status);
             eprintln!("Reused:            {}", response.reused);
             eprintln!("Checkout URL:      {}", response.checkout_url);
+            if let Some(invoice_id) = &response.lago_invoice_id {
+                eprintln!("Lago Invoice:      {invoice_id}");
+            }
         }
     }
     Ok(())
@@ -370,6 +374,7 @@ mod tests {
                 "checkout_url": "https://checkout.example.com/session",
                 "payment_provider": "stripe",
                 "lago_wallet_transaction_id": "txn-1",
+                "lago_invoice_id": "invoice-1",
                 "status": "checkout_created",
                 "reused": false
             })))

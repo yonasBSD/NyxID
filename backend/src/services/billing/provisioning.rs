@@ -160,6 +160,7 @@ pub async fn create_topup_checkout(
         amount_credits,
         lago_wallet_id: lago_wallet_id.clone(),
         lago_wallet_transaction_id: None,
+        lago_invoice_id: None,
         payment_url: None,
         payment_provider: None,
         status: BillingTopUpStatus::Pending,
@@ -242,6 +243,9 @@ pub async fn create_topup_checkout(
                 "status": "checkout_created",
                 "updated_at": bson::DateTime::from_chrono(Utc::now()),
             };
+            if let Some(invoice_id) = checkout.lago_invoice_id {
+                set_doc.insert("lago_invoice_id", invoice_id);
+            }
             if let Some(provider) = checkout.payment_provider {
                 set_doc.insert("payment_provider", provider);
             }
@@ -496,6 +500,10 @@ mod tests {
             first.session.lago_wallet_transaction_id.as_deref(),
             Some("txn_topup-1")
         );
+        assert_eq!(
+            first.session.lago_invoice_id.as_deref(),
+            Some("invoice_topup-1")
+        );
 
         let session_count = db
             .collection::<BillingTopUpSession>(BILLING_TOPUP_SESSIONS)
@@ -591,6 +599,7 @@ mod tests {
             self.topup_creates.fetch_add(1, Ordering::SeqCst);
             Ok(WalletTopUpCheckout {
                 wallet_transaction_id: "txn_topup-1".to_string(),
+                lago_invoice_id: Some("invoice_topup-1".to_string()),
                 payment_url: "https://pay.example/checkout".to_string(),
                 payment_provider: Some("stripe".to_string()),
             })

@@ -102,6 +102,7 @@ describe("billing schemas", () => {
         checkout_url: "https://checkout.example.com/session",
         payment_provider: "stripe",
         lago_wallet_transaction_id: "txn-1",
+        lago_invoice_id: "invoice-1",
         status: "checkout_created",
         reused: false,
       }).success,
