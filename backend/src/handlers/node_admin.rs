@@ -16,7 +16,7 @@ use crate::errors::{AppError, AppResult, PENDING_CREDENTIAL_NODE_OFFLINE_CODE};
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
-use crate::models::node::NodeMetadata;
+use crate::models::node::{Node, NodeMetadata, NodeStatus};
 use crate::models::node_pending_credential::{
     FanOutNodeState, InjectionMethod, NodePendingCredential, RemoteCryptoState,
 };
@@ -24,6 +24,7 @@ use crate::mw::auth::AuthUser;
 use crate::services::node_pending_credential_service::{
     IntegrityVerificationAudit, PendingCredentialIntegrityVerificationRequest,
 };
+use crate::services::node_ws_manager::{NodeCapabilitiesFlags, NodeWsManager};
 use crate::services::{
     audit_service, node_pending_credential_service, node_routing_service, node_service,
     org_service,
@@ -156,6 +157,12 @@ pub struct NodeMetricsInfo {
     pub last_success_at: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct NodeDispatchInfo {
+    pub dispatchable: bool,
+    pub reason: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct NodeInfo {
     pub id: String,
@@ -171,6 +178,9 @@ pub struct NodeInfo {
     pub metadata: Option<NodeMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metrics: Option<NodeMetricsInfo>,
+    pub capabilities: NodeCapabilitiesFlags,
+    pub capabilities_resolved: bool,
+    pub dispatch: NodeDispatchInfo,
     pub binding_count: u64,
     pub created_at: String,
 }
@@ -349,6 +359,56 @@ pub fn build_metrics_info(metrics: &crate::models::node::NodeMetrics) -> NodeMet
         last_error: metrics.last_error.clone(),
         last_error_at: metrics.last_error_at.map(|dt| dt.to_rfc3339()),
         last_success_at: metrics.last_success_at.map(|dt| dt.to_rfc3339()),
+    }
+}
+
+pub fn build_dispatch_info(node: &Node, ws_manager: &NodeWsManager) -> NodeDispatchInfo {
+    if !node.is_active {
+        return NodeDispatchInfo {
+            dispatchable: false,
+            reason: "node_inactive".to_string(),
+        };
+    }
+    if node.status != NodeStatus::Online {
+        return NodeDispatchInfo {
+            dispatchable: false,
+            reason: "node_status_not_online".to_string(),
+        };
+    }
+    if !ws_manager.is_connected(&node.id) {
+        return NodeDispatchInfo {
+            dispatchable: false,
+            reason: "no_websocket_session_on_this_backend".to_string(),
+        };
+    }
+    NodeDispatchInfo {
+        dispatchable: true,
+        reason: "ready".to_string(),
+    }
+}
+
+fn node_info_from_model(
+    node: &Node,
+    owner: node_service::NodeOwnerInfo,
+    binding_count: u64,
+    ws_manager: &NodeWsManager,
+) -> NodeInfo {
+    let session = ws_manager.session_info(&node.id);
+    NodeInfo {
+        id: node.id.clone(),
+        name: node.name.clone(),
+        owner,
+        status: node.status.as_str().to_string(),
+        is_connected: session.is_connected,
+        last_heartbeat_at: node.last_heartbeat_at.map(|dt| dt.to_rfc3339()),
+        connected_at: node.connected_at.map(|dt| dt.to_rfc3339()),
+        metadata: node.metadata.clone(),
+        metrics: Some(build_metrics_info(&node.metrics)),
+        capabilities: session.capabilities,
+        capabilities_resolved: session.capabilities_resolved,
+        dispatch: build_dispatch_info(node, ws_manager),
+        binding_count,
+        created_at: node.created_at.to_rfc3339(),
     }
 }
 
@@ -969,19 +1029,12 @@ pub async fn list_nodes(
         .iter()
         .map(|node_with_owner| {
             let node = &node_with_owner.node;
-            NodeInfo {
-                id: node.id.clone(),
-                name: node.name.clone(),
-                owner: node_with_owner.owner.clone(),
-                status: node.status.as_str().to_string(),
-                is_connected: state.node_ws_manager.is_connected(&node.id),
-                last_heartbeat_at: node.last_heartbeat_at.map(|dt| dt.to_rfc3339()),
-                connected_at: node.connected_at.map(|dt| dt.to_rfc3339()),
-                metadata: node.metadata.clone(),
-                metrics: Some(build_metrics_info(&node.metrics)),
-                binding_count: binding_counts.get(&node.id).copied().unwrap_or(0),
-                created_at: node.created_at.to_rfc3339(),
-            }
+            node_info_from_model(
+                node,
+                node_with_owner.owner.clone(),
+                binding_counts.get(&node.id).copied().unwrap_or(0),
+                state.node_ws_manager.as_ref(),
+            )
         })
         .collect();
 
@@ -1004,19 +1057,12 @@ pub async fn get_node(
         .count_documents(doc! { "node_id": &node.id, "is_active": true })
         .await?;
 
-    Ok(Json(NodeInfo {
-        id: node.id.clone(),
-        name: node.name,
+    Ok(Json(node_info_from_model(
+        &node,
         owner,
-        status: node.status.as_str().to_string(),
-        is_connected: state.node_ws_manager.is_connected(&node.id),
-        last_heartbeat_at: node.last_heartbeat_at.map(|dt| dt.to_rfc3339()),
-        connected_at: node.connected_at.map(|dt| dt.to_rfc3339()),
-        metadata: node.metadata,
-        metrics: Some(build_metrics_info(&node.metrics)),
         binding_count,
-        created_at: node.created_at.to_rfc3339(),
-    }))
+        state.node_ws_manager.as_ref(),
+    )))
 }
 
 /// DELETE /api/v1/nodes/{node_id}
@@ -1893,7 +1939,7 @@ pub struct MyBoundServicesResponse {
 
 /// GET /api/v1/nodes/my-bindings
 ///
-/// List all service IDs for which the authenticated user currently has a viable node route.
+/// List all service IDs for which the authenticated user currently has a dispatchable node route.
 pub async fn list_my_bound_services(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -5392,6 +5438,12 @@ mod tests {
             connected_at: None,
             metadata: None,
             metrics: None,
+            capabilities: NodeCapabilitiesFlags::default(),
+            capabilities_resolved: false,
+            dispatch: NodeDispatchInfo {
+                dispatchable: true,
+                reason: "ready".to_string(),
+            },
             binding_count: 3,
             created_at: "2025-01-01T00:00:00+00:00".to_string(),
         };
@@ -5406,6 +5458,11 @@ mod tests {
         assert_eq!(json["owner"]["kind"], "user");
         assert_eq!(json["owner"]["id"], "user-1");
         assert_eq!(json["owner"]["display_name"], "Test User");
+        assert_eq!(json["capabilities"]["credential_ack_correlation"], false);
+        assert_eq!(json["capabilities"]["remote_credential_crypto_v1"], false);
+        assert_eq!(json["capabilities_resolved"], false);
+        assert_eq!(json["dispatch"]["dispatchable"], true);
+        assert_eq!(json["dispatch"]["reason"], "ready");
         // Optional fields absent
         assert!(json.get("last_heartbeat_at").is_none());
         assert!(json.get("connected_at").is_none());
@@ -5444,6 +5501,15 @@ mod tests {
                 last_error_at: None,
                 last_success_at: None,
             }),
+            capabilities: NodeCapabilitiesFlags {
+                credential_ack_correlation: true,
+                remote_credential_crypto_v1: true,
+            },
+            capabilities_resolved: true,
+            dispatch: NodeDispatchInfo {
+                dispatchable: false,
+                reason: "node_status_not_online".to_string(),
+            },
             binding_count: 5,
             created_at: "2025-01-01T00:00:00+00:00".to_string(),
         };
@@ -5457,6 +5523,11 @@ mod tests {
         assert_eq!(json["metadata"]["arch"], "x86_64");
         assert_eq!(json["metadata"]["ip_address"], "10.0.0.1");
         assert_eq!(json["metrics"]["total_requests"], 100);
+        assert_eq!(json["capabilities"]["credential_ack_correlation"], true);
+        assert_eq!(json["capabilities"]["remote_credential_crypto_v1"], true);
+        assert_eq!(json["capabilities_resolved"], true);
+        assert_eq!(json["dispatch"]["dispatchable"], false);
+        assert_eq!(json["dispatch"]["reason"], "node_status_not_online");
     }
 
     // --- Serialization tests: BindingInfo ---

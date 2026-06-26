@@ -17,7 +17,13 @@ export interface NodeMetricsInfo {
 }
 
 export interface NodeCapabilitiesInfo {
+  readonly credential_ack_correlation?: boolean;
   readonly remote_credential_crypto_v1?: boolean;
+}
+
+export interface NodeDispatchInfo {
+  readonly dispatchable: boolean;
+  readonly reason: string;
 }
 
 export interface NodeOwnerInfo {
@@ -44,6 +50,8 @@ export interface NodeInfo {
   readonly metadata: NodeMetadata | null;
   readonly metrics: NodeMetricsInfo | null;
   readonly capabilities?: NodeCapabilitiesInfo | null;
+  readonly capabilities_resolved?: boolean;
+  readonly dispatch?: NodeDispatchInfo | null;
   readonly binding_count: number;
   readonly created_at: string;
 }
@@ -187,6 +195,9 @@ export interface AdminNodeInfo {
   readonly connected_at: string | null;
   readonly metadata: NodeMetadata | null;
   readonly metrics: NodeMetricsInfo | null;
+  readonly capabilities?: NodeCapabilitiesInfo | null;
+  readonly capabilities_resolved?: boolean;
+  readonly dispatch?: NodeDispatchInfo | null;
   readonly binding_count: number;
   readonly created_at: string;
 }

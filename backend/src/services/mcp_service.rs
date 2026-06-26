@@ -152,7 +152,7 @@ pub async fn load_user_tools(
 }
 
 /// Like [`load_user_tools`] but honors an API-key node scope during
-/// discovery: node-routed tools whose only viable routes (primary +
+/// discovery: node-routed tools whose only dispatchable routes (primary +
 /// failovers) are all out of scope get classified as non-executable so
 /// MCP doesn't advertise tools the caller can't actually invoke. Matches
 /// the scope enforcement in `execute_tool` (seventeenth-round Codex
@@ -183,7 +183,7 @@ pub async fn load_user_tools_all(
 
 /// Scoped variant of [`load_user_tools_all`]. Search discovery honors
 /// the caller's API-key node allow-list so `nyx__search_tools` can't
-/// surface tools whose only viable routes fall outside the caller's
+/// surface tools whose only dispatchable routes fall outside the caller's
 /// scope — otherwise a scoped agent would find tools it can never
 /// successfully invoke (twentieth-round Codex P2).
 pub async fn load_user_tools_all_scoped(
@@ -723,15 +723,15 @@ async fn load_callable_user_services(
         .map(|k| (k.id.as_str(), k.credential_type.as_str()))
         .collect();
 
-    // Precompute "is any routing candidate online?" per node-routed
+    // Precompute "is any routing candidate dispatchable?" per node-routed
     // service so `classify_credential` can report a tool as executable
-    // when the pinned node is offline but a viable fallback binding is
+    // when the pinned node is offline but a dispatchable fallback binding is
     // available (tenth-round Codex P2). Without this, agents lose
     // access to a service during exactly the kind of failover that
     // NodeServiceBinding was designed to enable. Cost is an extra DB
     // round-trip per node-routed service; acceptable on the discovery
     // path (not the hot proxy path).
-    let mut service_has_viable_route: HashMap<String, bool> = HashMap::new();
+    let mut service_has_dispatchable_route: HashMap<String, bool> = HashMap::new();
     let node_routed_refs: Vec<(&UserService, &str)> = personal_services
         .iter()
         .map(|s| (s, user_id))
@@ -752,15 +752,17 @@ async fn load_callable_user_services(
         // that configuration for a scoped key.
         let primary_in_scope = svc.node_id.as_deref().is_some_and(|nid| scope.permits(nid));
         if !primary_in_scope {
-            service_has_viable_route.insert(svc.id.clone(), false);
+            service_has_dispatchable_route.insert(svc.id.clone(), false);
             continue;
         }
-        let primary_online = svc
-            .node_id
-            .as_deref()
-            .is_some_and(|nid| node_ws_manager.is_connected(nid));
-        if primary_online {
-            service_has_viable_route.insert(svc.id.clone(), true);
+        let primary_dispatchable = match svc.node_id.as_deref() {
+            Some(nid) => node_routing_service::is_node_id_dispatchable(db, nid, node_ws_manager)
+                .await
+                .unwrap_or(false),
+            None => false,
+        };
+        if primary_dispatchable {
+            service_has_dispatchable_route.insert(svc.id.clone(), true);
             continue;
         }
         // `NodeServiceBinding.service_id` is keyed by the catalog
@@ -776,8 +778,8 @@ async fn load_callable_user_services(
         // tool as executable solely because an out-of-scope fallback
         // is online, then every call would fail after the scope filter
         // trimmed the fallback chain away.
-        let any_online = if let Some(ref catalog_service_id) = svc.catalog_service_id {
-            let fallbacks = node_routing_service::list_viable_binding_node_ids(
+        let any_dispatchable = if let Some(ref catalog_service_id) = svc.catalog_service_id {
+            let fallbacks = node_routing_service::list_dispatchable_binding_node_ids(
                 db,
                 effective_owner,
                 catalog_service_id,
@@ -785,13 +787,11 @@ async fn load_callable_user_services(
             )
             .await
             .unwrap_or_default();
-            fallbacks
-                .iter()
-                .any(|nid| node_ws_manager.is_connected(nid) && scope.permits(nid))
+            fallbacks.iter().any(|nid| scope.permits(nid))
         } else {
             false
         };
-        service_has_viable_route.insert(svc.id.clone(), any_online);
+        service_has_dispatchable_route.insert(svc.id.clone(), any_dispatchable);
     }
 
     // Filter and assemble
@@ -800,7 +800,7 @@ async fn load_callable_user_services(
 
     // Personal first (takes priority over org for same slug)
     for us in personal_services {
-        let has_route = service_has_viable_route
+        let has_route = service_has_dispatchable_route
             .get(&us.id)
             .copied()
             .unwrap_or(false);
@@ -816,7 +816,7 @@ async fn load_callable_user_services(
         // can never call (twenty-eighth-round Codex P2). This is the
         // pinned-primary scope check; failover nodes are already
         // gated by `has_route` via the scope-aware
-        // `service_has_viable_route` precompute above.
+        // `service_has_dispatchable_route` precompute above.
         let primary_in_scope = us
             .node_id
             .as_deref()
@@ -839,7 +839,7 @@ async fn load_callable_user_services(
         if seen_slugs.contains(&us.slug) {
             continue;
         }
-        let has_route = service_has_viable_route
+        let has_route = service_has_dispatchable_route
             .get(&us.id)
             .copied()
             .unwrap_or(false);
@@ -855,7 +855,7 @@ async fn load_callable_user_services(
         // can never call (twenty-eighth-round Codex P2). This is the
         // pinned-primary scope check; failover nodes are already
         // gated by `has_route` via the scope-aware
-        // `service_has_viable_route` precompute above.
+        // `service_has_dispatchable_route` precompute above.
         let primary_in_scope = us
             .node_id
             .as_deref()
@@ -912,9 +912,9 @@ fn classify_credential(
     //
     // `is_executable` uses `any_routing_node_online` instead of just
     // the primary `node_online` so failover via `NodeServiceBinding`
-    // keeps tools visible when the pinned node is offline but a viable
+    // keeps tools visible when the pinned node is offline but a dispatchable
     // fallback is online. `execute_tool` honors the same fallback
-    // chain via `list_viable_binding_node_ids`, so advertising only
+    // chain via `list_dispatchable_binding_node_ids`, so advertising only
     // the primary's state would hide calls that would otherwise succeed
     // (tenth-round Codex review P2).
     //
@@ -2463,7 +2463,7 @@ pub async fn execute_tool(
             }
             let nr = if let Some(primary_nid) = effective_primary_node_id {
                 let mut fallback_ids: Vec<String> =
-                    node_routing_service::list_viable_binding_node_ids(
+                    node_routing_service::list_dispatchable_binding_node_ids(
                         db,
                         effective_owner,
                         &resolution.target.service.id,

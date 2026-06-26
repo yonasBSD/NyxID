@@ -471,8 +471,20 @@ async fn drain_queued_pending_ciphertexts(state: &AppState, node_id: &str) {
 async fn apply_status_update_capabilities(
     state: &AppState,
     node_id: &str,
+    agent_version: Option<String>,
     capabilities: Option<NodeCapabilitiesMsg>,
 ) {
+    if let Some(agent_version) = agent_version
+        && let Err(error) =
+            node_service::update_node_agent_version(&state.db, node_id, agent_version.as_str())
+                .await
+    {
+        tracing::warn!(
+            node_id = %node_id,
+            error = %error,
+            "Failed to persist node agent version from status_update"
+        );
+    }
     if let Some(caps) = capabilities {
         state.node_ws_manager.record_capabilities(node_id, &caps);
     }
@@ -1244,7 +1256,11 @@ async fn handle_node_connection(
             NodeMessage::ProxyResponseEnd(end) => {
                 ws_manager.deliver_stream_end(&node_id_reader, &end.request_id);
             }
-            NodeMessage::StatusUpdate { capabilities, .. } => {
+            NodeMessage::StatusUpdate {
+                agent_version,
+                capabilities,
+                ..
+            } => {
                 // Record capability flags so `push_credential_to_node_strict`
                 // can decide between strict ack-wait and legacy fire-and-
                 // forget delivery. Old agents omit the field → `caps` is
@@ -1257,7 +1273,13 @@ async fn handle_node_connection(
                 // flag's value (present vs. absent) is what they
                 // want to observe, and it's now final for this
                 // connection (twenty-ninth-round Codex P2).
-                apply_status_update_capabilities(&state, &node_id_reader, capabilities).await;
+                apply_status_update_capabilities(
+                    &state,
+                    &node_id_reader,
+                    agent_version,
+                    capabilities,
+                )
+                .await;
                 tracing::debug!(node_id = %node_id_reader, "Received status_update");
             }
             NodeMessage::SshTunnelOpened(opened) => {
@@ -2354,6 +2376,7 @@ mod tests {
         apply_status_update_capabilities(
             &state,
             &node.id,
+            Some("0.7.1-test".to_string()),
             Some(NodeCapabilitiesMsg {
                 remote_credential_crypto_v1: true,
                 ..NodeCapabilitiesMsg::default()
@@ -2399,6 +2422,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ws_status_update_persists_agent_version_and_preserves_metadata() {
+        let db = test_db("ws_status_update_agent_version").await;
+        let owner_id = uuid::Uuid::new_v4().to_string();
+        let raw_auth_token = "nyx_nauth_status_version";
+        let mut node = test_node(&owner_id, "ws-version-node", raw_auth_token);
+        node.metadata = Some(crate::models::node::NodeMetadata {
+            agent_version: None,
+            os: Some("darwin".to_string()),
+            arch: Some("arm64".to_string()),
+            ip_address: None,
+            provisioning_source: Some("manual".to_string()),
+        });
+        insert_user_and_node(&db, &owner_id, &node).await;
+
+        let state = test_app_state(db.clone());
+        let (tx, _rx) = mpsc::channel(1);
+        state.node_ws_manager.register_connection(&node.id, tx);
+
+        apply_status_update_capabilities(&state, &node.id, Some("0.7.1".to_string()), None).await;
+
+        let stored = db
+            .collection::<Node>(NODES)
+            .find_one(doc! { "_id": &node.id })
+            .await
+            .unwrap()
+            .expect("node should exist");
+        let metadata = stored.metadata.expect("metadata should be present");
+        assert_eq!(metadata.agent_version.as_deref(), Some("0.7.1"));
+        assert_eq!(metadata.os.as_deref(), Some("darwin"));
+        assert_eq!(metadata.arch.as_deref(), Some("arm64"));
+        assert_eq!(metadata.provisioning_source.as_deref(), Some("manual"));
+        assert!(stored.last_heartbeat_at.is_some());
+    }
+
+    #[tokio::test]
     async fn ws_drain_marks_oversized_stored_queued_ciphertext_failed_and_audits() {
         let db = test_db("ws_pending_drain_oversized_audit").await;
         let owner_id = uuid::Uuid::new_v4().to_string();
@@ -2436,6 +2494,7 @@ mod tests {
         apply_status_update_capabilities(
             &state,
             &node.id,
+            None,
             Some(NodeCapabilitiesMsg {
                 remote_credential_crypto_v1: true,
                 ..NodeCapabilitiesMsg::default()

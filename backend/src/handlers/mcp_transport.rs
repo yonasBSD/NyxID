@@ -991,7 +991,7 @@ async fn handle_tools_list(
     request: &JsonRpcRequest,
 ) -> Response {
     // Thread API-key node scope into the discovery chain so scoped
-    // keys don't see tools whose only viable routes are all out of
+    // keys don't see tools whose only dispatchable routes are all out of
     // scope (seventeenth-round Codex review P2).
     let services = match mcp_service::load_user_tools_scoped(
         &state.db,
@@ -1145,7 +1145,7 @@ async fn handle_tools_call(
     let activated = session_id.map(|sid| state.mcp_sessions.get_activated_service_ids(sid));
 
     // Scoped discovery so resolve_tool_call can't match tools whose
-    // only viable routes fall outside the caller's API-key node scope
+    // only dispatchable routes fall outside the caller's API-key node scope
     // (twentieth-round Codex P2).
     let services = match mcp_service::load_user_tools_scoped(
         &state.db,
@@ -1291,7 +1291,7 @@ fn mcp_exec_context<'a>(auth: &'a McpAuthContext) -> mcp_service::McpExecContext
 
 /// Derive the MCP node-scope filter from the authenticated caller.
 /// Scoped API keys get an `Allowed` scope so the discovery chain hides
-/// tools whose only viable routes are outside the allow-list (matches
+/// tools whose only dispatchable routes are outside the allow-list (matches
 /// `execute_tool`'s runtime scope check). Non-API-key callers and keys
 /// with `allow_all_nodes` get `Unrestricted`.
 fn mcp_node_scope<'a>(auth: &'a McpAuthContext) -> mcp_service::NodeScope<'a> {
@@ -1506,7 +1506,7 @@ async fn handle_meta_call_tool(
         };
 
     // Load user tools with API-key node scope applied so
-    // `nyx__call_tool` can't auto-invoke a tool whose only viable
+    // `nyx__call_tool` can't auto-invoke a tool whose only dispatchable
     // routes are outside the caller's allow-list (twentieth-round
     // Codex P2). Service scope is still applied downstream below.
     let services = match mcp_service::load_user_tools_scoped(
@@ -1664,7 +1664,7 @@ async fn handle_meta_search(
     }
 
     // Load ALL user tools including non-executable (for discovery).
-    // Scope-aware so scoped keys don't see tools whose only viable
+    // Scope-aware so scoped keys don't see tools whose only dispatchable
     // routes are outside their node allow-list (twentieth-round Codex
     // P2).
     let services = match mcp_service::load_user_tools_all_scoped(
