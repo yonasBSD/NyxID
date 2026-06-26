@@ -83,6 +83,7 @@ impl BillingReconciler {
             .find(doc! {
                 "status": "finalized",
                 "lago_acked": false,
+                "wallet_id": { "$ne": null },
                 "quantity": { "$ne": null },
                 "updated_at": { "$lt": bson::DateTime::from_chrono(cutoff) },
             })
@@ -420,6 +421,10 @@ mod tests {
             })
         }
 
+        async fn wallet_balance(&self, _customer_id: &str) -> crate::errors::AppResult<i64> {
+            Ok(0)
+        }
+
         async fn entitlements(
             &self,
             _subscription_id: &str,
@@ -437,7 +442,7 @@ mod tests {
             layer: BillingLayer::Platform,
             flush_seq: None,
             billing_owner_id: "owner-1".to_string(),
-            wallet_id: None,
+            wallet_id: Some("wallet-1".to_string()),
             actor_user_id: "actor-1".to_string(),
             api_key_id: None,
             service_id: Some("service-1".to_string()),

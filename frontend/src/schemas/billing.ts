@@ -5,6 +5,13 @@ export const BILLING_USAGE_PERIODS = ["24h", "1d", "7d", "30d", "90d", "all"] as
 export type BillingUsagePeriod = (typeof BILLING_USAGE_PERIODS)[number];
 
 export const billingMetricSchema = z.enum(["tokens", "requests", "bytes"]);
+export const billingPlanKindSchema = z.enum(["prepaid", "subscription", "hybrid"]);
+export const billingCollectionStateSchema = z.enum(["good", "past_due", "suspended"]);
+export const billingTopUpStatusSchema = z.enum([
+  "pending",
+  "checkout_created",
+  "failed",
+]);
 
 export const billingReadOnlyBlockSchema = z.object({
   charging_enabled: z.boolean(),
@@ -43,8 +50,58 @@ export const billingUsageResponseSchema = z.object({
   billing: billingReadOnlyBlockSchema,
 });
 
+export const billingWalletResponseSchema = z.object({
+  owner_id: z.string().min(1),
+  plan_kind: billingPlanKindSchema,
+  collection_state: billingCollectionStateSchema,
+  balance_credits: z.number().int(),
+  reserved_credits: z.number().int(),
+  pending_lago_debits: z.number().int(),
+  available_credits: z.number().int(),
+  available_with_overdraft_credits: z.number().int(),
+  has_payment_instrument: z.boolean(),
+  overdraft_cap_credits: z.number().int(),
+  suspended: z.boolean(),
+  lago_customer_id: z.string().min(1),
+  lago_subscription_id: z.string().nullable().optional(),
+  lago_wallet_id: z.string().nullable().optional(),
+  balance_synced_at: z.string().min(1),
+  created_at: z.string().min(1),
+  updated_at: z.string().min(1),
+  created: z.boolean(),
+});
+
+export const provisionBillingWalletRequestSchema = z.object({
+  owner_id: z.string().min(1).optional(),
+});
+
+export const topUpBillingRequestSchema = z.object({
+  amount_credits: z.number().int().positive().max(10_000_000),
+  idempotency_key: z.string().trim().min(8).max(128),
+  owner_id: z.string().min(1).optional(),
+});
+
+export const topUpBillingResponseSchema = z.object({
+  owner_id: z.string().min(1),
+  amount_credits: z.number().int().positive(),
+  idempotency_key: z.string().min(1),
+  checkout_url: z.string().url(),
+  payment_provider: z.string().nullable().optional(),
+  lago_wallet_transaction_id: z.string().nullable().optional(),
+  lago_invoice_id: z.string().nullable().optional(),
+  status: billingTopUpStatusSchema,
+  reused: z.boolean(),
+});
+
 export type BillingMetric = z.infer<typeof billingMetricSchema>;
+export type BillingPlanKind = z.infer<typeof billingPlanKindSchema>;
+export type BillingCollectionState = z.infer<typeof billingCollectionStateSchema>;
+export type BillingTopUpStatus = z.infer<typeof billingTopUpStatusSchema>;
 export type BillingReadOnlyBlock = z.infer<typeof billingReadOnlyBlockSchema>;
 export type BillingUsageRow = z.infer<typeof billingUsageRowSchema>;
 export type BillingUsageTotals = z.infer<typeof billingUsageTotalsSchema>;
 export type BillingUsageResponse = z.infer<typeof billingUsageResponseSchema>;
+export type BillingWalletResponse = z.infer<typeof billingWalletResponseSchema>;
+export type ProvisionBillingWalletRequest = z.infer<typeof provisionBillingWalletRequestSchema>;
+export type TopUpBillingRequest = z.infer<typeof topUpBillingRequestSchema>;
+export type TopUpBillingResponse = z.infer<typeof topUpBillingResponseSchema>;

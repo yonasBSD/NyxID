@@ -51,6 +51,11 @@
         crate::handlers::api_keys::update_key,
         crate::handlers::api_keys::delete_key,
         crate::handlers::api_keys::rotate_key,
+        // Billing
+        crate::handlers::billing::get_usage,
+        crate::handlers::billing::get_wallet,
+        crate::handlers::billing::provision_wallet,
+        crate::handlers::billing::create_topup,
         // Demo
         crate::handlers::demo::get_demo
     ),
@@ -107,6 +112,15 @@
             crate::handlers::api_keys::ApiKeyResponse,
             crate::handlers::api_keys::ApiKeyListResponse,
             crate::handlers::api_keys::DeleteApiKeyResponse,
+            // Billing
+            crate::handlers::billing::BillingUsageResponse,
+            crate::handlers::billing::BillingUsageRow,
+            crate::handlers::billing::BillingUsageTotals,
+            crate::handlers::billing::BillingReadOnlyBlock,
+            crate::handlers::billing::ProvisionWalletRequest,
+            crate::handlers::billing::TopUpRequest,
+            crate::handlers::billing::BillingWalletResponse,
+            crate::handlers::billing::TopUpResponse,
             // Demo
             crate::handlers::demo::DemoResponse
         )
@@ -123,6 +137,7 @@
         (name = "External API Keys", description = "User's external API keys and credentials"),
         (name = "User Services", description = "User's proxy routing configuration"),
         (name = "API Keys", description = "NyxID API keys with service and node scope"),
+        (name = "Billing", description = "Owner billing wallet and usage endpoints"),
         (name = "Demo", description = "First-success verification: returns 200 with no downstream call")
     )
 )]

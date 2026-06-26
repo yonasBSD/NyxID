@@ -694,7 +694,13 @@ pub fn build_router(
             delete(handlers::service_pools_handler::remove_member),
         );
 
-    let billing_routes = Router::new().route("/usage", get(handlers::billing::get_usage));
+    let billing_routes = Router::new()
+        .route("/usage", get(handlers::billing::get_usage))
+        .route(
+            "/wallet",
+            get(handlers::billing::get_wallet).post(handlers::billing::provision_wallet),
+        )
+        .route("/topup", post(handlers::billing::create_topup));
 
     // Org management routes (creation, members, invites). All routes
     // authenticate as a regular session/user; admin-vs-member checks happen
@@ -1069,8 +1075,9 @@ pub fn build_router(
         .layer(oauth_public_cors());
 
     // Webhook routes -- unauthenticated (verified by secret token)
-    let webhook_routes =
-        Router::new().route("/telegram", post(handlers::webhooks::telegram_webhook));
+    let webhook_routes = Router::new()
+        .route("/telegram", post(handlers::webhooks::telegram_webhook))
+        .route("/lago", post(handlers::billing::lago_webhook));
 
     // Integration webhook routes -- unauthenticated (verified by HMAC signature)
     let integration_routes = Router::new().route(

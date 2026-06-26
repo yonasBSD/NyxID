@@ -486,6 +486,26 @@ async fn main() {
         db.clone(),
         Arc::new(config.clone()),
     ));
+    if config.billing_enabled {
+        if billing.lago_configured() {
+            match billing.backfill_existing_owner_wallets().await {
+                Ok(stats) => tracing::info!(
+                    scanned = stats.scanned,
+                    provisioned = stats.provisioned,
+                    existing = stats.existing,
+                    failed = stats.failed,
+                    "Billing wallet backfill complete"
+                ),
+                Err(error) => {
+                    tracing::warn!(error = %error, "Billing wallet backfill failed");
+                }
+            }
+        } else {
+            tracing::warn!(
+                "BILLING_ENABLED=true but Lago is not configured; billing wallet backfill skipped"
+            );
+        }
+    }
     let state = AppState {
         db,
         config: config.clone(),

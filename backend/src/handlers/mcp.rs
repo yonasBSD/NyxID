@@ -63,7 +63,7 @@ pub async fn get_mcp_config(
     // Honor the caller's API-key node scope when discovering tools —
     // otherwise a scoped key bootstrapping from this REST endpoint
     // would see a different tool set than the JSON-RPC `tools/list`,
-    // and could be handed tools whose only viable routes point at
+    // and could be handed tools whose only dispatchable routes point at
     // disallowed nodes (twenty-ninth-round Codex P2).
     let scope = if auth_user.allow_all_nodes {
         mcp_service::NodeScope::Unrestricted

@@ -1,8 +1,15 @@
 export type {
+  BillingCollectionState,
   BillingMetric,
+  BillingPlanKind,
   BillingReadOnlyBlock,
+  BillingTopUpStatus,
   BillingUsagePeriod,
   BillingUsageResponse,
   BillingUsageRow,
   BillingUsageTotals,
+  BillingWalletResponse,
+  ProvisionBillingWalletRequest,
+  TopUpBillingRequest,
+  TopUpBillingResponse,
 } from "@/schemas/billing";

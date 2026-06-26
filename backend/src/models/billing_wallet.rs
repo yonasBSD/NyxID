@@ -27,6 +27,8 @@ pub struct BillingWallet {
     pub owner_id: String,
     pub lago_customer_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lago_wallet_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lago_subscription_id: Option<String>,
     pub plan_kind: PlanKind,
     #[serde(default)]
@@ -82,6 +84,7 @@ mod tests {
             id: "wallet-1".to_string(),
             owner_id: "owner-1".to_string(),
             lago_customer_id: "owner-1".to_string(),
+            lago_wallet_id: Some("lago-wallet-1".to_string()),
             lago_subscription_id: None,
             plan_kind: PlanKind::Prepaid,
             balance_credits: 100,

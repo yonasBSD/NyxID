@@ -323,6 +323,35 @@ export function NodeDetailPage() {
           label="Last Heartbeat"
           value={formatRelativeTime(node.last_heartbeat_at)}
         />
+        {node.dispatch && (
+          <DetailRow
+            label="Proxy Dispatch"
+            value={
+              node.dispatch.dispatchable
+                ? "Ready"
+                : `Blocked: ${node.dispatch.reason}`
+            }
+          />
+        )}
+        {node.capabilities && (
+          <DetailRow
+            label="Capabilities"
+            value={
+              node.capabilities_resolved === false
+                ? "Pending status update"
+                : [
+                    node.capabilities.credential_ack_correlation
+                      ? "credential ack correlation"
+                      : null,
+                    node.capabilities.remote_credential_crypto_v1
+                      ? "remote credential crypto v1"
+                      : null,
+                  ]
+                    .filter(Boolean)
+                    .join(", ") || "None advertised"
+            }
+          />
+        )}
         {node.connected_at && (
           <DetailRow
             label="Connected Since"

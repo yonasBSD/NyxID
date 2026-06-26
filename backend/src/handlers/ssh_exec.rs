@@ -212,7 +212,7 @@ pub async fn ssh_exec(
         CredentialClass::NodeManaged,
         BillingMetric::Bytes,
         None,
-        state.billing.billing_enabled(),
+        false,
     );
     let metered = state.billing.open(&billing_ctx).await?;
     let request_len = command.len() as i64;

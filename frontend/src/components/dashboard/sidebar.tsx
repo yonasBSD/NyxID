@@ -14,6 +14,7 @@ import {
   ShieldCheck,
   Layers,
   Bell,
+  WalletCards,
   ClipboardList,
   Lock,
   Sparkles,
@@ -43,6 +44,7 @@ const STORAGE_KEY = "nyxid:sidebar-mode";
 export const MAIN_NAV = [
   { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard" },
   { to: "/keys", icon: Cable, label: "AI Services" },
+  { to: "/billing", icon: WalletCards, label: "Billing" },
   { to: "/orgs", icon: Building2, label: "Organizations" },
   { to: "/nodes", icon: HardDrive, label: "Nodes" },
   { to: "/devices/onboard", icon: QrCode, label: "Device Onboard" },

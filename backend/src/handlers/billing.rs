@@ -1,19 +1,34 @@
 use axum::{
     Json,
+    body::Bytes,
     extract::{Query, State},
+    http::{HeaderMap, StatusCode},
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::{Duration, Utc};
 use futures::TryStreamExt;
+use hmac::{Hmac, Mac};
 use mongodb::bson::{self, Bson, Document, doc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use utoipa::ToSchema;
 
 use crate::AppState;
-use crate::errors::AppResult;
+use crate::errors::{AppError, AppResult};
 use crate::models::billing_rate_cache::{BillingRateCache, COLLECTION_NAME as BILLING_RATE_CACHE};
+use crate::models::billing_topup_session::BillingTopUpStatus;
+use crate::models::billing_wallet::{BillingWallet, CollectionState, PlanKind};
 use crate::models::service_billing::BillingMetric;
 use crate::models::usage_meter::COLLECTION_NAME as USAGE_METER;
 use crate::mw::auth::AuthUser;
+
+type HmacSha256 = Hmac<Sha256>;
+
+const LAGO_SIGNATURE_HEADER: &str = "x-lago-signature";
+const LAGO_SIGNATURE_ALGORITHM_HEADER: &str = "x-lago-signature-algorithm";
+const LAGO_UNIQUE_KEY_HEADER: &str = "x-lago-unique-key";
+const LAGO_HMAC_SHA256_ALGORITHM: &str = "hmac";
 
 #[derive(Debug, Deserialize)]
 pub struct UsageQuery {
@@ -61,6 +76,71 @@ pub struct BillingReadOnlyBlock {
     pub rates_are_approximate: bool,
 }
 
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ProvisionWalletRequest {
+    pub owner_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct TopUpRequest {
+    pub amount_credits: i64,
+    pub idempotency_key: String,
+    pub owner_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct BillingWalletResponse {
+    pub owner_id: String,
+    pub plan_kind: PlanKind,
+    pub collection_state: CollectionState,
+    pub balance_credits: i64,
+    pub reserved_credits: i64,
+    pub pending_lago_debits: i64,
+    pub available_credits: i64,
+    pub available_with_overdraft_credits: i64,
+    pub has_payment_instrument: bool,
+    pub overdraft_cap_credits: i64,
+    pub suspended: bool,
+    pub lago_customer_id: String,
+    pub lago_subscription_id: Option<String>,
+    pub lago_wallet_id: Option<String>,
+    pub balance_synced_at: chrono::DateTime<Utc>,
+    pub created_at: chrono::DateTime<Utc>,
+    pub updated_at: chrono::DateTime<Utc>,
+    pub created: bool,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TopUpResponse {
+    pub owner_id: String,
+    pub amount_credits: i64,
+    pub idempotency_key: String,
+    pub checkout_url: String,
+    pub payment_provider: Option<String>,
+    pub lago_wallet_transaction_id: Option<String>,
+    pub lago_invoice_id: Option<String>,
+    pub status: BillingTopUpStatus,
+    pub reused: bool,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct LagoWebhookResponse {
+    pub ok: bool,
+    pub action: String,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/billing/usage",
+    tag = "Billing",
+    params(
+        ("period" = Option<String>, Query, description = "Usage period: 24h, 7d, 30d, 90d, or all")
+    ),
+    responses(
+        (status = 200, description = "Billing usage summary", body = BillingUsageResponse)
+    ),
+    security(("bearer_auth" = []))
+)]
 pub async fn get_usage(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -159,12 +239,213 @@ pub async fn get_usage(
         rows,
         totals,
         billing: BillingReadOnlyBlock {
-            charging_enabled: false,
+            charging_enabled: state.billing.billing_enabled() && state.billing.lago_configured(),
             lago_configured: state.billing.lago_configured(),
             source: "usage_meter".to_string(),
             rates_are_approximate: true,
         },
     }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/billing/wallet",
+    tag = "Billing",
+    responses(
+        (status = 200, description = "Billing wallet", body = BillingWalletResponse)
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn get_wallet(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+) -> AppResult<Json<BillingWalletResponse>> {
+    let owner = state
+        .billing
+        .owner_resolver()
+        .resolve(&auth_user.user_id.to_string(), None)
+        .await?;
+    if let Some(wallet) = state.billing.get_wallet(&owner.owner_id).await? {
+        return Ok(Json(BillingWalletResponse::from_wallet(wallet, false)));
+    }
+    let provisioned = state.billing.ensure_wallet(&owner.owner_id).await?;
+
+    Ok(Json(BillingWalletResponse::from_wallet(
+        provisioned.wallet,
+        provisioned.created,
+    )))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/billing/wallet",
+    tag = "Billing",
+    request_body = ProvisionWalletRequest,
+    responses(
+        (status = 200, description = "Provisioned billing wallet", body = BillingWalletResponse)
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn provision_wallet(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<ProvisionWalletRequest>,
+) -> AppResult<Json<BillingWalletResponse>> {
+    let actor_id = auth_user.user_id.to_string();
+    let owner = state
+        .billing
+        .owner_resolver()
+        .resolve(&actor_id, body.owner_id.as_deref())
+        .await?;
+    let provisioned = state.billing.ensure_wallet(&owner.owner_id).await?;
+
+    Ok(Json(BillingWalletResponse::from_wallet(
+        provisioned.wallet,
+        provisioned.created,
+    )))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/billing/topup",
+    tag = "Billing",
+    request_body = TopUpRequest,
+    responses(
+        (status = 200, description = "Hosted top-up checkout session", body = TopUpResponse)
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn create_topup(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<TopUpRequest>,
+) -> AppResult<Json<TopUpResponse>> {
+    let actor_id = auth_user.user_id.to_string();
+    let owner = state
+        .billing
+        .owner_resolver()
+        .resolve(&actor_id, body.owner_id.as_deref())
+        .await?;
+    let checkout = state
+        .billing
+        .create_topup_checkout(&owner.owner_id, body.amount_credits, &body.idempotency_key)
+        .await?;
+    let checkout_url = checkout.session.payment_url.clone().ok_or_else(|| {
+        AppError::BillingProviderUnavailable(
+            "Billing top-up session does not have a hosted checkout URL".to_string(),
+        )
+    })?;
+
+    Ok(Json(TopUpResponse {
+        owner_id: checkout.session.owner_id,
+        amount_credits: checkout.session.amount_credits,
+        idempotency_key: checkout.session.idempotency_key,
+        checkout_url,
+        payment_provider: checkout.session.payment_provider,
+        lago_wallet_transaction_id: checkout.session.lago_wallet_transaction_id,
+        lago_invoice_id: checkout.session.lago_invoice_id,
+        status: checkout.session.status,
+        reused: checkout.reused,
+    }))
+}
+
+pub async fn lago_webhook(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> AppResult<(StatusCode, Json<LagoWebhookResponse>)> {
+    let expected_secret = state.config.lago_webhook_secret.as_deref().ok_or_else(|| {
+        tracing::warn!("Lago webhook received but LAGO_WEBHOOK_SECRET is not configured");
+        AppError::Unauthorized("Lago webhook signature verification failed".to_string())
+    })?;
+
+    verify_lago_signature(&headers, &body, expected_secret).map_err(|error| {
+        tracing::warn!(error = %error, "Lago webhook signature verification failed");
+        AppError::Unauthorized("Lago webhook signature verification failed".to_string())
+    })?;
+
+    let payload: serde_json::Value = serde_json::from_slice(&body)
+        .map_err(|_| AppError::BadRequest("Lago webhook payload must be valid JSON".to_string()))?;
+    let event_type = lago_event_type(&payload).ok_or_else(|| {
+        AppError::BadRequest("Lago webhook payload is missing webhook_type".to_string())
+    })?;
+    let unique_key = headers
+        .get(LAGO_UNIQUE_KEY_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+
+    let lago = state.billing.lago_client();
+    let outcome = crate::services::billing::webhook::handle_lago_webhook_event(
+        &state.db,
+        lago.as_deref(),
+        event_type,
+        &payload,
+    )
+    .await?;
+
+    tracing::info!(
+        event_type,
+        unique_key,
+        action = outcome.action.as_str(),
+        owner_id = outcome.owner_id.as_deref().unwrap_or(""),
+        customer_id = outcome.customer_id.as_deref().unwrap_or(""),
+        "Lago webhook processed"
+    );
+
+    Ok((
+        StatusCode::OK,
+        Json(LagoWebhookResponse {
+            ok: true,
+            action: outcome.action.as_str().to_string(),
+        }),
+    ))
+}
+
+fn verify_lago_signature(
+    headers: &HeaderMap,
+    body: &[u8],
+    secret: &str,
+) -> Result<(), &'static str> {
+    if secret.trim().is_empty() {
+        return Err("missing expected secret");
+    }
+
+    let algorithm =
+        header_str(headers, LAGO_SIGNATURE_ALGORITHM_HEADER).unwrap_or(LAGO_HMAC_SHA256_ALGORITHM);
+    if !algorithm.eq_ignore_ascii_case(LAGO_HMAC_SHA256_ALGORITHM) {
+        return Err("unsupported signature algorithm");
+    }
+
+    let received = header_str(headers, LAGO_SIGNATURE_HEADER).ok_or("missing signature")?;
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).map_err(|_| "invalid expected secret")?;
+    mac.update(body);
+    let expected = BASE64_STANDARD.encode(mac.finalize().into_bytes());
+    if constant_time_str_eq(received.trim(), &expected) {
+        Ok(())
+    } else {
+        Err("signature mismatch")
+    }
+}
+
+fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers.get(name).and_then(|value| value.to_str().ok())
+}
+
+fn constant_time_str_eq(received: &str, expected: &str) -> bool {
+    let received_hash = Sha256::digest(received.as_bytes());
+    let expected_hash = Sha256::digest(expected.as_bytes());
+    received_hash.ct_eq(&expected_hash).into()
+}
+
+fn lago_event_type(payload: &serde_json::Value) -> Option<&str> {
+    payload
+        .get("webhook_type")
+        .or_else(|| payload.get("event_type"))
+        .or_else(|| payload.get("event"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 fn period_start(period: &str) -> chrono::DateTime<Utc> {
@@ -223,4 +504,80 @@ fn sum_optional(values: impl Iterator<Item = Option<i64>>) -> Option<i64> {
         total = total.saturating_add(value);
     }
     saw_value.then_some(total)
+}
+
+impl BillingWalletResponse {
+    fn from_wallet(wallet: BillingWallet, created: bool) -> Self {
+        let available_credits = wallet.available_credits();
+        let available_with_overdraft_credits = wallet.available_with_overdraft_credits();
+        let suspended = wallet.is_suspended();
+
+        Self {
+            owner_id: wallet.owner_id,
+            plan_kind: wallet.plan_kind,
+            collection_state: wallet.collection_state,
+            balance_credits: wallet.balance_credits,
+            reserved_credits: wallet.reserved_credits,
+            pending_lago_debits: wallet.pending_lago_debits,
+            available_credits,
+            available_with_overdraft_credits,
+            has_payment_instrument: wallet.has_payment_instrument,
+            overdraft_cap_credits: wallet.overdraft_cap_credits,
+            suspended,
+            lago_customer_id: wallet.lago_customer_id,
+            lago_subscription_id: wallet.lago_subscription_id,
+            lago_wallet_id: wallet.lago_wallet_id,
+            balance_synced_at: wallet.balance_synced_at,
+            created_at: wallet.created_at,
+            updated_at: wallet.updated_at,
+            created,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn signed_headers(secret: &str, body: &[u8]) -> HeaderMap {
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(body);
+        let signature = BASE64_STANDARD.encode(mac.finalize().into_bytes());
+        let mut headers = HeaderMap::new();
+        headers.insert(LAGO_SIGNATURE_HEADER, signature.parse().unwrap());
+        headers.insert(
+            LAGO_SIGNATURE_ALGORITHM_HEADER,
+            LAGO_HMAC_SHA256_ALGORITHM.parse().unwrap(),
+        );
+        headers
+    }
+
+    #[test]
+    fn lago_signature_accepts_valid_hmac() {
+        let body = br#"{"webhook_type":"wallet.updated"}"#;
+        let headers = signed_headers("secret", body);
+
+        assert!(verify_lago_signature(&headers, body, "secret").is_ok());
+    }
+
+    #[test]
+    fn lago_signature_rejects_tampered_body() {
+        let headers = signed_headers("secret", br#"{"webhook_type":"wallet.updated"}"#);
+
+        assert!(
+            verify_lago_signature(
+                &headers,
+                br#"{"webhook_type":"subscription.started"}"#,
+                "secret"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn lago_event_type_reads_webhook_type() {
+        let payload = serde_json::json!({ "webhook_type": "wallet.updated" });
+
+        assert_eq!(lago_event_type(&payload), Some("wallet.updated"));
+    }
 }

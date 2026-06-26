@@ -290,6 +290,8 @@ pub struct AppConfig {
     pub lago_api_url: Option<String>,
     /// Lago API key for later phases. Redacted from Debug.
     pub lago_api_key: Option<String>,
+    /// Default Lago plan code used when provisioning an owner subscription.
+    pub lago_plan_code: String,
     /// Lago webhook secret for later phases. Redacted from Debug.
     pub lago_webhook_secret: Option<String>,
     pub billing_reconcile_interval_secs: u64,
@@ -297,6 +299,9 @@ pub struct AppConfig {
     pub billing_reservation_abandon_secs: u64,
     pub billing_default_overdraft_cap_credits: i64,
     pub billing_fail_closed: bool,
+    /// Enables the dormant catalog resale layer. Default false keeps NyxID
+    /// platform-only even if legacy catalog records carry resale metadata.
+    pub billing_resale_enabled: bool,
 
     // Registration gate
     /// When `true` (default), new-user registration requires a valid invite
@@ -548,6 +553,7 @@ impl std::fmt::Debug for AppConfig {
                     &"None"
                 },
             )
+            .field("lago_plan_code", &self.lago_plan_code)
             .field(
                 "lago_webhook_secret",
                 if self.lago_webhook_secret.is_some() {
@@ -573,6 +579,7 @@ impl std::fmt::Debug for AppConfig {
                 &self.billing_default_overdraft_cap_credits,
             )
             .field("billing_fail_closed", &self.billing_fail_closed)
+            .field("billing_resale_enabled", &self.billing_resale_enabled)
             .finish()
     }
 }
@@ -951,6 +958,11 @@ impl AppConfig {
                 .ok()
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty()),
+            lago_plan_code: env::var("LAGO_PLAN_CODE")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "starter".to_string()),
             lago_webhook_secret: env::var("LAGO_WEBHOOK_SECRET")
                 .ok()
                 .map(|s| s.trim().to_string())
@@ -974,6 +986,7 @@ impl AppConfig {
             .and_then(|v| v.parse().ok())
             .unwrap_or(0),
             billing_fail_closed: parse_bool_env("BILLING_FAIL_CLOSED", false),
+            billing_resale_enabled: parse_bool_env("BILLING_RESALE_ENABLED", false),
 
             invite_code_required: parse_invite_code_required(env::var("INVITE_CODE_REQUIRED").ok()),
             email_auth_enabled: parse_bool_env("EMAIL_AUTH_ENABLED", false),
@@ -1306,12 +1319,14 @@ mod tests {
             billing_enabled: false,
             lago_api_url: None,
             lago_api_key: None,
+            lago_plan_code: "starter".to_string(),
             lago_webhook_secret: None,
             billing_reconcile_interval_secs: 300,
             billing_rate_cache_ttl_secs: 900,
             billing_reservation_abandon_secs: 600,
             billing_default_overdraft_cap_credits: 0,
             billing_fail_closed: false,
+            billing_resale_enabled: false,
             invite_code_required: true,
             email_auth_enabled: false,
             auto_verify_email: false,

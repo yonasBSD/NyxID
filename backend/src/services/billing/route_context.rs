@@ -22,7 +22,8 @@ pub struct BillingRouteContext {
     pub credential_class: CredentialClass,
     pub platform_metric: BillingMetric,
     pub resale: Option<ResaleSpec>,
-    pub platform_enabled: bool,
+    pub(crate) platform_metered: bool,
+    pub(crate) platform_billable: bool,
 }
 
 impl BillingRouteContext {
@@ -40,11 +41,15 @@ impl BillingRouteContext {
         credential_class: CredentialClass,
         platform_metric: BillingMetric,
         service_billing: Option<&ServiceBilling>,
-        platform_enabled: bool,
+        resale_enabled: bool,
     ) -> Self {
-        let resale = service_billing
-            .and_then(ServiceBilling::active_resale_spec)
-            .filter(|_| credential_class == CredentialClass::NyxidManagedMaster);
+        let resale = resale_enabled
+            .then(|| {
+                service_billing
+                    .and_then(ServiceBilling::active_resale_spec)
+                    .filter(|_| credential_class == CredentialClass::NyxidManagedMaster)
+            })
+            .flatten();
 
         Self {
             billing_request_id,
@@ -59,12 +64,27 @@ impl BillingRouteContext {
             credential_class,
             platform_metric,
             resale,
-            platform_enabled,
+            platform_metered: false,
+            platform_billable: false,
         }
     }
 
+    pub(crate) fn with_platform_metering(mut self, platform_billable: bool) -> Self {
+        self.platform_metered = true;
+        self.platform_billable = platform_billable;
+        self
+    }
+
+    pub(crate) fn platform_metered(&self) -> bool {
+        self.platform_metered
+    }
+
+    pub(crate) fn has_billable_layers(&self) -> bool {
+        self.platform_billable || self.resale.is_some()
+    }
+
     pub fn is_metered(&self) -> bool {
-        self.platform_enabled || self.resale.is_some()
+        self.platform_metered || self.resale.is_some()
     }
 }
 
@@ -93,7 +113,7 @@ mod tests {
             credential_class,
             BillingMetric::Requests,
             Some(&billing),
-            false,
+            true,
         )
     }
 
@@ -112,5 +132,32 @@ mod tests {
         );
         assert!(context_for(CredentialClass::NodeManaged).resale.is_none());
         assert!(context_for(CredentialClass::NoAuth).resale.is_none());
+    }
+
+    #[test]
+    fn resale_requires_operator_flag() {
+        let billing = ServiceBilling {
+            resale_billable: true,
+            resale_metric: BillingMetric::Tokens,
+            lago_resale_metric_code: Some("resale_tokens".to_string()),
+        };
+        let ctx = BillingRouteContext::new(
+            "request-1".to_string(),
+            "owner-1".to_string(),
+            "actor-1".to_string(),
+            Some("api-key-1".to_string()),
+            Some("user-service-1".to_string()),
+            Some("catalog-1".to_string()),
+            Some("llm-test".to_string()),
+            NodeIntent::Direct,
+            "bearer".to_string(),
+            CredentialClass::NyxidManagedMaster,
+            BillingMetric::Requests,
+            Some(&billing),
+            false,
+        );
+
+        assert!(ctx.resale.is_none());
+        assert!(!ctx.has_billable_layers());
     }
 }

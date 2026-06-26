@@ -67,21 +67,35 @@ absolute accept URL from `runtime-config.api_base_url`; see
 |----------|---------|-------------|
 | `DATABASE_MAX_CONNECTIONS` | `10` | Connection pool max size |
 
-## Billing Meter and Lago Sink (P1/P2)
+## Billing Meter and Lago Sink
 
-Phase P1 writes a durable `usage_meter` ledger. Phase P2 can push finalized ledger rows into Lago and expose read-only usage display. These variables do not enable wallet charging, top-ups, reservations, or the P3 charging gate.
+NyxID writes a durable `usage_meter` ledger, can push finalized rows into Lago, and keeps wallet and entitlement state fresh with signed Lago webhooks plus the periodic reconcile sweep as a backstop.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `BILLING_ENABLED` | `false` | Enables platform usage capture in the P1 meter. Resale capture still requires catalog `ServiceBilling.resale_billable=true` and a final `CredentialClass::NyxidManagedMaster`. |
+| `BILLING_ENABLED` | `false` | Enables platform usage capture and the prepaid wallet charging gate. When Lago is configured, owner wallets are provisioned idempotently on startup backfill, wallet access, registration best-effort, and first proxy use. |
 | `LAGO_API_URL` | *(empty)* | Lago API URL for the P2 sink. May include or omit `/api/v1`. |
 | `LAGO_API_KEY` | *(empty)* | Lago API bearer key for NyxID-to-Lago calls; redacted from config debug output. |
-| `LAGO_WEBHOOK_SECRET` | *(empty)* | Lago webhook verification secret reserved for Lago-originated webhooks; redacted from config debug output. |
+| `LAGO_PLAN_CODE` | `starter` | Lago plan code used by owner wallet provisioning/backfill when creating the owner's subscription. |
+| `LAGO_WEBHOOK_SECRET` | *(empty)* | Lago webhook verification secret for `POST /api/v1/webhooks/lago`; redacted from config debug output. Required to accept Lago-originated wallet/subscription updates. |
 | `BILLING_RECONCILE_INTERVAL_SECS` | `300` | Reconcile sweep interval. Set `0` to disable event push/reconcile sweeps. |
 | `BILLING_RATE_CACHE_TTL_SECS` | `900` | Read-only rate cache TTL for approximate display/reservation sizing. |
 | `BILLING_RESERVATION_ABANDON_SECS` | `600` | Grace before never-forwarded reserved rows are marked `abandoned`. |
 | `BILLING_DEFAULT_OVERDRAFT_CAP_CREDITS` | `0` | Default overdraft cap reserved for later phases. |
 | `BILLING_FAIL_CLOSED` | `false` | Operator fail-closed override reserved for later phases. |
+| `BILLING_RESALE_ENABLED` | `false` | Explicit opt-in for the dormant catalog resale layer. Resale still also requires `ServiceBilling.resale_billable=true` and final `CredentialClass::NyxidManagedMaster`. |
+
+Configure Lago to send webhooks to `<BASE_URL>/api/v1/webhooks/lago` with the same shared secret as `LAGO_WEBHOOK_SECRET`. NyxID verifies `X-Lago-Signature` over the raw request body before processing and uses `X-Lago-Unique-Key` only as metadata. Wallet events refresh the local wallet balance from Lago and clear accounted `pending_lago_debits`; subscription or entitlement events invalidate the local billing decision marker. The reconcile sweep remains enabled for missed or delayed webhooks unless `BILLING_RECONCILE_INTERVAL_SECS=0`.
+
+`POST /api/v1/billing/wallet` provisions the owner in Lago and creates a local `billing_wallet` cache idempotently. `POST /api/v1/billing/topup` creates a Lago wallet transaction, then uses Lago's documented `POST /api/v1/wallet_transactions/{lago_id}/payment_url` endpoint to obtain the provider-hosted Stripe checkout URL. NyxID never directly increments local credits; local balance changes only after Lago webhook/reconcile confirms the wallet balance.
+
+Before enabling paid top-ups for users, run a deployed sandbox verification:
+
+```bash
+nyxid billing verify-topup-flow --amount-credits 1 --open
+```
+
+Complete the Stripe sandbox checkout opened by the command. The verifier passes only when the reconciled wallet balance increases by exactly the paid amount and the checkout response is Stripe-backed.
 
 ## JWT
 

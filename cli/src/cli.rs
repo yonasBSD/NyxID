@@ -63,6 +63,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: PoolCommands,
     },
+    /// Manage billing wallet, usage, and top-ups
+    Billing {
+        #[command(subcommand)]
+        command: BillingCommands,
+    },
     /// Manage connected provider tokens
     Provider {
         #[command(subcommand)]
@@ -1099,6 +1104,99 @@ pub enum PoolCommands {
         /// Routing strategy
         #[arg(value_enum)]
         strategy: PoolStrategyArg,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+// ---- Billing ----
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum BillingUsagePeriodArg {
+    #[value(name = "24h")]
+    Last24Hours,
+    #[value(name = "1d")]
+    Last1Day,
+    #[value(name = "7d")]
+    Last7Days,
+    #[value(name = "30d")]
+    Last30Days,
+    #[value(name = "90d")]
+    Last90Days,
+    All,
+}
+
+impl BillingUsagePeriodArg {
+    pub fn as_query_value(self) -> &'static str {
+        match self {
+            Self::Last24Hours => "24h",
+            Self::Last1Day => "1d",
+            Self::Last7Days => "7d",
+            Self::Last30Days => "30d",
+            Self::Last90Days => "90d",
+            Self::All => "all",
+        }
+    }
+}
+
+#[derive(Subcommand)]
+pub enum BillingCommands {
+    /// Show or provision the billing wallet
+    Wallet {
+        /// Provision the wallet if it does not exist
+        #[arg(long)]
+        provision: bool,
+        /// Owner ID to bill, usually an org user ID (admin/member access required)
+        #[arg(long)]
+        owner_id: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Show billing usage and estimated cost
+    Usage {
+        /// Usage period
+        #[arg(long, value_enum, default_value = "30d")]
+        period: Option<BillingUsagePeriodArg>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Create a hosted wallet top-up checkout
+    Topup {
+        /// Credits to add
+        #[arg(long)]
+        amount_credits: i64,
+        /// Retry-safe idempotency key
+        #[arg(long)]
+        idempotency_key: Option<String>,
+        /// Owner ID to bill, usually an org user ID (admin/member access required)
+        #[arg(long)]
+        owner_id: Option<String>,
+        /// Open checkout URL in the default browser
+        #[arg(long)]
+        open: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Verify the deployed Lago + Stripe wallet top-up flow
+    VerifyTopupFlow {
+        /// Credits to add in the verification top-up
+        #[arg(long, default_value_t = 1)]
+        amount_credits: i64,
+        /// Fresh retry-safe idempotency key; omit to generate one
+        #[arg(long)]
+        idempotency_key: Option<String>,
+        /// Owner ID to bill, usually an org user ID (admin/member access required)
+        #[arg(long)]
+        owner_id: Option<String>,
+        /// Open checkout URL in the default browser
+        #[arg(long)]
+        open: bool,
+        /// Seconds to wait for Lago webhook/reconcile balance refresh after checkout
+        #[arg(long, default_value_t = 300)]
+        timeout_secs: u64,
+        /// Seconds between wallet balance polls
+        #[arg(long, default_value_t = 5)]
+        poll_interval_secs: u64,
         #[command(flatten)]
         auth: AuthArgs,
     },

@@ -333,7 +333,7 @@ async fn handle_ssh_socket(
         },
         BillingMetric::Bytes,
         None,
-        state.billing.billing_enabled(),
+        false,
     );
     let metered = match state.billing.open(&billing_ctx).await {
         Ok(metered) => metered,
