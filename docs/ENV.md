@@ -73,7 +73,7 @@ NyxID writes a durable `usage_meter` ledger, can push finalized rows into Lago, 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `BILLING_ENABLED` | `false` | Enables platform usage capture in the P1 meter. Resale capture still requires catalog `ServiceBilling.resale_billable=true` and a final `CredentialClass::NyxidManagedMaster`. |
+| `BILLING_ENABLED` | `false` | Enables platform usage capture and the prepaid wallet charging gate. When Lago is configured, owner wallets are provisioned idempotently on startup backfill, wallet access, registration best-effort, and first proxy use. |
 | `LAGO_API_URL` | *(empty)* | Lago API URL for the P2 sink. May include or omit `/api/v1`. |
 | `LAGO_API_KEY` | *(empty)* | Lago API bearer key for NyxID-to-Lago calls; redacted from config debug output. |
 | `LAGO_PLAN_CODE` | `starter` | Lago plan code used by owner wallet provisioning/backfill when creating the owner's subscription. |
@@ -83,6 +83,7 @@ NyxID writes a durable `usage_meter` ledger, can push finalized rows into Lago, 
 | `BILLING_RESERVATION_ABANDON_SECS` | `600` | Grace before never-forwarded reserved rows are marked `abandoned`. |
 | `BILLING_DEFAULT_OVERDRAFT_CAP_CREDITS` | `0` | Default overdraft cap reserved for later phases. |
 | `BILLING_FAIL_CLOSED` | `false` | Operator fail-closed override reserved for later phases. |
+| `BILLING_RESALE_ENABLED` | `false` | Explicit opt-in for the dormant catalog resale layer. Resale still also requires `ServiceBilling.resale_billable=true` and final `CredentialClass::NyxidManagedMaster`. |
 
 Configure Lago to send webhooks to `<BASE_URL>/api/v1/webhooks/lago` with the same shared secret as `LAGO_WEBHOOK_SECRET`. NyxID verifies `X-Lago-Signature` over the raw request body before processing and uses `X-Lago-Unique-Key` only as metadata. Wallet events refresh the local wallet balance from Lago and clear accounted `pending_lago_debits`; subscription or entitlement events invalidate the local billing decision marker. The reconcile sweep remains enabled for missed or delayed webhooks unless `BILLING_RECONCILE_INTERVAL_SECS=0`.
 

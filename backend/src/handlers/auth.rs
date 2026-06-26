@@ -458,6 +458,9 @@ pub async fn register(
         None,
         None,
     );
+    if result.actually_created {
+        ensure_billing_wallet_after_user_create(&state, &result.user_id).await;
+    }
 
     #[cfg(debug_assertions)]
     tracing::debug!(
@@ -1094,6 +1097,7 @@ pub async fn setup(
         None,
         None,
     );
+    ensure_billing_wallet_after_user_create(&state, &result.user_id).await;
 
     tracing::info!(user_id = %result.user_id, email = %body.email, "Initial admin created via bootstrap");
 
@@ -1101,6 +1105,27 @@ pub async fn setup(
         user_id: result.user_id,
         message: "Admin account created successfully.".to_string(),
     }))
+}
+
+async fn ensure_billing_wallet_after_user_create(state: &AppState, user_id: &str) {
+    if !state.billing.billing_enabled() {
+        return;
+    }
+    if !state.billing.lago_configured() {
+        tracing::warn!(
+            user_id,
+            "Billing is enabled but Lago is not configured; new-user wallet provisioning skipped"
+        );
+        return;
+    }
+
+    if let Err(error) = state.billing.ensure_wallet(user_id).await {
+        tracing::warn!(
+            user_id,
+            error = %error,
+            "New-user billing wallet provisioning failed"
+        );
+    }
 }
 
 /// POST /api/v1/auth/cli-token

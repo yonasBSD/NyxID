@@ -2712,6 +2712,7 @@ pub async fn execute_tool(
         ),
         BillingMetric::Requests,
         target.service.billing.as_ref(),
+        billing.resale_enabled(),
     );
     let metered = billing.open(&billing_ctx).await?;
     let request_len = body.as_ref().map(|body| body.len() as i64).unwrap_or(0);

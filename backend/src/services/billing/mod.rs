@@ -49,12 +49,26 @@ impl BillingService {
         }
     }
 
+    #[cfg(test)]
+    fn new_with_lago(db: DbHandle, config: Arc<AppConfig>, lago: Arc<dyn LagoApi>) -> Self {
+        Self {
+            db: db.clone(),
+            config,
+            owner_resolver: BillingOwnerResolver::new(db),
+            lago: Some(lago),
+        }
+    }
+
     pub fn owner_resolver(&self) -> &BillingOwnerResolver {
         &self.owner_resolver
     }
 
     pub fn billing_enabled(&self) -> bool {
         self.config.billing_enabled
+    }
+
+    pub fn resale_enabled(&self) -> bool {
+        self.config.billing_resale_enabled
     }
 
     pub fn lago_configured(&self) -> bool {
@@ -134,6 +148,8 @@ impl BillingService {
 
     pub async fn open(&self, ctx: &BillingRouteContext) -> AppResult<MeteredProxyContext> {
         let ctx = if self.config.billing_enabled {
+            self.ensure_wallet_for_charging(&ctx.billing_owner_id)
+                .await?;
             let platform_billable = self
                 .owner_has_chargeable_wallet(&ctx.billing_owner_id)
                 .await?;
@@ -154,6 +170,23 @@ impl BillingService {
             None
         };
         meter::open(&self.db, &ctx, reservation.as_ref()).await
+    }
+
+    async fn ensure_wallet_for_charging(&self, owner_id: &str) -> AppResult<()> {
+        if self.lago.is_none() {
+            if self.config.billing_fail_closed {
+                return Err(crate::errors::AppError::BillingNotConfigured(
+                    "Lago client is not configured".to_string(),
+                ));
+            }
+            tracing::warn!(
+                owner_id,
+                "Billing is enabled but Lago is not configured; continuing without wallet provisioning"
+            );
+            return Ok(());
+        }
+
+        self.ensure_wallet(owner_id).await.map(|_| ())
     }
 
     async fn owner_has_chargeable_wallet(&self, owner_id: &str) -> AppResult<bool> {
@@ -189,14 +222,23 @@ impl BillingService {
 
 #[cfg(test)]
 mod tests {
+    use async_trait::async_trait;
     use chrono::Utc;
     use mongodb::bson::doc;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use uuid::Uuid;
 
+    use crate::errors::AppResult;
+    use crate::models::billing_rate_cache::BillingRateCache;
     use crate::models::billing_wallet::{BillingWallet, CollectionState, PlanKind};
     use crate::models::service_billing::{BillingMetric, ServiceBilling};
     use crate::models::usage_meter::{BillingLayer, CredentialClass, UsageMeterRow};
+    use crate::services::billing::lago_client::{
+        Entitlement, LagoAck, LagoError, LagoEvent, LagoUsage, LagoWallet, OwnerProvisionInput,
+    };
     use crate::services::billing::{BillingRouteContext, BillingService, NodeIntent};
+    use crate::services::role_service;
     use crate::test_utils::{connect_test_database, test_app_config};
 
     #[tokio::test]
@@ -225,6 +267,7 @@ mod tests {
             CredentialClass::NyxidManagedMaster,
             BillingMetric::Requests,
             Some(&billing),
+            true,
         );
 
         let metered = service.open(&ctx).await.expect("open metering");
@@ -270,6 +313,7 @@ mod tests {
             CredentialClass::UserOwned,
             BillingMetric::Requests,
             None::<&ServiceBilling>,
+            false,
         );
 
         let metered = service.open(&ctx).await.expect("open metering");
@@ -285,6 +329,157 @@ mod tests {
         assert_eq!(row.layer, BillingLayer::Platform);
         assert_eq!(row.reserved_credits, 0);
         assert!(row.wallet_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn billing_enabled_with_lago_auto_provisions_missing_wallet() {
+        let Some(db) = connect_test_database("billing_auto_provision_on_open").await else {
+            return;
+        };
+        role_service::seed_system_roles(&db)
+            .await
+            .expect("seed roles");
+        insert_platform_rate(&db, 1).await;
+        let owner = crate::services::auth_service::register_user(
+            &db,
+            "wallet-auto@example.com",
+            "password123",
+            Some("Wallet Auto"),
+            None,
+            true,
+        )
+        .await
+        .expect("create owner");
+        let mut config = test_app_config();
+        config.billing_enabled = true;
+        config.lago_plan_code = "starter".to_string();
+        let lago = Arc::new(FakeLago::default());
+        let service = BillingService::new_with_lago(db.clone(), Arc::new(config), lago.clone());
+        let ctx = BillingRouteContext::new(
+            Uuid::new_v4().to_string(),
+            owner.user_id.clone(),
+            owner.user_id.clone(),
+            None,
+            Some("user-service-1".to_string()),
+            Some("catalog-1".to_string()),
+            Some("service-one".to_string()),
+            NodeIntent::Direct,
+            "bearer".to_string(),
+            CredentialClass::UserOwned,
+            BillingMetric::Requests,
+            None::<&ServiceBilling>,
+            false,
+        );
+
+        let metered = service.open(&ctx).await.expect("open metering");
+        assert!(metered.is_enabled());
+        let wallet = db
+            .collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
+            .find_one(doc! { "owner_id": &owner.user_id })
+            .await
+            .expect("find wallet")
+            .expect("wallet exists");
+        let row = db
+            .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+            .find_one(doc! { "billing_owner_id": &owner.user_id })
+            .await
+            .expect("find usage row")
+            .expect("row exists");
+
+        assert_eq!(wallet.lago_customer_id, owner.user_id);
+        assert_eq!(
+            wallet.lago_subscription_id.as_deref(),
+            Some(format!("{}:starter", owner.user_id).as_str())
+        );
+        assert_eq!(
+            wallet.lago_wallet_id.as_deref(),
+            Some(format!("{}:wallet", owner.user_id).as_str())
+        );
+        assert_eq!(lago.wallet_creates.load(Ordering::SeqCst), 1);
+        assert_eq!(row.layer, BillingLayer::Platform);
+        assert_eq!(row.wallet_id.as_deref(), Some(wallet.id.as_str()));
+    }
+
+    async fn insert_platform_rate(db: &mongodb::Database, credits: i64) {
+        db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
+            .insert_one(BillingRateCache {
+                id: BillingRateCache::cache_id("platform_requests", None),
+                lago_metric_code: "platform_requests".to_string(),
+                model: None,
+                credits_per_unit_micros: credits * 1_000_000,
+                synced_at: Utc::now(),
+            })
+            .await
+            .expect("insert platform rate");
+    }
+
+    #[derive(Default)]
+    struct FakeLago {
+        wallet_creates: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl crate::services::billing::lago_client::LagoApi for FakeLago {
+        async fn ensure_customer(&self, owner: &OwnerProvisionInput) -> AppResult<String> {
+            Ok(owner.external_customer_id.clone())
+        }
+
+        async fn ensure_subscription(
+            &self,
+            customer_id: &str,
+            plan_code: &str,
+        ) -> AppResult<String> {
+            Ok(format!("{customer_id}:{plan_code}"))
+        }
+
+        async fn ensure_wallet(&self, customer_id: &str) -> AppResult<LagoWallet> {
+            self.wallet_creates.fetch_add(1, Ordering::SeqCst);
+            Ok(LagoWallet {
+                id: format!("{customer_id}:wallet"),
+                balance_credits: 100,
+            })
+        }
+
+        async fn record_event(&self, event: &LagoEvent) -> Result<LagoAck, LagoError> {
+            Ok(LagoAck {
+                transaction_id: event.transaction_id.clone(),
+            })
+        }
+
+        async fn record_events_batch(
+            &self,
+            events: &[LagoEvent],
+        ) -> Result<Vec<LagoAck>, LagoError> {
+            Ok(events
+                .iter()
+                .map(|event| LagoAck {
+                    transaction_id: event.transaction_id.clone(),
+                })
+                .collect())
+        }
+
+        async fn current_usage(
+            &self,
+            customer_id: &str,
+            subscription_id: &str,
+        ) -> AppResult<LagoUsage> {
+            Ok(LagoUsage {
+                customer_id: customer_id.to_string(),
+                subscription_id: subscription_id.to_string(),
+                raw: serde_json::json!({}),
+            })
+        }
+
+        async fn wallet_balance(&self, _customer_id: &str) -> AppResult<i64> {
+            Ok(100)
+        }
+
+        async fn entitlements(&self, _subscription_id: &str) -> AppResult<Vec<Entitlement>> {
+            Ok(vec![Entitlement {
+                code: "service-one".to_string(),
+                raw: serde_json::json!({}),
+            }])
+        }
     }
 
     async fn insert_wallet(db: &mongodb::Database, owner_id: &str) {

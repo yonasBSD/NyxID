@@ -264,17 +264,15 @@ pub async fn get_wallet(
         .owner_resolver()
         .resolve(&auth_user.user_id.to_string(), None)
         .await?;
-    let wallet = state
-        .billing
-        .get_wallet(&owner.owner_id)
-        .await?
-        .ok_or_else(|| {
-            AppError::BillingNotConfigured(
-                "Billing wallet has not been provisioned for this owner".to_string(),
-            )
-        })?;
+    if let Some(wallet) = state.billing.get_wallet(&owner.owner_id).await? {
+        return Ok(Json(BillingWalletResponse::from_wallet(wallet, false)));
+    }
+    let provisioned = state.billing.ensure_wallet(&owner.owner_id).await?;
 
-    Ok(Json(BillingWalletResponse::from_wallet(wallet, false)))
+    Ok(Json(BillingWalletResponse::from_wallet(
+        provisioned.wallet,
+        provisioned.created,
+    )))
 }
 
 #[utoipa::path(

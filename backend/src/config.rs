@@ -299,6 +299,9 @@ pub struct AppConfig {
     pub billing_reservation_abandon_secs: u64,
     pub billing_default_overdraft_cap_credits: i64,
     pub billing_fail_closed: bool,
+    /// Enables the dormant catalog resale layer. Default false keeps NyxID
+    /// platform-only even if legacy catalog records carry resale metadata.
+    pub billing_resale_enabled: bool,
 
     // Registration gate
     /// When `true` (default), new-user registration requires a valid invite
@@ -576,6 +579,7 @@ impl std::fmt::Debug for AppConfig {
                 &self.billing_default_overdraft_cap_credits,
             )
             .field("billing_fail_closed", &self.billing_fail_closed)
+            .field("billing_resale_enabled", &self.billing_resale_enabled)
             .finish()
     }
 }
@@ -982,6 +986,7 @@ impl AppConfig {
             .and_then(|v| v.parse().ok())
             .unwrap_or(0),
             billing_fail_closed: parse_bool_env("BILLING_FAIL_CLOSED", false),
+            billing_resale_enabled: parse_bool_env("BILLING_RESALE_ENABLED", false),
 
             invite_code_required: parse_invite_code_required(env::var("INVITE_CODE_REQUIRED").ok()),
             email_auth_enabled: parse_bool_env("EMAIL_AUTH_ENABLED", false),
@@ -1321,6 +1326,7 @@ mod tests {
             billing_reservation_abandon_secs: 600,
             billing_default_overdraft_cap_credits: 0,
             billing_fail_closed: false,
+            billing_resale_enabled: false,
             invite_code_required: true,
             email_auth_enabled: false,
             auto_verify_email: false,

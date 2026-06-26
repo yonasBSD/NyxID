@@ -1455,6 +1455,7 @@ async fn execute_proxy_inner(
         credential_class,
         platform_metric,
         target.service.billing.as_ref(),
+        state.billing.resale_enabled(),
     );
 
     // === Request Decomposition ===
