@@ -230,7 +230,11 @@ impl LagoApi for LagoClient {
             "wallet_transaction": {
                 "wallet_id": wallet_id,
                 "paid_credits": request.amount_credits,
-                "granted_credits": request.amount_credits,
+                // granted_credits are FREE/promotional in Lago and ADDITIVE to
+                // paid_credits. A paid top-up must grant ONLY the purchased
+                // amount, so this is 0 — otherwise the customer receives 2N
+                // credits for an N payment (≈50% revenue loss). See #1050.
+                "granted_credits": 0,
                 "external_id": request.external_id,
                 "invoice_requires_successful_payment": true,
             }
@@ -982,6 +986,50 @@ mod tests {
             .expect("wallet balance");
 
         assert_eq!(balance, 77);
+    }
+
+    #[tokio::test]
+    async fn create_wallet_topup_does_not_grant_free_credits() {
+        async fn create_topup(
+            axum::Json(body): axum::Json<serde_json::Value>,
+        ) -> axum::Json<serde_json::Value> {
+            let wt = &body["wallet_transaction"];
+            // Bug #1050: granted_credits are FREE/promotional in Lago, so a paid
+            // top-up must grant ONLY the paid amount — granted_credits MUST be 0,
+            // otherwise the customer receives 2N credits for an N payment.
+            assert_eq!(wt["paid_credits"].as_i64(), Some(500), "paid_credits");
+            assert_eq!(
+                wt["granted_credits"].as_i64(),
+                Some(0),
+                "granted_credits must be 0 for a paid top-up"
+            );
+            axum::Json(json!({
+                "wallet_transaction": {
+                    "id": "txn-1",
+                    "payment_url": "https://pay.example/checkout"
+                }
+            }))
+        }
+
+        let base_url = spawn_lago_mock(axum::Router::new().route(
+            "/api/v1/wallet_transactions",
+            axum::routing::post(create_topup),
+        ))
+        .await;
+        let client = LagoClient::new(base_url, "test-key".to_string()).expect("client");
+
+        let checkout = client
+            .create_wallet_topup(
+                "wallet-1",
+                &super::WalletTopUpInput {
+                    external_id: "topup-1".to_string(),
+                    amount_credits: 500,
+                },
+            )
+            .await
+            .expect("create wallet topup");
+
+        assert_eq!(checkout.payment_url, "https://pay.example/checkout");
     }
 
     #[tokio::test]
