@@ -156,7 +156,12 @@ function makeNode(overrides: Partial<NodeInfo> = {}): NodeInfo {
     connected_at: null,
     metadata: null,
     metrics: null,
-    capabilities: { remote_credential_crypto_v1: true },
+    capabilities: {
+      credential_ack_correlation: true,
+      remote_credential_crypto_v1: true,
+    },
+    capabilities_resolved: true,
+    dispatch: { dispatchable: true, reason: "ready" },
     binding_count: 1,
     created_at: "2026-01-01T00:00:00Z",
     ...overrides,

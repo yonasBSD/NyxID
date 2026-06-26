@@ -298,10 +298,28 @@ struct NodeConnection {
 /// Negotiated capability flags. Default is "legacy agent": every
 /// feature disabled, preserving pre-migration behavior for nodes that
 /// haven't been upgraded yet.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct NodeCapabilitiesFlags {
     pub credential_ack_correlation: bool,
     pub remote_credential_crypto_v1: bool,
+}
+
+/// Live dispatch state for a node WebSocket session on this backend process.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct NodeSessionInfo {
+    pub is_connected: bool,
+    pub capabilities_resolved: bool,
+    pub capabilities: NodeCapabilitiesFlags,
+}
+
+impl NodeSessionInfo {
+    fn disconnected() -> Self {
+        Self {
+            is_connected: false,
+            capabilities_resolved: false,
+            capabilities: NodeCapabilitiesFlags::default(),
+        }
+    }
 }
 
 /// In-memory WebSocket connection manager for credential nodes.
@@ -1200,6 +1218,23 @@ impl NodeWsManager {
     /// Check if a node has an active WebSocket connection.
     pub fn is_connected(&self, node_id: &str) -> bool {
         self.connections.contains_key(node_id)
+    }
+
+    /// Return the live WebSocket dispatch state known to this backend instance.
+    pub fn session_info(&self, node_id: &str) -> NodeSessionInfo {
+        let Some(conn) = self.connections.get(node_id) else {
+            return NodeSessionInfo::disconnected();
+        };
+        let capabilities = conn
+            .capabilities
+            .lock()
+            .map(|flags| *flags)
+            .unwrap_or_default();
+        NodeSessionInfo {
+            is_connected: true,
+            capabilities_resolved: conn.capabilities_resolved.load(Ordering::Acquire),
+            capabilities,
+        }
     }
 
     /// Send a proxy request to a node and wait for the response.

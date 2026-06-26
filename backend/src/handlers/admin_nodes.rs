@@ -13,10 +13,13 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::errors::AppResult;
 use crate::handlers::admin_helpers::{require_admin, require_admin_or_operator};
-use crate::handlers::node_admin::{NodeMetricsInfo, build_metrics_info};
-use crate::models::node::{NodeMetadata, NodeStatus};
+use crate::handlers::node_admin::{
+    NodeDispatchInfo, NodeMetricsInfo, build_dispatch_info, build_metrics_info,
+};
+use crate::models::node::{Node, NodeMetadata, NodeStatus};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::AuthUser;
+use crate::services::node_ws_manager::{NodeCapabilitiesFlags, NodeWsManager};
 use crate::services::{audit_service, node_service};
 use crate::telemetry::{
     context::{TelemetryContext, emit_event},
@@ -59,8 +62,37 @@ pub struct AdminNodeInfo {
     pub metadata: Option<NodeMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metrics: Option<NodeMetricsInfo>,
+    pub capabilities: NodeCapabilitiesFlags,
+    pub capabilities_resolved: bool,
+    pub dispatch: NodeDispatchInfo,
     pub binding_count: u64,
     pub created_at: String,
+}
+
+fn admin_node_info_from_model(
+    node: &Node,
+    user_email: Option<String>,
+    binding_count: u64,
+    ws_manager: &NodeWsManager,
+) -> AdminNodeInfo {
+    let session = ws_manager.session_info(&node.id);
+    AdminNodeInfo {
+        id: node.id.clone(),
+        name: node.name.clone(),
+        user_id: node.user_id.clone(),
+        user_email,
+        status: node.status.as_str().to_string(),
+        is_connected: session.is_connected,
+        last_heartbeat_at: node.last_heartbeat_at.map(|dt| dt.to_rfc3339()),
+        connected_at: node.connected_at.map(|dt| dt.to_rfc3339()),
+        metadata: node.metadata.clone(),
+        metrics: Some(build_metrics_info(&node.metrics)),
+        capabilities: session.capabilities,
+        capabilities_resolved: session.capabilities_resolved,
+        dispatch: build_dispatch_info(node, ws_manager),
+        binding_count,
+        created_at: node.created_at.to_rfc3339(),
+    }
 }
 
 // --- Handlers ---
@@ -141,19 +173,13 @@ pub async fn admin_list_nodes(
 
     let node_infos: Vec<AdminNodeInfo> = nodes
         .iter()
-        .map(|node| AdminNodeInfo {
-            id: node.id.clone(),
-            name: node.name.clone(),
-            user_id: node.user_id.clone(),
-            user_email: user_emails.get(&node.user_id).cloned(),
-            status: node.status.as_str().to_string(),
-            is_connected: state.node_ws_manager.is_connected(&node.id),
-            last_heartbeat_at: node.last_heartbeat_at.map(|dt| dt.to_rfc3339()),
-            connected_at: node.connected_at.map(|dt| dt.to_rfc3339()),
-            metadata: node.metadata.clone(),
-            metrics: Some(build_metrics_info(&node.metrics)),
-            binding_count: binding_counts.get(&node.id).copied().unwrap_or(0),
-            created_at: node.created_at.to_rfc3339(),
+        .map(|node| {
+            admin_node_info_from_model(
+                node,
+                user_emails.get(&node.user_id).cloned(),
+                binding_counts.get(&node.id).copied().unwrap_or(0),
+                state.node_ws_manager.as_ref(),
+            )
         })
         .collect();
 
@@ -191,20 +217,12 @@ pub async fn admin_get_node(
         .count_documents(doc! { "node_id": &node.id, "is_active": true })
         .await?;
 
-    Ok(Json(AdminNodeInfo {
-        id: node.id.clone(),
-        name: node.name,
-        user_id: node.user_id,
+    Ok(Json(admin_node_info_from_model(
+        &node,
         user_email,
-        status: node.status.as_str().to_string(),
-        is_connected: state.node_ws_manager.is_connected(&node.id),
-        last_heartbeat_at: node.last_heartbeat_at.map(|dt| dt.to_rfc3339()),
-        connected_at: node.connected_at.map(|dt| dt.to_rfc3339()),
-        metadata: node.metadata,
-        metrics: Some(build_metrics_info(&node.metrics)),
         binding_count,
-        created_at: node.created_at.to_rfc3339(),
-    }))
+        state.node_ws_manager.as_ref(),
+    )))
 }
 
 /// POST /api/v1/admin/nodes/{node_id}/disconnect

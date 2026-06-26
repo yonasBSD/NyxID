@@ -18,35 +18,19 @@ pub struct NodeRoute {
     pub fallback_node_ids: Vec<String>,
 }
 
-fn is_node_viable(node: &Node, ws_manager: &NodeWsManager) -> bool {
-    if !ws_manager.is_connected(&node.id) {
-        return false;
-    }
-
-    if node.metrics.total_requests > 10 {
-        let error_rate = node.metrics.error_count as f64 / node.metrics.total_requests as f64;
-        if error_rate > 0.5 {
-            tracing::warn!(
-                node_id = %node.id,
-                error_rate = %error_rate,
-                "Skipping unhealthy node"
-            );
-            return false;
-        }
-    }
-
-    true
+fn is_node_dispatchable(node: &Node, ws_manager: &NodeWsManager) -> bool {
+    node.is_active && node.status == NodeStatus::Online && ws_manager.is_connected(&node.id)
 }
 
-/// Validate that a specific node_id is viable for proxy routing on this backend instance.
+/// Validate that a specific node_id is dispatchable for proxy routing on this backend instance.
 ///
-/// "Viable" means the node is active and marked Online in MongoDB, AND has an active
-/// WebSocket connection on this instance, AND is not unhealthy (error rate check).
+/// Dispatchability means the node is active and marked Online in MongoDB, AND has an
+/// active WebSocket connection on this instance.
 ///
 /// This is the single source of truth for "can we actually send a proxy request to
 /// this node right now?" and must stay aligned with the pre-send check in
 /// `NodeWsManager::send_proxy_request`.
-pub async fn is_node_id_viable(
+pub async fn is_node_id_dispatchable(
     db: &mongodb::Database,
     node_id: &str,
     ws_manager: &NodeWsManager,
@@ -60,7 +44,9 @@ pub async fn is_node_id_viable(
         })
         .await?;
 
-    Ok(node.as_ref().is_some_and(|n| is_node_viable(n, ws_manager)))
+    Ok(node
+        .as_ref()
+        .is_some_and(|n| is_node_dispatchable(n, ws_manager)))
 }
 
 fn collect_ordered_node_ids(
@@ -95,7 +81,7 @@ pub fn build_node_route(node_ids: Vec<String>) -> Option<NodeRoute> {
     })
 }
 
-async fn load_viable_bindings(
+async fn load_dispatchable_bindings(
     db: &mongodb::Database,
     owner_user_id: &str,
     service_id: Option<&str>,
@@ -139,16 +125,16 @@ async fn load_viable_bindings(
 
     let online_nodes: HashMap<&str, &Node> = nodes.iter().map(|n| (n.id.as_str(), n)).collect();
 
-    let mut viable_bindings = Vec::new();
+    let mut dispatchable_bindings = Vec::new();
     for binding in bindings {
         if let Some(node) = online_nodes.get(binding.node_id.as_str())
-            && is_node_viable(node, ws_manager)
+            && is_node_dispatchable(node, ws_manager)
         {
-            viable_bindings.push(binding);
+            dispatchable_bindings.push(binding);
         }
     }
 
-    Ok(viable_bindings)
+    Ok(dispatchable_bindings)
 }
 
 /// Check if a user has a node binding for this service.
@@ -165,9 +151,8 @@ async fn load_viable_bindings(
 /// 2. If no UserService node_id, find active NodeServiceBindings ordered by priority
 /// 3. Batch-fetch all referenced nodes in a single query
 /// 4. Filter to nodes that are both DB-online AND WS-connected
-/// 5. Skip nodes with >50% error rate (if enough samples)
-/// 6. Return the first viable node as primary, rest as fallbacks
-/// 7. Return None if no viable node found
+/// 5. Return the first dispatchable node as primary, rest as fallbacks
+/// 6. Return None if no dispatchable node found
 pub async fn resolve_node_route(
     db: &mongodb::Database,
     user_id: &str,
@@ -186,12 +171,12 @@ async fn resolve_node_route_for_owner(
 ) -> AppResult<Option<NodeRoute>> {
     let primary_node_id =
         resolve_from_user_service(db, owner_user_id, service_id, ws_manager).await?;
-    let viable_bindings =
-        load_viable_bindings(db, owner_user_id, Some(service_id), ws_manager).await?;
+    let dispatchable_bindings =
+        load_dispatchable_bindings(db, owner_user_id, Some(service_id), ws_manager).await?;
 
     Ok(build_node_route(collect_ordered_node_ids(
         primary_node_id,
-        viable_bindings,
+        dispatchable_bindings,
     )))
 }
 
@@ -214,7 +199,7 @@ async fn effective_service_owner_id(
 /// Resolve a node route from UserService.node_id for a given catalog service.
 ///
 /// Returns Some(node_id) if the user has a UserService with catalog_service_id
-/// matching the given service_id and a viable node_id set.
+/// matching the given service_id and a dispatchable node_id set.
 async fn resolve_from_user_service(
     db: &mongodb::Database,
     owner_user_id: &str,
@@ -235,7 +220,7 @@ async fn resolve_from_user_service(
         _ => return Ok(None),
     };
 
-    if !is_node_id_viable(db, &node_id, ws_manager).await? {
+    if !is_node_id_dispatchable(db, &node_id, ws_manager).await? {
         return Ok(None);
     }
 
@@ -285,7 +270,7 @@ pub async fn user_service_has_explicit_node(
         .is_some())
 }
 
-pub async fn list_viable_binding_node_ids(
+pub async fn list_dispatchable_binding_node_ids(
     db: &mongodb::Database,
     user_id: &str,
     service_id: &str,
@@ -294,27 +279,27 @@ pub async fn list_viable_binding_node_ids(
     let owner_user_id = effective_service_owner_id(db, user_id, service_id).await?;
     Ok(collect_ordered_node_ids(
         None,
-        load_viable_bindings(db, &owner_user_id, Some(service_id), ws_manager).await?,
+        load_dispatchable_bindings(db, &owner_user_id, Some(service_id), ws_manager).await?,
     ))
 }
 
-async fn load_viable_user_service_catalog_ids(
+async fn load_dispatchable_user_service_catalog_ids(
     db: &mongodb::Database,
     user_id: &str,
     ws_manager: &NodeWsManager,
 ) -> AppResult<Vec<String>> {
-    load_viable_user_service_catalog_ids_filtered(db, user_id, ws_manager, |_| true).await
+    load_dispatchable_user_service_catalog_ids_filtered(db, user_id, ws_manager, |_| true).await
 }
 
 /// Scope-aware variant: a `UserService` catalog entry only counts as a
-/// viable route when its `node_id` passes `node_filter`. Used by the
+/// dispatchable route when its `node_id` passes `node_filter`. Used by the
 /// scoped MCP discovery path so a scoped API key doesn't see platform
 /// tools whose only user-service route is pinned to an out-of-scope
 /// node (twenty-third-round Codex P2). `execute_tool` rejects the call
 /// anyway once it sees the primary `node_id` is out of scope, so
 /// discovery and execution must agree or scoped agents get broken tool
 /// listings.
-async fn load_viable_user_service_catalog_ids_filtered<F>(
+async fn load_dispatchable_user_service_catalog_ids_filtered<F>(
     db: &mongodb::Database,
     user_id: &str,
     ws_manager: &NodeWsManager,
@@ -372,7 +357,7 @@ where
         }
 
         if let Some(node) = online_nodes.get(node_id)
-            && is_node_viable(node, ws_manager)
+            && is_node_dispatchable(node, ws_manager)
         {
             service_ids.push(catalog_service_id.to_string());
         }
@@ -381,30 +366,30 @@ where
     Ok(service_ids)
 }
 
-/// Return all service IDs for which the user currently has at least one viable node route.
+/// Return all service IDs for which the user currently has at least one dispatchable node route.
 pub async fn list_routable_service_ids(
     db: &mongodb::Database,
     user_id: &str,
     ws_manager: &NodeWsManager,
 ) -> AppResult<Vec<String>> {
-    let mut service_ids: Vec<String> = load_viable_bindings(db, user_id, None, ws_manager)
+    let mut service_ids: Vec<String> = load_dispatchable_bindings(db, user_id, None, ws_manager)
         .await?
         .into_iter()
         .map(|binding| binding.service_id)
         .collect();
-    service_ids.extend(load_viable_user_service_catalog_ids(db, user_id, ws_manager).await?);
+    service_ids.extend(load_dispatchable_user_service_catalog_ids(db, user_id, ws_manager).await?);
     service_ids.sort();
     service_ids.dedup();
     Ok(service_ids)
 }
 
-/// Scope-aware variant: a `NodeServiceBinding` only counts as a viable
+/// Scope-aware variant: a `NodeServiceBinding` only counts as a dispatchable
 /// route when its `node_id` passes `node_filter`. The catalog `UserService`
 /// contribution is kept because it reflects the user's own `node_id`
 /// choice (the caller applies its own scope check separately).
 ///
 /// Used by MCP discovery so scoped API keys don't see tools whose only
-/// viable bindings are on nodes they can't reach (eighteenth-round
+/// dispatchable bindings are on nodes they can't reach (eighteenth-round
 /// Codex P2).
 pub async fn list_routable_service_ids_filtered<F>(
     db: &mongodb::Database,
@@ -415,7 +400,7 @@ pub async fn list_routable_service_ids_filtered<F>(
 where
     F: Fn(&str) -> bool,
 {
-    let mut service_ids: Vec<String> = load_viable_bindings(db, user_id, None, ws_manager)
+    let mut service_ids: Vec<String> = load_dispatchable_bindings(db, user_id, None, ws_manager)
         .await?
         .into_iter()
         .filter(|binding| node_filter(&binding.node_id))
@@ -426,7 +411,7 @@ where
     // tool look executable (twenty-third-round Codex P2). The caller's
     // `execute_tool` would later 403 on the primary node scope check.
     service_ids.extend(
-        load_viable_user_service_catalog_ids_filtered(db, user_id, ws_manager, &node_filter)
+        load_dispatchable_user_service_catalog_ids_filtered(db, user_id, ws_manager, &node_filter)
             .await?,
     );
     service_ids.sort();
@@ -440,7 +425,7 @@ mod tests {
 
     use super::{
         build_node_route, collect_ordered_node_ids, has_routable_node_bindings,
-        list_viable_binding_node_ids, resolve_node_route, user_service_has_explicit_node,
+        list_dispatchable_binding_node_ids, resolve_node_route, user_service_has_explicit_node,
     };
     use crate::models::node::{COLLECTION_NAME as NODES, Node, NodeMetrics, NodeStatus};
     use crate::models::node_service_binding::{
@@ -850,7 +835,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_viable_binding_node_ids_walks_org_owner() {
+    async fn list_dispatchable_binding_node_ids_walks_org_owner() {
         let Some(db) = connect_test_database("node_route_list_bindings_org").await else {
             eprintln!("skipping node routing integration test: no local MongoDB available");
             return;
@@ -875,7 +860,7 @@ mod tests {
         let ws_manager = connected_ws_manager(node_id);
 
         let node_ids =
-            list_viable_binding_node_ids(&db, &actor_id, catalog_service_id, &ws_manager)
+            list_dispatchable_binding_node_ids(&db, &actor_id, catalog_service_id, &ws_manager)
                 .await
                 .unwrap();
 
@@ -953,5 +938,55 @@ mod tests {
             !route.fallback_node_ids.contains(&offline_node.to_string()),
             "offline node must never appear in the routable set"
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_node_route_keeps_connected_node_with_high_historical_error_rate() {
+        let Some(db) = connect_test_database("node_route_high_errors_connected").await else {
+            eprintln!("skipping node routing integration test: no local MongoDB available");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let catalog_service_id = "catalog-high-errors";
+        let node_id = "node-high-error-connected";
+
+        db.collection(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+        insert_user_service(
+            &db,
+            &service_id,
+            &user_id,
+            "higherrors",
+            catalog_service_id,
+            Some(node_id),
+        )
+        .await;
+
+        let mut high_error_node = node(node_id, &user_id);
+        high_error_node.metrics = NodeMetrics {
+            total_requests: 11,
+            success_count: 0,
+            error_count: 11,
+            avg_latency_ms: 0.0,
+            last_error: Some("previous routing failure".to_string()),
+            last_error_at: Some(Utc::now()),
+            last_success_at: None,
+        };
+        db.collection(NODES)
+            .insert_one(high_error_node)
+            .await
+            .unwrap();
+        let ws_manager = connected_ws_manager(node_id);
+
+        let route = resolve_node_route(&db, &user_id, catalog_service_id, &ws_manager)
+            .await
+            .unwrap()
+            .expect("connected online node should remain dispatchable");
+
+        assert_eq!(route.node_id, node_id);
+        assert!(route.fallback_node_ids.is_empty());
     }
 }

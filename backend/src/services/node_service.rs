@@ -708,6 +708,37 @@ pub async fn update_heartbeat(
     Ok(())
 }
 
+/// Persist the agent version advertised by a node's WebSocket `status_update`.
+/// Existing metadata fields are preserved so the status handshake cannot erase
+/// registration-time OS/arch/IP/provisioning metadata.
+pub async fn update_node_agent_version(
+    db: &mongodb::Database,
+    node_id: &str,
+    agent_version: &str,
+) -> AppResult<()> {
+    let agent_version = agent_version.trim();
+    if agent_version.is_empty() {
+        return Ok(());
+    }
+
+    let node = get_node_by_id(db, node_id).await?.ok_or_else(|| {
+        AppError::NodeNotFound(format!("Node {node_id} not found during status update"))
+    })?;
+    let mut metadata = node.metadata.unwrap_or(NodeMetadata {
+        agent_version: None,
+        os: None,
+        arch: None,
+        ip_address: None,
+        provisioning_source: None,
+    });
+    if metadata.agent_version.as_deref() == Some(agent_version) {
+        update_heartbeat(db, node_id, None).await?;
+        return Ok(());
+    }
+    metadata.agent_version = Some(agent_version.to_string());
+    update_heartbeat(db, node_id, Some(metadata)).await
+}
+
 /// Set node status.
 pub async fn set_node_status(
     db: &mongodb::Database,
@@ -1462,6 +1493,44 @@ mod tests {
         assert_eq!(total, 1);
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].id, operational_node.id);
+    }
+
+    #[tokio::test]
+    async fn update_node_agent_version_preserves_existing_metadata() {
+        let Some(db) = connect_test_database("node_agent_version_metadata").await else {
+            return;
+        };
+        let owner_id = Uuid::new_v4().to_string();
+        let mut node = make_node(&owner_id, "versioned-node");
+        node.metadata = Some(NodeMetadata {
+            agent_version: None,
+            os: Some("linux".to_string()),
+            arch: Some("x86_64".to_string()),
+            ip_address: Some("127.0.0.1".to_string()),
+            provisioning_source: Some("manual".to_string()),
+        });
+        db.collection::<Node>(NODES)
+            .insert_one(&node)
+            .await
+            .expect("insert node");
+
+        update_node_agent_version(&db, &node.id, "0.7.1")
+            .await
+            .expect("update agent version");
+
+        let stored = db
+            .collection::<Node>(NODES)
+            .find_one(doc! { "_id": &node.id })
+            .await
+            .unwrap()
+            .expect("node exists");
+        let metadata = stored.metadata.expect("metadata exists");
+        assert_eq!(metadata.agent_version.as_deref(), Some("0.7.1"));
+        assert_eq!(metadata.os.as_deref(), Some("linux"));
+        assert_eq!(metadata.arch.as_deref(), Some("x86_64"));
+        assert_eq!(metadata.ip_address.as_deref(), Some("127.0.0.1"));
+        assert_eq!(metadata.provisioning_source.as_deref(), Some("manual"));
+        assert!(stored.last_heartbeat_at.is_some());
     }
 
     struct NodeAclFixture {

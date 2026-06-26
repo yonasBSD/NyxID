@@ -960,14 +960,14 @@ async fn resolve_via_downstream_service(
         node_routing_service::user_service_has_explicit_node(&state.db, user_id_str, service_id)
             .await?;
 
-    // Hard-fail when the service is explicitly node-routed but no viable
+    // Hard-fail when the service is explicitly node-routed but no dispatchable
     // node could be resolved. Falling through to direct routing would
     // violate the "Route via Node" contract and silently bypass the
     // intended execution boundary (node isolation, local credentials,
     // private-network access).
     if nr.is_none() && node_routing_required {
         let err = AppError::NodeOffline(
-            "Service is configured to route via a node, but no viable node is available"
+            "Service is configured to route via a node, but no dispatchable node is available"
                 .to_string(),
         );
         audit_service::log_for_user(
@@ -1044,19 +1044,19 @@ async fn build_pre_resolved_node_route(
         return Ok(None);
     };
 
-    // Check if the configured node is actually viable on this instance (DB Online
-    // + WS-connected + healthy). Without this, a request landing on a backend
+    // Check if the configured node is actually dispatchable on this instance
+    // (DB Online + WS-connected). Without this, a request landing on a backend
     // instance that doesn't hold the WS connection is routed to the node and
     // surfaces `503 node_offline` to the caller even though `node list` shows
     // the node online globally. See issue #325.
-    let primary_viable = node_routing_service::is_node_id_viable(
+    let primary_dispatchable = node_routing_service::is_node_id_dispatchable(
         &state.db,
         explicit_node_id,
         state.node_ws_manager.as_ref(),
     )
     .await?;
 
-    let fallback_node_ids: Vec<String> = node_routing_service::list_viable_binding_node_ids(
+    let fallback_node_ids: Vec<String> = node_routing_service::list_dispatchable_binding_node_ids(
         &state.db,
         user_id,
         service_id,
@@ -1067,43 +1067,43 @@ async fn build_pre_resolved_node_route(
     .filter(|node_id| node_id != explicit_node_id)
     .collect();
 
-    if !primary_viable {
+    if !primary_dispatchable {
         if fallback_node_ids.is_empty() {
             tracing::warn!(
                 configured_node_id = %explicit_node_id,
                 service_id = %service_id,
-                "Configured node is not viable on this instance and no viable fallback bindings; caller will hard-fail the node-pinned request"
+                "Configured node is not dispatchable on this instance and no dispatchable fallback bindings; caller will hard-fail the node-pinned request"
             );
         } else {
             tracing::warn!(
                 configured_node_id = %explicit_node_id,
                 promoted_node_id = %fallback_node_ids[0],
                 service_id = %service_id,
-                "Configured node is not viable on this instance; promoting a viable fallback to primary"
+                "Configured node is not dispatchable on this instance; promoting a dispatchable fallback to primary"
             );
         }
     }
 
     Ok(node_routing_service::build_node_route(
-        compose_pre_resolved_node_ids(explicit_node_id, primary_viable, fallback_node_ids),
+        compose_pre_resolved_node_ids(explicit_node_id, primary_dispatchable, fallback_node_ids),
     ))
 }
 
 /// Pure helper: build the ordered node-id list for a pre-resolved route.
 ///
-/// - If the configured node is viable, it goes first and viable fallbacks follow.
-/// - If it is not viable, only the viable fallbacks remain; the first one is promoted
+/// - If the configured node is dispatchable, it goes first and dispatchable fallbacks follow.
+/// - If it is not dispatchable, only the dispatchable fallbacks remain; the first one is promoted
 ///   to primary by the caller via `build_node_route`.
-/// - If nothing is viable, returns an empty list. `build_node_route` then yields
+/// - If nothing is dispatchable, returns an empty list. `build_node_route` then yields
 ///   `None`, and `execute_proxy_inner`'s pre_resolved arm hard-fails with
 ///   `NodeOffline` to honor the "Route via Node" contract
 ///   (see ChronoAIProject/NyxID#328).
 fn compose_pre_resolved_node_ids(
     explicit_node_id: &str,
-    primary_viable: bool,
+    primary_dispatchable: bool,
     fallback_node_ids: Vec<String>,
 ) -> Vec<String> {
-    if primary_viable {
+    if primary_dispatchable {
         let mut ids = Vec::with_capacity(fallback_node_ids.len() + 1);
         ids.push(explicit_node_id.to_string());
         ids.extend(fallback_node_ids);
@@ -1258,7 +1258,7 @@ async fn execute_proxy_inner(
         .await?;
 
         // Hard-fail when the UserService pins a node (Route via Node) but
-        // `build_pre_resolved_node_route` could not resolve a viable node
+        // `build_pre_resolved_node_route` could not resolve a dispatchable node
         // and no fallback binding exists. Falling through to direct routing
         // would silently bypass node isolation, local credentials, and
         // private-network access -- the exact contract "Route via Node"
@@ -1267,7 +1267,7 @@ async fn execute_proxy_inner(
         // the UserService path honest. See ChronoAIProject/NyxID#328.
         if node_route.is_none() && pre.node_id.as_deref().is_some_and(|nid| !nid.is_empty()) {
             let err = AppError::NodeOffline(
-                "Service is configured to route via a node, but no viable node is available"
+                "Service is configured to route via a node, but no dispatchable node is available"
                     .to_string(),
             );
             audit_service::log_for_user(
@@ -1280,7 +1280,7 @@ async fn execute_proxy_inner(
                     "configured_node_id": pre.node_id,
                     "path": path,
                     "reason": err.to_string(),
-                    "denial_reason": "node_routing_required_no_viable_node",
+                    "denial_reason": "node_routing_required_no_dispatchable_node",
                     "node_routing_required": true,
                 })),
             );
@@ -4340,7 +4340,7 @@ mod tests {
     // ---- compose_pre_resolved_node_ids tests (issue #325) ----
 
     #[test]
-    fn compose_pre_resolved_node_ids_uses_configured_as_primary_when_viable() {
+    fn compose_pre_resolved_node_ids_uses_configured_as_primary_when_dispatchable() {
         let result = compose_pre_resolved_node_ids(
             "configured",
             true,
@@ -4358,7 +4358,7 @@ mod tests {
     }
 
     #[test]
-    fn compose_pre_resolved_node_ids_drops_configured_when_not_viable() {
+    fn compose_pre_resolved_node_ids_drops_configured_when_not_dispatchable() {
         let result = compose_pre_resolved_node_ids(
             "configured",
             false,
@@ -4372,19 +4372,19 @@ mod tests {
     }
 
     #[test]
-    fn compose_pre_resolved_node_ids_returns_empty_when_nothing_viable() {
-        // When the configured node is not viable and no fallback bindings exist,
-        // the list must be empty so `build_node_route` returns None. The caller
-        // (execute_proxy_inner pre_resolved arm) then hard-fails with
-        // `NodeOffline` to honor the "Route via Node" contract rather than
-        // silently dropping to direct routing. See ChronoAIProject/NyxID#328.
+    fn compose_pre_resolved_node_ids_returns_empty_when_nothing_dispatchable() {
+        // When the configured node is not dispatchable and no fallback bindings
+        // exist, the list must be empty so `build_node_route` returns None.
+        // The caller then hard-fails with `NodeOffline` to honor the
+        // "Route via Node" contract rather than silently dropping to direct
+        // routing. See ChronoAIProject/NyxID#328.
         let result = compose_pre_resolved_node_ids("configured", false, vec![]);
 
         assert!(result.is_empty());
     }
 
     #[test]
-    fn compose_pre_resolved_node_ids_keeps_viable_configured_without_fallbacks() {
+    fn compose_pre_resolved_node_ids_keeps_dispatchable_configured_without_fallbacks() {
         let result = compose_pre_resolved_node_ids("configured", true, vec![]);
 
         assert_eq!(result, vec!["configured".to_string()]);
@@ -7045,7 +7045,7 @@ pub struct ProxyServiceItem {
     pub connected: bool,
     /// Whether a connection is required before proxying
     pub requires_connection: bool,
-    /// Whether the user currently has a viable node route for this service
+    /// Whether the user currently has a dispatchable node route for this service
     pub has_node_binding: bool,
     /// UUID-based proxy URL
     pub proxy_url: String,

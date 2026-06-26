@@ -131,6 +131,41 @@ pub async fn run(command: NodeCommands) -> Result<()> {
                     eprintln!("Status:     {status}");
                     eprintln!("Last Seen:  {last_seen}");
                     eprintln!("Version:    {version}");
+                    if let Some(dispatch) = node.get("dispatch") {
+                        let dispatchable = dispatch["dispatchable"].as_bool().unwrap_or(false);
+                        let reason = dispatch["reason"].as_str().unwrap_or("-");
+                        eprintln!(
+                            "Dispatch:   {} ({reason})",
+                            if dispatchable { "ready" } else { "blocked" }
+                        );
+                    }
+                    if let Some(caps) = node.get("capabilities") {
+                        let capabilities_resolved =
+                            node["capabilities_resolved"].as_bool().unwrap_or(false);
+                        let mut names = Vec::new();
+                        if caps["credential_ack_correlation"]
+                            .as_bool()
+                            .unwrap_or(false)
+                        {
+                            names.push("credential_ack_correlation");
+                        }
+                        if caps["remote_credential_crypto_v1"]
+                            .as_bool()
+                            .unwrap_or(false)
+                        {
+                            names.push("remote_credential_crypto_v1");
+                        }
+                        eprintln!(
+                            "Capabilities: {}",
+                            if !capabilities_resolved {
+                                "pending status update".to_string()
+                            } else if names.is_empty() {
+                                "none advertised".to_string()
+                            } else {
+                                names.join(", ")
+                            }
+                        );
+                    }
 
                     let source_ip = format_source_ip(node.get("metadata"));
                     let connected_str = format_connected_duration(

@@ -1153,7 +1153,7 @@ mod tests {
         .await;
         let client = LagoClient::new(base_url, "test-key".to_string()).expect("client");
 
-        let checkout = client
+        let error = client
             .create_wallet_topup(
                 "wallet-1",
                 &super::WalletTopUpInput {
