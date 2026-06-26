@@ -23,6 +23,8 @@ pub struct BillingTopUpSession {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lago_wallet_transaction_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lago_invoice_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payment_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payment_provider: Option<String>,

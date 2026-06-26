@@ -87,7 +87,15 @@ NyxID writes a durable `usage_meter` ledger, can push finalized rows into Lago, 
 
 Configure Lago to send webhooks to `<BASE_URL>/api/v1/webhooks/lago` with the same shared secret as `LAGO_WEBHOOK_SECRET`. NyxID verifies `X-Lago-Signature` over the raw request body before processing and uses `X-Lago-Unique-Key` only as metadata. Wallet events refresh the local wallet balance from Lago and clear accounted `pending_lago_debits`; subscription or entitlement events invalidate the local billing decision marker. The reconcile sweep remains enabled for missed or delayed webhooks unless `BILLING_RECONCILE_INTERVAL_SECS=0`.
 
-`POST /api/v1/billing/wallet` provisions the owner in Lago and creates a local `billing_wallet` cache idempotently. `POST /api/v1/billing/topup` creates a provider-hosted Lago wallet transaction checkout and never directly increments local credits; local balance changes only after Lago webhook/reconcile confirms the wallet balance.
+`POST /api/v1/billing/wallet` provisions the owner in Lago and creates a local `billing_wallet` cache idempotently. `POST /api/v1/billing/topup` creates a Lago wallet transaction, then uses Lago's documented `POST /api/v1/wallet_transactions/{lago_id}/payment_url` endpoint to obtain the provider-hosted Stripe checkout URL. NyxID never directly increments local credits; local balance changes only after Lago webhook/reconcile confirms the wallet balance.
+
+Before enabling paid top-ups for users, run a deployed sandbox verification:
+
+```bash
+nyxid billing verify-topup-flow --amount-credits 1 --open
+```
+
+Complete the Stripe sandbox checkout opened by the command. The verifier passes only when the reconciled wallet balance increases by exactly the paid amount and the checkout response is Stripe-backed.
 
 ## JWT
 

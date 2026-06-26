@@ -1177,6 +1177,29 @@ pub enum BillingCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
+    /// Verify the deployed Lago + Stripe wallet top-up flow
+    VerifyTopupFlow {
+        /// Credits to add in the verification top-up
+        #[arg(long, default_value_t = 1)]
+        amount_credits: i64,
+        /// Fresh retry-safe idempotency key; omit to generate one
+        #[arg(long)]
+        idempotency_key: Option<String>,
+        /// Owner ID to bill, usually an org user ID (admin/member access required)
+        #[arg(long)]
+        owner_id: Option<String>,
+        /// Open checkout URL in the default browser
+        #[arg(long)]
+        open: bool,
+        /// Seconds to wait for Lago webhook/reconcile balance refresh after checkout
+        #[arg(long, default_value_t = 300)]
+        timeout_secs: u64,
+        /// Seconds between wallet balance polls
+        #[arg(long, default_value_t = 5)]
+        poll_interval_secs: u64,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
 }
 
 // ---- API Key ----

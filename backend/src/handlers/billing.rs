@@ -118,6 +118,7 @@ pub struct TopUpResponse {
     pub checkout_url: String,
     pub payment_provider: Option<String>,
     pub lago_wallet_transaction_id: Option<String>,
+    pub lago_invoice_id: Option<String>,
     pub status: BillingTopUpStatus,
     pub reused: bool,
 }
@@ -342,6 +343,7 @@ pub async fn create_topup(
         checkout_url,
         payment_provider: checkout.session.payment_provider,
         lago_wallet_transaction_id: checkout.session.lago_wallet_transaction_id,
+        lago_invoice_id: checkout.session.lago_invoice_id,
         status: checkout.session.status,
         reused: checkout.reused,
     }))
