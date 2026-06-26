@@ -238,7 +238,7 @@ pub async fn get_usage(
         rows,
         totals,
         billing: BillingReadOnlyBlock {
-            charging_enabled: false,
+            charging_enabled: state.billing.billing_enabled() && state.billing.lago_configured(),
             lago_configured: state.billing.lago_configured(),
             source: "usage_meter".to_string(),
             rates_are_approximate: true,
