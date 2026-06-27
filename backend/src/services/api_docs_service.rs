@@ -429,6 +429,182 @@ pub fn render_catalog_html() -> &'static str {
 </html>"#
 }
 
+pub fn build_firecrawl_openapi_document() -> serde_json::Value {
+    serde_json::json!({
+        "openapi": "3.1.0",
+        "info": {
+            "title": "Firecrawl API",
+            "version": "v2-nyxid-overlay",
+            "description": "NyxID-hosted Firecrawl OpenAPI overlay with Aevatar tool annotations for asynchronous agent submit and poll operations."
+        },
+        "servers": [
+            {
+                "url": "https://api.firecrawl.dev",
+                "description": "Firecrawl API"
+            }
+        ],
+        "paths": {
+            "/v2/agent": {
+                "post": {
+                    "operationId": "agent",
+                    "summary": "Submit a Firecrawl agent task",
+                    "description": "Starts an asynchronous Firecrawl agent task. Poll the returned id with GET /v2/agent/{id}.",
+                    "x-aevatar-tool": {
+                        "name": "agent",
+                        "description": "Submit an asynchronous Firecrawl agent task.",
+                        "readOnly": false,
+                        "destructive": false,
+                        "requiresApproval": false
+                    },
+                    "requestBody": {
+                        "required": true,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/AgentSubmitRequest"
+                                }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Agent task accepted",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "$ref": "#/components/schemas/AgentSubmitResponse"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "/v2/agent/{id}": {
+                "get": {
+                    "operationId": "agent_status",
+                    "summary": "Poll a Firecrawl agent task",
+                    "description": "Returns the current status and result for an asynchronous Firecrawl agent task.",
+                    "x-aevatar-tool": {
+                        "name": "agent_status",
+                        "description": "Poll an asynchronous Firecrawl agent task.",
+                        "readOnly": true,
+                        "destructive": false,
+                        "requiresApproval": false
+                    },
+                    "parameters": [
+                        {
+                            "name": "id",
+                            "in": "path",
+                            "required": true,
+                            "description": "Firecrawl agent task id returned by POST /v2/agent.",
+                            "schema": {
+                                "type": "string",
+                                "minLength": 1
+                            }
+                        }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Agent task status",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "$ref": "#/components/schemas/AgentStatusResponse"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "components": {
+            "securitySchemes": {
+                "firecrawlApiKey": {
+                    "type": "http",
+                    "scheme": "bearer",
+                    "bearerFormat": "Firecrawl API key"
+                }
+            },
+            "schemas": {
+                "AgentSubmitRequest": {
+                    "type": "object",
+                    "required": ["prompt"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "prompt": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": "Natural-language task for the Firecrawl agent."
+                        },
+                        "urls": {
+                            "type": "array",
+                            "description": "Optional starting URLs for the agent.",
+                            "items": {
+                                "type": "string",
+                                "format": "uri"
+                            }
+                        },
+                        "schema": {
+                            "type": "object",
+                            "description": "Optional structured extraction schema.",
+                            "additionalProperties": true
+                        },
+                        "model": {
+                            "type": "string",
+                            "description": "Optional model override."
+                        },
+                        "maxCredits": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "Optional maximum credits to spend on the task."
+                        }
+                    }
+                },
+                "AgentSubmitResponse": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "properties": {
+                        "success": {
+                            "type": "boolean"
+                        },
+                        "id": {
+                            "type": "string",
+                            "description": "Agent task id to poll."
+                        }
+                    }
+                },
+                "AgentStatusResponse": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "properties": {
+                        "success": {
+                            "type": "boolean"
+                        },
+                        "status": {
+                            "type": "string",
+                            "description": "Current task status."
+                        },
+                        "data": {
+                            "description": "Completed task result, when available."
+                        },
+                        "error": {
+                            "type": "string",
+                            "description": "Failure details, when available."
+                        }
+                    }
+                }
+            }
+        },
+        "security": [
+            {
+                "firecrawlApiKey": []
+            }
+        ]
+    })
+}
+
 pub fn scalar_docs_csp() -> String {
     format!(
         "default-src 'none'; script-src {}; style-src 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data: https:; connect-src 'self'; frame-ancestors 'none'",
@@ -694,6 +870,16 @@ async fn fetch_json_spec_internal(
     url: &str,
     scope: Option<&str>,
 ) -> AppResult<Arc<serde_json::Value>> {
+    if let Some(spec) = hosted_catalog_spec_for_url(url)? {
+        let cache_key = build_cache_key(url, scope);
+        if let Some(cached) = get_cached_spec(&cache_key) {
+            return Ok(cached);
+        }
+        let spec = Arc::new(spec);
+        cache_spec(&cache_key, spec.clone());
+        return Ok(spec);
+    }
+
     let target = validate_spec_fetch_target(url).await?;
     let cache_key = build_cache_key(target.url.as_ref(), scope);
     if let Some(spec) = get_cached_spec(&cache_key) {
@@ -755,6 +941,18 @@ async fn fetch_json_spec_internal(
     );
     cache_spec(&cache_key, spec.clone());
     Ok(spec)
+}
+
+fn hosted_catalog_spec_for_url(url: &str) -> AppResult<Option<serde_json::Value>> {
+    let parsed = url::Url::parse(url)
+        .map_err(|_| AppError::BadRequest("Spec URL is invalid".to_string()))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Ok(None);
+    }
+    if parsed.path() == "/api/v1/catalog-specs/firecrawl/openapi.json" {
+        return Ok(Some(build_firecrawl_openapi_document()));
+    }
+    Ok(None)
 }
 
 fn detect_streaming_from_openapi(spec: &serde_json::Value) -> bool {
@@ -1028,10 +1226,12 @@ fn is_rfc6598_cgnat(ipv4: Ipv4Addr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        CachedSpecEntry, MAX_SPEC_CACHE_ENTRIES, ServiceDocumentationMetadata,
-        build_asyncapi_document, cache_spec, catalog_csp, detect_streaming_from_openapi,
-        get_cached_spec, render_scalar_html, scalar_docs_csp, validate_spec_fetch_target,
+        CachedSpecEntry, MAX_SPEC_CACHE_ENTRIES, ServiceDocumentationMetadata, SpecCacheTestGuard,
+        build_asyncapi_document, build_firecrawl_openapi_document, cache_spec, catalog_csp,
+        detect_streaming_from_openapi, fetch_spec_json, get_cached_spec, render_scalar_html,
+        scalar_docs_csp, validate_spec_fetch_target,
     };
+    use crate::errors::AppError;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
@@ -1057,6 +1257,54 @@ mod tests {
         });
 
         assert!(detect_streaming_from_openapi(&spec));
+    }
+
+    #[test]
+    fn firecrawl_overlay_declares_aevatar_agent_operations() {
+        let spec = build_firecrawl_openapi_document();
+        assert_eq!(spec["openapi"], "3.1.0");
+        assert_eq!(spec["servers"][0]["url"], "https://api.firecrawl.dev");
+
+        let submit = &spec["paths"]["/v2/agent"]["post"];
+        assert_eq!(submit["operationId"], "agent");
+        assert_eq!(submit["x-aevatar-tool"]["name"], "agent");
+        assert_eq!(submit["x-aevatar-tool"]["readOnly"], false);
+        assert_eq!(
+            submit["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AgentSubmitRequest"
+        );
+
+        let submit_schema = &spec["components"]["schemas"]["AgentSubmitRequest"];
+        assert_eq!(submit_schema["required"][0], "prompt");
+        assert!(submit_schema["properties"].get("urls").is_some());
+        assert!(submit_schema["properties"].get("schema").is_some());
+        assert!(submit_schema["properties"].get("model").is_some());
+        assert!(submit_schema["properties"].get("maxCredits").is_some());
+
+        let poll = &spec["paths"]["/v2/agent/{id}"]["get"];
+        assert_eq!(poll["operationId"], "agent_status");
+        assert_eq!(poll["x-aevatar-tool"]["name"], "agent_status");
+        assert_eq!(poll["x-aevatar-tool"]["readOnly"], true);
+        assert_eq!(poll["parameters"][0]["name"], "id");
+        assert_eq!(poll["parameters"][0]["required"], true);
+    }
+
+    #[tokio::test]
+    async fn hosted_firecrawl_spec_fetch_bypasses_private_target_rejection_only_for_builtin_path() {
+        let _guard = SpecCacheTestGuard::acquire();
+
+        let spec =
+            fetch_spec_json("http://localhost:3001/api/v1/catalog-specs/firecrawl/openapi.json")
+                .await
+                .expect("built-in Firecrawl catalog spec");
+        assert_eq!(spec["paths"]["/v2/agent"]["post"]["operationId"], "agent");
+
+        let err = fetch_spec_json("http://localhost:3001/openapi.json")
+            .await
+            .expect_err("other localhost specs stay blocked");
+        assert!(
+            matches!(err, AppError::BadRequest(message) if message.contains("private or internal"))
+        );
     }
 
     #[test]

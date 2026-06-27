@@ -894,6 +894,10 @@ pub fn build_router(
             "/runtime-config",
             get(handlers::runtime_config::get_runtime_config),
         )
+        .route(
+            "/catalog-specs/firecrawl/openapi.json",
+            get(handlers::docs::firecrawl_openapi_json),
+        )
         .nest("/auth/device", auth_device_public_routes)
         .nest("/devices/code", device_code_public_routes)
         .nest("/devices/onboard", device_onboard_public_routes);
