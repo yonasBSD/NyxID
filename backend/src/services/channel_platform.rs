@@ -38,6 +38,16 @@ pub struct InboundAttachment {
     pub content_type: String,
     /// Download URL (may require bot token to fetch)
     pub url: String,
+    /// Platform-native message ID needed by providers such as Lark/Feishu to
+    /// dereference opaque resource keys.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform_message_id: Option<String>,
+    /// Provider file handle, when the platform exposes one directly.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_key: Option<String>,
+    /// Provider image handle, when the platform exposes one directly.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_key: Option<String>,
     pub filename: Option<String>,
     pub mime_type: Option<String>,
     pub size_bytes: Option<u64>,
@@ -322,6 +332,9 @@ mod tests {
         let att = InboundAttachment {
             content_type: "image".to_string(),
             url: "https://cdn.example.com/img.png".to_string(),
+            platform_message_id: None,
+            file_key: None,
+            image_key: None,
             filename: Some("img.png".to_string()),
             mime_type: Some("image/png".to_string()),
             size_bytes: Some(12345),
@@ -347,6 +360,9 @@ mod tests {
             attachments: vec![InboundAttachment {
                 content_type: "file".to_string(),
                 url: "https://files.example.com/doc.pdf".to_string(),
+                platform_message_id: None,
+                file_key: None,
+                image_key: None,
                 filename: Some("doc.pdf".to_string()),
                 mime_type: Some("application/pdf".to_string()),
                 size_bytes: Some(999_999),

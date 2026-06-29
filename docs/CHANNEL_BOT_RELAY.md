@@ -487,7 +487,7 @@ The payload normalizes messages into a common format so agents can handle all pl
 | `sender.display_name` | string | Yes | Display name from the platform (Telegram `first_name`, Discord `username`). `null` if not provided. |
 | `content.type` | string | No | Content kind: `text`, `image`, `file`, `audio`, `video`, `location`, `sticker`, or `unknown`. |
 | `content.text` | string | Yes | Text body. Present for `text`; may contain caption for media. `null` for non-text without caption. |
-| `content.attachments` | array | No | Non-text attachments: `{ type, url, filename, mime_type, size_bytes }`. Empty `[]` for plain text. |
+| `content.attachments` | array | No | Non-text attachments: `{ content_type, url, platform_message_id, file_key, image_key, filename, mime_type, size_bytes }`. Omitted when empty. `platform_message_id`, `file_key`, and `image_key` are provider-scoped opaque handles, present only when the platform exposes them. For Lark/Feishu, `url` is the authenticated message-resource endpoint; NyxID forwards the reference and does not download or store the attachment body. |
 | `reply_to_message_id` | UUID | Yes | NyxID `message_id` of the message being replied to. `null` for standalone messages. |
 | `thread_id` | string | Yes | Platform-native thread ID (Discord threads, Lark threads). `null` if not in a thread. |
 | `timestamp` | ISO 8601 | No | When the message was sent on the platform (not when NyxID received it). |

@@ -88,6 +88,12 @@ pub struct CallbackAttachment {
     pub content_type: String,
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform_message_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub filename: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
@@ -584,6 +590,9 @@ pub fn build_callback_payload(
         .map(|a| CallbackAttachment {
             content_type: a.content_type.clone(),
             url: a.url.clone(),
+            platform_message_id: a.platform_message_id.clone(),
+            file_key: a.file_key.clone(),
+            image_key: a.image_key.clone(),
             filename: a.filename.clone(),
             mime_type: a.mime_type.clone(),
             size_bytes: a.size_bytes,
@@ -900,6 +909,9 @@ mod tests {
             attachments: vec![CallbackAttachment {
                 content_type: "image".to_string(),
                 url: "https://example.com/photo.jpg".to_string(),
+                platform_message_id: None,
+                file_key: None,
+                image_key: None,
                 filename: Some("photo.jpg".to_string()),
                 mime_type: Some("image/jpeg".to_string()),
                 size_bytes: Some(1024),
@@ -909,6 +921,79 @@ mod tests {
         let atts = json["attachments"].as_array().unwrap();
         assert_eq!(atts.len(), 1);
         assert_eq!(atts[0]["content_type"], "image");
+    }
+
+    #[test]
+    fn build_callback_payload_preserves_provider_attachment_handles() {
+        let now = Utc::now();
+        let message = ChannelMessage {
+            id: "msg-attachment".to_string(),
+            channel_bot_id: Some("bot-1".to_string()),
+            conversation_id: "conv-1".to_string(),
+            platform_conversation_id: Some("oc_chat".to_string()),
+            user_id: "user-1".to_string(),
+            direction: "inbound".to_string(),
+            platform: "lark".to_string(),
+            platform_message_id: Some("om_file_msg".to_string()),
+            sender_platform_id: Some("ou_file_user".to_string()),
+            sender_display_name: None,
+            content_type: "file".to_string(),
+            thread_id: None,
+            agent_api_key_id: Some("key-1".to_string()),
+            callback_status: Some("pending".to_string()),
+            reply_to_message_id: None,
+            platform_reply_message_id: None,
+            created_at: now,
+            updated_at: None,
+        };
+        let conversation = crate::models::channel_conversation::ChannelConversation {
+            id: "conv-1".to_string(),
+            user_id: "user-1".to_string(),
+            channel_bot_id: Some("bot-1".to_string()),
+            platform: "lark".to_string(),
+            platform_conversation_id: "oc_chat".to_string(),
+            platform_conversation_type: "private".to_string(),
+            platform_sender_id: None,
+            agent_api_key_id: "key-1".to_string(),
+            default_agent: false,
+            is_active: true,
+            last_message_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let inbound = InboundMessage {
+            platform_message_id: "om_file_msg".to_string(),
+            conversation_id: "oc_chat".to_string(),
+            conversation_type: "private".to_string(),
+            sender_platform_id: "ou_file_user".to_string(),
+            sender_display_name: None,
+            content_type: "file".to_string(),
+            text: None,
+            attachments: vec![crate::services::channel_platform::InboundAttachment {
+                content_type: "file".to_string(),
+                url: "https://open.larksuite.com/open-apis/im/v1/messages/om_file_msg/resources/file_v3_abcdef?type=file".to_string(),
+                platform_message_id: Some("om_file_msg".to_string()),
+                file_key: Some("file_v3_abcdef".to_string()),
+                image_key: None,
+                filename: Some("invoice.pdf".to_string()),
+                mime_type: None,
+                size_bytes: Some(4096),
+            }],
+            reply_to_platform_message_id: None,
+            thread_id: None,
+            raw_data: serde_json::json!({ "event": "fixture" }),
+        };
+
+        let payload =
+            build_callback_payload(&message, &conversation, "key-1", "agent", &inbound, None);
+        let json = serde_json::to_value(&payload).expect("serialize callback payload");
+        let attachment = &json["content"]["attachments"][0];
+
+        assert_eq!(attachment["content_type"], "file");
+        assert_eq!(attachment["platform_message_id"], "om_file_msg");
+        assert_eq!(attachment["file_key"], "file_v3_abcdef");
+        assert!(attachment.get("image_key").is_none());
+        assert_eq!(attachment["filename"], "invoice.pdf");
     }
 
     // ─── forward_to_agent HTTP behavior ───
