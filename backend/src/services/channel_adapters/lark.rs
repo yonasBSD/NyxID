@@ -33,7 +33,7 @@ use crate::errors::{AppError, AppResult};
 use crate::models::channel_bot::ChannelBot;
 use crate::models::downstream_service::{CredentialFieldSpec, TokenExchangeConfig};
 use crate::services::channel_platform::{
-    BotIdentity, InboundMessage, OutboundEdit, OutboundReply, PlatformAdapter,
+    BotIdentity, InboundAttachment, InboundMessage, OutboundEdit, OutboundReply, PlatformAdapter,
     PlatformVerifySecrets, PreparedWebhook,
 };
 use crate::services::provider_token_exchange_service::{self, TokenExchangeCache};
@@ -374,6 +374,82 @@ fn extract_text_content(content_str: &str) -> Option<String> {
     inner.get("text").and_then(|v| v.as_str()).map(String::from)
 }
 
+fn parse_message_content(content_str: Option<&str>) -> Option<serde_json::Value> {
+    serde_json::from_str(content_str?).ok()
+}
+
+fn lark_resource_url(
+    base_url: &str,
+    message_id: &str,
+    resource_key: &str,
+    resource_type: &str,
+) -> String {
+    format!(
+        "{}/open-apis/im/v1/messages/{}/resources/{}?type={}",
+        base_url.trim_end_matches('/'),
+        urlencoding::encode(message_id),
+        urlencoding::encode(resource_key),
+        urlencoding::encode(resource_type),
+    )
+}
+
+/// Extract provider-scoped attachment handles from Lark/Feishu message
+/// content. The returned `url` is the authenticated message-resource endpoint
+/// path; callers still need the bot tenant token to fetch the body.
+fn extract_attachments(
+    base_url: &str,
+    message_id: &str,
+    message_type: &str,
+    content: Option<&serde_json::Value>,
+) -> Vec<InboundAttachment> {
+    let Some(content) = content else {
+        return Vec::new();
+    };
+
+    match message_type {
+        "image" => content
+            .get("image_key")
+            .and_then(|v| v.as_str())
+            .filter(|key| !key.is_empty())
+            .map(|image_key| {
+                vec![InboundAttachment {
+                    content_type: "image".to_string(),
+                    url: lark_resource_url(base_url, message_id, image_key, "image"),
+                    platform_message_id: Some(message_id.to_string()),
+                    file_key: None,
+                    image_key: Some(image_key.to_string()),
+                    filename: None,
+                    mime_type: None,
+                    size_bytes: None,
+                }]
+            })
+            .unwrap_or_default(),
+        "file" => content
+            .get("file_key")
+            .and_then(|v| v.as_str())
+            .filter(|key| !key.is_empty())
+            .map(|file_key| {
+                let content_type = detect_content_type(message_type);
+                vec![InboundAttachment {
+                    content_type: content_type.to_string(),
+                    url: lark_resource_url(base_url, message_id, file_key, message_type),
+                    platform_message_id: Some(message_id.to_string()),
+                    file_key: Some(file_key.to_string()),
+                    image_key: None,
+                    filename: content
+                        .get("file_name")
+                        .or_else(|| content.get("name"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    mime_type: None,
+                    size_bytes: content.get("file_size").and_then(|v| v.as_u64()),
+                }]
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
 /// Build `(msg_type, content)` for Lark's `im.v1.messages` send endpoint.
 ///
 /// If `reply.metadata` contains a `"card"` key, sends as an interactive
@@ -471,6 +547,7 @@ fn detect_content_type(message_type: &str) -> &'static str {
 
 /// Parse an `im.message.receive_v1` event into an [`InboundMessage`].
 fn parse_message_event(
+    base_url: &str,
     event: &serde_json::Value,
     raw: serde_json::Value,
 ) -> Option<InboundMessage> {
@@ -488,7 +565,10 @@ fn parse_message_event(
         .unwrap_or("text");
 
     let content_str = message.get("content").and_then(|v| v.as_str());
+    let parsed_content = parse_message_content(content_str);
     let text = content_str.and_then(extract_text_content);
+    let attachments =
+        extract_attachments(base_url, message_id, message_type, parsed_content.as_ref());
 
     let sender = event.get("sender");
     let sender_id = sender
@@ -522,7 +602,7 @@ fn parse_message_event(
         sender_display_name: sender_name,
         content_type: detect_content_type(message_type).to_string(),
         text,
-        attachments: Vec::new(),
+        attachments,
         reply_to_platform_message_id: reply_to,
         thread_id,
         raw_data: raw,
@@ -640,7 +720,9 @@ impl PlatformAdapter for LarkFamilyAdapter {
         let event_type = header.get("event_type").and_then(|v| v.as_str());
 
         let parsed = match event_type {
-            Some("im.message.receive_v1") => parse_message_event(event, payload.clone()),
+            Some("im.message.receive_v1") => {
+                parse_message_event(&self.base_url, event, payload.clone())
+            }
             Some("card.action.trigger") => parse_card_action_event(header, event, payload.clone()),
             _ => None,
         };
@@ -1271,6 +1353,102 @@ mod tests {
 
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].conversation_type, "group");
+    }
+
+    #[tokio::test]
+    async fn parse_image_message_preserves_image_key_attachment() {
+        let adapter = LarkFamilyAdapter::lark(test_cache());
+        let body = serde_json::json!({
+            "schema": "2.0",
+            "header": {
+                "event_id": "ev_img",
+                "event_type": "im.message.receive_v1",
+                "create_time": "1700000002"
+            },
+            "event": {
+                "sender": {
+                    "sender_id": {
+                        "open_id": "ou_image_user",
+                        "name": "Image Sender"
+                    }
+                },
+                "message": {
+                    "message_id": "om_image_msg",
+                    "chat_id": "oc_image_chat",
+                    "chat_type": "p2p",
+                    "message_type": "image",
+                    "content": "{\"image_key\":\"img_v3_abcdef\"}"
+                }
+            }
+        });
+        let raw = serde_json::to_vec(&body).unwrap();
+        let msgs = adapter.parse_inbound(&raw).await.unwrap();
+
+        assert_eq!(msgs.len(), 1);
+        let message = &msgs[0];
+        assert_eq!(message.content_type, "image");
+        assert!(message.text.is_none());
+        assert_eq!(message.attachments.len(), 1);
+        let attachment = &message.attachments[0];
+        assert_eq!(attachment.content_type, "image");
+        assert_eq!(
+            attachment.platform_message_id.as_deref(),
+            Some("om_image_msg")
+        );
+        assert_eq!(attachment.image_key.as_deref(), Some("img_v3_abcdef"));
+        assert!(attachment.file_key.is_none());
+        assert_eq!(
+            attachment.url,
+            "https://open.larksuite.com/open-apis/im/v1/messages/om_image_msg/resources/img_v3_abcdef?type=image"
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_file_message_preserves_file_key_attachment() {
+        let adapter = LarkFamilyAdapter::feishu(test_cache());
+        let body = serde_json::json!({
+            "schema": "2.0",
+            "header": {
+                "event_id": "ev_file",
+                "event_type": "im.message.receive_v1",
+                "create_time": "1700000003"
+            },
+            "event": {
+                "sender": {
+                    "sender_id": {
+                        "open_id": "ou_file_user"
+                    }
+                },
+                "message": {
+                    "message_id": "om_file_msg",
+                    "chat_id": "oc_file_chat",
+                    "chat_type": "group",
+                    "message_type": "file",
+                    "content": "{\"file_key\":\"file_v3_abcdef\",\"file_name\":\"invoice.pdf\",\"file_size\":4096}"
+                }
+            }
+        });
+        let raw = serde_json::to_vec(&body).unwrap();
+        let msgs = adapter.parse_inbound(&raw).await.unwrap();
+
+        assert_eq!(msgs.len(), 1);
+        let message = &msgs[0];
+        assert_eq!(message.content_type, "file");
+        assert_eq!(message.attachments.len(), 1);
+        let attachment = &message.attachments[0];
+        assert_eq!(attachment.content_type, "file");
+        assert_eq!(
+            attachment.platform_message_id.as_deref(),
+            Some("om_file_msg")
+        );
+        assert_eq!(attachment.file_key.as_deref(), Some("file_v3_abcdef"));
+        assert!(attachment.image_key.is_none());
+        assert_eq!(attachment.filename.as_deref(), Some("invoice.pdf"));
+        assert_eq!(attachment.size_bytes, Some(4096));
+        assert_eq!(
+            attachment.url,
+            "https://open.feishu.cn/open-apis/im/v1/messages/om_file_msg/resources/file_v3_abcdef?type=file"
+        );
     }
 
     #[tokio::test]
