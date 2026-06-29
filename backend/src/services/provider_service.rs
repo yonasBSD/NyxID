@@ -405,6 +405,51 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
+    // 7b. Firecrawl (API Key)
+    if !slug_exists!("firecrawl") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "firecrawl".to_string(),
+            name: "Firecrawl".to_string(),
+            description: Some(
+                "Firecrawl API access for scraping, crawling, search, extraction, and asynchronous agent workflows."
+                    .to_string(),
+            ),
+            provider_type: "api_key".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: Some(
+                "Create a Firecrawl API key from the Firecrawl dashboard and paste the raw key. NyxID adds the Bearer prefix automatically."
+                    .to_string(),
+            ),
+            api_key_url: Some("https://docs.firecrawl.dev".to_string()),
+            icon_url: None,
+            documentation_url: Some("https://docs.firecrawl.dev".to_string()),
+            is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "firecrawl", "Seeded default provider: Firecrawl");
+        seeded_count += 1;
+    }
+
     // 8. Twitter / X (OAuth 2.0 with PKCE)
     if !slug_exists!("twitter") {
         let provider = ProviderConfig {
@@ -1746,6 +1791,12 @@ struct DefaultServiceSeed {
     /// seeded name are preserved (see
     /// `ensure_seeded_default_request_headers`).
     default_request_headers: Option<&'static [SeededHeader]>,
+    service_category: &'static str,
+    requires_user_credential: bool,
+    openapi_spec_path: Option<&'static str>,
+    homepage_url: Option<&'static str>,
+    auth_notes: Option<&'static str>,
+    known_limitations: Option<&'static str>,
 }
 
 /// Static, serializable form of `DefaultRequestHeader` for seed tables.
@@ -1782,6 +1833,18 @@ fn seed_capability_override(slug: &str) -> Option<(ServiceCapabilities, bool)> {
                 supports_direct_downstream_auth: true,
                 supports_authoring_via_nyx: false,
                 supports_websocket: true,
+                supports_streaming: true,
+            },
+            true,
+        )),
+        "api-firecrawl" => Some((
+            ServiceCapabilities {
+                supports_proxy_read: true,
+                supports_proxy_write: true,
+                supports_proxy_binary_upload: false,
+                supports_direct_downstream_auth: true,
+                supports_authoring_via_nyx: false,
+                supports_websocket: false,
                 supports_streaming: true,
             },
             true,
@@ -1824,6 +1887,12 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_key_name: None,
         description: None,
         default_request_headers: None,
+        service_category: "internal",
+        requires_user_credential: false,
+        openapi_spec_path: None,
+        homepage_url: None,
+        auth_notes: None,
+        known_limitations: None,
     },
     DefaultServiceSeed {
         provider_slug: "openai-codex",
@@ -1836,6 +1905,12 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_key_name: None,
         description: None,
         default_request_headers: None,
+        service_category: "internal",
+        requires_user_credential: false,
+        openapi_spec_path: None,
+        homepage_url: None,
+        auth_notes: None,
+        known_limitations: None,
     },
     DefaultServiceSeed {
         provider_slug: "anthropic",
@@ -1848,6 +1923,12 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_key_name: None,
         description: None,
         default_request_headers: Some(ANTHROPIC_DEFAULT_HEADERS),
+        service_category: "internal",
+        requires_user_credential: false,
+        openapi_spec_path: None,
+        homepage_url: None,
+        auth_notes: None,
+        known_limitations: None,
     },
     DefaultServiceSeed {
         provider_slug: "google-ai",
@@ -1860,6 +1941,12 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_key_name: None,
         description: None,
         default_request_headers: None,
+        service_category: "internal",
+        requires_user_credential: false,
+        openapi_spec_path: None,
+        homepage_url: None,
+        auth_notes: None,
+        known_limitations: None,
     },
     DefaultServiceSeed {
         provider_slug: "mistral",
@@ -1872,6 +1959,12 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_key_name: None,
         description: None,
         default_request_headers: None,
+        service_category: "internal",
+        requires_user_credential: false,
+        openapi_spec_path: None,
+        homepage_url: None,
+        auth_notes: None,
+        known_limitations: None,
     },
     DefaultServiceSeed {
         provider_slug: "cohere",
@@ -1884,6 +1977,12 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_key_name: None,
         description: None,
         default_request_headers: None,
+        service_category: "internal",
+        requires_user_credential: false,
+        openapi_spec_path: None,
+        homepage_url: None,
+        auth_notes: None,
+        known_limitations: None,
     },
     DefaultServiceSeed {
         provider_slug: "deepseek",
@@ -1896,6 +1995,39 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_key_name: None,
         description: None,
         default_request_headers: None,
+        service_category: "internal",
+        requires_user_credential: false,
+        openapi_spec_path: None,
+        homepage_url: None,
+        auth_notes: None,
+        known_limitations: None,
+    },
+    DefaultServiceSeed {
+        provider_slug: "firecrawl",
+        service_slug: "api-firecrawl",
+        service_name: "Firecrawl",
+        base_url: "https://api.firecrawl.dev",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: Some("bearer"),
+        service_auth_key_name: Some("Authorization"),
+        description: Some(
+            "Firecrawl API connector for scrape, crawl, search, map, extract, \
+             and asynchronous agent workflows. Store a Firecrawl API key once \
+             and NyxID injects it as `Authorization: Bearer <key>` on every \
+             proxied request.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        openapi_spec_path: Some("/api/v1/catalog-specs/firecrawl/openapi.json"),
+        homepage_url: Some("https://www.firecrawl.dev"),
+        auth_notes: Some(
+            "Firecrawl uses bearer API keys. Paste the raw `fc-...` key; NyxID adds the `Bearer` prefix.",
+        ),
+        known_limitations: Some(
+            "The NyxID-hosted OpenAPI overlay currently annotates the asynchronous agent submit and poll operations for Aevatar typed tool discovery.",
+        ),
     },
     DefaultServiceSeed {
         provider_slug: "twitter",
@@ -1908,6 +2040,12 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_key_name: None,
         description: None,
         default_request_headers: None,
+        service_category: "internal",
+        requires_user_credential: false,
+        openapi_spec_path: None,
+        homepage_url: None,
+        auth_notes: None,
+        known_limitations: None,
     },
     DefaultServiceSeed {
         provider_slug: "google",
@@ -1920,6 +2058,12 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_key_name: None,
         description: None,
         default_request_headers: None,
+        service_category: "internal",
+        requires_user_credential: false,
+        openapi_spec_path: None,
+        homepage_url: None,
+        auth_notes: None,
+        known_limitations: None,
     },
     DefaultServiceSeed {
         provider_slug: "github",
@@ -1932,6 +2076,12 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_key_name: None,
         description: None,
         default_request_headers: None,
+        service_category: "internal",
+        requires_user_credential: false,
+        openapi_spec_path: None,
+        homepage_url: None,
+        auth_notes: None,
+        known_limitations: None,
     },
     DefaultServiceSeed {
         provider_slug: "github-pat",
@@ -1947,6 +2097,12 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
              Use this when you want a long-lived static credential instead of OAuth.",
         ),
         default_request_headers: None,
+        service_category: "internal",
+        requires_user_credential: false,
+        openapi_spec_path: None,
+        homepage_url: None,
+        auth_notes: None,
+        known_limitations: None,
     },
     DefaultServiceSeed {
         provider_slug: "facebook",
@@ -1959,6 +2115,12 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_key_name: None,
         description: None,
         default_request_headers: None,
+        service_category: "internal",
+        requires_user_credential: false,
+        openapi_spec_path: None,
+        homepage_url: None,
+        auth_notes: None,
+        known_limitations: None,
     },
     DefaultServiceSeed {
         provider_slug: "discord",
@@ -1971,6 +2133,12 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_key_name: None,
         description: None,
         default_request_headers: None,
+        service_category: "internal",
+        requires_user_credential: false,
+        openapi_spec_path: None,
+        homepage_url: None,
+        auth_notes: None,
+        known_limitations: None,
     },
     DefaultServiceSeed {
         provider_slug: "spotify",
@@ -1983,6 +2151,12 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_key_name: None,
         description: None,
         default_request_headers: None,
+        service_category: "internal",
+        requires_user_credential: false,
+        openapi_spec_path: None,
+        homepage_url: None,
+        auth_notes: None,
+        known_limitations: None,
     },
     DefaultServiceSeed {
         provider_slug: "slack",
@@ -2000,6 +2174,12 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
              `api-slack-bot` instead.",
         ),
         default_request_headers: None,
+        service_category: "internal",
+        requires_user_credential: false,
+        openapi_spec_path: None,
+        homepage_url: None,
+        auth_notes: None,
+        known_limitations: None,
     },
     DefaultServiceSeed {
         provider_slug: "microsoft",
@@ -2012,6 +2192,12 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_key_name: None,
         description: None,
         default_request_headers: None,
+        service_category: "internal",
+        requires_user_credential: false,
+        openapi_spec_path: None,
+        homepage_url: None,
+        auth_notes: None,
+        known_limitations: None,
     },
     DefaultServiceSeed {
         provider_slug: "tiktok",
@@ -2024,6 +2210,12 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_key_name: None,
         description: None,
         default_request_headers: None,
+        service_category: "internal",
+        requires_user_credential: false,
+        openapi_spec_path: None,
+        homepage_url: None,
+        auth_notes: None,
+        known_limitations: None,
     },
     DefaultServiceSeed {
         provider_slug: "twitch",
@@ -2036,6 +2228,12 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_key_name: None,
         description: None,
         default_request_headers: None,
+        service_category: "internal",
+        requires_user_credential: false,
+        openapi_spec_path: None,
+        homepage_url: None,
+        auth_notes: None,
+        known_limitations: None,
     },
     DefaultServiceSeed {
         provider_slug: "reddit",
@@ -2048,6 +2246,12 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_key_name: None,
         description: None,
         default_request_headers: None,
+        service_category: "internal",
+        requires_user_credential: false,
+        openapi_spec_path: None,
+        homepage_url: None,
+        auth_notes: None,
+        known_limitations: None,
     },
     DefaultServiceSeed {
         provider_slug: "lark",
@@ -2064,6 +2268,12 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
              For bot/tenant-level access, use `api-lark-bot` instead.",
         ),
         default_request_headers: None,
+        service_category: "internal",
+        requires_user_credential: false,
+        openapi_spec_path: None,
+        homepage_url: None,
+        auth_notes: None,
+        known_limitations: None,
     },
     DefaultServiceSeed {
         provider_slug: "lark-bot",
@@ -2084,6 +2294,12 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
              directly through the proxy.",
         ),
         default_request_headers: None,
+        service_category: "internal",
+        requires_user_credential: false,
+        openapi_spec_path: None,
+        homepage_url: None,
+        auth_notes: None,
+        known_limitations: None,
     },
     DefaultServiceSeed {
         provider_slug: "telegram-bot",
@@ -2103,6 +2319,12 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
              webhooks, payments, mini apps -- all Bot API methods use the same shape.",
         ),
         default_request_headers: None,
+        service_category: "internal",
+        requires_user_credential: false,
+        openapi_spec_path: None,
+        homepage_url: None,
+        auth_notes: None,
+        known_limitations: None,
     },
     DefaultServiceSeed {
         provider_slug: "feishu",
@@ -2119,6 +2341,12 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
              For bot/tenant-level access, use `api-feishu-bot` instead.",
         ),
         default_request_headers: None,
+        service_category: "internal",
+        requires_user_credential: false,
+        openapi_spec_path: None,
+        homepage_url: None,
+        auth_notes: None,
+        known_limitations: None,
     },
     DefaultServiceSeed {
         provider_slug: "feishu-bot",
@@ -2136,6 +2364,12 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
              outbound request. Call any Feishu open API path directly through the proxy.",
         ),
         default_request_headers: None,
+        service_category: "internal",
+        requires_user_credential: false,
+        openapi_spec_path: None,
+        homepage_url: None,
+        auth_notes: None,
+        known_limitations: None,
     },
     DefaultServiceSeed {
         provider_slug: "discord-bot",
@@ -2153,6 +2387,12 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
              managing guilds, and any other Discord bot operations.",
         ),
         default_request_headers: None,
+        service_category: "internal",
+        requires_user_credential: false,
+        openapi_spec_path: None,
+        homepage_url: None,
+        auth_notes: None,
+        known_limitations: None,
     },
     DefaultServiceSeed {
         provider_slug: "slack-bot",
@@ -2173,6 +2413,12 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
              outside the channel-relay flow.",
         ),
         default_request_headers: None,
+        service_category: "internal",
+        requires_user_credential: false,
+        openapi_spec_path: None,
+        homepage_url: None,
+        auth_notes: None,
+        known_limitations: None,
     },
     DefaultServiceSeed {
         provider_slug: "openclaw",
@@ -2187,6 +2433,12 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_key_name: None,
         description: None,
         default_request_headers: None,
+        service_category: "internal",
+        requires_user_credential: false,
+        openapi_spec_path: None,
+        homepage_url: None,
+        auth_notes: None,
+        known_limitations: None,
     },
     // Cloud-billing catalog entries (NyxID#716, #778). AWS uses direct
     // (non-delegated) sigv4 injection. Google Cloud uses delegated OAuth
@@ -2212,6 +2464,12 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
              cache aggressively.",
         ),
         default_request_headers: None,
+        service_category: "internal",
+        requires_user_credential: false,
+        openapi_spec_path: None,
+        homepage_url: None,
+        auth_notes: None,
+        known_limitations: None,
     },
     DefaultServiceSeed {
         provider_slug: "google-cloud",
@@ -2235,6 +2493,12 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
              --scope for write APIs.",
         ),
         default_request_headers: None,
+        service_category: "internal",
+        requires_user_credential: false,
+        openapi_spec_path: None,
+        homepage_url: None,
+        auth_notes: None,
+        known_limitations: None,
     },
 ];
 
@@ -2454,6 +2718,12 @@ fn seeded_header_to_model(seed: &SeededHeader) -> DefaultRequestHeader {
     }
 }
 
+fn hosted_spec_url(path: &str) -> String {
+    let base_url =
+        std::env::var("BASE_URL").unwrap_or_else(|_| "http://localhost:3001".to_string());
+    format!("{}{}", base_url.trim_end_matches('/'), path)
+}
+
 /// Pure merge step for the seeded-header reconciler. Returns `Some(new_list)`
 /// when the stored list must be updated, or `None` when no change is needed.
 ///
@@ -2557,6 +2827,68 @@ async fn ensure_seeded_default_request_headers(
         tracing::info!(
             count = updated,
             "Seeded default_request_headers reconcile complete"
+        );
+    }
+
+    Ok(())
+}
+
+async fn reconcile_firecrawl_seed_metadata(
+    service_col: &mongodb::Collection<DownstreamService>,
+    now: chrono::DateTime<Utc>,
+) -> AppResult<()> {
+    let Some(seed) = DEFAULT_SERVICE_SEEDS
+        .iter()
+        .find(|seed| seed.service_slug == "api-firecrawl")
+    else {
+        return Ok(());
+    };
+
+    let Some((capabilities, streaming_supported)) = seed_capability_override(seed.service_slug)
+    else {
+        return Ok(());
+    };
+
+    let capabilities = bson::to_bson(&capabilities).map_err(|error| {
+        AppError::Internal(format!(
+            "Failed to serialize Firecrawl capabilities: {error}"
+        ))
+    })?;
+    let openapi_spec_url = seed.openapi_spec_path.map(hosted_spec_url);
+
+    let mut set_doc = doc! {
+        "base_url": seed.base_url,
+        "auth_method": seed.service_auth_method.unwrap_or("bearer"),
+        "auth_key_name": seed.service_auth_key_name.unwrap_or("Authorization"),
+        "service_category": seed.service_category,
+        "requires_user_credential": seed.requires_user_credential,
+        "streaming_supported": streaming_supported,
+        "capabilities": capabilities,
+        "updated_at": bson::DateTime::from_chrono(now),
+    };
+    if let Some(url) = openapi_spec_url {
+        set_doc.insert("openapi_spec_url", url);
+    }
+    if let Some(url) = seed.homepage_url {
+        set_doc.insert("homepage_url", url);
+    }
+    if let Some(notes) = seed.auth_notes {
+        set_doc.insert("auth_notes", notes);
+    }
+    if let Some(limitations) = seed.known_limitations {
+        set_doc.insert("known_limitations", limitations);
+    }
+
+    let result = service_col
+        .update_many(
+            doc! { "slug": "api-firecrawl", "created_by": "system" },
+            doc! { "$set": set_doc },
+        )
+        .await?;
+    if result.modified_count > 0 {
+        tracing::info!(
+            modified = result.modified_count,
+            "Reconciled Firecrawl catalog seed metadata"
         );
     }
 
@@ -2698,6 +3030,7 @@ pub async fn seed_default_services(
             Some((caps, streaming)) => (Some(caps), streaming),
             None => (None, false),
         };
+        let openapi_spec_url = seed.openapi_spec_path.map(hosted_spec_url);
 
         let default_request_headers = seed
             .default_request_headers
@@ -2715,13 +3048,13 @@ pub async fn seed_default_services(
             auth_key_name: service_auth_key_name,
             credential_encrypted: empty_credential,
             auth_type: None,
-            openapi_spec_url: None,
+            openapi_spec_url,
             asyncapi_spec_url: None,
             streaming_supported,
             ssh_config: None,
             oauth_client_id: None,
-            service_category: "internal".to_string(),
-            requires_user_credential: false,
+            service_category: seed.service_category.to_string(),
+            requires_user_credential: seed.requires_user_credential,
             is_active: true,
             created_by: "system".to_string(),
             identity_propagation_mode: "none".to_string(),
@@ -2733,13 +3066,13 @@ pub async fn seed_default_services(
             inject_delegation_token: false,
             delegation_token_scope: delegation_scope.to_string(),
             provider_config_id: Some(provider.id.clone()),
-            homepage_url: None,
+            homepage_url: seed.homepage_url.map(String::from),
             repository_url: None,
             issues_url: None,
             capabilities,
             billing: None,
-            auth_notes: None,
-            known_limitations: None,
+            auth_notes: seed.auth_notes.map(String::from),
+            known_limitations: seed.known_limitations.map(String::from),
             required_permissions: None,
             examples_url: None,
             recommended_skills: None,
@@ -2796,6 +3129,8 @@ pub async fn seed_default_services(
             "Default downstream service seeding complete"
         );
     }
+
+    reconcile_firecrawl_seed_metadata(&service_col, now).await?;
 
     // Migration: update name + description on existing seeded services
     // whose description still matches a known auto-generated or previously
@@ -3848,6 +4183,32 @@ mod tests {
     }
 
     #[test]
+    fn firecrawl_seed_uses_direct_bearer_connection_with_overlay_spec() {
+        let seed = DEFAULT_SERVICE_SEEDS
+            .iter()
+            .find(|seed| seed.service_slug == "api-firecrawl")
+            .expect("api-firecrawl seed should exist");
+
+        assert_eq!(seed.provider_slug, "firecrawl");
+        assert_eq!(seed.base_url, "https://api.firecrawl.dev");
+        assert_eq!(seed.service_auth_method, Some("bearer"));
+        assert_eq!(seed.service_auth_key_name, Some("Authorization"));
+        assert_eq!(seed.service_category, "connection");
+        assert!(seed.requires_user_credential);
+        assert_eq!(
+            seed.openapi_spec_path,
+            Some("/api/v1/catalog-specs/firecrawl/openapi.json")
+        );
+
+        let (caps, streaming) = seed_capability_override("api-firecrawl")
+            .expect("api-firecrawl should have a capability override");
+        assert!(caps.supports_proxy_read);
+        assert!(caps.supports_proxy_write);
+        assert!(caps.supports_streaming);
+        assert!(streaming);
+    }
+
+    #[test]
     fn seed_capability_override_returns_none_for_unknown_slug() {
         assert!(seed_capability_override("llm-openai").is_none());
         assert!(seed_capability_override("api-github").is_none());
@@ -4185,6 +4546,63 @@ mod tests {
         let caps = openclaw.capabilities.expect("openclaw capabilities");
         assert!(caps.supports_websocket);
         assert!(caps.supports_streaming);
+    }
+
+    #[tokio::test]
+    async fn seed_default_services_seeds_firecrawl_connection_metadata() {
+        let Some(db) = seed_default_catalog("prov_seed_firecrawl").await else {
+            return;
+        };
+        let provider_col = db.collection::<ProviderConfig>(COLLECTION_NAME);
+        let service_col = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+        let req_col = db.collection::<ServiceProviderRequirement>(REQUIREMENTS);
+
+        let provider = provider_col
+            .find_one(doc! { "slug": "firecrawl" })
+            .await
+            .expect("query firecrawl provider")
+            .expect("firecrawl provider");
+        assert_eq!(provider.provider_type, "api_key");
+        assert_eq!(
+            provider.api_key_url.as_deref(),
+            Some("https://docs.firecrawl.dev")
+        );
+
+        let service = service_col
+            .find_one(doc! { "slug": "api-firecrawl" })
+            .await
+            .expect("query firecrawl service")
+            .expect("firecrawl service");
+        assert_eq!(
+            service.provider_config_id.as_deref(),
+            Some(provider.id.as_str())
+        );
+        assert_eq!(service.name, "Firecrawl");
+        assert_eq!(service.base_url, "https://api.firecrawl.dev");
+        assert_eq!(service.auth_method, "bearer");
+        assert_eq!(service.auth_key_name, "Authorization");
+        assert_eq!(service.service_category, "connection");
+        assert!(service.requires_user_credential);
+        assert_eq!(
+            service.openapi_spec_url.as_deref(),
+            Some("http://localhost:3001/api/v1/catalog-specs/firecrawl/openapi.json")
+        );
+        assert_eq!(
+            service.homepage_url.as_deref(),
+            Some("https://www.firecrawl.dev")
+        );
+        assert!(service.streaming_supported);
+        let caps = service.capabilities.expect("firecrawl capabilities");
+        assert!(caps.supports_proxy_read);
+        assert!(caps.supports_proxy_write);
+        assert!(caps.supports_streaming);
+        assert_eq!(
+            req_col
+                .count_documents(doc! { "service_id": &service.id })
+                .await
+                .expect("count firecrawl requirements"),
+            0
+        );
     }
 
     #[tokio::test]
