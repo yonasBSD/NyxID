@@ -136,6 +136,17 @@ After the CLI is installed, choose where it should log in:
 >
 > The agent reads [`skills/INSTALL.md`](skills/INSTALL.md) end-to-end. It should use the CLI installer by default and only run the Docker backend setup if you explicitly ask to self-host.
 
+> **Prefer a plugin install?** If your agent has a plugin marketplace, add the NyxID skill that way instead of copying files — it stays in sync with the repo on update. The skill still calls the `nyxid` CLI (installed above), so keep that step.
+>
+> **Claude Code**
+>
+> ```
+> /plugin marketplace add ChronoAIProject/NyxID
+> /plugin install nyxid@nyxid
+> ```
+>
+> **Codex / Cursor** — point the runtime at `https://github.com/ChronoAIProject/NyxID`; it reads `.codex-plugin/plugin.json` / `.cursor-plugin/plugin.json` and loads the bundled skills from `skills/`.
+
 #### Hosted (Recommended)
 
 Start using NyxID in under a minute — no Docker, no setup.
