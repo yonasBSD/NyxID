@@ -1,6 +1,6 @@
 import { Suspense, useState, useEffect, useCallback, useMemo, createContext, useContext } from "react";
 import { Outlet, Link, useNavigate, useRouterState } from "@tanstack/react-router";
-import { Sidebar, MAIN_NAV, APPROVALS_NAV, DEVELOPER_NAV, ADMIN_NAV, isNavActive } from "@/components/dashboard/sidebar";
+import { Sidebar, APPROVALS_NAV, DEVELOPER_NAV, ADMIN_NAV, getVisibleMainNav, isNavActive } from "@/components/dashboard/sidebar";
 import { hasAdminRead } from "@/types/api";
 import {
   CommandPalette,
@@ -481,7 +481,8 @@ function MobileNav({
   const logoutMutation = useLogout();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const isAdmin = hasAdminRead(user);
-  const allItems = [...MAIN_NAV, ...APPROVALS_NAV, ...DEVELOPER_NAV, ...(isAdmin ? ADMIN_NAV : [])];
+  const mainNav = getVisibleMainNav(user);
+  const allItems = [...mainNav, ...APPROVALS_NAV, ...DEVELOPER_NAV, ...(isAdmin ? ADMIN_NAV : [])];
   const [searchQuery, setSearchQuery] = useState("");
 
   const searchResults = useMemo(() => {
@@ -587,7 +588,7 @@ function MobileNav({
         ) : (
           <>
             <div className="flex flex-col gap-0.5">
-              {MAIN_NAV.map((item) => (
+              {mainNav.map((item) => (
                 <MobileNavItem
                   key={item.to}
                   item={item}
