@@ -49,6 +49,7 @@ import {
   Terminal,
 } from "lucide-react";
 import { toast } from "sonner";
+import { ServiceIcon } from "@/components/service-icons";
 import type { CatalogEntry, KeyInfo } from "@/types/keys";
 import type { DeviceCodePollResponse } from "@/types/api";
 
@@ -364,34 +365,37 @@ function CatalogGrid({
             onClick={() => onSelect(entry)}
             className="flex min-h-[7.5rem] flex-col items-start gap-1.5 rounded-lg border border-border p-4 text-left transition-colors duration-300 hover:border-white/[0.15] hover:bg-accent/40"
           >
+            <div className="flex w-full items-start justify-between gap-2">
+              <ServiceIcon slug={entry.slug} className="h-5 w-5 shrink-0 text-muted-foreground" />
+              <div className="flex flex-wrap justify-end gap-1">
+                {entry.service_type === "ssh" && (
+                  <Badge variant="secondary" className="text-[10px]">
+                    SSH
+                  </Badge>
+                )}
+                {entry.requires_gateway_url && (
+                  <Badge variant="secondary" className="text-[10px]">
+                    URL required
+                  </Badge>
+                )}
+                {entry.provider_type === "oauth2" && (
+                  <Badge variant="secondary" className="text-[10px]">
+                    OAuth
+                  </Badge>
+                )}
+                {entry.provider_type === "device_code" && (
+                  <Badge variant="secondary" className="text-[10px]">
+                    Device Code
+                  </Badge>
+                )}
+              </div>
+            </div>
             <span className="line-clamp-1 w-full text-[12px] font-medium">
               {entry.name}
             </span>
             <span className="line-clamp-2 w-full text-[11px] leading-snug text-muted-foreground">
               {entry.description ?? entry.base_url}
             </span>
-            <div className="mt-auto flex w-full flex-wrap gap-1 pt-1">
-              {entry.service_type === "ssh" && (
-                <Badge variant="secondary" className="text-[10px]">
-                  SSH
-                </Badge>
-              )}
-              {entry.requires_gateway_url && (
-                <Badge variant="secondary" className="text-[10px]">
-                  URL required
-                </Badge>
-              )}
-              {entry.provider_type === "oauth2" && (
-                <Badge variant="secondary" className="text-[10px]">
-                  OAuth
-                </Badge>
-              )}
-              {entry.provider_type === "device_code" && (
-                <Badge variant="secondary" className="text-[10px]">
-                  Device Code
-                </Badge>
-              )}
-            </div>
           </button>
         ))}
       </div>

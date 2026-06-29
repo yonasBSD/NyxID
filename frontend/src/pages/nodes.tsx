@@ -20,6 +20,7 @@ import { formatRelativeTime } from "@/lib/utils";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { PageHeader } from "@/components/shared/page-header";
 import { CopyableField } from "@/components/shared/copyable-field";
+import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { OrgScopeSelect } from "@/components/shared/org-scope-select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
@@ -50,7 +51,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Plus, Trash2 } from "lucide-react";
+import { Trash2 } from "lucide-react";
 import { WifiRouterIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 import { NodeStatusBadge } from "@/components/shared/node-status-badge";
@@ -128,15 +129,9 @@ function RegisterNodeDialog() {
       onOpenChange={(o) => (o ? setOpen(true) : handleClose())}
     >
       <DialogTrigger asChild>
-        <button
-          type="button"
-          className="flex h-8 items-center gap-2 rounded-lg border border-white/[0.08] px-3 text-[12px] text-text-tertiary transition-all duration-300 hover:border-white/[0.15] hover:text-muted-foreground"
-        >
-          <span className="flex h-[22px] w-[22px] items-center justify-center rounded-[6px] border border-white/[0.08] bg-white/[0.04]">
-            <Plus className="h-3 w-3" />
-          </span>
-          Register Node
-        </button>
+        <span>
+          <AddCtaButton label="Register Node" onClick={() => setOpen(true)} />
+        </span>
       </DialogTrigger>
       <DialogContent>
         {createdToken ? (
@@ -302,10 +297,10 @@ export function NodesPage() {
         <ErrorBanner message="Failed to load nodes. Please try again." onRetry={refetch} />
       ) : !nodes || nodes.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
-          <WifiRouterIcon className="h-64 w-64 text-muted-foreground/30" />
+          <WifiRouterIcon className="h-64 w-64 text-muted-foreground" />
           <div className="max-w-md space-y-1">
-            <p className="text-[12px] font-medium text-muted-foreground/30">No Credential Nodes</p>
-            <p className="text-[12px] text-muted-foreground/30">
+            <p className="text-[12px] font-medium text-muted-foreground">No Credential Nodes</p>
+            <p className="text-[12px] text-muted-foreground">
               Create a registration token to get started.
             </p>
           </div>

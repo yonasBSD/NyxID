@@ -483,8 +483,8 @@ export function NodeDetailPage() {
           </>
         ) : (
           <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
-            <SolarPanelIcon className="h-48 w-48 text-muted-foreground/30" />
-            <p className="text-[12px] text-muted-foreground/30">
+            <SolarPanelIcon className="h-48 w-48 text-muted-foreground" />
+            <p className="text-[12px] text-muted-foreground">
               No metrics recorded yet. Metrics will appear after the first proxy
               request.
             </p>
@@ -646,8 +646,8 @@ export function NodeDetailPage() {
               </div>
             ) : !pendingCredentials || pendingCredentials.length === 0 ? (
               <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
-                <SwitchIcon className="h-48 w-48 text-muted-foreground/30" />
-                <p className="text-[12px] text-muted-foreground/30">
+                <SwitchIcon className="h-48 w-48 text-muted-foreground" />
+                <p className="text-[12px] text-muted-foreground">
                   No pending credentials are waiting for this node.
                 </p>
               </div>
@@ -889,6 +889,11 @@ export function NodeDetailPage() {
                     {rotatedCredentials.signing_secret}
                   </code>
                 </div>
+                <p className="text-xs text-muted-foreground">
+                  <strong>Lost it?</strong> If you don&apos;t copy this now,
+                  you&apos;ll need to rotate the credential to get a new one.
+                  (Old value stops working immediately on rotate.)
+                </p>
               </div>
               <DialogFooter>
                 <Button

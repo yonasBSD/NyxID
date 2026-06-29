@@ -20,12 +20,9 @@ import {
 } from "@/components/ui/table";
 import {
   Globe,
-  KeyRound,
   KeySquare,
   Server,
-  Router,
   Terminal,
-  Zap,
   RefreshCw,
   Shield,
 } from "lucide-react";
@@ -34,6 +31,7 @@ import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { useNodes } from "@/hooks/use-nodes";
 import { ViewToggle, useViewMode, type ViewMode } from "@/components/shared/view-toggle";
+import { ServiceIcon } from "@/components/service-icons";
 import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
 import { ApiKeyTable } from "@/components/dashboard/api-key-table";
 import { ApiKeyCreateDialog } from "@/components/dashboard/api-key-create-dialog";
@@ -166,15 +164,23 @@ function KeyCardContent({
       aria-disabled={isBlocked ? true : undefined}
     >
       <CardContent className="flex h-full min-h-[140px] flex-col gap-3 p-4">
-        <div className="min-w-0">
-          <p className="truncate text-[12px] font-medium text-foreground">
-            {keyInfo.label}
-          </p>
-          {keyInfo.catalog_service_name && (
-            <p className="truncate text-xs text-muted-foreground">
-              {keyInfo.catalog_service_name}
-            </p>
+        <div className="flex items-start gap-3 min-w-0">
+          {keyInfo.catalog_service_slug && (
+            <ServiceIcon
+              slug={keyInfo.catalog_service_slug}
+              className="h-6 w-6 shrink-0 text-muted-foreground mt-0.5"
+            />
           )}
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-[12px] font-medium text-foreground">
+              {keyInfo.label}
+            </p>
+            {keyInfo.catalog_service_name && (
+              <p className="truncate text-xs text-muted-foreground">
+                {keyInfo.catalog_service_name}
+              </p>
+            )}
+          </div>
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
           {isOrgInherited && (
@@ -193,6 +199,20 @@ function KeyCardContent({
             {displayStatusLabel}
           </Badge>
           {isSsh && <Badge variant="secondary">SSH</Badge>}
+          {/* Auth-method pill — moved to top so it aligns across cards */}
+          <Badge variant="secondary">
+            {keyInfo.auto_connected
+              ? autoAuthLabel
+              : isSsh
+                ? hasSshCertificateAuth
+                  ? "certificate"
+                  : "ssh tunnel"
+                : keyInfo.credential_type}
+          </Badge>
+          {/* Routing pill — moved to top so it aligns across cards */}
+          <Badge variant="secondary">
+            {nodeName ? `→ ${nodeName}` : "Direct"}
+          </Badge>
           {keyInfo.auto_connected && (
             <Badge variant="secondary">
               {keyInfo.source_app_name
@@ -218,7 +238,7 @@ function KeyCardContent({
           </Button>
         )}
 
-        <div className="mt-auto grid grid-cols-2 gap-x-4 gap-y-3 text-xs text-muted-foreground">
+        <div className="mt-auto space-y-1.5 text-xs text-muted-foreground">
           <div className="flex min-w-0 items-center gap-1.5">
             {isSsh ? (
               <Terminal className="h-3 w-3 shrink-0" />
@@ -227,32 +247,10 @@ function KeyCardContent({
             )}
             <span className="truncate">{displayUrl}</span>
           </div>
-          <div className="flex min-w-0 items-center justify-end gap-1.5">
-            {keyInfo.auto_connected ? (
-              <Zap className="h-3 w-3 shrink-0" />
-            ) : (
-              <KeyRound className="h-3 w-3 shrink-0" />
-            )}
-            <span className="truncate">
-              {keyInfo.auto_connected
-                ? autoAuthLabel
-                : isSsh
-                  ? hasSshCertificateAuth
-                    ? "certificate"
-                    : "ssh tunnel"
-                  : keyInfo.credential_type}
-            </span>
-          </div>
           <div className="flex min-w-0 items-center gap-1.5">
             <Server className="h-3 w-3 shrink-0" />
             <span className="truncate">
               {isSsh ? keyInfo.slug : `/proxy/s/${keyInfo.slug}`}
-            </span>
-          </div>
-          <div className="flex min-w-0 items-center justify-end gap-1.5">
-            <Router className="h-3 w-3 shrink-0" />
-            <span className="truncate">
-              {nodeName ? `→ ${nodeName}` : "Direct"}
             </span>
           </div>
         </div>
@@ -341,10 +339,20 @@ function ServiceTableRow({
       onClick={() => void navigate({ to: "/keys/$keyId", params: { keyId: keyInfo.id } })}
     >
       <TableCell className="h-[60px]">
+        <div className="flex items-center gap-2.5 min-w-0">
+          {keyInfo.catalog_service_slug && (
+            <ServiceIcon
+              slug={keyInfo.catalog_service_slug}
+              className="h-5 w-5 shrink-0 text-muted-foreground"
+            />
+          )}
+          <div className="min-w-0 flex-1">
         <p className="truncate font-medium text-foreground">{keyInfo.label}</p>
         <p className="truncate text-[11px] text-text-tertiary mt-0.5">
           {keyInfo.catalog_service_name ?? " "}
         </p>
+          </div>
+        </div>
       </TableCell>
 
       <TableCell className="h-[60px]">
@@ -547,16 +555,16 @@ function groupKeysBySource(
 
 function ServicesEmptyState({ onAdd }: { readonly onAdd: () => void }) {
   return (
-    <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
-      <MagicKeyIcon className="h-64 w-64 text-muted-foreground/30" />
-      <div className="space-y-1">
-        <p className="text-[12px] font-medium text-muted-foreground/30">No AI services yet</p>
-        <p className="text-xs text-muted-foreground/30">
+    <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
+      <MagicKeyIcon className="h-48 w-48 text-muted-foreground/40" />
+      <div className="space-y-1.5 max-w-md">
+        <p className="text-[15px] font-semibold text-foreground">No AI services yet</p>
+        <p className="text-[12px] text-muted-foreground leading-relaxed">
           Connect a downstream service (OpenAI, GitHub, Anthropic, etc.) so your
           AI agents can call it through NyxID without ever seeing the raw key.
         </p>
       </div>
-      <AddCtaButton label="Add Service" onClick={onAdd} />
+      <AddCtaButton label="Add your first service" onClick={onAdd} />
     </div>
   );
 }
@@ -717,8 +725,8 @@ function NyxIdApiKeysTab({
               </p>
             </div>
           </div>
-          <Button variant="primary" className="shrink-0" onClick={onSetupAgent}>
-            <ButtonIcon variant="primary"><Terminal className="h-3 w-3" /></ButtonIcon>
+          <Button className="shrink-0" onClick={onSetupAgent}>
+            <ButtonIcon><Terminal className="h-3 w-3" /></ButtonIcon>
             Start Setup
           </Button>
         </CardContent>

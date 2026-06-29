@@ -4,6 +4,7 @@ import { useAuthStore } from "@/stores/auth-store";
 import { useApiKeys } from "@/hooks/use-api-keys";
 import { useKeys } from "@/hooks/use-keys";
 import { useNodes } from "@/hooks/use-nodes";
+import { useProxyOnboarding } from "@/hooks/use-proxy-onboarding";
 import { useRightPanel } from "@/components/layout/dashboard-layout";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button, ButtonIcon } from "@/components/ui/button";
@@ -14,6 +15,7 @@ import {
   Cable,
   Check,
   KeyRound,
+  Loader2,
   Mail,
   MailCheck,
   MailX,
@@ -40,6 +42,7 @@ export function DashboardPage() {
   const { data: services, isLoading: servicesLoading } = useKeys();
   const { data: nodes, isLoading: nodesLoading } = useNodes();
   const { setRightPanel } = useRightPanel();
+  const { firstProxyCallSucceeded, verifyKeyLoading } = useProxyOnboarding();
 
   const activeKeys = apiKeys?.filter((k) => k.is_active).length ?? 0;
   const serviceCount = services?.length ?? 0;
@@ -62,15 +65,28 @@ export function DashboardPage() {
     setOnboardingDismissed(true);
   }, []);
 
+  // Checklist stays visible until the user has both an active key AND a
+  // successful first proxy call. Once both are true, the checklist is
+  // 3/3 complete and can be hidden / demoted.
+  const checklistVisible =
+    !onboardingDismissed &&
+    (activeKeys === 0 || !firstProxyCallSucceeded);
+  // While the checklist is visible AND any step is still incomplete, demote
+  // the sibling cards' primary CTAs so the activation CTA stays visually
+  // dominant (item 13a).
+  const anyStepIncomplete =
+    serviceCount === 0 || activeKeys === 0 || !firstProxyCallSucceeded;
+  const siblingDemote = checklistVisible && anyStepIncomplete;
+
   useEffect(() => {
     setRightPanel(
       <>
-        {!aiDismissed && <AiSetupCard onDismiss={dismissAi} />}
-        <RightPanelContent />
+        {!aiDismissed && <AiSetupCard onDismiss={dismissAi} demotePrimary={siblingDemote} />}
+        <RightPanelContent demotePrimary={siblingDemote} />
       </>,
     );
     return () => setRightPanel(null);
-  }, [setRightPanel, aiDismissed, dismissAi]);
+  }, [setRightPanel, aiDismissed, dismissAi, siblingDemote]);
 
   if (servicesLoading) {
     return (
@@ -92,11 +108,13 @@ export function DashboardPage() {
   return (
     <div className="flex flex-col gap-8">
       {/* Onboarding checklist — guides remaining steps after first service */}
-      {!onboardingDismissed && activeKeys === 0 && (
+      {checklistVisible && (
         <OnboardingChecklist
           serviceConnected={serviceCount > 0}
           activeKeys={activeKeys}
           loading={keysLoading}
+          firstProxyCallSucceeded={firstProxyCallSucceeded}
+          verifyKeyLoading={verifyKeyLoading}
           onDismiss={dismissOnboarding}
         />
       )}
@@ -241,8 +259,8 @@ export function DashboardPage() {
 
       {/* Right panel content — inline on mobile/tablet, hidden on lg+ (shown in sidebar) */}
       <div className="flex flex-col gap-4 lg:hidden">
-        {!aiDismissed && <AiSetupCard onDismiss={dismissAi} />}
-        <ApprovalsCard />
+        {!aiDismissed && <AiSetupCard onDismiss={dismissAi} demotePrimary={siblingDemote} />}
+        <ApprovalsCard demotePrimary={siblingDemote} />
         <div className="rounded-xl border border-border/50 bg-card p-4 flex flex-col gap-2.5">
           <p className="text-[10px] font-semibold uppercase tracking-[1.5px] text-text-tertiary">
             Quick Links
@@ -264,11 +282,15 @@ function OnboardingChecklist({
   serviceConnected,
   activeKeys,
   loading,
+  firstProxyCallSucceeded,
+  verifyKeyLoading,
   onDismiss,
 }: {
   readonly serviceConnected: boolean;
   readonly activeKeys: number;
   readonly loading: boolean;
+  readonly firstProxyCallSucceeded: boolean;
+  readonly verifyKeyLoading: boolean;
   readonly onDismiss: () => void;
 }) {
   const steps = [
@@ -289,7 +311,7 @@ function OnboardingChecklist({
       cta: "Create Key",
     },
     {
-      done: false,
+      done: firstProxyCallSucceeded,
       title: "Make first proxy call",
       description: "Use your agent key to route a request through NyxID.",
       icon: <Wifi className="h-4 w-4" />,
@@ -297,6 +319,11 @@ function OnboardingChecklist({
       cta: "Make a call",
     },
   ];
+
+  // First incomplete step gets the primary CTA accent; remaining
+  // incomplete steps render `outline` so they're still tappable but
+  // visually subordinate (item 13a).
+  const firstIncompleteIndex = steps.findIndex((s) => !s.done);
 
   return (
     <div>
@@ -369,15 +396,36 @@ function OnboardingChecklist({
                         {step.description}
                       </p>
                       {step.done ? (
-                        <span className="mt-2 inline-flex items-center gap-1.5 text-[11px] font-medium text-success/70">
-                          <Check className="h-3 w-3" />
+                        <span className="mt-2 inline-flex items-center gap-1.5 text-[12px] font-medium text-success/70">
+                          <Check className="h-3.5 w-3.5" />
                           Completed
                         </span>
                       ) : (
-                        <span className="mt-2 inline-flex items-center gap-1.5 text-[11px] font-semibold text-nyx-secondary-400">
+                        <Button
+                          variant={
+                            i === firstIncompleteIndex ? "primary" : "outline"
+                          }
+                          className={cn(
+                            "mt-3 w-full",
+                            i === firstIncompleteIndex &&
+                              verifyKeyLoading &&
+                              "opacity-60 pointer-events-none",
+                          )}
+                          tabIndex={-1}
+                        >
+                          <ButtonIcon
+                            variant={
+                              i === firstIncompleteIndex ? "primary" : "default"
+                            }
+                          >
+                            {i === firstIncompleteIndex && verifyKeyLoading ? (
+                              <Loader2 className="h-3 w-3 animate-spin" />
+                            ) : (
+                              <ArrowRight className="h-3 w-3" />
+                            )}
+                          </ButtonIcon>
                           {step.cta}
-                          <ArrowRight className="h-3 w-3" />
-                        </span>
+                        </Button>
                       )}
                     </div>
                   </Link>
@@ -419,15 +467,36 @@ function OnboardingChecklist({
                     </p>
                     <p className={cn("text-[11px] mt-1 leading-relaxed", step.done ? "text-muted-foreground/50" : "text-muted-foreground")}>{step.description}</p>
                     {step.done ? (
-                      <span className="mt-3 inline-flex items-center gap-1.5 text-[11px] font-medium text-success/70">
-                        <Check className="h-3 w-3" />
+                      <span className="mt-3 inline-flex items-center gap-1.5 text-[12px] font-medium text-success/70">
+                        <Check className="h-3.5 w-3.5" />
                         Completed
                       </span>
                     ) : (
-                      <span className="mt-3 inline-flex items-center gap-1.5 text-[11px] font-semibold text-nyx-secondary-400 group-hover:gap-2 transition-all">
+                      <Button
+                        variant={
+                          i === firstIncompleteIndex ? "primary" : "outline"
+                        }
+                        className={cn(
+                          "mt-auto w-full",
+                          i === firstIncompleteIndex &&
+                            verifyKeyLoading &&
+                            "opacity-60 pointer-events-none",
+                        )}
+                        tabIndex={-1}
+                      >
+                        <ButtonIcon
+                          variant={
+                            i === firstIncompleteIndex ? "primary" : "default"
+                          }
+                        >
+                          {i === firstIncompleteIndex && verifyKeyLoading ? (
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                          ) : (
+                            <ArrowRight className="h-3 w-3" />
+                          )}
+                        </ButtonIcon>
                         {step.cta}
-                        <ArrowRight className="h-3 w-3" />
-                      </span>
+                      </Button>
                     )}
                   </div>
                 </Link>
@@ -677,10 +746,14 @@ function QuickActionCard({
 
 /* ─────────────── Right panel ─────────────── */
 
-function RightPanelContent() {
+function RightPanelContent({
+  demotePrimary = false,
+}: {
+  readonly demotePrimary?: boolean;
+}) {
   return (
     <>
-      <ApprovalsCard />
+      <ApprovalsCard demotePrimary={demotePrimary} />
       <div className="rounded-xl border border-border/50 bg-card p-4 flex flex-col gap-2.5">
         <p className="text-[10px] font-semibold uppercase tracking-[1.5px] text-text-tertiary">
           Quick Links
@@ -695,7 +768,13 @@ function RightPanelContent() {
   );
 }
 
-function AiSetupCard({ onDismiss }: { readonly onDismiss: () => void }) {
+function AiSetupCard({
+  onDismiss,
+  demotePrimary = false,
+}: {
+  readonly onDismiss: () => void;
+  readonly demotePrimary?: boolean;
+}) {
   return (
     <div className="group relative overflow-hidden rounded-xl border border-nyx-500/20 transition-[border-color] duration-300 hover:border-nyx-500/40 dark:border-nyx-500/30 dark:hover:border-nyx-500/50">
       <div className="absolute inset-0 bg-gradient-to-b from-nyx-500/[0.04] via-nyx-500/[0.02] to-transparent dark:from-nyx-500/15 dark:via-nyx-500/5 dark:to-transparent" />
@@ -712,12 +791,12 @@ function AiSetupCard({ onDismiss }: { readonly onDismiss: () => void }) {
           secure credential brokering.
         </p>
         <Button
-          variant="primary"
+          variant={demotePrimary ? "outline" : "primary"}
           asChild
           className="w-full transition-transform duration-300 group-hover:-translate-y-0.5"
         >
           <Link to="/ai-setup">
-            <ButtonIcon variant="primary">
+            <ButtonIcon variant={demotePrimary ? "default" : "primary"}>
               <ArrowRight className="h-3 w-3" />
             </ButtonIcon>
             Set up
@@ -754,7 +833,11 @@ function QuickLink({
   );
 }
 
-function ApprovalsCard() {
+function ApprovalsCard({
+  demotePrimary = false,
+}: {
+  readonly demotePrimary?: boolean;
+}) {
   return (
     <div className="rounded-xl border border-border/50 bg-card p-4 flex flex-col gap-3">
       <p className="text-[10px] font-semibold uppercase tracking-[1.5px] text-text-tertiary">
@@ -778,9 +861,9 @@ function ApprovalsCard() {
             Connect Telegram
           </Link>
         </Button>
-        <Button variant="primary" asChild>
+        <Button variant={demotePrimary ? "outline" : "primary"} asChild>
           <a href={MOBILE_APP_LINK} target="_blank" rel="noopener noreferrer">
-            <ButtonIcon className="border-white/20 bg-white/10">
+            <ButtonIcon variant={demotePrimary ? "default" : "primary"}>
               <Smartphone className="h-3 w-3" />
             </ButtonIcon>
             Get App
