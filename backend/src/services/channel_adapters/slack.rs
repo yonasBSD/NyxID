@@ -138,6 +138,9 @@ fn extract_attachments(event: &serde_json::Value) -> Vec<InboundAttachment> {
                     .and_then(|v| v.as_str())
                     .unwrap_or_default()
                     .to_string(),
+                platform_message_id: None,
+                file_key: None,
+                image_key: None,
                 filename: file.get("name").and_then(|v| v.as_str()).map(String::from),
                 mime_type: if mimetype.is_empty() {
                     None

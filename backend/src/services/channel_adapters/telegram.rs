@@ -88,6 +88,9 @@ fn extract_attachments(msg: &serde_json::Value) -> Vec<InboundAttachment> {
         attachments.push(InboundAttachment {
             content_type: "image".to_string(),
             url: file_id.to_string(),
+            platform_message_id: None,
+            file_key: None,
+            image_key: None,
             filename: None,
             mime_type: None,
             size_bytes: largest.get("file_size").and_then(|v| v.as_u64()),
@@ -103,6 +106,9 @@ fn extract_attachments(msg: &serde_json::Value) -> Vec<InboundAttachment> {
         attachments.push(InboundAttachment {
             content_type: "file".to_string(),
             url: file_id.to_string(),
+            platform_message_id: None,
+            file_key: None,
+            image_key: None,
             filename: doc
                 .get("file_name")
                 .and_then(|v| v.as_str())
@@ -124,6 +130,9 @@ fn extract_attachments(msg: &serde_json::Value) -> Vec<InboundAttachment> {
         attachments.push(InboundAttachment {
             content_type: "audio".to_string(),
             url: file_id.to_string(),
+            platform_message_id: None,
+            file_key: None,
+            image_key: None,
             filename: audio
                 .get("file_name")
                 .and_then(|v| v.as_str())
@@ -145,6 +154,9 @@ fn extract_attachments(msg: &serde_json::Value) -> Vec<InboundAttachment> {
         attachments.push(InboundAttachment {
             content_type: "video".to_string(),
             url: file_id.to_string(),
+            platform_message_id: None,
+            file_key: None,
+            image_key: None,
             filename: video
                 .get("file_name")
                 .and_then(|v| v.as_str())
@@ -166,6 +178,9 @@ fn extract_attachments(msg: &serde_json::Value) -> Vec<InboundAttachment> {
         attachments.push(InboundAttachment {
             content_type: "audio".to_string(),
             url: file_id.to_string(),
+            platform_message_id: None,
+            file_key: None,
+            image_key: None,
             filename: None,
             mime_type: voice
                 .get("mime_type")
