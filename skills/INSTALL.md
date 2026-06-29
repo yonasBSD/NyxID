@@ -40,7 +40,22 @@ Windows is supported via WSL only.
 |---|---|---|
 | `nyxid` | Credential broker for downstream APIs (OpenAI, Anthropic, GitHub, Slack, internal APIs, SSH, MCP tools). The skill is a thin wrapper over the `nyxid` CLI. | [`nyxid/`](nyxid/) |
 
-There is one skill today. This manifest will list more as they ship.
+### Aevatar platform (control-plane family)
+
+These skills drive the [Aevatar](https://aevatar.ai) control plane over REST, authenticated through the NyxID broker — so they need the `nyxid` CLI plus a NyxID login, exactly like the `nyxid` skill. They mirror the public `aevatar-platform` skillset on Ornn. Start at `aevatar-platform-map`; each spoke is self-contained.
+
+| Skill | Purpose | Source |
+|---|---|---|
+| `aevatar-platform-map` | Entry point: object model, auth, and router to the right companion skill for each step. | [`aevatar-platform-map/`](aevatar-platform-map/) |
+| `aevatar-feasibility-advisor` | Decide whether a goal is buildable on Aevatar, and its prerequisites, before building. | [`aevatar-feasibility-advisor/`](aevatar-feasibility-advisor/) |
+| `aevatar-workflow-authoring` | Author, validate, and persist an executable Aevatar workflow from a natural-language request. | [`aevatar-workflow-authoring/`](aevatar-workflow-authoring/) |
+| `aevatar-team-builder` | Create a team and its members, bind implementations, and set the team entry member. | [`aevatar-team-builder/`](aevatar-team-builder/) |
+| `aevatar-service-publisher` | Publish a member/team/workflow as an invocable service, register it with NyxID, and invoke it. | [`aevatar-service-publisher/`](aevatar-service-publisher/) |
+| `aevatar-scheduler` | Create cron schedules that fire an Aevatar service as the scope owner. | [`aevatar-scheduler/`](aevatar-scheduler/) |
+| `aevatar-triage` | Triage a failure across Aevatar / NyxID / Ornn and file a code-grounded issue or give usage guidance. | [`aevatar-triage/`](aevatar-triage/) |
+| `fallback-to-calling-agent` | Safety net: hand the original task back to the calling agent when Aevatar can't finish it server-side. | [`fallback-to-calling-agent/`](fallback-to-calling-agent/) |
+
+A plugin install (`/plugin install nyxid@nyxid`) bundles every skill above automatically across the Claude Code / Codex / Cursor manifests. For manual installs, copy each skill directory you want from `skills/`. This manifest will list more as they ship.
 
 ---
 
