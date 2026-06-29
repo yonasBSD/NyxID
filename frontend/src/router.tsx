@@ -11,8 +11,10 @@ import { Toaster } from "@/components/ui/toast";
 import { ChunkErrorBoundary } from "@/components/chunk-error-boundary";
 import { AuthLayout } from "@/components/layout/auth-layout";
 import { DashboardLayout } from "@/components/layout/dashboard-layout";
+import { BillingRouteGuard } from "@/components/billing-route-guard";
 import { useAuthStore } from "@/stores/auth-store";
 import { hasAdminRead } from "@/types/api";
+import { shouldRedirectFromBilling } from "@/lib/billing-availability";
 
 import {
   LandingPage,
@@ -578,7 +580,17 @@ const keysRoute = createRoute({
 const billingRoute = createRoute({
   path: "/billing",
   getParentRoute: () => dashboardLayout,
-  component: BillingPage,
+  beforeLoad: () => {
+    const { isLoading, user } = useAuthStore.getState();
+    if (shouldRedirectFromBilling({ isLoading, user })) {
+      throw redirect({ to: "/dashboard" });
+    }
+  },
+  component: () => (
+    <BillingRouteGuard>
+      <BillingPage />
+    </BillingRouteGuard>
+  ),
 });
 
 const keyDetailRoute = createRoute({
