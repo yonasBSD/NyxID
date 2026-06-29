@@ -90,6 +90,18 @@ pub async fn asyncapi_json(
 
 #[utoipa::path(
     get,
+    path = "/api/v1/catalog-specs/firecrawl/openapi.json",
+    responses(
+        (status = 200, description = "NyxID-hosted Firecrawl OpenAPI overlay with Aevatar tool annotations", content_type = "application/json")
+    ),
+    tag = "Catalog"
+)]
+pub async fn firecrawl_openapi_json() -> Json<serde_json::Value> {
+    Json(api_docs_service::build_firecrawl_openapi_document())
+}
+
+#[utoipa::path(
+    get,
     path = "/api/v1/proxy/services/{service_id}/docs",
     params(
         ("service_id" = String, Path, description = "Downstream service ID")
@@ -247,7 +259,7 @@ fn html_response_with_csp(html: String, csp: &str) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::{catalog_ui, docs_ui, openapi_json, service_openapi_json};
+    use super::{catalog_ui, docs_ui, firecrawl_openapi_json, openapi_json, service_openapi_json};
     use crate::errors::AppError;
     use crate::models::user::COLLECTION_NAME as USERS;
     use crate::models::user::UserType;
@@ -364,6 +376,22 @@ mod tests {
         assert_eq!(value["info"]["version"], env!("CARGO_PKG_VERSION"));
         assert!(value["paths"]["/api/v1/demo"].is_object());
         assert!(value["components"]["schemas"].is_object());
+    }
+
+    #[tokio::test]
+    async fn firecrawl_openapi_json_returns_overlay_with_aevatar_annotations() {
+        let axum::Json(value) = firecrawl_openapi_json().await;
+
+        assert_eq!(value["info"]["title"], "Firecrawl API");
+        assert_eq!(value["paths"]["/v2/agent"]["post"]["operationId"], "agent");
+        assert_eq!(
+            value["paths"]["/v2/agent"]["post"]["x-aevatar-tool"]["name"],
+            "agent"
+        );
+        assert_eq!(
+            value["paths"]["/v2/agent/{id}"]["get"]["x-aevatar-tool"]["readOnly"],
+            true
+        );
     }
 
     #[tokio::test]
