@@ -26,6 +26,11 @@ pub struct ProfileConfigResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct UserCapabilitiesResponse {
+    pub billing_available: bool,
+}
+
+#[derive(Debug, Serialize)]
 pub struct UserProfileResponse {
     pub id: String,
     pub email: String,
@@ -42,6 +47,7 @@ pub struct UserProfileResponse {
     pub created_at: String,
     pub last_login_at: Option<String>,
     pub profile_config: ProfileConfigResponse,
+    pub capabilities: UserCapabilitiesResponse,
 }
 
 #[derive(Debug, Deserialize)]
@@ -108,6 +114,9 @@ pub async fn get_me(
                     .ai_services_completed_at
                     .map(|t| t.to_rfc3339()),
             },
+        },
+        capabilities: UserCapabilitiesResponse {
+            billing_available: state.billing.billing_enabled() && state.billing.lago_configured(),
         },
     }))
 }
@@ -336,6 +345,29 @@ mod tests {
         assert!(response.0.is_operator);
     }
 
+    #[tokio::test]
+    async fn get_me_marks_billing_unavailable_without_lago() {
+        let Some(db) = connect_test_database("users_me_billing_unavailable").await else {
+            eprintln!("skipping users/me billing capability test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .expect("insert user");
+        role_service::seed_system_roles(&db)
+            .await
+            .expect("seed platform roles");
+
+        let response = get_me(State(test_app_state(db)), test_auth_user(&user_id))
+            .await
+            .expect("get profile");
+
+        assert!(!response.0.capabilities.billing_available);
+    }
+
     // --- Serialization tests: UserProfileResponse ---
 
     #[test]
@@ -359,6 +391,9 @@ mod tests {
                     ai_services_completed_at: Some("2025-03-15T10:00:00+00:00".to_string()),
                 },
             },
+            capabilities: UserCapabilitiesResponse {
+                billing_available: true,
+            },
         };
         let json = serde_json::to_value(&resp).unwrap();
 
@@ -379,6 +414,7 @@ mod tests {
             json["profile_config"]["onboarding"]["ai_services_completed_at"],
             "2025-03-15T10:00:00+00:00"
         );
+        assert_eq!(json["capabilities"]["billing_available"], true);
     }
 
     #[test]
@@ -402,6 +438,9 @@ mod tests {
                     ai_services_completed_at: None,
                 },
             },
+            capabilities: UserCapabilitiesResponse {
+                billing_available: false,
+            },
         };
         let json = serde_json::to_value(&resp).unwrap();
 
@@ -410,6 +449,7 @@ mod tests {
         assert!(json["social_provider"].is_null());
         assert!(json["last_login_at"].is_null());
         assert!(json["profile_config"]["onboarding"]["ai_services_completed_at"].is_null());
+        assert_eq!(json["capabilities"]["billing_available"], false);
         assert_eq!(json["role"], "user");
     }
 
@@ -579,6 +619,9 @@ mod tests {
                     ai_services_completed_at: None,
                 },
             },
+            capabilities: UserCapabilitiesResponse {
+                billing_available: false,
+            },
         };
         let json = serde_json::to_value(&resp).unwrap();
         let obj = json.as_object().unwrap();
@@ -598,6 +641,7 @@ mod tests {
             "created_at",
             "last_login_at",
             "profile_config",
+            "capabilities",
         ];
         for key in &expected_keys {
             assert!(obj.contains_key(*key), "Missing expected key: {}", key);

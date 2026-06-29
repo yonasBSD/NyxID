@@ -36,7 +36,7 @@ import {
 } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth-store";
-import { hasAdminRead } from "@/types/api";
+import { hasAdminRead, isBillingAvailable } from "@/types/api";
 
 type SidebarMode = "expanded" | "collapsed" | "hover";
 const STORAGE_KEY = "nyxid:sidebar-mode";
@@ -83,6 +83,14 @@ export type NavItemDef = {
   readonly icon: React.ComponentType<{ className?: string }>;
   readonly label: string;
 };
+
+export function getVisibleMainNav(
+  user: Parameters<typeof isBillingAvailable>[0],
+): readonly NavItemDef[] {
+  return MAIN_NAV.filter(
+    (item) => item.to !== "/billing" || isBillingAvailable(user),
+  );
+}
 
 export function isNavActive(
   itemTo: string,
@@ -169,6 +177,7 @@ export function Sidebar({
   const routerState = useRouterState();
   const user = useAuthStore((s) => s.user);
   const currentPath = routerState.location.pathname;
+  const mainNav = getVisibleMainNav(user);
 
   const [mode, setMode] = useState<SidebarMode>(readMode);
   const [hovered, setHovered] = useState(false);
@@ -207,13 +216,13 @@ export function Sidebar({
     hoverTimerRef.current = setTimeout(() => setHovered(false), 250);
   }
 
-  const allItems = [...MAIN_NAV, ...APPROVALS_NAV, ...DEVELOPER_NAV];
+  const allItems = [...mainNav, ...APPROVALS_NAV, ...DEVELOPER_NAV];
 
   const sidebarContent = (
     <>
       <nav className="flex-1 overflow-y-auto scrollbar-none px-2 pt-2 pb-4">
         <div className="flex flex-col gap-[2px]">
-          {MAIN_NAV.map((item) => (
+          {mainNav.map((item) => (
             <NavItem
               key={item.to}
               item={item}

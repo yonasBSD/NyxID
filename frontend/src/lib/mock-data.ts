@@ -9,6 +9,9 @@ const MOCK_USER = {
   is_admin: true,
   is_active: true,
   created_at: "2025-11-20T08:00:00Z",
+  capabilities: {
+    billing_available: true,
+  },
 };
 
 // ── NyxID API Keys (Agent Keys) ──

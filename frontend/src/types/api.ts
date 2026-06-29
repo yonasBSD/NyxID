@@ -22,6 +22,9 @@ export interface User {
   /// User-scoped config / preferences. Older backends omit this; callers
   /// must treat `undefined` as "unknown" and fail open (never trap a user).
   readonly profile_config?: ProfileConfig;
+  /// Server-owned capability flags surfaced on `GET /users/me`. Older
+  /// backends omit this field; optional features must fail closed.
+  readonly capabilities?: UserCapabilities;
 }
 
 /// First-run onboarding flags. Timestamps are rfc3339 strings; `null`
@@ -33,6 +36,16 @@ export interface OnboardingState {
 /// User-scoped configuration surfaced on `GET /users/me`.
 export interface ProfileConfig {
   readonly onboarding: OnboardingState;
+}
+
+export interface UserCapabilities {
+  readonly billing_available?: boolean;
+}
+
+export function isBillingAvailable(
+  user: Pick<User, "capabilities"> | null | undefined,
+): boolean {
+  return user?.capabilities?.billing_available === true;
 }
 
 /// Resolve the effective platform role for a user payload returned by the
