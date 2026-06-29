@@ -1,0 +1,24 @@
+{
+  "name": "nyxid",
+  "displayName": "NyxID",
+  "description": "Brokers credentials for downstream services (OpenAI, Anthropic, GitHub, Lark, custom APIs, SSH, MCP) so the agent never sees raw API keys or OAuth tokens. Thin wrapper over the nyxid CLI.",
+  "version": "0.5.0",
+  "author": {
+    "name": "ChronoAIProject",
+    "url": "https://github.com/ChronoAIProject"
+  },
+  "homepage": "https://github.com/ChronoAIProject/NyxID",
+  "repository": "https://github.com/ChronoAIProject/NyxID",
+  "license": "Apache-2.0",
+  "keywords": [
+    "credentials",
+    "oauth",
+    "proxy",
+    "nyxid",
+    "sso",
+    "mcp",
+    "ssh",
+    "broker"
+  ],
+  "skills": "./skills/"
+}
