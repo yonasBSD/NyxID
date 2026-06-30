@@ -528,11 +528,12 @@ pub fn build_router(
                 .delete(handlers::approvals::delete_service_config),
         );
 
+    let node_registration_routes = Router::new().route(
+        "/register-token",
+        post(handlers::node_admin::create_registration_token),
+    );
+
     let node_routes = Router::new()
-        .route(
-            "/register-token",
-            post(handlers::node_admin::create_registration_token),
-        )
         .route("/", get(handlers::node_admin::list_nodes))
         .route(
             "/my-bindings",
@@ -983,6 +984,7 @@ pub fn build_router(
     let api_v1_shared = Router::new()
         .nest("/connections", connection_routes)
         .nest("/providers", provider_routes)
+        .nest("/nodes", node_registration_routes)
         .nest("/oracle", oracle_consumer_routes)
         .layer(middleware::from_fn(reject_delegated_tokens));
 
