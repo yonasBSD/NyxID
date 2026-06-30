@@ -1,6 +1,6 @@
 {
   "name": "nyxid",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Brokers credentials for downstream services (OpenAI, Anthropic, GitHub, Lark, custom APIs, SSH, MCP) so the agent never sees raw API keys or OAuth tokens. Thin wrapper over the nyxid CLI.",
   "author": {
     "name": "ChronoAIProject",

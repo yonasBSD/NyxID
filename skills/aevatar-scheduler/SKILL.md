@@ -1,7 +1,7 @@
 ---
 name: aevatar-scheduler
 description: Create and manage cron schedules that fire an Aevatar service on a recurring basis, authenticated as the scope owner via NyxID — over the REST API. Use when a user wants to "schedule", "run on a cron", "set up a recurring run", "run every day/hour/Monday", "automate this service on a timer", "preview a cron", "pause/resume/disable a schedule", or "run it now". It builds the schedule against a published service (identity + endpoint + payload + serving revision), uses scope-owner NyxID auth (which requires the owner's NyxID broker binding), and covers preview, enable/disable, run-now, update, and delete. Publish the service first with the service-publisher skill.
-version: "1.4"
+version: "1.5"
 metadata:
   category: plain
   tag:
@@ -27,7 +27,10 @@ authenticated as **you** (the scope owner) through NyxID. Publish the service fi
 # token. A raw curl to the aevatar backend with ~/.nyxid/access_token resolves NO scope
 # (scopeResolved:false) and the stored token expires — it is not a usable path.
 # Prerequisite once: the `aevatar` service must be connected — `nyxid service add aevatar`.
-aev() { nyxid proxy request aevatar "$@"; }   # aev "<path>" [-m POST|PUT|DELETE] [-d '<json>'] [--stream]
+# NOTE: the aevatar backend requires `Content-Type: application/json` on writes (POST/PUT) —
+# omit it and every write returns HTTP 415 Unsupported Media Type. The helper sets it on
+# every call (harmless on bodyless GETs), so the POST/PUT examples below work as written.
+aev() { nyxid proxy request aevatar "$@" -H 'Content-Type: application/json'; }   # aev "<path>" [-m POST|PUT|DELETE] [-d '<json>'] [--stream]
 scopeId=$(aev "api/studio/context" | jq -r .scopeId)
 ```
 
@@ -72,16 +75,45 @@ Use a real IANA `timezone`; the engine has no implicit local time.
 
 A scheduled service fire happens *later*, after your current token has expired, so the
 platform must be able to **re-mint** the scope owner's NyxID credential at fire time. That
-requires the scope owner to have an **authenticated NyxID owner binding** (the
-`urn:nyxid:scope:broker_binding` granted when you sign in through the Aevatar console /
-studio NyxID login). A plain NyxID-CLI token is **not** sufficient: creating a
-`scopeOwnerNyxId` schedule without that binding fails fast with
+requires an **authenticated NyxID owner binding** (`urn:nyxid:scope:broker_binding`),
+established by signing in through the Aevatar console / studio NyxID login (a browser PKCE
+`authorization_code` flow → `POST /api/auth/nyxid/finalize`). A plain NyxID-CLI token is
+**not** sufficient. Create-time validation does a *real* token mint, so a missing/revoked
+binding fails fast at create with one of:
 
-> HTTP 400 — "Authenticated NyxID owner binding is required for scope owner schedule auth;
-> complete or refresh NyxID login before creating a scope owner schedule."
+> HTTP 400 — "Authenticated NyxID owner binding is required for scope owner schedule auth…"
+> HTTP 400 — "NyxID binding was revoked for the scheduled subject. (Parameter 'configuration')"
 
-If you hit this, tell the user to complete/refresh their NyxID login in the Aevatar console
-(to establish the broker binding), then retry — do not try to work around it.
+**Diagnose before re-logging in** — the binding lives on the NyxID side, so check it directly:
+```bash
+NYX=$(tr -d '\n' < ~/.nyxid/base_url); TOK=$(tr -d '\n' < ~/.nyxid/access_token)
+curl -s -H "Authorization: Bearer $TOK" "$NYX/api/v1/users/me/broker-bindings" \
+  | jq -r '.bindings[] | "\(.client_name)  scopes=\(.scopes|join(","))  last_used=\(.last_used_at)"'
+```
+A non-revoked `aevatar` binding with the `proxy` scope means NyxID is healthy and the fault
+is Aevatar-side (it can be pinned to a stale binding). A **clean** console re-login (fully
+logged out first) refreshes a revoked binding — finalize replaces it on the revoked/stale
+probe path — so that usually clears it; an SSO-cached login may not re-run finalize.
+
+**There is no CLI / headless path to establish this binding** (NyxID mints broker bindings
+only via the `authorization_code` grant; the only Aevatar writer is the browser finalize).
+Tracked at **aevatarAI/aevatar#2491** — do not promise a CLI-only way to create a
+`scopeOwnerNyxId` schedule until it lands.
+
+### CLI-only alternative: skip the Aevatar scheduler entirely
+For a recurring run **without the browser console**, don't use `scopeOwnerNyxId` scheduling
+at all. The published service is already invocable — drive it from an **external timer**
+(cron, `launchd`, a node) that hits the invoke endpoint with a **non-expiring NyxID API key**
+(`nyxid api-key create --scopes proxy`; export as `NYXID_ACCESS_TOKEN`). No broker binding,
+no console:
+```bash
+NYXID_ACCESS_TOKEN="$KEY" nyxid proxy request aevatar \
+  "api/scopes/$scopeId/members/$memberId/invoke/chat:stream" -m POST --stream \
+  -H 'Content-Type: application/json' -d '{"prompt":"poll"}'
+```
+The member invoke endpoint carries `scopeId` in its path, so it runs even though a bare API
+key reports `scopeResolved:false` on the generic `api/studio/context` call. Trade-off: the
+timer runs on whatever machine you put it on (a cloud cron would live in Aevatar; this does not).
 
 ## Create the schedule
 
@@ -110,6 +142,21 @@ aev "api/schedules" -m POST -d "{
 > `revisionId` (and the service has no *active* serving revision), creation fails with
 > 400 "payloadJson requires a revisionId; provide one explicitly or activate a serving
 > revision." Pass the service's `defaultServingRevisionId`.
+
+> **Workflow-member services: use `payloadBase64`, not `payloadJson`.** A `member-<id>`
+> service produced by a Studio **bind** (the common workflow path) carries a serving
+> revision with **no protocol descriptor**, so `payloadJson` fails creation with
+> 400 "payloadTypeUrl '…ChatRequestEvent' could not be resolved: revision '…' has no
+> protocol descriptor set." The fix is to send the request as a packed proto in
+> `payloadBase64` instead — it bypasses the descriptor-based JSON encoding. The streaming
+> invoke (`…/invoke/chat:stream`) accepts the `{"prompt":"…"}` shorthand via a shim, but
+> the scheduler's typed path does not. For a `ChatRequestEvent` with `prompt` at field 1:
+> ```bash
+> # python3 -c "import base64;print(base64.b64encode(bytes([0x0a,len(p:=b'do the thing')])+p).decode())"
+> # → swap the `payloadJson` line for:  "payloadBase64": "CgxkbyB0aGUgdGhpbmc=",
+> ```
+> If your workflow ignores the prompt (e.g. a self-contained poll), any valid
+> `ChatRequestEvent` payload triggers the run.
 
 ### Auth (`serviceInvocation.auth`)
 

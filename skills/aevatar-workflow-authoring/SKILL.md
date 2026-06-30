@@ -1,7 +1,7 @@
 ---
 name: aevatar-workflow-authoring
 description: Author, validate, and persist an executable aevatar workflow from a natural-language request — use it when the user wants to create, build, set up, or automate a multi-step task as a runnable aevatar workflow (make a workflow that…, automate…, build a pipeline…, set up a recurring…). It generates workflow YAML, dispatch-validates it, then saves it as a reusable workflow that can be re-run and watched in the observatory. Not for running an existing workflow — search for that and start it instead.
-version: "1.4"
+version: "1.5"
 metadata:
   category: tool-based
   tool-list:
@@ -366,7 +366,10 @@ source.)
 # auto-refreshes your token. A raw curl with ~/.nyxid/access_token resolves NO scope
 # (scopeResolved:false) and the stored token expires — it is not a usable path.
 # Prerequisite once: the `aevatar` service must be connected — `nyxid service add aevatar`.
-aev() { nyxid proxy request aevatar "$@"; }   # aev "<path>" [-m POST|PUT|DELETE] [-d '<json>'] [--stream]
+# NOTE: the aevatar backend requires `Content-Type: application/json` on writes (POST/PUT,
+# including the `draft-run` validation call below) — omit it and you get HTTP 415 Unsupported
+# Media Type. The helper sets it on every call (harmless on bodyless GETs).
+aev() { nyxid proxy request aevatar "$@" -H 'Content-Type: application/json'; }   # aev "<path>" [-m POST|PUT|DELETE] [-d '<json>'] [--stream]
 NYX=$(tr -d '\n' < ~/.nyxid/base_url)               # e.g. https://nyx.chrono-ai.fun
 scopeId=$(aev "api/studio/context" | jq -r .scopeId)
 ```
