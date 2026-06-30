@@ -1,7 +1,7 @@
 ---
 name: aevatar-team-builder
 description: Build an Aevatar agent team and its members over the REST API. Use when a user wants to "create a team", "add a member", "make a workflow member / script member / gagent member", "set the team's entry point", or "assemble agents into a team". It creates the team, creates members whose implementation is a workflow (most common), a script, or a hosted gagent, binds each member's concrete implementation (the workflow YAML is attached here), waits for the async binding to succeed, and sets the team entry member. Author the workflow YAML first with the workflow-authoring skill; publish the result as a service with the service-publisher skill.
-version: "1.2"
+version: "1.3"
 metadata:
   category: plain
   tag:
@@ -25,17 +25,20 @@ output is an invocable team. Publishing it as a NyxID service is a separate step
 ## Bootstrap
 
 ```bash
-BASE=https://aevatar-console-backend-api.aevatar.ai
-TOK=$(tr -d '\n' < ~/.nyxid/access_token)        # or the agent's own NyxID bearer
-scopeId=$(curl -s -H "Authorization: Bearer $TOK" "$BASE/api/studio/context" | jq -r .scopeId)
-auth=(-H "Authorization: Bearer $TOK" -H "Content-Type: application/json")
+# Drive aevatar THROUGH the NyxID broker: it injects your scope_id claim AND auto-refreshes your
+# token. A raw curl to the aevatar backend with ~/.nyxid/access_token resolves NO scope
+# (scopeResolved:false) and the stored token expires — it is not a usable path.
+# Prerequisite once: the `aevatar` service must be connected — `nyxid service add aevatar`.
+aev() { nyxid proxy request aevatar "$@"; }   # aev "<path>" [-m POST|PUT|DELETE] [-d '<json>'] [--stream]
+scopeId=$(aev "api/studio/context" | jq -r .scopeId)
 ```
 
 > **`jq` is only for convenience** — any JSON reader works (replace `| jq -r .scopeId` with
-> `| python3 -c 'import sys,json;print(json.load(sys.stdin)["scopeId"])'`). Make these calls with
-> the **`curl` binary**, not Python's `urllib`/`requests` (a WAF may 403 those). And because the
-> create/bind calls are async and can occasionally return a **transient empty body**, always read
-> the response status/JSON back — retry once on an empty body — rather than assuming success.
+> `| python3 -c 'import sys,json;print(json.load(sys.stdin)["scopeId"])'`). All calls go through the
+> NyxID broker (`nyxid proxy request aevatar`), which injects your `scope_id` claim and
+> auto-refreshes the token. And because the create/bind calls are async and can occasionally return
+> a **transient empty body**, always read the response status/JSON back — retry once on an empty
+> body — rather than assuming success.
 
 Member implementation kinds are the lowercase strings **`workflow`**, **`script`**,
 **`gagent`**.
@@ -43,7 +46,7 @@ Member implementation kinds are the lowercase strings **`workflow`**, **`script`
 ## Step 1 — Create the team
 
 ```bash
-teamId=$(curl -s "${auth[@]}" -X POST "$BASE/api/scopes/$scopeId/teams" \
+teamId=$(aev "api/scopes/$scopeId/teams" -m POST \
   -d '{"displayName":"My Team","description":"what it does"}' | jq -r '.teamId // .id')
 ```
 `CreateStudioTeamRequest`: `displayName` (required), `description?`, `teamId?` (omit to
@@ -57,7 +60,7 @@ implementation (the workflow + its YAML) is attached in Step 3. Passing a forwar
 
 ```bash
 wfId="my-workflow"   # the id you will bind in Step 3 (pick a stable kebab-case id)
-memberId=$(curl -s "${auth[@]}" -X POST "$BASE/api/scopes/$scopeId/members" -d "{
+memberId=$(aev "api/scopes/$scopeId/members" -m POST -d "{
   \"displayName\": \"My Workflow Member\",
   \"implementationKind\": \"workflow\",
   \"teamId\": \"$teamId\"
@@ -80,7 +83,7 @@ This is where the real implementation lands. It starts an **async binding run**.
 
 ```bash
 # Author the YAML first with aevatar-workflow-authoring; pass it inline.
-runId=$(curl -s "${auth[@]}" -X PUT "$BASE/api/scopes/$scopeId/members/$memberId/binding" -d "{
+runId=$(aev "api/scopes/$scopeId/members/$memberId/binding" -m PUT -d "{
   \"workflow\": { \"workflowId\": \"$wfId\", \"workflowYamls\": [ $(jq -Rs . < workflow.yaml) ] }
 }" | jq -r '.bindingRunId')      # returns {status:"accepted", bindingRunId:"bind-...", ...}
 ```
@@ -95,7 +98,7 @@ runId=$(curl -s "${auth[@]}" -X PUT "$BASE/api/scopes/$scopeId/members/$memberId
 
 Poll the binding run **by its id** until `status` is `succeeded`:
 ```bash
-curl -s "${auth[@]}" "$BASE/api/scopes/$scopeId/members/$memberId/binding-runs/$runId" \
+aev "api/scopes/$scopeId/members/$memberId/binding-runs/$runId" \
   | jq '{status, failure}'
 ```
 Status progresses `accepted → admission_pending → admitted → platform_binding_pending →
@@ -104,7 +107,7 @@ for a minute or two before flipping to `succeeded` — keep polling (e.g. every 
 ~3 min). On `succeeded` the response carries `result.publishedServiceId` +
 `result.revisionId`, and the member reaches `lifecycleStage:"bind_ready"`:
 ```bash
-curl -s "${auth[@]}" "$BASE/api/scopes/$scopeId/members/$memberId" \
+aev "api/scopes/$scopeId/members/$memberId" \
   | jq '{stage:.summary.lifecycleStage, svc:.summary.publishedServiceId, ref:.implementationRef}'
 ```
 Do not report success on the 2xx from the PUT alone — that is only `accepted`; wait for the
@@ -115,7 +118,7 @@ run to reach `succeeded`.
 The entry member is the team's front door (what callers hit by default).
 
 ```bash
-curl -s "${auth[@]}" -X PUT "$BASE/api/scopes/$scopeId/teams/$teamId/entry-member" \
+aev "api/scopes/$scopeId/teams/$teamId/entry-member" -m PUT \
   -d "{\"memberId\":\"$memberId\"}"
 ```
 Add more members by repeating Steps 2–3 with the same `teamId`. List the roster:
@@ -124,8 +127,8 @@ Add more members by repeating Steps 2–3 with the same `teamId`. List the roste
 ## Verify
 
 ```bash
-curl -s "${auth[@]}" "$BASE/api/scopes/$scopeId/teams/$teamId"          | jq .
-curl -s "${auth[@]}" "$BASE/api/scopes/$scopeId/teams/$teamId/members"  | jq .
+aev "api/scopes/$scopeId/teams/$teamId"          | jq .
+aev "api/scopes/$scopeId/teams/$teamId/members"  | jq .
 ```
 Confirm the team exists, the roster contains your member(s), and the entry member is set.
 

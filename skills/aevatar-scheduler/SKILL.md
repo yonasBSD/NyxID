@@ -1,7 +1,7 @@
 ---
 name: aevatar-scheduler
 description: Create and manage cron schedules that fire an Aevatar service on a recurring basis, authenticated as the scope owner via NyxID — over the REST API. Use when a user wants to "schedule", "run on a cron", "set up a recurring run", "run every day/hour/Monday", "automate this service on a timer", "preview a cron", "pause/resume/disable a schedule", or "run it now". It builds the schedule against a published service (identity + endpoint + payload + serving revision), uses scope-owner NyxID auth (which requires the owner's NyxID broker binding), and covers preview, enable/disable, run-now, update, and delete. Publish the service first with the service-publisher skill.
-version: "1.3"
+version: "1.4"
 metadata:
   category: plain
   tag:
@@ -23,24 +23,27 @@ authenticated as **you** (the scope owner) through NyxID. Publish the service fi
 ## Bootstrap
 
 ```bash
-BASE=https://aevatar-console-backend-api.aevatar.ai
-TOK=$(tr -d '\n' < ~/.nyxid/access_token)        # or the agent's own NyxID bearer
-scopeId=$(curl -s -H "Authorization: Bearer $TOK" "$BASE/api/studio/context" | jq -r .scopeId)
-auth=(-H "Authorization: Bearer $TOK" -H "Content-Type: application/json")
+# Drive aevatar THROUGH the NyxID broker: it injects your scope_id claim AND auto-refreshes your
+# token. A raw curl to the aevatar backend with ~/.nyxid/access_token resolves NO scope
+# (scopeResolved:false) and the stored token expires — it is not a usable path.
+# Prerequisite once: the `aevatar` service must be connected — `nyxid service add aevatar`.
+aev() { nyxid proxy request aevatar "$@"; }   # aev "<path>" [-m POST|PUT|DELETE] [-d '<json>'] [--stream]
+scopeId=$(aev "api/studio/context" | jq -r .scopeId)
 ```
 
 > **`jq` is only for convenience** — any JSON reader works (replace `| jq -r .scopeId` with
-> `| python3 -c 'import sys,json;print(json.load(sys.stdin)["scopeId"])'`). Make these calls with
-> the **`curl` binary**, not Python's `urllib`/`requests` (a WAF may 403 those). Reminder: the
-> `scopeOwnerNyxId` precondition below cannot be satisfied by a bare NyxID **CLI** token — it needs
-> the owner's interactive **console** NyxID login (broker binding), or creation 400s.
+> `| python3 -c 'import sys,json;print(json.load(sys.stdin)["scopeId"])'`). All calls go through the
+> NyxID broker (`nyxid proxy request aevatar`), which injects your scope_id claim and auto-refreshes
+> the token. Reminder: the `scopeOwnerNyxId` precondition below cannot be satisfied by a bare NyxID
+> **CLI** token — it needs the owner's interactive **console** NyxID login (broker binding), or
+> creation 400s.
 
 ## Gather the target (one call: the scope services list)
 
 `GET /api/scopes/{scopeId}/services` returns everything you need per service — copy it off
 the entry for your service:
 ```bash
-curl -s "${auth[@]}" "$BASE/api/scopes/$scopeId/services" \
+aev "api/scopes/$scopeId/services" \
   | jq '.[] | {tenantId, appId, namespace, serviceId, defaultServingRevisionId, invokeReady,
                endpoints: [.endpoints[] | {endpointId, requestTypeUrl}]}'
 ```
@@ -59,7 +62,7 @@ curl -s "${auth[@]}" "$BASE/api/scopes/$scopeId/services" \
 ## Preview the cron first (no clock guessing)
 
 ```bash
-curl -s "${auth[@]}" -X POST "$BASE/api/schedules/preview" \
+aev "api/schedules/preview" -m POST \
   -d '{"cronExpression":"0 9 * * 1-5","timezone":"Asia/Shanghai","count":"5"}' | jq .
 ```
 Returns the next N fire times so you can confirm the expression means what the user wants.
@@ -83,7 +86,7 @@ If you hit this, tell the user to complete/refresh their NyxID login in the Aeva
 ## Create the schedule
 
 ```bash
-curl -s "${auth[@]}" -X POST "$BASE/api/schedules" -d "{
+aev "api/schedules" -m POST -d "{
   \"displayName\": \"Weekday 9am run\",
   \"cronExpression\": \"0 9 * * 1-5\",
   \"timezone\": \"Asia/Shanghai\",
@@ -122,13 +125,13 @@ curl -s "${auth[@]}" -X POST "$BASE/api/schedules" -d "{
 
 ```bash
 sid=$(...)   # scheduleId from the create response
-curl -s "${auth[@]}" "$BASE/api/schedules"            | jq '.[] | {scheduleId, displayName, cronExpression, enabled, nextFireUtc}'
-curl -s "${auth[@]}" "$BASE/api/schedules/$sid"       | jq .
-curl -s "${auth[@]}" -X POST "$BASE/api/schedules/$sid:run-now"   # fire once immediately to test
-curl -s "${auth[@]}" -X POST "$BASE/api/schedules/$sid:disable"   # pause
-curl -s "${auth[@]}" -X POST "$BASE/api/schedules/$sid:enable"    # resume
-curl -s "${auth[@]}" -X PUT  "$BASE/api/schedules/$sid" -d '{ ...updated configuration... }'
-curl -s "${auth[@]}" -X DELETE "$BASE/api/schedules/$sid"         # remove
+aev "api/schedules"            | jq '.[] | {scheduleId, displayName, cronExpression, enabled, nextFireUtc}'
+aev "api/schedules/$sid"       | jq .
+aev "api/schedules/$sid:run-now" -m POST   # fire once immediately to test
+aev "api/schedules/$sid:disable" -m POST   # pause
+aev "api/schedules/$sid:enable" -m POST    # resume
+aev "api/schedules/$sid" -m PUT -d '{ ...updated configuration... }'
+aev "api/schedules/$sid" -m DELETE         # remove
 ```
 Note the action verbs use a colon (`/{scheduleId}:run-now`), not a slash.
 

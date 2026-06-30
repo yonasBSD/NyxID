@@ -1,7 +1,7 @@
 ---
 name: aevatar-workflow-authoring
 description: Author, validate, and persist an executable aevatar workflow from a natural-language request — use it when the user wants to create, build, set up, or automate a multi-step task as a runnable aevatar workflow (make a workflow that…, automate…, build a pipeline…, set up a recurring…). It generates workflow YAML, dispatch-validates it, then saves it as a reusable workflow that can be re-run and watched in the observatory. Not for running an existing workflow — search for that and start it instead.
-version: "1.3"
+version: "1.4"
 metadata:
   category: tool-based
   tool-list:
@@ -23,7 +23,7 @@ You turn a user's natural-language request into a **valid, test-run, reusable** 
 
 Everything you need is in this document — the DSL, the engine rules, the tools, and worked examples. Follow the protocol in order.
 
-> **Two execution surfaces — know which one you are *before* step 3.** Steps 3 / 5 / 6 below call the *server-side agent tools* `nyxid_services`, `aevatar_start_workflow`, and `ornn_publish_skill`. Those exist **only** when you are the model running **inside** an aevatar session with the nyxid MCP connected. If instead you are an external **client** holding only a NyxID bearer token (e.g. `~/.nyxid/access_token`) — the same identity the sibling skills (`aevatar-team-builder`, `aevatar-service-publisher`, `aevatar-scheduler`) assume — **those three tools are not callable**, and you dry-run + publish over plain authenticated REST instead. Jump to **[Client path (no nyxid MCP)](#client-path-no-nyxid-mcp--dry-run--publish-over-rest)** at the end; the DSL, engine rules, and examples in between apply to both surfaces.
+> **Two execution surfaces — know which one you are *before* step 3.** Steps 3 / 5 / 6 below call the *server-side agent tools* `nyxid_services`, `aevatar_start_workflow`, and `ornn_publish_skill`. Those exist **only** when you are the model running **inside** an aevatar session with the nyxid MCP connected. If instead you are an external **client** holding only a NyxID bearer token — driving the aevatar backend through the NyxID broker (`nyxid proxy request aevatar`), the same identity the sibling skills (`aevatar-team-builder`, `aevatar-service-publisher`, `aevatar-scheduler`) assume — **those three tools are not callable**, and you dry-run + publish over plain authenticated REST instead. Jump to **[Client path (no nyxid MCP)](#client-path-no-nyxid-mcp--dry-run--publish-over-rest)** at the end; the DSL, engine rules, and examples in between apply to both surfaces.
 
 ---
 
@@ -362,10 +362,13 @@ source.)
 
 ### Bootstrap
 ```bash
-BASE=https://aevatar-console-backend-api.aevatar.ai
-TOK=$(tr -d '\n' < ~/.nyxid/access_token)          # or the agent's own NyxID bearer
+# Drive the aevatar backend THROUGH the NyxID broker: it injects your scope_id claim AND
+# auto-refreshes your token. A raw curl with ~/.nyxid/access_token resolves NO scope
+# (scopeResolved:false) and the stored token expires — it is not a usable path.
+# Prerequisite once: the `aevatar` service must be connected — `nyxid service add aevatar`.
+aev() { nyxid proxy request aevatar "$@"; }   # aev "<path>" [-m POST|PUT|DELETE] [-d '<json>'] [--stream]
 NYX=$(tr -d '\n' < ~/.nyxid/base_url)               # e.g. https://nyx.chrono-ai.fun
-scopeId=$(curl -s -H "Authorization: Bearer $TOK" "$BASE/api/studio/context" | jq -r .scopeId)
+scopeId=$(aev "api/studio/context" | jq -r .scopeId)
 ```
 No `jq`? Any JSON reader works, e.g.
 `... | python3 -c 'import sys,json;print(json.load(sys.stdin)["scopeId"])'`.
@@ -380,10 +383,9 @@ reliable thing to validate. Never invent a slug.
 ### Dry-run (the client replacement for `aevatar_start_workflow`) — `draft-run`
 `aevatar_start_workflow` is a **server-side agent tool dispatched through the engine, not a REST
 endpoint** — a client cannot call it. The client dry-run is the **draft-run** endpoint, which
-takes the YAML inline:
+takes the YAML inline (long runs stream, so the broker holds the connection open):
 ```bash
-curl -sN --max-time 120 -X POST -H "Authorization: Bearer $TOK" -H "Content-Type: application/json" \
-  "$BASE/api/scopes/$scopeId/workflow/draft-run" \
+aev "api/scopes/$scopeId/workflow/draft-run" -m POST --stream \
   -d "$(python3 -c 'import json;print(json.dumps({"prompt":"<test input>","workflowYamls":[open("workflow.yaml").read()]}))')"
 ```
 Body (JSON, **camelCase**): `prompt` (string) + `workflowYamls` (array of YAML strings,
@@ -438,6 +440,7 @@ metadata:
 Then **validate first** (the format oracle — read every `violations[].rule`/`message` and fix),
 then **upload** (re-uploading the **same `name`** later creates a **new version**):
 ```bash
+TOK=$(tr -d '\n' < ~/.nyxid/access_token)                     # raw NyxID bearer for the ornn-api proxy
 cd <parent>; zip -r demo-skill.zip demo-skill                 # root folder MUST be included
 # 1) validate → {"data":{"valid":bool,"violations":[{"rule","message"}]}}
 curl -s -X POST -H "Authorization: Bearer $TOK" -H "Content-Type: application/zip" \

@@ -1,7 +1,7 @@
 ---
 name: aevatar-platform-map
 description: Entry point, panorama, and router for the entire Aevatar skill family — load this FIRST whenever someone wants to build, run, publish, schedule, or operate anything on Aevatar ("create an agent team", "make a workflow / member", "publish or bind a service", "register it with NyxID", "set up a recurring / cron run", "invoke my service"), wants to know whether something is even possible ("can Aevatar do X?", "能不能用 aevatar 实现"), or just wants to know what Aevatar can do. It teaches the object model (scope → team → member[workflow|script|gagent] → service → schedule), how to authenticate as a NyxID-bearer REST client, how to resolve your scope, and the two caller modes (client REST vs in-session server-side tools). It does not do the work itself — it routes you to the right companion skill (feasibility-advisor, workflow-authoring, team-builder, service-publisher, scheduler, plus diagnostics probes and the safety-net fallback), held together by the shared `aevatar` tag.
-version: "1.5"
+version: "1.6"
 metadata:
   category: plain
   tag:
@@ -65,27 +65,41 @@ service (register to NyxID) → schedule it.**
 
 ## Authenticate (every request)
 
-- **Base URL:** `https://aevatar-console-backend-api.aevatar.ai`
-- **Auth header:** every call needs `Authorization: Bearer <token>`.
-  - Local NyxID CLI login: read the token from `~/.nyxid/access_token`.
-  - Or use the NyxID-brokered access this agent already holds (an API key with NyxID
-    service access works the same way — send it as the bearer).
+Drive aevatar **through the NyxID broker** — it forwards your identity **and injects the
+`scope_id` claim** that aevatar's backend needs. This is the load-bearing detail: sending a raw
+NyxID token straight to `https://aevatar-console-backend-api.aevatar.ai` authenticates but resolves
+**no scope** (`scopeResolved:false`, `scopeId:null`), so every studio resource under
+`/api/scopes/{scopeId}/…` is unreachable and workflow/team creation fails silently. Always go
+through the broker:
+
+- **Prerequisite (once):** the `aevatar` service must be connected in NyxID. Verify with
+  `nyxid proxy discover | grep aevatar`; if absent, `nyxid service add aevatar` (no credential —
+  it is an admin-mode system service that resolves the caller via NyxID `/me`).
+- **Every call is** `nyxid proxy request aevatar "<path>" [-m POST -d '<json>']`. NyxID injects the
+  bearer **and** the scope claim; you never read or send the token yourself. (The broker forwards to
+  base URL `https://aevatar-console-backend-api.aevatar.ai`; you only ever pass the `<path>`.)
 - **Resolve your scope once** — `scopeId` is your NyxID subject id:
   ```bash
-  BASE=https://aevatar-console-backend-api.aevatar.ai
-  TOK=$(tr -d '\n' < ~/.nyxid/access_token)
-  scopeId=$(curl -s -H "Authorization: Bearer $TOK" "$BASE/api/studio/context" | jq -r .scopeId)
+  scopeId=$(nyxid proxy request aevatar "api/studio/context" \
+    | python3 -c 'import sys,json;print(json.load(sys.stdin)["scopeId"])')
   ```
-  (`GET /api/auth/me` and `GET /api/workflow/observatory/me` also return `scopeId`.)
-  No `jq` on the box? Any JSON reader works — e.g. pipe to
-  `python3 -c 'import sys,json;print(json.load(sys.stdin)["scopeId"])'`. And make these calls with
-  the **`curl` binary** (a WAF may 403 Python's `urllib`/`requests`).
-- All studio resources live under `/api/scopes/{scopeId}/...`. Account-level service and
-  schedule management live under `/api/services` and `/api/schedules`.
+  (`api/auth/me` and `api/workflow/observatory/me` also return `scopeId`.) **If `scopeId` comes back
+  null / `scopeResolved:false`, you are not going through the broker — fix the transport, do not
+  proceed**: nothing under `/api/scopes/{scopeId}/…` will work.
+- All studio resources live under `api/scopes/{scopeId}/…`. Account-level service and schedule
+  management live under `api/services` and `api/schedules`. Pass these as the `<path>` to
+  `nyxid proxy request aevatar`.
+
+**In-session / platform mode:** if you are the model running *inside* an aevatar session with the
+nyxid MCP connected, you instead have server-side tools (`aevatar_start_workflow`, `use_skill`,
+`nyxid_services`, …) that already run inside your resolved scope — see *Two caller modes*. Reserve
+the raw-token-to-backend call only for environments where neither the `nyxid` CLI nor those tools
+exist, and expect to handle scope resolution yourself.
 
 ## Two caller modes (this matters for the workflow skill)
 
-Most of this family is **plain REST you call as a client** with the bearer above — that is the
+Most of this family is **plain REST you call as a client** through the NyxID broker above
+(`nyxid proxy request aevatar "<path>"`) — that is the
 default assumption here and in `team-builder` / `service-publisher` / `scheduler`. The one
 exception is **`aevatar-workflow-authoring`**, written for the model running *inside* an aevatar
 session with the nyxid MCP connected, where it uses the **server-side tools**

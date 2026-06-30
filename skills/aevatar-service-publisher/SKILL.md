@@ -1,7 +1,7 @@
 ---
 name: aevatar-service-publisher
 description: Publish an Aevatar member, team, or workflow as an invocable service and (host permitting) register it with NyxID, then verify and invoke it — all over the REST API. Use when a user wants to "publish/bind a service", "expose my workflow/team as a service", "register it with NyxID", "make it callable", "get the service slug/URL", "invoke my service", or "version/deploy/roll out a service". It covers the simple scope binding, reading back a member's published service, the full account-level service lifecycle (revision → publish → deploy → rollout), how to confirm the NyxID registration (slug + status), and how to invoke an endpoint. Build the team/member first with the team-builder skill.
-version: "1.2"
+version: "1.3"
 metadata:
   category: plain
   tag:
@@ -24,15 +24,18 @@ You turn a member / team / workflow into an **invocable service** and verify whe
 ## Bootstrap
 
 ```bash
-BASE=https://aevatar-console-backend-api.aevatar.ai
-TOK=$(tr -d '\n' < ~/.nyxid/access_token)        # or the agent's own NyxID bearer
-scopeId=$(curl -s -H "Authorization: Bearer $TOK" "$BASE/api/studio/context" | jq -r .scopeId)
-auth=(-H "Authorization: Bearer $TOK" -H "Content-Type: application/json")
+# Drive aevatar THROUGH the NyxID broker: it injects your scope_id claim AND auto-refreshes your
+# token. A raw curl to the aevatar backend with ~/.nyxid/access_token resolves NO scope
+# (scopeResolved:false) and the stored token expires — it is not a usable path.
+# Prerequisite once: the `aevatar` service must be connected — `nyxid service add aevatar`.
+aev() { nyxid proxy request aevatar "$@"; }   # aev "<path>" [-m POST|PUT|DELETE] [-d '<json>'] [--stream]
+scopeId=$(aev "api/studio/context" | jq -r .scopeId)
 ```
 
 > **`jq` is only for convenience** — any JSON reader works (replace `| jq -r .scopeId` with
-> `| python3 -c 'import sys,json;print(json.load(sys.stdin)["scopeId"])'`). Make these calls with
-> the **`curl` binary**, not Python's `urllib`/`requests` (a WAF may 403 those). On the streaming
+> `| python3 -c 'import sys,json;print(json.load(sys.stdin)["scopeId"])'`). All calls go through the
+> NyxID broker (`nyxid proxy request aevatar`), which injects your scope_id claim and auto-refreshes
+> the token, so you never touch the aevatar backend or a stored token directly. On the streaming
 > `:stream` invoke, the SSE `data:` frames interleave lifecycle frames
 > (`stepStarted`/`stepFinished`/`runFinished`/`stateSnapshot`/`usage`, keyed by a top-level field)
 > with raw observation frames (`custom.name: aevatar.raw.observed`) that carry the step **output
@@ -54,9 +57,9 @@ A bound member **already has a published service** — binding it was the publis
 NyxID exposure) lives in the scope services list:
 ```bash
 # minimal: publishedServiceId + key
-curl -s "${auth[@]}" "$BASE/api/scopes/$scopeId/members/$memberId/published-service" | jq .
+aev "api/scopes/$scopeId/members/$memberId/published-service" | jq .
 # full: identity, endpoints, serving revision, invokeReady, externalExposure
-curl -s "${auth[@]}" "$BASE/api/scopes/$scopeId/services" \
+aev "api/scopes/$scopeId/services" \
   | jq '.[] | select(.serviceId=="member-'"$memberId"'")
         | {serviceId, defaultServingRevisionId, invokeReady, invokeReadinessStatus,
            endpoints: [.endpoints[] | {endpointId, requestTypeUrl}], externalExposure}'
@@ -69,7 +72,7 @@ and reports `invokeReady:true` once serving. Then jump to **Verify** and **Invok
 The fastest way to expose a single workflow/script/gagent as a service for your scope:
 
 ```bash
-curl -s "${auth[@]}" -X PUT "$BASE/api/scopes/$scopeId/binding" -d "{
+aev "api/scopes/$scopeId/binding" -m PUT -d "{
   \"implementationKind\": \"workflow\",
   \"displayName\": \"My Service\",
   \"serviceId\": \"my-service\",
@@ -80,7 +83,7 @@ curl -s "${auth[@]}" -X PUT "$BASE/api/scopes/$scopeId/binding" -d "{
 plus the matching typed block (`workflow` / `script` / `gAgent`), `displayName?`,
 `serviceId?`, `appId?`, `revisionId?`. List your scope services and read exposure:
 ```bash
-curl -s "${auth[@]}" "$BASE/api/scopes/$scopeId/services" | jq '.[] | {serviceId, displayName, externalExposure}'
+aev "api/scopes/$scopeId/services" | jq '.[] | {serviceId, displayName, externalExposure}'
 ```
 
 ## Path C — Account-level service lifecycle (versioned / advanced)
@@ -90,22 +93,22 @@ For a standalone, independently versioned service with staged rollout. Identity 
 
 ```bash
 # 1. Create the service shell + its endpoint contract(s)
-curl -s "${auth[@]}" -X POST "$BASE/api/services" -d '{
+aev "api/services" -m POST -d '{
   "tenantId":"<t>","appId":"<a>","namespace":"<ns>","serviceId":"my-service",
   "displayName":"My Service",
   "endpoints":[{"endpointId":"invoke","displayName":"Invoke","kind":"unary",
     "requestTypeUrl":"<type.googleapis.com/...>","responseTypeUrl":"<...>","description":"..."}]
 }'
 # 2. Add an implementation revision (one of static / scripting / workflow)
-curl -s "${auth[@]}" -X POST "$BASE/api/services/my-service/revisions" -d '{
+aev "api/services/my-service/revisions" -m POST -d '{
   "tenantId":"<t>","appId":"<a>","namespace":"<ns>","revisionId":"r1",
   "implementationKind":"workflow",
   "workflow":{"workflowName":"my-workflow","workflowYaml":"<yaml>","definitionActorId":null,"inlineWorkflowYamls":null}
 }'
 # 3. Prepare → publish → deploy
-curl -s "${auth[@]}" -X POST "$BASE/api/services/my-service/revisions/r1:prepare"
-curl -s "${auth[@]}" -X POST "$BASE/api/services/my-service/revisions/r1:publish"
-curl -s "${auth[@]}" -X POST "$BASE/api/services/my-service:deploy" -d '{ ... serving target ... }'
+aev "api/services/my-service/revisions/r1:prepare" -m POST
+aev "api/services/my-service/revisions/r1:publish" -m POST
+aev "api/services/my-service:deploy" -m POST -d '{ ... serving target ... }'
 ```
 Optional staged rollout: `POST …/rollouts` then `:advance` / `:pause` / `:resume` /
 `:rollback`; inspect `GET …/serving` and `GET …/traffic`. Bindings (connector + secret)
@@ -116,9 +119,9 @@ and access policies: `POST …/bindings`, `POST …/policies`. The service self-
 
 ```bash
 # Account-level service + its NyxID exposure block
-curl -s "${auth[@]}" "$BASE/api/services/my-service" | jq '{serviceId, externalExposure}'
+aev "api/services/my-service" | jq '{serviceId, externalExposure}'
 # Its own OpenAPI (proves it is serving)
-curl -s "${auth[@]}" "$BASE/api/services/my-service/openapi.json" | jq '.info, (.paths|keys)'
+aev "api/services/my-service/openapi.json" | jq '.info, (.paths|keys)'
 ```
 The `externalExposure` block is the NyxID-registration truth:
 - `nyxidSlug` — the brokered connector slug (empty ⇒ not registered).
@@ -132,16 +135,14 @@ The `externalExposure` block is the NyxID-registration truth:
 
 The endpoint contract tells you the path, readiness, and a ready-to-run curl example:
 ```bash
-curl -s "${auth[@]}" "$BASE/api/scopes/$scopeId/members/$memberId/endpoints/chat/contract" \
+aev "api/scopes/$scopeId/members/$memberId/endpoints/chat/contract" \
   | jq '{invokePath, canInvoke:.invocationReadiness.canInvoke, curlExample}'
 ```
 The reliable smoke test is the **streaming** path (`…/invoke/{endpointId}:stream`, SSE),
 which accepts the `{"prompt":"…"}` shorthand and returns workflow-run frames ending in a
 `runFinished` event with the result:
 ```bash
-curl -sN -X POST -H "Authorization: Bearer $TOK" -H "Content-Type: application/json" \
-  -H "Accept: text/event-stream" \
-  "$BASE/api/scopes/$scopeId/members/$memberId/invoke/chat:stream" \
+aev "api/scopes/$scopeId/members/$memberId/invoke/chat:stream" -m POST --stream \
   -d '{"prompt":"smoke test"}'
 # look for:  data: {... "runFinished": { "result": { "output": "..." } } }
 ```
