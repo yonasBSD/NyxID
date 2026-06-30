@@ -1,7 +1,7 @@
 ---
 name: aevatar-service-publisher
 description: Publish an Aevatar member, team, or workflow as an invocable service and (host permitting) register it with NyxID, then verify and invoke it — all over the REST API. Use when a user wants to "publish/bind a service", "expose my workflow/team as a service", "register it with NyxID", "make it callable", "get the service slug/URL", "invoke my service", or "version/deploy/roll out a service". It covers the simple scope binding, reading back a member's published service, the full account-level service lifecycle (revision → publish → deploy → rollout), how to confirm the NyxID registration (slug + status), and how to invoke an endpoint. Build the team/member first with the team-builder skill.
-version: "1.3"
+version: "1.4"
 metadata:
   category: plain
   tag:
@@ -28,7 +28,10 @@ You turn a member / team / workflow into an **invocable service** and verify whe
 # token. A raw curl to the aevatar backend with ~/.nyxid/access_token resolves NO scope
 # (scopeResolved:false) and the stored token expires — it is not a usable path.
 # Prerequisite once: the `aevatar` service must be connected — `nyxid service add aevatar`.
-aev() { nyxid proxy request aevatar "$@"; }   # aev "<path>" [-m POST|PUT|DELETE] [-d '<json>'] [--stream]
+# NOTE: the aevatar backend requires `Content-Type: application/json` on writes (POST/PUT) —
+# omit it and every write returns HTTP 415 Unsupported Media Type. The helper sets it on
+# every call (harmless on bodyless GETs), so the POST/PUT examples below work as written.
+aev() { nyxid proxy request aevatar "$@" -H 'Content-Type: application/json'; }   # aev "<path>" [-m POST|PUT|DELETE] [-d '<json>'] [--stream]
 scopeId=$(aev "api/studio/context" | jq -r .scopeId)
 ```
 
