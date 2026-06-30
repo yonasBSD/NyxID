@@ -20,7 +20,7 @@ use crate::models::node::{Node, NodeMetadata, NodeStatus};
 use crate::models::node_pending_credential::{
     FanOutNodeState, InjectionMethod, NodePendingCredential, RemoteCryptoState,
 };
-use crate::mw::auth::AuthUser;
+use crate::mw::auth::{AuthMethod, AuthUser};
 use crate::services::node_pending_credential_service::{
     IntegrityVerificationAudit, PendingCredentialIntegrityVerificationRequest,
 };
@@ -927,6 +927,8 @@ pub async fn create_registration_token(
     auth_user: AuthUser,
     Json(body): Json<CreateRegistrationTokenRequest>,
 ) -> AppResult<Json<CreateRegistrationTokenResponse>> {
+    ensure_registration_token_auth_allowed(&auth_user)?;
+
     let user_id_str = auth_user.user_id.to_string();
     let owner_user_id = body.owner_user_id.as_deref().unwrap_or(&user_id_str);
 
@@ -980,6 +982,18 @@ pub async fn create_registration_token(
         name: body.name,
         expires_at: expires_at.to_rfc3339(),
     }))
+}
+
+fn ensure_registration_token_auth_allowed(auth_user: &AuthUser) -> AppResult<()> {
+    match auth_user.auth_method {
+        AuthMethod::ApiKey if !auth_user.allow_all_nodes => Err(AppError::ApiKeyScopeForbidden(
+            "API key must allow all nodes to create node registration tokens".to_string(),
+        )),
+        AuthMethod::ServiceAccount => Err(AppError::Forbidden(
+            "Service accounts cannot create node registration tokens".to_string(),
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// GET /api/v1/nodes
@@ -4251,6 +4265,167 @@ mod tests {
             .expect("token exists");
         assert_eq!(stored.user_id, actor_id);
         assert_eq!(stored.name, "direct-node");
+    }
+
+    #[tokio::test]
+    async fn route_create_registration_token_accepts_user_access_token() {
+        let Some(db) = connect_test_database("node_token_route_user").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+
+        let actor_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&actor_id, UserType::Person))
+            .await
+            .expect("insert user");
+
+        let state = test_app_state(db.clone());
+        let token = access_token(&state, &actor_id);
+        let app = api_app(state);
+
+        let (status, body) = route_json(
+            app,
+            Method::POST,
+            "/api/v1/nodes/register-token".to_string(),
+            &token,
+            Some(serde_json::json!({ "name": "access-token-node" })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let token_id = body["token_id"].as_str().expect("token id");
+        assert!(
+            body["token"]
+                .as_str()
+                .expect("raw token")
+                .starts_with("nyx_nreg_")
+        );
+
+        let stored = db
+            .collection::<NodeRegistrationToken>(NODE_REG_TOKENS)
+            .find_one(doc! { "_id": token_id })
+            .await
+            .expect("query token")
+            .expect("token exists");
+        assert_eq!(stored.user_id, actor_id);
+        assert_eq!(stored.name, "access-token-node");
+    }
+
+    #[tokio::test]
+    async fn route_create_registration_token_accepts_all_node_api_key() {
+        let Some(db) = connect_test_database("node_token_api_key_all").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+
+        let actor_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&actor_id, UserType::Person))
+            .await
+            .expect("insert user");
+        let api_key = crate::services::key_service::create_api_key(
+            &db,
+            &actor_id,
+            "node-registration",
+            "read write proxy",
+            None,
+            None,
+            None,
+            None,
+            Some(false),
+            Some(true),
+            None,
+            None,
+            Some("codex"),
+            None,
+        )
+        .await
+        .expect("create API key");
+
+        let app = api_app(test_app_state(db.clone()));
+        let (status, body) = route_json(
+            app,
+            Method::POST,
+            "/api/v1/nodes/register-token".to_string(),
+            &api_key.full_key,
+            Some(serde_json::json!({ "name": "api-key-node" })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let token_id = body["token_id"].as_str().expect("token id");
+        assert!(
+            body["token"]
+                .as_str()
+                .expect("raw token")
+                .starts_with("nyx_nreg_")
+        );
+
+        let stored = db
+            .collection::<NodeRegistrationToken>(NODE_REG_TOKENS)
+            .find_one(doc! { "_id": token_id })
+            .await
+            .expect("query token")
+            .expect("token exists");
+        assert_eq!(stored.user_id, actor_id);
+        assert_eq!(stored.name, "api-key-node");
+    }
+
+    #[tokio::test]
+    async fn route_create_registration_token_rejects_node_scoped_api_key() {
+        let Some(db) = connect_test_database("node_token_api_key_scoped").await else {
+            eprintln!("skipping node handler test: no local MongoDB available");
+            return;
+        };
+
+        let actor_id = Uuid::new_v4().to_string();
+        let allowed_node = test_node(&actor_id, "allowed-node");
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&actor_id, UserType::Person))
+            .await
+            .expect("insert user");
+        db.collection::<Node>(NODES)
+            .insert_one(&allowed_node)
+            .await
+            .expect("insert node");
+        let allowed_node_ids = [allowed_node.id.clone()];
+        let api_key = crate::services::key_service::create_api_key(
+            &db,
+            &actor_id,
+            "node-scoped-registration",
+            "read write proxy",
+            None,
+            None,
+            None,
+            Some(&allowed_node_ids),
+            Some(false),
+            Some(false),
+            None,
+            None,
+            Some("codex"),
+            None,
+        )
+        .await
+        .expect("create scoped API key");
+
+        let app = api_app(test_app_state(db));
+        let (status, body) = route_json(
+            app,
+            Method::POST,
+            "/api/v1/nodes/register-token".to_string(),
+            &api_key.full_key,
+            Some(serde_json::json!({ "name": "blocked-node" })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"], "api_key_scope_forbidden");
+        assert_eq!(body["error_code"], 9000);
+        assert_ne!(
+            body["message"],
+            "Forbidden: API keys cannot access this endpoint"
+        );
     }
 
     #[tokio::test]
