@@ -132,6 +132,8 @@ Load the matching `references/<file>.md` when the user asks for one of these top
 
 Prefer the canonical reference over guessing. If a topic spans two files (e.g. "create an org-shared API key with rate limits"), load both `organizations.md` and `managing.md`.
 
+**Driving Aevatar through NyxID.** If the user wants to build or run things on the **Aevatar** agent platform — "create a workflow / team / member", "publish a service", "schedule a run", or "can Aevatar do X?" — that is a sibling skill family bundled in this plugin (not a `references/` file here). Start with **`aevatar-platform-map`** (the router). Those skills drive Aevatar entirely through this same NyxID broker — `nyxid proxy request aevatar "<path>"` — so the CLI you set up above is the only prerequisite; connect the service once with `nyxid service add aevatar`.
+
 ## Working Rules
 
 - Always discover services before assuming a slug exists.
